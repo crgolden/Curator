@@ -1,0 +1,93 @@
+# Testing
+
+## Unit tests
+
+The whole suite under `tests/` runs fully offline: no live database, no network, no live PSN/Identity
+calls. Backends (the psycopg connection/cursor protocol, the `Repository`, the PSN agent, and
+`curator.token_validation.JwtValidator`) are stood in for with hand-written fake classes — never
+`unittest.mock` — matching the style used in the sibling `psnpy` repo's test suite (see
+`psnpy/tests/test_client.py`). `tests/test_token_validation.py` is the one place that exercises the *real*
+`JwtValidator`: it generates a local RSA key with Authlib, signs canned tokens, and serves the
+discovery/JWKS documents through an injected fake `fetch_json` — no network access even there.
+
+Curator is a pure JWT Bearer resource server — there is no session, no cookie, no login route — so every
+protected-route test presents an `Authorization: Bearer <token>` header; `tests/test_routes.py`'s
+`FakeTokenValidator` maps known token strings to canned `TokenClaims` and raises `TokenError` for anything
+else.
+
+`tests/test_authz.py` exercises this offline (`tests/test_routes.py`'s fakes, reused by importing them
+rather than duplicating — pytest's rootdir-relative import puts `tests/` on `sys.path`, so a bare
+`from test_routes import ...` resolves) but proves a structural property rather than individual status
+codes: every bearer-required route (`GET /me`, `POST /psn/link`, `DELETE /psn/link`) rejects both a
+missing `Authorization` header and a garbage/invalid token; two established callers (user A, user B) never
+leak — A's requests only ever read/write A's row in the fake repository, B's is provably untouched; and no
+route in the app exposes a path parameter at all (the obvious place a caller-supplied "target user"
+identifier could sneak in), which the test locks in via introspecting `app.routes`.
+
+Run:
+
+```powershell
+python -m pip install -e ".[dev]"
+python -m pip install -e ../psnpy   # editable install; imports of psnpy.client/config/psn_api need this
+python -m pytest
+```
+
+`pyproject.toml` sets `pythonpath = ["src"]` and `testpaths = ["tests"]`, so `python -m pytest` from the
+repo root picks up `src/curator` without an editable install of Curator itself. If running from a
+different working directory, either `Set-Location` into the repo root first or pass the tests directory
+and `-o pythonpath=<repo>/src` explicitly (or set the `PYTHONPATH` env var to `<repo>/src`).
+
+`python -m pip install -e ".[dev]"` will fail until the `psnpy` GitHub release referenced in
+`pyproject.toml`'s dependency pin exists — install the sibling `psnpy` repo editable instead (as above),
+and install `fastapi`, `uvicorn`, `authlib`, `cryptography`, `psycopg[binary]`, `httpx` (only needed for
+`fastapi.testclient.TestClient`) directly if `pip install -e ".[dev]"` doesn't resolve them:
+
+```powershell
+python -m pip install pytest httpx fastapi uvicorn authlib cryptography "psycopg[binary]"
+python -m pip install -e ../psnpy
+python -m pytest tests -q
+```
+
+## Integration tests (schema, gated — opt-in only)
+
+`tests/test_schema.py` is the one place in this suite that touches a real PostgreSQL instance. It is
+gated on the `CURATOR_TEST_DATABASE_URL` environment variable via a module-level `pytest.mark.skipif`:
+unset (the default — nothing to configure for a plain `python -m pytest` run, and CI never sets it), every
+test in the module is skipped rather than run against a fake. When set, it applies the full
+`db/migrations/0001_initial.sql` migration and every insert inside one transaction per test, then rolls
+that transaction back in teardown — so a correctly-configured database is left exactly as it started.
+
+**Only ever point `CURATOR_TEST_DATABASE_URL` at a disposable, throwaway database created solely for this
+purpose — never a shared or production database.** The rollback-per-test discipline above is what makes
+that safe to do repeatedly, but it still assumes the target database is not something else's.
+
+What it checks: every table the migration is expected to create exists; representative CHECK constraints
+reject an out-of-enum value (`game_assignments.collection_status`, `user_consoles.platform`,
+`exclusion_rules.rule_type`); `measured_sizes` retains history (two inserts for the same
+user/game/platform at different `measured_at` both persist, rather than one overwriting the other); and no
+column named anything like `%email%` or `%npsso%` exists anywhere in the schema (the hard privacy tenet
+documented in the migration's own header comment).
+
+```powershell
+# Create a throwaway database (adjust host/user for your environment)
+psql -h <host> -U postgres -d postgres -c "CREATE DATABASE curator_schema_test_scratch"
+
+$env:CURATOR_TEST_DATABASE_URL = "postgresql://postgres@<host>:5432/curator_schema_test_scratch"
+python -m pytest tests/test_schema.py -q
+
+# Tear down when done
+psql -h <host> -U postgres -d postgres -c "DROP DATABASE curator_schema_test_scratch"
+```
+
+## CI
+
+`.github/workflows/main.yml` runs on push to `main`, on pull requests, and on `workflow_dispatch`. It
+installs the sibling `psnpy` repo from a second cross-checkout (`crgolden/psnpy`, authenticated with the
+`PACKAGES_READ_TOKEN` secret — the same PAT-backed convention other workspace repos use for cross-repo
+package access) into `./psnpy-src`, since `psnpy` is private and has no published release yet; it does
+**not** run `pip install -e .` for Curator itself, because `pyproject.toml`'s own `psnpy` dependency is a
+release-wheel URL pin that doesn't exist yet and would fail dependency resolution outright. Once `psnpy`
+starts tagging releases, replace the cross-checkout with installing the published release wheel.
+
+CI runs unit tests only — `CURATOR_TEST_DATABASE_URL` is never set in the workflow, so `test_schema.py`
+auto-skips; there is no PostgreSQL service in this job.
