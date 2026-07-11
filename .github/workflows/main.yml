@@ -1,4 +1,4 @@
-name: Build and test
+name: Build and deploy Python app to Azure Web App - crgolden-curator
 
 on:
   push:
@@ -49,3 +49,51 @@ jobs:
         env:
           PYTHONPATH: src
         run: python -m pytest --tb=short -q
+
+  deploy:
+    name: Deploy
+    runs-on: ubuntu-latest
+    needs: test
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    permissions:
+      id-token: write   # Required for requesting the JWT (Azure OIDC)
+      contents: read
+
+    steps:
+      - name: Checkout Curator
+        uses: actions/checkout@v6
+
+      # Curator's psnpy dependency (pyproject.toml) is a release-wheel URL pin, but the deploy package is
+      # built directly from a local vendor/ directory instead of letting Oryx fetch that URL at build time —
+      # vendoring here keeps the deploy independent of GitHub release-asset availability during the Oryx
+      # build. psnpy is a private repo, so the plain GITHUB_TOKEN can't read its releases; PACKAGES_READ_TOKEN
+      # is the workspace's existing PAT-backed secret used wherever a workflow needs to read another private
+      # crgolden repo.
+      - name: Vendor psnpy wheel
+        env:
+          GH_TOKEN: ${{ secrets.PACKAGES_READ_TOKEN }}
+        run: gh release download v0.2.0 --repo crgolden/psnpy --pattern '*.whl' --dir vendor
+
+      # Assemble the deploy payload with only what production needs: source, the SQL migration, the
+      # vendored wheel, and the install manifest — excludes tests/, .github/, and local caches.
+      - name: Assemble deployment package
+        run: |
+          mkdir -p publish
+          cp -r src publish/src
+          cp -r db publish/db
+          cp -r vendor publish/vendor
+          cp requirements.txt publish/requirements.txt
+
+      - name: Login to Azure
+        uses: azure/login@a457da9ea143d694b1b9c7c869ebb04ebe844ef5  # v2
+        with:
+          client-id: ${{ secrets.AZUREAPPSERVICE_CLIENTID_C4CF7EE65BC442259601FFDB3B86513D }}
+          tenant-id: ${{ secrets.AZUREAPPSERVICE_TENANTID_D1FC42A8E15547A18F5A397D64F179D0 }}
+          subscription-id: ${{ secrets.AZUREAPPSERVICE_SUBSCRIPTIONID_C6E3B3EB281E4D4C85FC7D1501EE1170 }}
+
+      - name: Deploy to Azure Web App
+        id: deploy-to-webapp
+        uses: azure/webapps-deploy@84a80cfe7e9889f35148ed88c307e6e93bf02578  # v3
+        with:
+          app-name: 'crgolden-curator'
+          package: publish/

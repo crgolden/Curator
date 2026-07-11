@@ -68,6 +68,30 @@ Run the app itself (once settings are resolvable — see `curator.settings.Setti
 uvicorn --factory curator.app:create_app
 ```
 
+## Deployment
+
+`main.yml`'s `deploy` job (runs after `test` passes, only on push to `main`) deploys to the Azure Linux Web
+App `crgolden-curator` via `azure/webapps-deploy`, authenticating over OIDC federated credentials with
+`azure/login` — no client secret. `SCM_DO_BUILD_DURING_DEPLOYMENT=true` is set on the app, so Oryx installs
+[`requirements.txt`](requirements.txt) during deployment; `pyproject.toml` remains the dev/test manifest and
+is not used at deploy time.
+
+`requirements.txt` pins the sibling `psnpy` dependency to a local `vendor/psnpy-0.2.0-py3-none-any.whl`
+path rather than the release-URL pin `pyproject.toml` uses. The `deploy` job creates `vendor/` immediately
+before packaging by downloading that wheel from the `psnpy` v0.2.0 GitHub Release
+(`gh release download v0.2.0 --repo crgolden/psnpy --pattern '*.whl' --dir vendor`) — `psnpy` is a private
+repo, so this needs a token that can read another repo's releases. The deploy package itself contains only
+`src/`, `db/`, `vendor/`, and `requirements.txt` — no tests, no `.github/`, no local caches.
+
+Required repository secrets:
+
+| Secret | Purpose |
+|---|---|
+| `PACKAGES_READ_TOKEN` | PAT-backed; reads the `psnpy` private-repo GitHub Release to vendor its wheel |
+| `AZUREAPPSERVICE_CLIENTID_C4CF7EE65BC442259601FFDB3B86513D` | `azure/login` client id (federated credential) |
+| `AZUREAPPSERVICE_TENANTID_D1FC42A8E15547A18F5A397D64F179D0` | `azure/login` tenant id |
+| `AZUREAPPSERVICE_SUBSCRIPTIONID_C6E3B3EB281E4D4C85FC7D1501EE1170` | `azure/login` subscription id |
+
 There is deliberately no module-level `app = create_app()` instance — building the real app resolves every
 setting (OIDC authority, token key, database URL) at construction time, which import alone must never
 require.
