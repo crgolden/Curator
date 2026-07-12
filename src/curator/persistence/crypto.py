@@ -51,7 +51,7 @@ class TokenCrypto:
         explicit_key: str | bytes | None = None,
         *,
         dotenv_path: Path | None = None,
-    ) -> "TokenCrypto":
+    ) -> TokenCrypto:
         """Build a :class:`TokenCrypto` from the resolved encryption key.
 
         Priority: ``explicit_key`` argument, then ``CURATOR_TOKEN_KEY`` as an environment variable,
@@ -70,5 +70,5 @@ class TokenCrypto:
         raise ConfigError(
             f"No token encryption key found. Set {DEFAULT_ENV_NAMES[0]} as an environment variable or "
             "in a .env file. Generate one with: "
-            "python -c \"from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())\""
+            'python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"'
         )

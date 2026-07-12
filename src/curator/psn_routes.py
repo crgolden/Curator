@@ -7,15 +7,18 @@ unlink another's PSN account.
 
 from __future__ import annotations
 
-from typing import Optional
+from datetime import datetime
+from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import BaseModel
 
 from curator.deps import require_verified_caller
-from curator.link_service import LinkError
+from curator.link_service import AgentFactory, LinkError
 from curator.link_service import link as link_account
 from curator.link_service import unlink as unlink_account
+from curator.persistence.crypto import TokenCrypto
+from curator.persistence.repository import Repository
 from curator.reverify import reverify_link
 from curator.token_validation import TokenClaims
 
@@ -45,15 +48,18 @@ async def psn_link(
     body: LinkRequest,
     request: Request,
     claims: TokenClaims = Depends(require_verified_caller),
-):
+) -> dict[str, Any]:
     """Link the caller's PSN account, requiring a verified-matching PSN email.
 
     :raises fastapi.HTTPException: 400 (invalid npsso), 401 (PSN auth failed), or 409 (email mismatch /
         unverified email) -- see :class:`curator.link_service.LinkError`.
     """
-    repository = request.app.state.repository
-    token_crypto = request.app.state.token_crypto
-    agent_factory = request.app.state.agent_factory
+    repository: Repository = request.app.state.repository
+    token_crypto: TokenCrypto = request.app.state.token_crypto
+    agent_factory: AgentFactory = request.app.state.agent_factory
+
+    # require_verified_caller guarantees claims.email is set before this dependency chain runs.
+    assert claims.email is not None, "psn_link requires a verified caller (claims.email must be set)"
 
     try:
         result = link_account(
@@ -84,15 +90,15 @@ async def psn_unlink(
     claims: TokenClaims = Depends(require_verified_caller),
 ) -> Response:
     """Re-verify (see :func:`curator.reverify.reverify_link`), then unlink the caller's PSN account."""
-    repository = request.app.state.repository
-    token_crypto = request.app.state.token_crypto
-    agent_factory = request.app.state.agent_factory
+    repository: Repository = request.app.state.repository
+    token_crypto: TokenCrypto = request.app.state.token_crypto
+    agent_factory: AgentFactory = request.app.state.agent_factory
 
     reverify_link(claims, repository=repository, token_crypto=token_crypto, agent_factory=agent_factory)
     unlink_account(claims.sub, repository=repository, token_crypto=token_crypto)
     return Response(status_code=204)
 
 
-def _iso(value) -> Optional[str]:
+def _iso(value: datetime | None) -> str | None:
     """Render a datetime as ISO-8601, or ``None``."""
     return value.isoformat() if value is not None else None

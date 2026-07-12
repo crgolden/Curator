@@ -56,13 +56,14 @@ class FakeRepository:
     def get_link(self, sub):
         return self.links.get(sub)
 
-    def upsert_link(self, sub, token_response_enc, access_token_expires_at, refresh_token_expires_at,
-                     psn_account_id=None):
+    def upsert_link(
+        self, sub, token_response_enc, access_token_expires_at, refresh_token_expires_at, psn_account_id=None
+    ):
         existing = self.links.get(sub)
         self.links[sub] = LinkRecord(
-            psn_account_id=psn_account_id if psn_account_id is not None else (
-                existing.psn_account_id if existing else None
-            ),
+            psn_account_id=psn_account_id
+            if psn_account_id is not None
+            else (existing.psn_account_id if existing else None),
             token_response_enc=token_response_enc,
             access_token_expires_at=access_token_expires_at,
             refresh_token_expires_at=refresh_token_expires_at,
@@ -104,8 +105,9 @@ class FakeRepository:
         self.links.pop(sub, None)
 
 
-def _seed_link(repo: FakeRepository, crypto: TokenCrypto, sub: str, account_id: str = "psn-account-1",
-                last_verified_at=None) -> None:
+def _seed_link(
+    repo: FakeRepository, crypto: TokenCrypto, sub: str, account_id: str = "psn-account-1", last_verified_at=None
+) -> None:
     """Seed a pre-existing PSN link, as if a previous /psn/link call (or DbTokenStore.save) had run."""
     encrypted = crypto.encrypt(b'{"access_token": "AT", "refresh_token": "RT"}')
     repo.links[sub] = LinkRecord(
@@ -164,8 +166,12 @@ class FakeAgentFactory:
     def __call__(self, sub, npsso=None):
         self.calls.append((sub, npsso))
         return FakeAgent(
-            sub, self.repository, self.token_crypto,
-            email_info=self.email_info, account_id=self.account_id, raise_kind=self.raise_kind,
+            sub,
+            self.repository,
+            self.token_crypto,
+            email_info=self.email_info,
+            account_id=self.account_id,
+            raise_kind=self.raise_kind,
         )
 
 
@@ -209,7 +215,10 @@ def _build(repository=None, token_crypto=None, agent_factory=None, token_validat
     agent_factory = agent_factory if agent_factory is not None else FakeAgentFactory(repository, token_crypto)
     token_validator = token_validator if token_validator is not None else FakeTokenValidator()
     app = create_app(
-        settings, repository=repository, token_crypto=token_crypto, agent_factory=agent_factory,
+        settings,
+        repository=repository,
+        token_crypto=token_crypto,
+        agent_factory=agent_factory,
         token_validator=token_validator,
     )
     client = TestClient(app)
@@ -225,6 +234,7 @@ def _build_with_valid_token(token="valid-token", **claims_kwargs):
 def test_create_app_returns_a_fastapi_instance():
     client, *_ = _build()
     from fastapi import FastAPI
+
     assert isinstance(client.app, FastAPI)
 
 
@@ -255,20 +265,20 @@ def test_me_with_invalid_token_is_401():
 
 
 def test_me_without_curator_scope_is_403():
-    client, repo, crypto, agent_factory, validator = _build_with_valid_token(scopes=("openid",))
+    client, *_ = _build_with_valid_token(scopes=("openid",))
     response = client.get("/me", headers=_bearer("valid-token"))
     assert response.status_code == 403
 
 
 def test_me_without_email_claim_is_403():
-    client, repo, crypto, agent_factory, validator = _build_with_valid_token(email=None)
+    client, *_ = _build_with_valid_token(email=None)
     response = client.get("/me", headers=_bearer("valid-token"))
     assert response.status_code == 403
     assert response.json()["detail"] == "email claim required"
 
 
 def test_me_reports_unlinked():
-    client, repo, *_ = _build_with_valid_token()
+    client, *_ = _build_with_valid_token()
     response = client.get("/me", headers=_bearer("valid-token"))
     assert response.status_code == 200
     body = response.json()
@@ -286,8 +296,7 @@ def test_me_with_matching_verified_link_keeps_it_and_touches_verified():
     _seed_link(repo, crypto, SUB, last_verified_at=OLD_IAT)
     validator = FakeTokenValidator()
     validator.register("valid-token", _claims(iat=NEW_IAT))
-    client, *_ = _build(repository=repo, token_crypto=crypto, agent_factory=agent_factory,
-                         token_validator=validator)
+    client, *_ = _build(repository=repo, token_crypto=crypto, agent_factory=agent_factory, token_validator=validator)
 
     response = client.get("/me", headers=_bearer("valid-token"))
 
@@ -305,8 +314,7 @@ def test_me_with_mismatched_email_auto_unlinks():
     _seed_link(repo, crypto, SUB, last_verified_at=OLD_IAT)
     validator = FakeTokenValidator()
     validator.register("valid-token", _claims(iat=NEW_IAT))
-    client, *_ = _build(repository=repo, token_crypto=crypto, agent_factory=agent_factory,
-                         token_validator=validator)
+    client, *_ = _build(repository=repo, token_crypto=crypto, agent_factory=agent_factory, token_validator=validator)
 
     response = client.get("/me", headers=_bearer("valid-token"))
 
@@ -322,8 +330,7 @@ def test_me_with_unverified_email_auto_unlinks():
     _seed_link(repo, crypto, SUB, last_verified_at=OLD_IAT)
     validator = FakeTokenValidator()
     validator.register("valid-token", _claims(iat=NEW_IAT))
-    client, *_ = _build(repository=repo, token_crypto=crypto, agent_factory=agent_factory,
-                         token_validator=validator)
+    client, *_ = _build(repository=repo, token_crypto=crypto, agent_factory=agent_factory, token_validator=validator)
 
     response = client.get("/me", headers=_bearer("valid-token"))
 
@@ -365,8 +372,7 @@ def test_me_reverify_skips_psn_check_when_token_iat_not_newer_than_last_verified
     validator = FakeTokenValidator()
     # OLD_IAT is not newer than the link's last_verified_at (NEW_IAT) -- must not re-trigger a PSN check.
     validator.register("valid-token", _claims(iat=OLD_IAT))
-    client, *_ = _build(repository=repo, token_crypto=crypto, agent_factory=agent_factory,
-                         token_validator=validator)
+    client, *_ = _build(repository=repo, token_crypto=crypto, agent_factory=agent_factory, token_validator=validator)
 
     response = client.get("/me", headers=_bearer("valid-token"))
 
@@ -397,7 +403,7 @@ def test_psn_link_without_email_claim_is_403():
 
 
 def test_psn_link_happy_path_then_me_shows_linked_with_expirations():
-    client, repo, crypto, agent_factory, validator = _build_with_valid_token()
+    client, repo, _crypto, agent_factory, _validator = _build_with_valid_token()
     agent_factory.email_info = (EMAIL, True)
 
     response = client.post("/psn/link", json={"npsso": "the-npsso"}, headers=_bearer("valid-token"))
@@ -417,7 +423,7 @@ def test_psn_link_happy_path_then_me_shows_linked_with_expirations():
 
 
 def test_psn_link_mismatch_returns_409():
-    client, repo, crypto, agent_factory, validator = _build_with_valid_token()
+    client, _repo, _crypto, agent_factory, _validator = _build_with_valid_token()
     agent_factory.email_info = ("someone-else@example.com", True)
 
     response = client.post("/psn/link", json={"npsso": "the-npsso"}, headers=_bearer("valid-token"))
@@ -427,7 +433,7 @@ def test_psn_link_mismatch_returns_409():
 
 
 def test_psn_link_unverified_returns_409():
-    client, repo, crypto, agent_factory, validator = _build_with_valid_token()
+    client, _repo, _crypto, agent_factory, _validator = _build_with_valid_token()
     agent_factory.email_info = (EMAIL, False)
 
     response = client.post("/psn/link", json={"npsso": "the-npsso"}, headers=_bearer("valid-token"))
@@ -437,7 +443,7 @@ def test_psn_link_unverified_returns_409():
 
 
 def test_psn_link_invalid_npsso_returns_400():
-    client, repo, crypto, agent_factory, validator = _build_with_valid_token()
+    client, _repo, _crypto, agent_factory, _validator = _build_with_valid_token()
 
     response = client.post("/psn/link", json={"npsso": "{not valid json"}, headers=_bearer("valid-token"))
 
@@ -446,7 +452,7 @@ def test_psn_link_invalid_npsso_returns_400():
 
 
 def test_psn_link_auth_failure_returns_401():
-    client, repo, crypto, agent_factory, validator = _build_with_valid_token()
+    client, _repo, _crypto, agent_factory, _validator = _build_with_valid_token()
     agent_factory.raise_kind = "whoami"
 
     response = client.post("/psn/link", json={"npsso": "the-npsso"}, headers=_bearer("valid-token"))
@@ -463,8 +469,7 @@ def test_psn_unlink_then_me_shows_unlinked():
     _seed_link(repo, crypto, SUB)
     validator = FakeTokenValidator()
     validator.register("valid-token", _claims())
-    client, *_ = _build(repository=repo, token_crypto=crypto, agent_factory=agent_factory,
-                         token_validator=validator)
+    client, *_ = _build(repository=repo, token_crypto=crypto, agent_factory=agent_factory, token_validator=validator)
 
     response = client.delete("/psn/link", headers=_bearer("valid-token"))
     assert response.status_code == 204

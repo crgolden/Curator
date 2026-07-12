@@ -8,9 +8,9 @@ inject a fake connection with no real database.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Callable, Optional
 
 import psycopg
 
@@ -30,13 +30,13 @@ class LinkRecord:
         created via :meth:`Repository.upsert_link`/:meth:`Repository.set_link_account`.
     """
 
-    psn_account_id: Optional[str]
+    psn_account_id: str | None
     token_response_enc: bytes
-    access_token_expires_at: Optional[datetime]
-    refresh_token_expires_at: Optional[datetime]
+    access_token_expires_at: datetime | None
+    refresh_token_expires_at: datetime | None
     linked_at: datetime
     updated_at: datetime
-    last_verified_at: Optional[datetime]
+    last_verified_at: datetime | None
 
 
 class Repository:
@@ -47,7 +47,7 @@ class Repository:
         method call rather than held open, matching the short-lived-request shape of a FastAPI handler.
     """
 
-    def __init__(self, connection_factory: Callable[[], "psycopg.Connection"]) -> None:
+    def __init__(self, connection_factory: Callable[[], psycopg.Connection]) -> None:
         self._connection_factory = connection_factory
 
     def upsert_user(self, sub: str) -> None:
@@ -75,7 +75,7 @@ class Repository:
                 cur.execute(sql, (sub,))
             conn.commit()
 
-    def get_link(self, sub: str) -> Optional[LinkRecord]:
+    def get_link(self, sub: str) -> LinkRecord | None:
         """Fetch the ``psn_links`` row for ``sub``, if any.
 
         :param sub: The Identity ``sub`` claim.
@@ -108,9 +108,9 @@ class Repository:
         self,
         sub: str,
         token_response_enc: bytes,
-        access_token_expires_at: Optional[datetime],
-        refresh_token_expires_at: Optional[datetime],
-        psn_account_id: Optional[str] = None,
+        access_token_expires_at: datetime | None,
+        refresh_token_expires_at: datetime | None,
+        psn_account_id: str | None = None,
     ) -> None:
         """Create or update the ``psn_links`` row for ``sub``.
 

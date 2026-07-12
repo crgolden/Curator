@@ -61,8 +61,12 @@ def reverify_link(
     except PsnAuthError:
         DbTokenStore(claims.sub, repository, token_crypto).clear()
         return
-    except Exception:  # noqa: BLE001 - transient failures must not crash the caller's request
+    except Exception:
         return
+
+    # Callers must have already enforced `claims.email is not None` (see this function's docstring and
+    # `curator.deps.require_verified_caller`) -- narrow it here so normalize_email(claims.email) type-checks.
+    assert claims.email is not None, "reverify_link requires a verified caller (claims.email must be set)"
 
     stale = (
         email_info is None

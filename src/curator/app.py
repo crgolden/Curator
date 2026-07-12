@@ -15,7 +15,8 @@ cookie.
 
 from __future__ import annotations
 
-from typing import Callable, Optional
+from collections.abc import Callable
+from typing import cast
 
 import psycopg
 from fastapi import FastAPI
@@ -29,16 +30,17 @@ from curator.persistence.db_token_store import DbTokenStore
 from curator.persistence.repository import Repository
 from curator.psn_routes import router as psn_router
 from curator.settings import Settings
+from curator.telemetry import configure_telemetry
 from curator.token_validation import JwtValidator, TokenValidatorLike
 
 
 def create_app(
-    settings: Optional[Settings] = None,
+    settings: Settings | None = None,
     *,
-    repository: Optional[Repository] = None,
-    token_crypto: Optional[TokenCrypto] = None,
-    agent_factory: Optional[Callable[..., PsnAgentLike]] = None,
-    token_validator: Optional[TokenValidatorLike] = None,
+    repository: Repository | None = None,
+    token_crypto: TokenCrypto | None = None,
+    agent_factory: Callable[..., PsnAgentLike] | None = None,
+    token_validator: TokenValidatorLike | None = None,
 ) -> FastAPI:
     """Build a configured Curator :class:`~fastapi.FastAPI` app.
 
@@ -80,18 +82,28 @@ def create_app(
         """Fleet-convention health probe: plain-text ``"Healthy"``, no auth required."""
         return PlainTextResponse("Healthy")
 
+    # Telemetry (OTLP traces/metrics to Grafana Alloy, Elasticsearch structured logging) is configured last,
+    # after routes are registered, so FastAPI instrumentation sees the full route table. Each gunicorn
+    # worker calls this factory independently, so per-worker init comes for free here -- do not move this to
+    # module import time (breaks fork-safety) or call it more than once per app. It is a no-op per leg when
+    # that leg's settings are absent, and never raises: a telemetry failure must never prevent app startup.
+    configure_telemetry(app, settings)
+
     return app
 
 
 def _default_agent_factory(
-    repository: Repository, token_crypto: TokenCrypto,
+    repository: Repository,
+    token_crypto: TokenCrypto,
 ) -> Callable[..., PsnAgentLike]:
     """Build the production ``agent_factory``: a real :class:`~psnpy.client.PsnAgent` per call, backed by a
     fresh :class:`~curator.persistence.db_token_store.DbTokenStore` for the given user.
     """
 
-    def factory(sub: str, npsso: Optional[str] = None) -> PsnAgentLike:
+    def factory(sub: str, npsso: str | None = None) -> PsnAgentLike:
         store = DbTokenStore(sub, repository, token_crypto)
-        return PsnAgent.from_config(npsso=npsso, token_store=store)
+        # psnpy ships no py.typed marker, so PsnAgent.from_config resolves as Any -- narrow it to the
+        # PsnAgentLike shape this module's callers rely on (whoami / account_email_verified).
+        return cast(PsnAgentLike, PsnAgent.from_config(npsso=npsso, token_store=store))
 
     return factory

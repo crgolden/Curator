@@ -1,5 +1,9 @@
 # Curator
 
+[![Build and deploy Python app to Azure Web App - crgolden-curator](https://github.com/crgolden/Curator/actions/workflows/main.yml/badge.svg)](https://github.com/crgolden/Curator/actions/workflows/main.yml)
+
+[![Quality gate](https://sonarcloud.io/api/project_badges/quality_gate?project=crgolden_Curator)](https://sonarcloud.io/summary/new_code?id=crgolden_Curator)
+
 A multi-user PlayStation library curation API. Every user authenticates elsewhere — through Duende
 IdentityServer — and identifies themselves to Curator with a bearer access token; Curator itself is a
 pure **JWT Bearer resource server**, matching how the workspace's `Directory` API interacts with Identity.
@@ -43,6 +47,28 @@ scope. Routes that compare emails (`/me`'s re-verify, `POST`/`DELETE /psn/link`)
 `curator.deps.require_verified_caller`, which further 403s a token missing the `email` claim — a verified
 Identity email is mandatory for those, never treated as an absent-but-fine value.
 
+## Telemetry
+
+Two independent, optional legs, wired up in `curator.telemetry.configure_telemetry` and invoked once from
+`create_app`:
+
+- **Traces + metrics**: OTLP gRPC to Grafana Alloy, enabled by setting `AlloyEndpoint`. Resource
+  `service.name` is `curator`; the FastAPI app, psycopg, and outbound `requests` calls (covers `psnpy`'s
+  calls to Sony) are all instrumented. `/health` is excluded from tracing, matching the fleet convention.
+- **Structured logging**: root-logger documents shipped to Elasticsearch, enabled by setting
+  `ElasticsearchNode` together with `ElasticsearchUsername`/`ElasticsearchPassword`. Each document carries
+  `service.name: "curator"` and a flat `log.level` field (never a nested `log: {level: ...}` object) —
+  mirroring what the `Churches` Node app ships — indexed into a day-bucketed `curator-logs-<yyyy.MM.dd>`
+  index. Shipping runs on a background thread (a `QueueHandler`/`QueueListener` pair), so a slow or
+  unreachable Elasticsearch node never blocks a request.
+
+Both legs are **no-op when their settings are unset** — the default for local dev and CI — and neither can
+ever prevent the app from starting: every telemetry init path is wrapped in its own broad `except Exception`
+that logs to stderr and continues. Each leg's global state (the OTel providers, the library instrumentors,
+the Elasticsearch log handler) is registered at most once per process, so calling `create_app` more than
+once — as the test suite and, incidentally, each gunicorn worker's own factory call do — never stacks a
+second provider on top of the first.
+
 ## Quick start
 
 ```powershell
@@ -57,10 +83,11 @@ schema integration tests that apply the migration to a real (disposable) Postgre
 
 ## CI
 
-`.github/workflows/main.yml` runs the offline unit test suite on push to `main`, on pull requests, and on
-`workflow_dispatch`. It never sets `CURATOR_TEST_DATABASE_URL`, so the schema integration tests always
-auto-skip there. See [TESTING.md](TESTING.md#ci) for how it gets the sibling `psnpy` dependency without a
-published release yet.
+`.github/workflows/main.yml` runs Ruff lint, Ruff format check, mypy, the offline unit test suite (with
+coverage), and a SonarCloud analysis on push to `main`, on pull requests, and on `workflow_dispatch`. It
+never sets `CURATOR_TEST_DATABASE_URL`, so the schema integration tests always auto-skip there. See
+[TESTING.md](TESTING.md#ci) for how it gets the sibling `psnpy` dependency without a published release yet,
+and for the local lint/type-check commands.
 
 Run the app itself (once settings are resolvable — see `curator.settings.Settings.from_config`) with:
 
@@ -112,6 +139,7 @@ src/curator/
   deps.py                  # require_bearer / require_verified_caller: the auth gates every route depends on
   reverify.py               # reverify_link(): re-check a stored PSN link against the caller's token
   app.py                     # create_app(): FastAPI factory, DI seams on app.state
+  telemetry.py                # configure_telemetry(): optional OTLP traces/metrics + Elasticsearch logging
   me_routes.py                # GET /me
   link_service.py               # link()/unlink(): PSN account linking, email verification rules
   psn_routes.py                   # POST/DELETE /psn/link

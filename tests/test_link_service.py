@@ -27,8 +27,9 @@ class FakeRepository:
     def get_link(self, sub):
         return self.links.get(sub)
 
-    def upsert_link(self, sub, token_response_enc, access_token_expires_at, refresh_token_expires_at,
-                     psn_account_id=None):
+    def upsert_link(
+        self, sub, token_response_enc, access_token_expires_at, refresh_token_expires_at, psn_account_id=None
+    ):
         self.upsert_link_calls.append(
             (sub, token_response_enc, access_token_expires_at, refresh_token_expires_at, psn_account_id)
         )
@@ -139,8 +140,12 @@ def test_link_verified_match_links_and_sets_account_id():
         return FakeAgent(sub_arg, npsso, email_info=("user@example.com", True))
 
     result = link(
-        sub, "the-npsso-token", "User@Example.com",
-        repository=repo, token_crypto=crypto, agent_factory=agent_factory,
+        sub,
+        "the-npsso-token",
+        "User@Example.com",
+        repository=repo,
+        token_crypto=crypto,
+        agent_factory=agent_factory,
     )
 
     assert isinstance(result, LinkResult)
@@ -163,8 +168,12 @@ def test_link_address_mismatch_clears_and_raises():
 
     with pytest.raises(LinkError) as exc_info:
         link(
-            sub, "npsso", "user@example.com",
-            repository=repo, token_crypto=crypto, agent_factory=agent_factory,
+            sub,
+            "npsso",
+            "user@example.com",
+            repository=repo,
+            token_crypto=crypto,
+            agent_factory=agent_factory,
         )
 
     assert exc_info.value.kind == "mismatch"
@@ -185,8 +194,12 @@ def test_link_matching_but_unverified_clears_and_raises():
 
     with pytest.raises(LinkError) as exc_info:
         link(
-            sub, "npsso", "user@example.com",
-            repository=repo, token_crypto=crypto, agent_factory=agent_factory,
+            sub,
+            "npsso",
+            "user@example.com",
+            repository=repo,
+            token_crypto=crypto,
+            agent_factory=agent_factory,
         )
 
     assert exc_info.value.kind == "unverified"
@@ -206,8 +219,12 @@ def test_link_none_email_clears_and_raises_unverified():
 
     with pytest.raises(LinkError) as exc_info:
         link(
-            sub, "npsso", "user@example.com",
-            repository=repo, token_crypto=crypto, agent_factory=agent_factory,
+            sub,
+            "npsso",
+            "user@example.com",
+            repository=repo,
+            token_crypto=crypto,
+            agent_factory=agent_factory,
         )
 
     assert exc_info.value.kind == "unverified"
@@ -227,8 +244,12 @@ def test_link_psn_auth_error_clears_and_raises_auth_failed():
 
     with pytest.raises(LinkError) as exc_info:
         link(
-            sub, "npsso", "user@example.com",
-            repository=repo, token_crypto=crypto, agent_factory=agent_factory,
+            sub,
+            "npsso",
+            "user@example.com",
+            repository=repo,
+            token_crypto=crypto,
+            agent_factory=agent_factory,
         )
 
     assert exc_info.value.kind == "auth_failed"
@@ -248,8 +269,12 @@ def test_link_invalid_npsso_rejected_before_any_agent_call():
 
     with pytest.raises(LinkError) as exc_info:
         link(
-            "sub-1", "{not valid json", "user@example.com",
-            repository=repo, token_crypto=crypto, agent_factory=agent_factory,
+            "sub-1",
+            "{not valid json",
+            "user@example.com",
+            repository=repo,
+            token_crypto=crypto,
+            agent_factory=agent_factory,
         )
 
     assert exc_info.value.kind == "invalid_npsso"
@@ -269,8 +294,12 @@ def test_link_accepts_npsso_json_blob():
         return FakeAgent(sub_arg, npsso, email_info=("user@example.com", True))
 
     result = link(
-        sub, '{"npsso": "abc123"}', "user@example.com",
-        repository=repo, token_crypto=crypto, agent_factory=agent_factory,
+        sub,
+        '{"npsso": "abc123"}',
+        "user@example.com",
+        repository=repo,
+        token_crypto=crypto,
+        agent_factory=agent_factory,
     )
     assert result.psn_account_id == "psn-account-1"
 

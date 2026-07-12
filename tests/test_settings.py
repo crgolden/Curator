@@ -53,4 +53,4 @@ def test_settings_is_frozen(monkeypatch, tmp_path):
     _set_all_required(monkeypatch)
     settings = Settings.from_config(dotenv_path=tmp_path / "absent.env")
     with pytest.raises(AttributeError):
-        settings.token_key = "changed"
+        settings.token_key = "changed"  # type: ignore[misc] # intentional: proves the frozen dataclass raises at runtime

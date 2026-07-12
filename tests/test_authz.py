@@ -61,11 +61,15 @@ class RecordingRepository(FakeRepository):
         self.all_subs_seen.append(sub)
         return super().get_link(sub)
 
-    def upsert_link(self, sub, token_response_enc, access_token_expires_at, refresh_token_expires_at,
-                     psn_account_id=None):
+    def upsert_link(
+        self, sub, token_response_enc, access_token_expires_at, refresh_token_expires_at, psn_account_id=None
+    ):
         self.all_subs_seen.append(sub)
         return super().upsert_link(
-            sub, token_response_enc, access_token_expires_at, refresh_token_expires_at,
+            sub,
+            token_response_enc,
+            access_token_expires_at,
+            refresh_token_expires_at,
             psn_account_id=psn_account_id,
         )
 
@@ -82,8 +86,7 @@ class RecordingRepository(FakeRepository):
         return super().delete_link(sub)
 
 
-def _seed_custom_link(repo: RecordingRepository, crypto: TokenCrypto, sub: str, account_id: str,
-                       hour: int) -> None:
+def _seed_custom_link(repo: RecordingRepository, crypto: TokenCrypto, sub: str, account_id: str, hour: int) -> None:
     """Seed a link with values distinguishable per-user (unlike ``test_routes._seed_link``'s fixed
     timestamps), so isolation between two users' rows is actually observable in assertions."""
     encrypted = crypto.encrypt(f'{{"access_token": "AT-{sub}", "refresh_token": "RT-{sub}"}}'.encode())
@@ -102,14 +105,15 @@ def _seed_custom_link(repo: RecordingRepository, crypto: TokenCrypto, sub: str, 
 # Every bearer-required route rejects missing/garbage tokens.
 # ---------------------------------------------------------------------------------------------------
 
-@pytest.mark.parametrize("method, path, kwargs", _BEARER_REQUIRED_ROUTES)
+
+@pytest.mark.parametrize(("method", "path", "kwargs"), _BEARER_REQUIRED_ROUTES)
 def test_bearer_required_routes_reject_missing_authorization_header(method, path, kwargs):
     client, *_ = _build()
     response = getattr(client, method)(path, **kwargs)
     assert response.status_code == 401
 
 
-@pytest.mark.parametrize("method, path, kwargs", _BEARER_REQUIRED_ROUTES)
+@pytest.mark.parametrize(("method", "path", "kwargs"), _BEARER_REQUIRED_ROUTES)
 def test_bearer_required_routes_reject_garbage_token(method, path, kwargs):
     client, *_ = _build()
     response = getattr(client, method)(path, headers=_bearer("garbage-not-a-real-token"), **kwargs)
@@ -119,6 +123,7 @@ def test_bearer_required_routes_reject_garbage_token(method, path, kwargs):
 # ---------------------------------------------------------------------------------------------------
 # Cross-user isolation.
 # ---------------------------------------------------------------------------------------------------
+
 
 def test_cross_user_isolation_between_two_established_callers():
     repo = RecordingRepository()
@@ -134,7 +139,10 @@ def test_cross_user_isolation_between_two_established_callers():
         _claims(sub="sub-a", email="usera@example.com", iat=datetime(2026, 1, 1, 2, tzinfo=timezone.utc)),
     )
     app = create_app(
-        _make_settings(), repository=repo, token_crypto=crypto, agent_factory=agent_factory,
+        _make_settings(),
+        repository=repo,
+        token_crypto=crypto,
+        agent_factory=agent_factory,
         token_validator=validator,
     )
     client = TestClient(app)
@@ -181,6 +189,7 @@ def test_cross_user_isolation_between_two_established_callers():
 # ---------------------------------------------------------------------------------------------------
 # No route accepts a caller-supplied target-user identifier.
 # ---------------------------------------------------------------------------------------------------
+
 
 def test_no_route_exposes_a_path_parameter():
     """Every Curator route path is currently a fixed literal (no ``{...}`` path parameters at all) -- this

@@ -33,7 +33,9 @@ def _sign(key, kid: str, **payload_overrides) -> str:
     }
     payload.update(payload_overrides)
     header = {"alg": "RS256", "kid": kid}
-    return _jwt.encode(header, payload, key).decode("ascii")
+    # authlib ships no type stubs, so `.encode(...)` resolves as Any; `str(...)` narrows it back to the
+    # `str` this helper declares, with no behavioral change (the value is already a decoded ascii str).
+    return str(_jwt.encode(header, payload, key).decode("ascii"))
 
 
 class FakeFetcher:

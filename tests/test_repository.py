@@ -11,7 +11,7 @@ from curator.persistence.repository import LinkRecord, Repository
 class FakeCursor:
     """Stands in for a psycopg.Cursor: records executed SQL/params, returns a queued fetchone() row."""
 
-    def __init__(self, connection: "FakeConnection") -> None:
+    def __init__(self, connection: FakeConnection) -> None:
         self._connection = connection
 
     def execute(self, sql, params=None):
@@ -106,7 +106,12 @@ def test_get_link_maps_row_to_link_record():
     refresh_expires = datetime(2026, 3, 1, tzinfo=timezone.utc)
     last_verified_at = datetime(2026, 2, 2, tzinfo=timezone.utc)
     row = (
-        "psn-account-1", b"encrypted-bytes", access_expires, refresh_expires, linked_at, updated_at,
+        "psn-account-1",
+        b"encrypted-bytes",
+        access_expires,
+        refresh_expires,
+        linked_at,
+        updated_at,
         last_verified_at,
     )
     factory = FakeConnectionFactory(fetchone_result=row)

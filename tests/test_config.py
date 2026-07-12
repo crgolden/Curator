@@ -20,7 +20,7 @@ def test_read_dotenv_skips_blanks_and_comments(tmp_path):
 
 def test_read_dotenv_strips_optional_quotes(tmp_path):
     dotenv = tmp_path / ".env"
-    dotenv.write_text('DOUBLE="double-value"\nSINGLE=\'single-value\'\nBARE=bare-value\n', encoding="utf-8")
+    dotenv.write_text("DOUBLE=\"double-value\"\nSINGLE='single-value'\nBARE=bare-value\n", encoding="utf-8")
     assert _read_dotenv(dotenv) == {
         "DOUBLE": "double-value",
         "SINGLE": "single-value",

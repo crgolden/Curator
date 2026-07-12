@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import json
 from datetime import datetime, timezone
-from typing import Any, Optional
+from typing import Any
 
 from cryptography.fernet import InvalidToken
 
@@ -36,7 +36,7 @@ class DbTokenStore:
         self._repository = repository
         self._crypto = crypto
 
-    def load(self) -> Optional[dict[str, Any]]:
+    def load(self) -> dict[str, Any] | None:
         """Load the cached token response, or ``None`` if absent, corrupt, or unusable.
 
         :returns: The token response dict, only when it has a truthy ``refresh_token``; ``None``
@@ -87,7 +87,7 @@ class DbTokenStore:
         self._repository.delete_link(self._sub)
 
 
-def _to_datetime(value: Any) -> Optional[datetime]:
+def _to_datetime(value: Any) -> datetime | None:
     """Convert a Unix epoch (seconds) to a timezone-aware UTC ``datetime``.
 
     :param value: An epoch timestamp (``int``/``float``), or ``None``.

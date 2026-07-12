@@ -1,5 +1,23 @@
 # Testing
 
+## Lint, format, and type checking
+
+Ruff (lint + format) and mypy (strict) run against `src/` and `tests/`, configured in `pyproject.toml`
+(`[tool.ruff]`, `[tool.ruff.lint]`, `[tool.mypy]`). Run them locally the same way CI does:
+
+```powershell
+python -m pip install -e ".[dev]"
+
+python -m ruff check src tests
+python -m ruff format --check src tests   # drop --check to apply formatting
+$env:MYPYPATH = "src"
+python -m mypy src tests
+```
+
+`mypy` is strict on `src/curator` (no untyped defs, no implicit `Any`); `[[tool.mypy.overrides]]` in
+`pyproject.toml` relaxes a few checks for `tests/` (hand-written fake collaborators use structural, not
+nominal, typing — see "Unit tests" below) and marks `authlib`/`psnpy` as untyped third-party imports.
+
 ## Unit tests
 
 The whole suite under `tests/` runs fully offline: no live database, no network, no live PSN/Identity
@@ -48,6 +66,15 @@ python -m pip install -e ../psnpy
 python -m pytest tests -q
 ```
 
+`tests/test_telemetry.py` covers `curator.telemetry`: both legs (OTLP traces/metrics, Elasticsearch
+logging) stay no-op when their settings are absent; the module-level registration guards make repeated
+`create_app` calls never stack a second provider or handler; `FastAPIInstrumentor.instrument_app` is called
+with `/health` excluded; and the Elasticsearch log-document formatter produces the expected flat `log.level`
+/ `service.name` keys. Every OTel/Elasticsearch collaborator (`TracerProvider`, `MeterProvider`, the OTLP
+exporters, the psycopg/requests instrumentors, the `Elasticsearch` client, `QueueListener`) is a
+hand-written fake swapped in via `monkeypatch.setattr` — no live OTLP collector, no live Elasticsearch node,
+no `unittest.mock`.
+
 ## Integration tests (schema, gated — opt-in only)
 
 `tests/test_schema.py` is the one place in this suite that touches a real PostgreSQL instance. It is
@@ -89,5 +116,7 @@ package access) into `./psnpy-src`, since `psnpy` is private and has no publishe
 release-wheel URL pin that doesn't exist yet and would fail dependency resolution outright. Once `psnpy`
 starts tagging releases, replace the cross-checkout with installing the published release wheel.
 
-CI runs unit tests only — `CURATOR_TEST_DATABASE_URL` is never set in the workflow, so `test_schema.py`
-auto-skips; there is no PostgreSQL service in this job.
+The `test` job runs, in order: Ruff lint, Ruff format check, mypy, then the unit test suite with coverage
+(`--cov=src/curator --cov-report=xml:coverage.xml`), then a SonarCloud analysis over `coverage.xml`. Each
+lint/type-check step is its own named step so a failure is attributable at a glance. `CURATOR_TEST_DATABASE_URL`
+is never set in the workflow, so `test_schema.py` auto-skips; there is no PostgreSQL service in this job.

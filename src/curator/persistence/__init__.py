@@ -14,9 +14,9 @@ from curator.persistence.repository import LinkRecord, Repository
 
 __all__ = [
     "ConfigError",
-    "resolve_database_url",
-    "TokenCrypto",
     "DbTokenStore",
     "LinkRecord",
     "Repository",
+    "TokenCrypto",
+    "resolve_database_url",
 ]

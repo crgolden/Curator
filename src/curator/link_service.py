@@ -11,9 +11,10 @@ tokens were just obtained, so a rejected link never leaves live PSN credentials 
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Callable, Optional, Protocol
+from typing import Protocol
 
 from psnpy.config import ConfigError as NpssoConfigError
 from psnpy.config import parse_npsso
@@ -50,7 +51,7 @@ class PsnAgentLike(Protocol):
         """Return the authenticated PSN account (bootstrapping/persisting tokens as a side effect)."""
         ...
 
-    def account_email_verified(self) -> Optional[tuple[str, bool]]:
+    def account_email_verified(self) -> tuple[str, bool] | None:
         """Return ``(address, is_verified)`` for the PSN account's primary email, or ``None``."""
         ...
 
@@ -68,8 +69,8 @@ class LinkResult:
     """
 
     psn_account_id: str
-    access_token_expires_at: Optional[datetime]
-    refresh_token_expires_at: Optional[datetime]
+    access_token_expires_at: datetime | None
+    refresh_token_expires_at: datetime | None
 
 
 def normalize_email(value: str) -> str:

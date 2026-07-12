@@ -18,7 +18,7 @@ from __future__ import annotations
 
 from fastapi import Depends, HTTPException, Request
 
-from curator.token_validation import TokenClaims, TokenError
+from curator.token_validation import TokenClaims, TokenError, TokenValidatorLike
 
 _CURATOR_SCOPE = "curator"
 
@@ -40,9 +40,9 @@ def require_bearer(request: Request) -> TokenClaims:
             headers={"WWW-Authenticate": "Bearer"},
         )
 
-    validator = request.app.state.token_validator
+    validator: TokenValidatorLike = request.app.state.token_validator
     try:
-        claims = validator.validate(token)
+        claims: TokenClaims = validator.validate(token)
     except TokenError as exc:
         raise HTTPException(
             status_code=401,

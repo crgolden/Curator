@@ -14,12 +14,21 @@ dependencies = [
     "cryptography",
     "psycopg[binary]>=3.1.0,<4.0.0",
     "psnpy @ https://github.com/crgolden/psnpy/releases/download/v0.2.0/psnpy-0.2.0-py3-none-any.whl",
+    "opentelemetry-sdk>=1.27.0,<2.0.0",
+    "opentelemetry-exporter-otlp-proto-grpc>=1.27.0,<2.0.0",
+    "opentelemetry-instrumentation-fastapi>=0.48b0",
+    "opentelemetry-instrumentation-psycopg>=0.48b0",
+    "opentelemetry-instrumentation-requests>=0.48b0",
+    "elasticsearch>=8.0.0,<9.0.0",
 ]
 
 [project.optional-dependencies]
 dev = [
     "pytest>=8.0.0",
     "httpx>=0.27.0",
+    "pytest-cov>=5.0.0",
+    "ruff>=0.15.0",
+    "mypy>=1.13.0",
 ]
 
 [build-system]
@@ -32,3 +41,62 @@ where = ["src"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]
+
+[tool.ruff]
+target-version = "py310"
+line-length = 120
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "W", "F", "I", "UP", "B", "SIM", "RUF", "PT"]
+# B008 (function call in a default argument) is a real anti-pattern in general, but FastAPI's dependency
+# injection is *built* on `Depends(...)` as a parameter default (see `curator.deps.require_verified_caller`,
+# `curator.me_routes.me`, `curator.psn_routes.psn_link`/`psn_unlink`) -- there is no alternative spelling
+# that keeps the DI working, and FastAPI's own docs use this exact shape. Ignored repo-wide rather than
+# per-line `# noqa` clutter on every route handler.
+ignore = ["B008"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["curator"]
+
+[tool.mypy]
+strict = true
+python_version = "3.10"
+mypy_path = "src"
+files = ["src", "tests"]
+
+[[tool.mypy.overrides]]
+# authlib ships no inline types and no published stub package (unlike psycopg, which is fully typed).
+module = ["authlib.*"]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+# psnpy is installed editable from the sibling repo without a py.typed marker / stub package.
+module = ["psnpy.*"]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+# Tests intentionally use bare, unannotated fake-collaborator classes (FakeRepository, FakeConnection, ...)
+# that satisfy the real collaborators' methods structurally (duck typing) rather than nominally -- matching
+# this repo's no-unittest.mock fake style (see TESTING.md). Full strict-everywhere would force either
+# fully-typed Protocols for every fake or scattered casts with no runtime benefit on throwaway test doubles.
+# `tests/` has no `__init__.py`, so mypy names each test file's module after its bare filename
+# (`test_config`, not `tests.test_config`) -- the glob below matches on that. src/ remains fully strict.
+module = [
+    "test_authz",
+    "test_config",
+    "test_connection",
+    "test_crypto",
+    "test_db_token_store",
+    "test_link_service",
+    "test_repository",
+    "test_routes",
+    "test_schema",
+    "test_settings",
+    "test_telemetry",
+    "test_token_validation",
+]
+disallow_untyped_defs = false
+disallow_incomplete_defs = false
+disallow_untyped_calls = false
+disable_error_code = ["arg-type", "type-arg"]

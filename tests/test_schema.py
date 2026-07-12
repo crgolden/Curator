@@ -65,7 +65,7 @@ EXPECTED_TABLES = {
 }
 
 
-@pytest.fixture()
+@pytest.fixture
 def db_connection():
     """Open a connection, apply the full migration inside one transaction, and roll it all back on exit.
 
@@ -85,7 +85,7 @@ def db_connection():
         connection.close()
 
 
-@pytest.fixture()
+@pytest.fixture
 def seeded_user_and_game(db_connection):
     """Insert one ``app_users`` row and one ``games`` row, returning ``(identity_sub, game_id)``.
 
@@ -107,7 +107,7 @@ def test_migration_creates_all_expected_tables(db_connection):
     with db_connection.cursor() as cur:
         cur.execute("SELECT table_name FROM information_schema.tables WHERE table_schema = 'public'")
         actual_tables = {row[0] for row in cur.fetchall()}
-    assert EXPECTED_TABLES <= actual_tables
+    assert actual_tables >= EXPECTED_TABLES
 
 
 def test_game_assignments_rejects_invalid_collection_status(db_connection, seeded_user_and_game):
@@ -118,32 +118,28 @@ def test_game_assignments_rejects_invalid_collection_status(db_connection, seede
             "INSERT INTO assignment_runs (run_id, identity_sub, config_snapshot) VALUES (%s, %s, %s)",
             (run_id, user_sub, "{}"),
         )
-    with pytest.raises(psycopg_errors.CheckViolation):
-        with db_connection.cursor() as cur:
-            cur.execute(
-                "INSERT INTO game_assignments (run_id, game_id, collection_status) VALUES (%s, %s, %s)",
-                (run_id, game_id, "Wrong"),
-            )
+    with pytest.raises(psycopg_errors.CheckViolation), db_connection.cursor() as cur:
+        cur.execute(
+            "INSERT INTO game_assignments (run_id, game_id, collection_status) VALUES (%s, %s, %s)",
+            (run_id, game_id, "Wrong"),
+        )
 
 
 def test_user_consoles_rejects_invalid_platform(db_connection, seeded_user_and_game):
     user_sub, _game_id = seeded_user_and_game
-    with pytest.raises(psycopg_errors.CheckViolation):
-        with db_connection.cursor() as cur:
-            cur.execute(
-                "INSERT INTO user_consoles (identity_sub, name, platform, raw_capacity_gb) "
-                "VALUES (%s, %s, %s, %s)",
-                (user_sub, "Living Room", "PS3", 825),
-            )
+    with pytest.raises(psycopg_errors.CheckViolation), db_connection.cursor() as cur:
+        cur.execute(
+            "INSERT INTO user_consoles (identity_sub, name, platform, raw_capacity_gb) VALUES (%s, %s, %s, %s)",
+            (user_sub, "Living Room", "PS3", 825),
+        )
 
 
 def test_exclusion_rules_rejects_invalid_rule_type(db_connection):
-    with pytest.raises(psycopg_errors.CheckViolation):
-        with db_connection.cursor() as cur:
-            cur.execute(
-                "INSERT INTO exclusion_rules (rule_type, pattern) VALUES (%s, %s)",
-                ("bogus", "some-pattern"),
-            )
+    with pytest.raises(psycopg_errors.CheckViolation), db_connection.cursor() as cur:
+        cur.execute(
+            "INSERT INTO exclusion_rules (rule_type, pattern) VALUES (%s, %s)",
+            ("bogus", "some-pattern"),
+        )
 
 
 def test_measured_sizes_retains_history_across_measured_at(db_connection, seeded_user_and_game):

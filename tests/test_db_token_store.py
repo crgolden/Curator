@@ -24,8 +24,9 @@ class FakeRepository:
     def get_link(self, sub):
         return self.links.get(sub)
 
-    def upsert_link(self, sub, token_response_enc, access_token_expires_at, refresh_token_expires_at,
-                     psn_account_id=None):
+    def upsert_link(
+        self, sub, token_response_enc, access_token_expires_at, refresh_token_expires_at, psn_account_id=None
+    ):
         self.upsert_calls.append(
             (sub, token_response_enc, access_token_expires_at, refresh_token_expires_at, psn_account_id)
         )

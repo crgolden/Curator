@@ -19,9 +19,10 @@ from __future__ import annotations
 
 import json
 import urllib.request
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Callable, Optional, Protocol
+from typing import Any, Protocol
 
 from authlib.jose import JsonWebKey, JsonWebToken
 from authlib.jose.errors import JoseError
@@ -52,7 +53,7 @@ class TokenClaims:
     """
 
     sub: str
-    email: Optional[str]
+    email: str | None
     iat: datetime
     scopes: tuple[str, ...]
 
@@ -72,14 +73,15 @@ class TokenValidatorLike(Protocol):
         ...
 
 
-def fetch_json(url: str) -> dict:
+def fetch_json(url: str) -> dict[str, Any]:
     """Default ``fetch_json``: a plain HTTP GET, JSON-decoded. Injected so tests never hit the network.
 
     :param url: The URL to fetch (Identity's discovery document, or the ``jwks_uri`` it points to).
     :returns: The parsed JSON body.
     """
-    with urllib.request.urlopen(url) as response:  # noqa: S310 - fixed https URL derived from config only
-        return json.loads(response.read().decode("utf-8"))
+    with urllib.request.urlopen(url) as response:
+        body: dict[str, Any] = json.loads(response.read().decode("utf-8"))
+        return body
 
 
 class JwtValidator:
@@ -92,11 +94,11 @@ class JwtValidator:
         ``urllib``-based GET. Tests inject a fake that serves canned discovery/JWKS documents.
     """
 
-    def __init__(self, authority: str, fetch_json: Callable[[str], dict] = fetch_json) -> None:
+    def __init__(self, authority: str, fetch_json: Callable[[str], dict[str, Any]] = fetch_json) -> None:
         self._authority = authority.rstrip("/")
         self._fetch_json = fetch_json
         self._jwt = JsonWebToken(_ALGORITHMS)
-        self._keyset = None
+        self._keyset: Any | None = None
 
     def validate(self, token: str) -> TokenClaims:
         """Validate ``token`` and extract the claims Curator cares about.
@@ -129,7 +131,7 @@ class JwtValidator:
             scopes=_parse_scopes(claims.get("scope")),
         )
 
-    def _decode(self, token: str):
+    def _decode(self, token: str) -> Any:
         """Decode and structurally validate ``token``'s signature, refetching the JWKS once on an
         unrecognized ``kid`` before giving up.
         """
@@ -148,7 +150,7 @@ class JwtValidator:
         except (ValueError, JoseError) as exc:
             raise TokenError(f"Malformed or unverifiable token: {exc}") from exc
 
-    def _ensure_keyset(self, *, force: bool = False):
+    def _ensure_keyset(self, *, force: bool = False) -> Any:
         """Return the cached :class:`~authlib.jose.KeySet`, fetching (or refetching) it when needed."""
         if self._keyset is None or force:
             discovery = self._fetch_json(f"{self._authority}/.well-known/openid-configuration")

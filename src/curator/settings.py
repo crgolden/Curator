@@ -19,6 +19,15 @@ from curator.persistence.connection import resolve_database_url
 _OIDC_AUTHORITY_ENV_NAMES: tuple[str, ...] = ("OIDC_AUTHORITY",)
 _TOKEN_KEY_ENV_NAMES: tuple[str, ...] = ("CURATOR_TOKEN_KEY",)
 
+# Fleet-convention telemetry settings (see workspace AGENTS.md): App Service application settings of these
+# exact names, already used by the other repos' OTLP/Elasticsearch legs. Every one of them is optional --
+# unset locally and in CI -- so `curator.telemetry.configure_telemetry` disables each leg independently
+# rather than requiring all-or-nothing.
+_ALLOY_ENDPOINT_ENV_NAMES: tuple[str, ...] = ("AlloyEndpoint",)
+_ELASTICSEARCH_NODE_ENV_NAMES: tuple[str, ...] = ("ElasticsearchNode",)
+_ELASTICSEARCH_USERNAME_ENV_NAMES: tuple[str, ...] = ("ElasticsearchUsername",)
+_ELASTICSEARCH_PASSWORD_ENV_NAMES: tuple[str, ...] = ("ElasticsearchPassword",)
+
 
 @dataclass(frozen=True)
 class Settings:
@@ -29,14 +38,24 @@ class Settings:
         claim on every validated access token are derived from this.
     :param token_key: The Fernet key encrypting stored PSN tokens at rest.
     :param database_url: The PostgreSQL connection URL.
+    :param alloy_endpoint: The Grafana Alloy OTLP gRPC endpoint (traces + metrics); ``None`` disables that
+        telemetry leg entirely.
+    :param elasticsearch_node: The Elasticsearch node URL structured logs ship to; ``None`` (along with
+        either credential being absent) disables that telemetry leg entirely.
+    :param elasticsearch_username: Basic-auth username for ``elasticsearch_node``.
+    :param elasticsearch_password: Basic-auth password for ``elasticsearch_node``.
     """
 
     oidc_authority: str
     token_key: str
     database_url: str
+    alloy_endpoint: str | None = None
+    elasticsearch_node: str | None = None
+    elasticsearch_username: str | None = None
+    elasticsearch_password: str | None = None
 
     @classmethod
-    def from_config(cls, dotenv_path: Path | None = None) -> "Settings":
+    def from_config(cls, dotenv_path: Path | None = None) -> Settings:
         """Build :class:`Settings`, resolving every field from env vars / a ``.env`` file.
 
         :param dotenv_path: Path to a ``.env`` file to consult; defaults to ``./.env``.
@@ -44,17 +63,34 @@ class Settings:
         :raises ConfigError: If a required setting cannot be resolved.
         """
         oidc_authority = _require(
-            "OIDC_AUTHORITY", _OIDC_AUTHORITY_ENV_NAMES, dotenv_path,
+            "OIDC_AUTHORITY",
+            _OIDC_AUTHORITY_ENV_NAMES,
+            dotenv_path,
         )
         token_key = _require(
-            "CURATOR_TOKEN_KEY", _TOKEN_KEY_ENV_NAMES, dotenv_path,
+            "CURATOR_TOKEN_KEY",
+            _TOKEN_KEY_ENV_NAMES,
+            dotenv_path,
         )
         database_url = resolve_database_url(dotenv_path=dotenv_path)
+
+        alloy_endpoint = resolve_setting(None, env_names=_ALLOY_ENDPOINT_ENV_NAMES, dotenv_path=dotenv_path)
+        elasticsearch_node = resolve_setting(None, env_names=_ELASTICSEARCH_NODE_ENV_NAMES, dotenv_path=dotenv_path)
+        elasticsearch_username = resolve_setting(
+            None, env_names=_ELASTICSEARCH_USERNAME_ENV_NAMES, dotenv_path=dotenv_path
+        )
+        elasticsearch_password = resolve_setting(
+            None, env_names=_ELASTICSEARCH_PASSWORD_ENV_NAMES, dotenv_path=dotenv_path
+        )
 
         return cls(
             oidc_authority=oidc_authority,
             token_key=token_key,
             database_url=database_url,
+            alloy_endpoint=alloy_endpoint,
+            elasticsearch_node=elasticsearch_node,
+            elasticsearch_username=elasticsearch_username,
+            elasticsearch_password=elasticsearch_password,
         )
 
 
@@ -70,6 +106,4 @@ def _require(key: str, env_names: tuple[str, ...], dotenv_path: Path | None) -> 
     value = resolve_setting(None, env_names=env_names, dotenv_path=dotenv_path)
     if value:
         return value
-    raise ConfigError(
-        f"No {key} found. Set {', '.join(env_names)} as an environment variable or in a .env file."
-    )
+    raise ConfigError(f"No {key} found. Set {', '.join(env_names)} as an environment variable or in a .env file.")
