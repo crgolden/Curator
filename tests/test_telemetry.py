@@ -109,7 +109,7 @@ def _patch_otlp_collaborators(monkeypatch):
     monkeypatch.setattr(telemetry, "BatchSpanProcessor", _FakeSpanProcessor)
     monkeypatch.setattr(telemetry, "PeriodicExportingMetricReader", _FakeMetricReader)
     monkeypatch.setattr(telemetry, "PsycopgInstrumentor", _FakeInstrumentor)
-    monkeypatch.setattr(telemetry, "RequestsInstrumentor", _FakeInstrumentor)
+    monkeypatch.setattr(telemetry, "HTTPXClientInstrumentor", _FakeInstrumentor)
     monkeypatch.setattr(telemetry, "trace", _FakeTraceNamespace())
     monkeypatch.setattr(telemetry, "metrics", _FakeMetricsNamespace())
     monkeypatch.setattr(telemetry, "_otel_configured", False)

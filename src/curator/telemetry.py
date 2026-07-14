@@ -14,7 +14,7 @@ rather than raised into ``create_app``. This mirrors the fleet convention (see t
 gunicorn worker process calls the factory independently, per-worker OTel initialization comes for free --
 nothing here spawns exporters or background threads at import time, only when the factory actually runs.
 The *global* provider/instrumentation registration (:func:`opentelemetry.trace.set_tracer_provider`,
-:func:`opentelemetry.metrics.set_meter_provider`, and the psycopg/requests library instrumentors, all of
+:func:`opentelemetry.metrics.set_meter_provider`, and the psycopg/httpx library instrumentors, all of
 which are process-wide state) is guarded by a module-level flag so calling ``create_app`` more than once in
 the same process -- as the test suite does -- never stacks a second provider on top of the first. Per-app
 instrumentation (``FastAPIInstrumentor.instrument_app``) is not process-wide state, so it runs for every
@@ -38,8 +38,8 @@ from opentelemetry import metrics, trace
 from opentelemetry.exporter.otlp.proto.grpc.metric_exporter import OTLPMetricExporter
 from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExporter
 from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
+from opentelemetry.instrumentation.httpx import HTTPXClientInstrumentor
 from opentelemetry.instrumentation.psycopg import PsycopgInstrumentor
-from opentelemetry.instrumentation.requests import RequestsInstrumentor
 from opentelemetry.sdk.metrics import MeterProvider
 from opentelemetry.sdk.metrics.export import PeriodicExportingMetricReader
 from opentelemetry.sdk.resources import SERVICE_NAME, Resource
@@ -80,7 +80,7 @@ def configure_telemetry(app: FastAPI, settings: Settings) -> None:
 
 
 def _configure_tracing_and_metrics(app: FastAPI, settings: Settings) -> None:
-    """Configure OTLP traces + metrics and instrument FastAPI/psycopg/requests, iff ``alloy_endpoint`` is set.
+    """Configure OTLP traces + metrics and instrument FastAPI/psycopg/httpx, iff ``alloy_endpoint`` is set.
 
     :param app: The FastAPI app to instrument (per-instance; not process-wide state).
     :param settings: The resolved settings; only ``alloy_endpoint`` is consulted.
@@ -96,7 +96,7 @@ def _register_otlp_providers(alloy_endpoint: str) -> None:
     """Register the process-wide TracerProvider/MeterProvider and library instrumentors, exactly once.
 
     Guarded by :data:`_otel_configured` so repeated calls in the same process (multiple ``create_app``
-    calls, as in tests) never stack a second provider or double-instrument psycopg/requests.
+    calls, as in tests) never stack a second provider or double-instrument psycopg/httpx.
 
     :param alloy_endpoint: The Grafana Alloy OTLP gRPC endpoint.
     """
@@ -121,9 +121,9 @@ def _register_otlp_providers(alloy_endpoint: str) -> None:
         if not psycopg_instrumentor.is_instrumented_by_opentelemetry:
             psycopg_instrumentor.instrument()
 
-        requests_instrumentor = RequestsInstrumentor()
-        if not requests_instrumentor.is_instrumented_by_opentelemetry:
-            requests_instrumentor.instrument()
+        httpx_instrumentor = HTTPXClientInstrumentor()
+        if not httpx_instrumentor.is_instrumented_by_opentelemetry:
+            httpx_instrumentor.instrument()
 
         _otel_configured = True
 
