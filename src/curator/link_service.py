@@ -11,18 +11,16 @@ tokens were just obtained, so a rejected link never leaves live PSN credentials 
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Coroutine
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Protocol
-
-from psnpy.config import ConfigError as NpssoConfigError
-from psnpy.config import parse_npsso
-from psnpy.psn_api import PsnAuthError
+from typing import Any, Protocol
 
 from curator.persistence.crypto import TokenCrypto
 from curator.persistence.db_token_store import DbTokenStore
 from curator.persistence.repository import Repository
+from curator.psn.errors import PsnAuthError
+from curator.psn.npsso import NpssoError, parse_npsso
 
 
 class LinkError(Exception):
@@ -39,24 +37,37 @@ class LinkError(Exception):
 
 
 class _Account(Protocol):
-    """The shape of the account object :meth:`PsnAgentLike.whoami` returns (structural — see psnpy.client.Account)."""
+    """The shape of the account object :meth:`PsnAgentLike.whoami` returns (structural — matches
+    :class:`curator.psn.account_client.Account`)."""
 
-    account_id: str
+    @property
+    def account_id(self) -> str:
+        """The PSN account id."""
+        ...
 
 
 class PsnAgentLike(Protocol):
-    """The shape an injected PSN agent must satisfy: ``whoami()`` + ``account_email_verified()``."""
+    """The shape an injected PSN agent must satisfy: ``whoami()`` + ``account_email_verified()``.
 
-    def whoami(self) -> _Account:
+    Both methods are async: the real production agent makes real HTTP calls (via
+    :class:`curator.psn.session.PsnSession`), and every Curator collaborator that touches I/O is async so a
+    slow PSN round-trip never blocks the event loop. Satisfied by
+    :class:`curator.psn.account_client.AccountClient`.
+    """
+
+    async def whoami(self) -> _Account:
         """Return the authenticated PSN account (bootstrapping/persisting tokens as a side effect)."""
         ...
 
-    def account_email_verified(self) -> tuple[str, bool] | None:
+    async def account_email_verified(self) -> tuple[str, bool] | None:
         """Return ``(address, is_verified)`` for the PSN account's primary email, or ``None``."""
         ...
 
 
-AgentFactory = Callable[..., PsnAgentLike]
+AgentFactory = Callable[..., Coroutine[Any, Any, PsnAgentLike]]
+"""Builds a :class:`PsnAgentLike` for a given ``sub`` (and optional ``npsso``). Async because building the
+real agent means restoring (or freshly bootstrapping) a :class:`curator.psn.session.PsnSession`, which
+awaits the token store."""
 
 
 @dataclass(frozen=True)
@@ -93,7 +104,7 @@ def emails_match(identity_email: str, psn_email: str, psn_verified: bool) -> boo
     return psn_verified is True and normalize_email(identity_email) == normalize_email(psn_email)
 
 
-def link(
+async def link(
     sub: str,
     npsso: str,
     identity_email: str,
@@ -124,33 +135,33 @@ def link(
     """
     try:
         parse_npsso(npsso)
-    except NpssoConfigError as exc:
+    except NpssoError as exc:
         raise LinkError("invalid_npsso", str(exc)) from exc
 
-    agent = agent_factory(sub, npsso=npsso)
+    agent = await agent_factory(sub, npsso=npsso)
 
     try:
-        account = agent.whoami()
-        email_info = agent.account_email_verified()
+        account = await agent.whoami()
+        email_info = await agent.account_email_verified()
     except PsnAuthError as exc:
-        DbTokenStore(sub, repository, token_crypto).clear()
+        await DbTokenStore(sub, repository, token_crypto).clear()
         raise LinkError("auth_failed", "PSN authentication failed.") from exc
 
     if email_info is None:
-        DbTokenStore(sub, repository, token_crypto).clear()
+        await DbTokenStore(sub, repository, token_crypto).clear()
         raise LinkError("unverified", "PSN email is not verified.")
 
     psn_email, psn_verified = email_info
     if not psn_verified:
-        DbTokenStore(sub, repository, token_crypto).clear()
+        await DbTokenStore(sub, repository, token_crypto).clear()
         raise LinkError("unverified", "PSN email is not verified.")
     if normalize_email(identity_email) != normalize_email(psn_email):
-        DbTokenStore(sub, repository, token_crypto).clear()
+        await DbTokenStore(sub, repository, token_crypto).clear()
         raise LinkError("mismatch", "emails do not match")
 
-    repository.set_link_account(sub, account.account_id)
-    repository.touch_link_verified(sub)
-    link_record = repository.get_link(sub)
+    await repository.set_link_account(sub, account.account_id)
+    await repository.touch_link_verified(sub)
+    link_record = await repository.get_link(sub)
     return LinkResult(
         psn_account_id=account.account_id,
         access_token_expires_at=link_record.access_token_expires_at if link_record else None,
@@ -158,16 +169,16 @@ def link(
     )
 
 
-def unlink(sub: str, *, repository: Repository, token_crypto: TokenCrypto) -> None:
+async def unlink(sub: str, *, repository: Repository, token_crypto: TokenCrypto) -> None:
     """Unlink a user's PSN account: best-effort revoke, then clear the stored tokens.
 
-    psnpy exposes no token-revocation API (its ``PsnSession``/``PsnAgent`` only bootstrap, refresh, and use
-    tokens — there is no PSN endpoint call to invalidate one server-side), so there is nothing to revoke
-    here; this simply clears Curator's own copy. Documented explicitly so a future psnpy revoke capability
-    has an obvious place to plug in.
+    PSN exposes no token-revocation endpoint (``curator.psn.session.PsnSession`` only bootstraps,
+    refreshes, and uses tokens — there is no PSN call to invalidate one server-side), so there is nothing
+    to revoke here; this simply clears Curator's own copy. Documented explicitly so a future PSN revoke
+    capability has an obvious place to plug in.
 
     :param sub: The Identity ``sub`` claim of the user unlinking their account.
     :param repository: The :class:`~curator.persistence.repository.Repository` to write through.
     :param token_crypto: The :class:`~curator.persistence.crypto.TokenCrypto` used by the token store.
     """
-    DbTokenStore(sub, repository, token_crypto).clear()
+    await DbTokenStore(sub, repository, token_crypto).clear()

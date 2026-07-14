@@ -11,9 +11,9 @@ verification.
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any
 
 from fastapi import APIRouter, Depends, Request
+from pydantic import BaseModel
 
 from curator.deps import require_verified_caller
 from curator.link_service import AgentFactory
@@ -22,11 +22,27 @@ from curator.persistence.repository import LinkRecord, Repository
 from curator.reverify import reverify_link
 from curator.token_validation import TokenClaims
 
-router = APIRouter()
+router = APIRouter(tags=["account"])
 
 
-@router.get("/me")
-async def me(request: Request, claims: TokenClaims = Depends(require_verified_caller)) -> dict[str, Any]:
+class PsnSummary(BaseModel):
+    """A linked PSN account's token expirations, as returned by ``/me`` and ``/psn/link``."""
+
+    access_token_expires_at: str | None
+    refresh_token_expires_at: str | None
+
+
+class MeResponse(BaseModel):
+    """The ``GET /me`` response body."""
+
+    sub: str
+    email: str | None
+    linked: bool
+    psn: PsnSummary | None
+
+
+@router.get("/me", response_model=MeResponse)
+async def me(request: Request, claims: TokenClaims = Depends(require_verified_caller)) -> MeResponse:
     """Return the caller's identity plus their PSN link status.
 
     :returns: ``{"sub", "email", "linked", "psn"}`` where ``psn`` is ``None`` when unlinked, else
@@ -36,23 +52,23 @@ async def me(request: Request, claims: TokenClaims = Depends(require_verified_ca
     token_crypto: TokenCrypto = request.app.state.token_crypto
     agent_factory: AgentFactory = request.app.state.agent_factory
 
-    reverify_link(claims, repository=repository, token_crypto=token_crypto, agent_factory=agent_factory)
+    await reverify_link(claims, repository=repository, token_crypto=token_crypto, agent_factory=agent_factory)
 
-    link = repository.get_link(claims.sub)
-    return {
-        "sub": claims.sub,
-        "email": claims.email,
-        "linked": link is not None,
-        "psn": _psn_summary(link) if link is not None else None,
-    }
+    link = await repository.get_link(claims.sub)
+    return MeResponse(
+        sub=claims.sub,
+        email=claims.email,
+        linked=link is not None,
+        psn=_psn_summary(link) if link is not None else None,
+    )
 
 
-def _psn_summary(link: LinkRecord) -> dict[str, Any]:
+def _psn_summary(link: LinkRecord) -> PsnSummary:
     """Render a :class:`LinkRecord`'s expirations as the ``/me``/``/psn/link`` response shape."""
-    return {
-        "access_token_expires_at": _iso(link.access_token_expires_at),
-        "refresh_token_expires_at": _iso(link.refresh_token_expires_at),
-    }
+    return PsnSummary(
+        access_token_expires_at=_iso(link.access_token_expires_at),
+        refresh_token_expires_at=_iso(link.refresh_token_expires_at),
+    )
 
 
 def _iso(value: datetime | None) -> str | None:

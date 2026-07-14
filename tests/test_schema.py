@@ -39,29 +39,36 @@ MIGRATION_PATH = Path(__file__).resolve().parent.parent / "db" / "migrations" / 
 EXPECTED_TABLES = {
     "app_users",
     "psn_links",
+    "psn_test_accounts",
     "entitlement_pulls",
     "entitlement_snapshots",
     "games",
     "game_concepts",
     "game_name_overrides",
+    "genres",
     "game_enrichment",
     "rawg_cache",
     "opencritic_cache",
-    "psn_store_cache",
+    "psn_catalog_cache",
+    "psn_game_search_cache",
+    "psn_player_search_cache",
     "data_quality_flags",
     "data_quality_flag_games",
     "exclusion_rules",
+    "global_exclusions",
     "franchise_rules",
     "edition_ranks",
-    "genre_priority",
+    "publisher_tiers",
     "size_estimates",
     "library_entries",
     "library_exclusions",
     "user_consoles",
     "measured_sizes",
-    "assignment_runs",
-    "game_assignments",
+    "collection_definitions",
+    "collection_runs",
+    "collection_items",
     "console_installs",
+    "job_runs",
 }
 
 
@@ -110,18 +117,27 @@ def test_migration_creates_all_expected_tables(db_connection):
     assert actual_tables >= EXPECTED_TABLES
 
 
-def test_game_assignments_rejects_invalid_collection_status(db_connection, seeded_user_and_game):
+def test_collection_items_rejects_invalid_collection_status(db_connection, seeded_user_and_game):
     user_sub, game_id = seeded_user_and_game
     run_id = str(uuid.uuid4())
     with db_connection.cursor() as cur:
         cur.execute(
-            "INSERT INTO assignment_runs (run_id, identity_sub, config_snapshot) VALUES (%s, %s, %s)",
+            "INSERT INTO collection_runs (run_id, identity_sub, spec_snapshot) VALUES (%s, %s, %s)",
             (run_id, user_sub, "{}"),
         )
     with pytest.raises(psycopg_errors.CheckViolation), db_connection.cursor() as cur:
         cur.execute(
-            "INSERT INTO game_assignments (run_id, game_id, collection_status) VALUES (%s, %s, %s)",
-            (run_id, game_id, "Wrong"),
+            "INSERT INTO collection_items (run_id, game_id, included, collection_status) VALUES (%s, %s, %s, %s)",
+            (run_id, game_id, True, "Wrong"),
+        )
+
+
+def test_game_enrichment_genre_id_rejects_orphan_fk(db_connection, seeded_user_and_game):
+    _user_sub, game_id = seeded_user_and_game
+    with pytest.raises(psycopg_errors.ForeignKeyViolation), db_connection.cursor() as cur:
+        cur.execute(
+            "INSERT INTO game_enrichment (game_id, genre_id) VALUES (%s, %s)",
+            (game_id, str(uuid.uuid4())),
         )
 
 
@@ -161,6 +177,15 @@ def test_measured_sizes_retains_history_across_measured_at(db_connection, seeded
         )
         (count,) = cur.fetchone()
     assert count == 2
+
+
+def test_job_runs_rejects_invalid_status(db_connection):
+    run_id = str(uuid.uuid4())
+    with pytest.raises(psycopg_errors.CheckViolation), db_connection.cursor() as cur:
+        cur.execute(
+            "INSERT INTO job_runs (run_id, kind, status) VALUES (%s, %s, %s)",
+            (run_id, "library_refresh", "bogus"),
+        )
 
 
 def test_no_email_or_npsso_columns_anywhere(db_connection):

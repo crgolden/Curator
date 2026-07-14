@@ -49,23 +49,23 @@ class RecordingRepository(FakeRepository):
         super().__init__()
         self.all_subs_seen: list[str] = []
 
-    def upsert_user(self, sub):
+    async def upsert_user(self, sub):
         self.all_subs_seen.append(sub)
-        return super().upsert_user(sub)
+        return await super().upsert_user(sub)
 
-    def touch_login(self, sub):
+    async def touch_login(self, sub):
         self.all_subs_seen.append(sub)
-        return super().touch_login(sub)
+        return await super().touch_login(sub)
 
-    def get_link(self, sub):
+    async def get_link(self, sub):
         self.all_subs_seen.append(sub)
-        return super().get_link(sub)
+        return await super().get_link(sub)
 
-    def upsert_link(
+    async def upsert_link(
         self, sub, token_response_enc, access_token_expires_at, refresh_token_expires_at, psn_account_id=None
     ):
         self.all_subs_seen.append(sub)
-        return super().upsert_link(
+        return await super().upsert_link(
             sub,
             token_response_enc,
             access_token_expires_at,
@@ -73,17 +73,17 @@ class RecordingRepository(FakeRepository):
             psn_account_id=psn_account_id,
         )
 
-    def set_link_account(self, sub, psn_account_id):
+    async def set_link_account(self, sub, psn_account_id):
         self.all_subs_seen.append(sub)
-        return super().set_link_account(sub, psn_account_id)
+        return await super().set_link_account(sub, psn_account_id)
 
-    def touch_link_verified(self, sub):
+    async def touch_link_verified(self, sub):
         self.all_subs_seen.append(sub)
-        return super().touch_link_verified(sub)
+        return await super().touch_link_verified(sub)
 
-    def delete_link(self, sub):
+    async def delete_link(self, sub):
         self.all_subs_seen.append(sub)
-        return super().delete_link(sub)
+        return await super().delete_link(sub)
 
 
 def _seed_custom_link(repo: RecordingRepository, crypto: TokenCrypto, sub: str, account_id: str, hour: int) -> None:
@@ -191,14 +191,24 @@ def test_cross_user_isolation_between_two_established_callers():
 # ---------------------------------------------------------------------------------------------------
 
 
-def test_no_route_exposes_a_path_parameter():
-    """Every Curator route path is currently a fixed literal (no ``{...}`` path parameters at all) -- this
-    locks that in, since a path parameter would be the obvious place a "target user" identifier (a
-    ``{sub}``-shaped segment letting one user name another's data) could sneak in."""
+_ALLOWED_PATH_PARAMETERS = {"console_id", "game_id"}
+
+
+def test_no_route_exposes_a_caller_suppliable_user_identifier_path_parameter():
+    """No route path parameter may be a "target user" identifier (a ``{sub}``-shaped segment letting one
+    user name another's data) -- every route still keys identity exclusively off the validated token's own
+    ``sub``. ``{console_id}``/``{game_id}`` (``PUT /consoles/{console_id}/installs/{game_id}``) are the
+    sole exception: they name a *resource*, not a user, and the route re-checks the resource's ownership
+    against the caller's own ``sub`` before acting (see ``test_consoles_routes.py``) rather than trusting
+    the path.
+    """
     client, *_ = _build()
     app = client.app
 
     route_paths = [route.path for route in app.routes if hasattr(route, "path")]
     assert route_paths, "expected at least one route to introspect"
     for path in route_paths:
-        assert "{" not in path, f"route {path!r} exposes a path parameter"
+        for segment in path.split("/"):
+            if segment.startswith("{") and segment.endswith("}"):
+                name = segment[1:-1]
+                assert name in _ALLOWED_PATH_PARAMETERS, f"route {path!r} exposes an unexpected path parameter {name!r}"

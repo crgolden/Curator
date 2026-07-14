@@ -17,11 +17,11 @@ from types import SimpleNamespace
 
 from cryptography.fernet import Fernet
 from fastapi.testclient import TestClient
-from psnpy.psn_api import PsnAuthError
 
 from curator.app import create_app
 from curator.persistence.crypto import TokenCrypto
 from curator.persistence.repository import LinkRecord
+from curator.psn.errors import PsnAuthError
 from curator.settings import Settings
 from curator.token_validation import TokenClaims, TokenError
 
@@ -47,16 +47,16 @@ class FakeRepository:
         self.set_link_account_calls: list[tuple[str, str]] = []
         self.touch_verified_calls: list[str] = []
 
-    def upsert_user(self, sub):
+    async def upsert_user(self, sub):
         self.users.add(sub)
 
-    def touch_login(self, sub):
+    async def touch_login(self, sub):
         self.login_touches.append(sub)
 
-    def get_link(self, sub):
+    async def get_link(self, sub):
         return self.links.get(sub)
 
-    def upsert_link(
+    async def upsert_link(
         self, sub, token_response_enc, access_token_expires_at, refresh_token_expires_at, psn_account_id=None
     ):
         existing = self.links.get(sub)
@@ -72,7 +72,7 @@ class FakeRepository:
             last_verified_at=existing.last_verified_at if existing else None,
         )
 
-    def set_link_account(self, sub, psn_account_id):
+    async def set_link_account(self, sub, psn_account_id):
         self.set_link_account_calls.append((sub, psn_account_id))
         existing = self.links.get(sub)
         if existing is not None:
@@ -86,7 +86,7 @@ class FakeRepository:
                 last_verified_at=existing.last_verified_at,
             )
 
-    def touch_link_verified(self, sub):
+    async def touch_link_verified(self, sub):
         self.touch_verified_calls.append(sub)
         existing = self.links.get(sub)
         if existing is not None:
@@ -100,7 +100,7 @@ class FakeRepository:
                 last_verified_at=TOUCHED_AT,
             )
 
-    def delete_link(self, sub):
+    async def delete_link(self, sub):
         self.delete_calls.append(sub)
         self.links.pop(sub, None)
 
@@ -134,11 +134,11 @@ class FakeAgent:
         self._account_id = account_id
         self._raise_kind = raise_kind
 
-    def whoami(self):
+    async def whoami(self):
         if self._raise_kind == "whoami":
             raise PsnAuthError("boom")
         encrypted = self._token_crypto.encrypt(b'{"access_token": "AT", "refresh_token": "RT"}')
-        self._repository.upsert_link(
+        await self._repository.upsert_link(
             self._sub,
             encrypted,
             datetime(2026, 1, 1, 1, tzinfo=timezone.utc),
@@ -146,7 +146,7 @@ class FakeAgent:
         )
         return SimpleNamespace(account_id=self._account_id)
 
-    def account_email_verified(self):
+    async def account_email_verified(self):
         if self._raise_kind == "email":
             raise PsnAuthError("boom")
         return self._email_info
@@ -163,7 +163,7 @@ class FakeAgentFactory:
         self.raise_kind = None
         self.calls: list[tuple[str, str | None]] = []
 
-    def __call__(self, sub, npsso=None):
+    async def __call__(self, sub, npsso=None):
         self.calls.append((sub, npsso))
         return FakeAgent(
             sub,
@@ -192,8 +192,8 @@ class FakeTokenValidator:
         return claims
 
 
-def _claims(sub=SUB, email=EMAIL, iat=NEW_IAT, scopes=("curator",)) -> TokenClaims:
-    return TokenClaims(sub=sub, email=email, iat=iat, scopes=scopes)
+def _claims(sub=SUB, email=EMAIL, iat=NEW_IAT, scopes=("curator",), is_admin=False) -> TokenClaims:
+    return TokenClaims(sub=sub, email=email, iat=iat, scopes=scopes, is_admin=is_admin)
 
 
 def _bearer(token: str) -> dict[str, str]:
@@ -343,7 +343,7 @@ def test_me_reverify_network_blip_leaves_link_intact():
     crypto = TokenCrypto(Fernet.generate_key())
 
     class FlakyAgent(FakeAgent):
-        def account_email_verified(self):
+        async def account_email_verified(self):
             raise RuntimeError("transient network blip")
 
     calls: list[tuple[str, str | None]] = []

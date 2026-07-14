@@ -1,13 +1,14 @@
-"""A PostgreSQL-backed PSN token store, satisfying psnpy's ``TokenStore`` contract.
+"""A PostgreSQL-backed PSN token store, satisfying the folded-in ``curator.psn`` package's ``TokenStore``
+contract.
 
-``psnpy.auth.TokenStore`` persists a PSN token response (access + refresh tokens and their expiry
-timestamps) to a JSON file on disk — fine for a single-user CLI, wrong for a multi-user API where each
-Identity-authenticated user needs their own persisted token, encrypted at rest. :class:`DbTokenStore`
-implements the same ``load`` / ``save`` / ``clear`` shape psnpy's ``PsnAgent`` expects, backed by the
-``psn_links`` table instead of a file — so a ``PsnAgent`` can be handed a ``DbTokenStore`` in place of a
-``TokenStore`` with no code change on the psnpy side. This module deliberately does **not** import
-``psnpy``: the contract is satisfied structurally (duck typing), keeping persistence decoupled from the
-PSN client library.
+The folded-in ``psn/session.py`` persists a PSN token response (access + refresh tokens and their expiry
+timestamps) via a duck-typed ``load`` / ``save`` / ``clear`` contract — a JSON-file-backed implementation
+is fine for a single-user CLI, wrong for a multi-user API where each Identity-authenticated user needs
+their own persisted token, encrypted at rest. :class:`DbTokenStore` implements that same shape, backed by
+the ``psn_links`` table instead of a file, so a ``PsnSession`` can be handed a ``DbTokenStore`` in place
+of a file-backed store with no code change on the PSN-session side. This module deliberately does **not**
+import anything from ``curator.psn``: the contract is satisfied structurally (duck typing), keeping
+persistence decoupled from the PSN client code.
 """
 
 from __future__ import annotations
@@ -36,13 +37,13 @@ class DbTokenStore:
         self._repository = repository
         self._crypto = crypto
 
-    def load(self) -> dict[str, Any] | None:
+    async def load(self) -> dict[str, Any] | None:
         """Load the cached token response, or ``None`` if absent, corrupt, or unusable.
 
         :returns: The token response dict, only when it has a truthy ``refresh_token``; ``None``
             otherwise (no row, decryption failure, or a token response missing a refresh token).
         """
-        link = self._repository.get_link(self._sub)
+        link = await self._repository.get_link(self._sub)
         if link is None:
             return None
 
@@ -58,13 +59,13 @@ class DbTokenStore:
 
         return data if isinstance(data, dict) and data.get("refresh_token") else None
 
-    def save(self, token_response: dict[str, Any]) -> None:
+    async def save(self, token_response: dict[str, Any]) -> None:
         """Persist a token response, replacing any previous value.
 
-        Mirrors psnpy's ``TokenStore.load`` contract: only a token response with a truthy
+        Mirrors the ``TokenStore`` contract's ``load`` expectation: only a token response with a truthy
         ``refresh_token`` is worth persisting, so anything else is silently ignored.
 
-        :param token_response: The PSN token response dict (as produced by ``psnpy.psn_api.PsnSession``).
+        :param token_response: The PSN token response dict (as produced by ``curator.psn.session``).
             Its ``access_token_expires_at`` / ``refresh_token_expires_at`` keys, when present, hold
             precomputed absolute Unix epoch timestamps.
         """
@@ -75,16 +76,16 @@ class DbTokenStore:
         access_expires = _to_datetime(token_response.get("access_token_expires_at"))
         refresh_expires = _to_datetime(token_response.get("refresh_token_expires_at"))
 
-        self._repository.upsert_link(
+        await self._repository.upsert_link(
             self._sub,
             encrypted,
             access_expires,
             refresh_expires,
         )
 
-    def clear(self) -> None:
+    async def clear(self) -> None:
         """Remove the cached token, if present."""
-        self._repository.delete_link(self._sub)
+        await self._repository.delete_link(self._sub)
 
 
 def _to_datetime(value: Any) -> datetime | None:

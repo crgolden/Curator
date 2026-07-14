@@ -50,12 +50,17 @@ class TokenClaims:
         the link's last verification triggers a fresh check, an older/same-vintage token does not.
     :param scopes: Every scope the token carries, parsed from either a JSON array (Duende's JWT scope
         shape) or a legacy space-delimited string.
+    :param is_admin: The ``curator.admin`` claim, mirroring the ``Directory`` API's ``churches.mod``
+        elevated-claim pattern -- ``True`` only when Identity's token explicitly carries
+        ``"curator.admin": true``. Gates ``POST /enrichment/runs`` (see :func:`curator.deps.require_admin`);
+        every other route only requires the plain ``curator`` scope.
     """
 
     sub: str
     email: str | None
     iat: datetime
     scopes: tuple[str, ...]
+    is_admin: bool = False
 
     def has_scope(self, scope: str) -> bool:
         """Return whether ``scope`` is present among this token's scopes.
@@ -129,6 +134,7 @@ class JwtValidator:
             email=claims.get("email"),
             iat=datetime.fromtimestamp(iat, tz=timezone.utc),
             scopes=_parse_scopes(claims.get("scope")),
+            is_admin=_is_true(claims.get("curator.admin")),
         )
 
     def _decode(self, token: str) -> Any:
@@ -157,6 +163,22 @@ class JwtValidator:
             jwks = self._fetch_json(discovery["jwks_uri"])
             self._keyset = JsonWebKey.import_key_set(jwks)
         return self._keyset
+
+
+def _is_true(raw: object) -> bool:
+    """Normalize a claim value that should represent a boolean.
+
+    Duende emits custom boolean claims as either a JSON boolean or the string ``"true"``/``"True"``
+    depending on the claim-mapping configuration; this accepts both rather than assuming one.
+
+    :param raw: The raw claim value: a bool, a string, or ``None``.
+    :returns: ``True`` only if ``raw`` is ``True`` or the case-insensitive string ``"true"``.
+    """
+    if isinstance(raw, bool):
+        return raw
+    if isinstance(raw, str):
+        return raw.lower() == "true"
+    return False
 
 
 def _parse_scopes(raw: object) -> tuple[str, ...]:

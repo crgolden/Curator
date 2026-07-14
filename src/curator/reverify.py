@@ -14,16 +14,15 @@ privacy tenet: no email is ever persisted or logged here, only compared in memor
 
 from __future__ import annotations
 
-from psnpy.psn_api import PsnAuthError
-
 from curator.link_service import AgentFactory, normalize_email
 from curator.persistence.crypto import TokenCrypto
 from curator.persistence.db_token_store import DbTokenStore
 from curator.persistence.repository import Repository
+from curator.psn.errors import PsnAuthError
 from curator.token_validation import TokenClaims
 
 
-def reverify_link(
+async def reverify_link(
     claims: TokenClaims,
     *,
     repository: Repository,
@@ -48,7 +47,7 @@ def reverify_link(
     :param token_crypto: The :class:`~curator.persistence.crypto.TokenCrypto` used to clear a stale link.
     :param agent_factory: Builds the PSN agent for this ``sub``.
     """
-    link = repository.get_link(claims.sub)
+    link = await repository.get_link(claims.sub)
     if link is None:
         return
 
@@ -56,10 +55,10 @@ def reverify_link(
         return
 
     try:
-        agent = agent_factory(claims.sub)
-        email_info = agent.account_email_verified()
+        agent = await agent_factory(claims.sub)
+        email_info = await agent.account_email_verified()
     except PsnAuthError:
-        DbTokenStore(claims.sub, repository, token_crypto).clear()
+        await DbTokenStore(claims.sub, repository, token_crypto).clear()
         return
     except Exception:
         return
@@ -74,6 +73,6 @@ def reverify_link(
         or normalize_email(email_info[0]) != normalize_email(claims.email)
     )
     if stale:
-        DbTokenStore(claims.sub, repository, token_crypto).clear()
+        await DbTokenStore(claims.sub, repository, token_crypto).clear()
     else:
-        repository.touch_link_verified(claims.sub)
+        await repository.touch_link_verified(claims.sub)

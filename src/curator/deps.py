@@ -71,6 +71,21 @@ def require_verified_caller(claims: TokenClaims = Depends(require_bearer)) -> To
     return claims
 
 
+def require_admin(claims: TokenClaims = Depends(require_bearer)) -> TokenClaims:
+    """Require an authenticated, in-scope caller whose token also carries the ``curator.admin`` claim.
+
+    Mirrors the ``Directory`` API's ``ChurchesMod`` elevated-claim pattern: the plain ``curator`` scope
+    every authenticated user has is not enough to trigger a global catalog re-enrichment run.
+
+    :param claims: The caller resolved by :func:`require_bearer`.
+    :returns: ``claims``, unchanged.
+    :raises fastapi.HTTPException: 403, if ``claims.is_admin`` is ``False``.
+    """
+    if not claims.is_admin:
+        raise HTTPException(status_code=403, detail="curator.admin claim required.")
+    return claims
+
+
 def _extract_bearer_token(request: Request) -> str | None:
     """Pull the token out of a well-formed ``Authorization: Bearer <token>`` header.
 

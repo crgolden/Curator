@@ -21,10 +21,10 @@ class FakeRepository:
         self.upsert_calls: list[tuple] = []
         self.delete_calls: list[str] = []
 
-    def get_link(self, sub):
+    async def get_link(self, sub):
         return self.links.get(sub)
 
-    def upsert_link(
+    async def upsert_link(
         self, sub, token_response_enc, access_token_expires_at, refresh_token_expires_at, psn_account_id=None
     ):
         self.upsert_calls.append(
@@ -40,7 +40,7 @@ class FakeRepository:
             last_verified_at=None,
         )
 
-    def delete_link(self, sub):
+    async def delete_link(self, sub):
         self.delete_calls.append(sub)
         self.links.pop(sub, None)
 
@@ -62,22 +62,22 @@ def _encrypted_link(crypto: TokenCrypto, payload: dict) -> LinkRecord:
     )
 
 
-def test_load_happy_path_returns_decrypted_dict():
+async def test_load_happy_path_returns_decrypted_dict():
     crypto = _make_crypto()
     repo = FakeRepository()
     token = {"access_token": "AT", "refresh_token": "RT"}
     repo.links["sub-1"] = _encrypted_link(crypto, token)
     store = DbTokenStore("sub-1", repo, crypto)
 
-    assert store.load() == token
+    assert await store.load() == token
 
 
-def test_load_returns_none_when_no_row():
+async def test_load_returns_none_when_no_row():
     store = DbTokenStore("sub-1", FakeRepository(), _make_crypto())
-    assert store.load() is None
+    assert await store.load() is None
 
 
-def test_load_returns_none_on_corrupt_ciphertext():
+async def test_load_returns_none_on_corrupt_ciphertext():
     repo = FakeRepository()
     repo.links["sub-1"] = LinkRecord(
         psn_account_id=None,
@@ -90,46 +90,46 @@ def test_load_returns_none_on_corrupt_ciphertext():
     )
     store = DbTokenStore("sub-1", repo, _make_crypto())
 
-    assert store.load() is None
+    assert await store.load() is None
 
 
-def test_load_returns_none_when_ciphertext_from_different_key():
+async def test_load_returns_none_when_ciphertext_from_different_key():
     other_crypto = _make_crypto()
     repo = FakeRepository()
     repo.links["sub-1"] = _encrypted_link(other_crypto, {"refresh_token": "RT"})
     store = DbTokenStore("sub-1", repo, _make_crypto())
 
-    assert store.load() is None
+    assert await store.load() is None
 
 
-def test_load_returns_none_when_dict_has_no_refresh_token():
+async def test_load_returns_none_when_dict_has_no_refresh_token():
     crypto = _make_crypto()
     repo = FakeRepository()
     repo.links["sub-1"] = _encrypted_link(crypto, {"access_token": "AT"})
     store = DbTokenStore("sub-1", repo, crypto)
 
-    assert store.load() is None
+    assert await store.load() is None
 
 
-def test_save_no_op_when_dict_has_no_refresh_token():
+async def test_save_no_op_when_dict_has_no_refresh_token():
     repo = FakeRepository()
     store = DbTokenStore("sub-1", repo, _make_crypto())
 
-    store.save({"access_token": "AT"})
+    await store.save({"access_token": "AT"})
 
     assert repo.upsert_calls == []
 
 
-def test_save_no_op_when_refresh_token_falsy():
+async def test_save_no_op_when_refresh_token_falsy():
     repo = FakeRepository()
     store = DbTokenStore("sub-1", repo, _make_crypto())
 
-    store.save({"access_token": "AT", "refresh_token": ""})
+    await store.save({"access_token": "AT", "refresh_token": ""})
 
     assert repo.upsert_calls == []
 
 
-def test_save_persists_encrypted_token_and_converts_epochs_to_aware_datetimes():
+async def test_save_persists_encrypted_token_and_converts_epochs_to_aware_datetimes():
     crypto = _make_crypto()
     repo = FakeRepository()
     store = DbTokenStore("sub-1", repo, crypto)
@@ -140,7 +140,7 @@ def test_save_persists_encrypted_token_and_converts_epochs_to_aware_datetimes():
         "refresh_token_expires_at": 1_800_000_000.0,
     }
 
-    store.save(token)
+    await store.save(token)
 
     assert len(repo.upsert_calls) == 1
     sub, token_response_enc, access_expires, refresh_expires, psn_account_id = repo.upsert_calls[0]
@@ -153,32 +153,34 @@ def test_save_persists_encrypted_token_and_converts_epochs_to_aware_datetimes():
     assert refresh_expires.tzinfo is not None
 
 
-def test_save_passes_none_expiries_when_keys_absent():
+async def test_save_passes_none_expiries_when_keys_absent():
     repo = FakeRepository()
     store = DbTokenStore("sub-1", repo, _make_crypto())
 
-    store.save({"refresh_token": "RT"})
+    await store.save({"refresh_token": "RT"})
 
     _, _, access_expires, refresh_expires, _ = repo.upsert_calls[0]
     assert access_expires is None
     assert refresh_expires is None
 
 
-def test_clear_deletes_the_link():
+async def test_clear_deletes_the_link():
     repo = FakeRepository()
     repo.links["sub-1"] = _encrypted_link(_make_crypto(), {"refresh_token": "RT"})
     store = DbTokenStore("sub-1", repo, _make_crypto())
 
-    store.clear()
+    await store.clear()
 
     assert repo.delete_calls == ["sub-1"]
 
 
-def test_db_token_store_satisfies_psnpy_token_store_contract_shape():
-    # psnpy's TokenStore contract is duck-typed: load()/save(dict)/clear() callables. Verify DbTokenStore
-    # exposes the same shape without importing psnpy itself.
+def test_db_token_store_satisfies_async_token_store_contract_shape():
+    # The folded-in PSN client's TokenStore contract is duck-typed: async load()/save(dict)/clear()
+    # coroutine methods. Verify DbTokenStore exposes the same shape.
+    import inspect
+
     store = DbTokenStore("sub-1", FakeRepository(), _make_crypto())
 
-    assert callable(store.load)
-    assert callable(store.save)
-    assert callable(store.clear)
+    assert inspect.iscoroutinefunction(store.load)
+    assert inspect.iscoroutinefunction(store.save)
+    assert inspect.iscoroutinefunction(store.clear)

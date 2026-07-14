@@ -2,17 +2,19 @@
 
 Raw SQL via psycopg 3 rather than an ORM — the schema (``db/migrations/0001_initial.sql``) is small and
 deliberate, and this repo already favors ADO.NET-style hand-written SQL over a mapper in its sibling .NET
-services. :class:`Repository` takes a ``connection_factory`` rather than opening its own pool so tests can
-inject a fake connection with no real database.
+services. :class:`Repository` is backed by a shared ``psycopg_pool.AsyncConnectionPool`` (one pool per
+process, opened once in ``create_app()``'s lifespan) rather than opening a connection per call, and every
+method is a coroutine so a slow query never blocks the event loop or exhausts FastAPI's sync threadpool.
+Tests inject a hand-written fake pool with the same async context-manager/cursor shape, never a real
+database or a mocking library.
 """
 
 from __future__ import annotations
 
-from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
 
-import psycopg
+from psycopg_pool import AsyncConnectionPool
 
 
 @dataclass(frozen=True)
@@ -42,15 +44,17 @@ class LinkRecord:
 class Repository:
     """DAO over ``app_users`` and ``psn_links``.
 
-    :param connection_factory: A zero-argument callable returning a new ``psycopg.Connection`` (or a
-        test fake with the same context-manager/cursor/commit shape). A new connection is opened per
-        method call rather than held open, matching the short-lived-request shape of a FastAPI handler.
+    :param pool: The shared ``psycopg_pool.AsyncConnectionPool`` (or a test fake with the same
+        ``async with pool.connection() as conn`` / ``async with conn.cursor() as cur`` shape). A
+        connection is checked out from the pool per method call and returned on exit; the pool's
+        connection context manager commits on clean exit and rolls back on exception, matching the
+        short-lived-request shape of a FastAPI handler without needing an explicit ``conn.commit()``.
     """
 
-    def __init__(self, connection_factory: Callable[[], psycopg.Connection]) -> None:
-        self._connection_factory = connection_factory
+    def __init__(self, pool: AsyncConnectionPool) -> None:
+        self._pool = pool
 
-    def upsert_user(self, sub: str) -> None:
+    async def upsert_user(self, sub: str) -> None:
         """Insert ``app_users`` row for ``sub`` if absent, else bump ``updated_at``.
 
         :param sub: The Identity ``sub`` claim (the user's ``identity_sub``).
@@ -59,23 +63,19 @@ class Repository:
             "INSERT INTO app_users (identity_sub) VALUES (%s) "
             "ON CONFLICT (identity_sub) DO UPDATE SET updated_at = now()"
         )
-        with self._connection_factory() as conn:
-            with conn.cursor() as cur:
-                cur.execute(sql, (sub,))
-            conn.commit()
+        async with self._pool.connection() as conn, conn.cursor() as cur:
+            await cur.execute(sql, (sub,))
 
-    def touch_login(self, sub: str) -> None:
+    async def touch_login(self, sub: str) -> None:
         """Record a login: set ``last_login_at`` (and ``updated_at``) to now.
 
         :param sub: The Identity ``sub`` claim.
         """
         sql = "UPDATE app_users SET last_login_at = now(), updated_at = now() WHERE identity_sub = %s"
-        with self._connection_factory() as conn:
-            with conn.cursor() as cur:
-                cur.execute(sql, (sub,))
-            conn.commit()
+        async with self._pool.connection() as conn, conn.cursor() as cur:
+            await cur.execute(sql, (sub,))
 
-    def get_link(self, sub: str) -> LinkRecord | None:
+    async def get_link(self, sub: str) -> LinkRecord | None:
         """Fetch the ``psn_links`` row for ``sub``, if any.
 
         :param sub: The Identity ``sub`` claim.
@@ -86,11 +86,9 @@ class Repository:
             "refresh_token_expires_at, linked_at, updated_at, last_verified_at "
             "FROM psn_links WHERE identity_sub = %s"
         )
-        with self._connection_factory() as conn:
-            with conn.cursor() as cur:
-                cur.execute(sql, (sub,))
-                row = cur.fetchone()
-            conn.commit()
+        async with self._pool.connection() as conn, conn.cursor() as cur:
+            await cur.execute(sql, (sub,))
+            row = await cur.fetchone()
 
         if row is None:
             return None
@@ -104,7 +102,7 @@ class Repository:
             last_verified_at=row[6],
         )
 
-    def upsert_link(
+    async def upsert_link(
         self,
         sub: str,
         token_response_enc: bytes,
@@ -142,41 +140,33 @@ class Repository:
             access_token_expires_at,
             refresh_token_expires_at,
         )
-        with self._connection_factory() as conn:
-            with conn.cursor() as cur:
-                cur.execute(sql, params)
-            conn.commit()
+        async with self._pool.connection() as conn, conn.cursor() as cur:
+            await cur.execute(sql, params)
 
-    def set_link_account(self, sub: str, psn_account_id: str) -> None:
+    async def set_link_account(self, sub: str, psn_account_id: str) -> None:
         """Set the linked PSN account id for ``sub``, once it's discovered.
 
         :param sub: The Identity ``sub`` claim.
         :param psn_account_id: The PSN account id to record.
         """
         sql = "UPDATE psn_links SET psn_account_id = %s, updated_at = now() WHERE identity_sub = %s"
-        with self._connection_factory() as conn:
-            with conn.cursor() as cur:
-                cur.execute(sql, (psn_account_id, sub))
-            conn.commit()
+        async with self._pool.connection() as conn, conn.cursor() as cur:
+            await cur.execute(sql, (psn_account_id, sub))
 
-    def touch_link_verified(self, sub: str) -> None:
+    async def touch_link_verified(self, sub: str) -> None:
         """Stamp ``last_verified_at`` to now, recording that the link's email match was just re-checked.
 
         :param sub: The Identity ``sub`` claim.
         """
         sql = "UPDATE psn_links SET last_verified_at = now() WHERE identity_sub = %s"
-        with self._connection_factory() as conn:
-            with conn.cursor() as cur:
-                cur.execute(sql, (sub,))
-            conn.commit()
+        async with self._pool.connection() as conn, conn.cursor() as cur:
+            await cur.execute(sql, (sub,))
 
-    def delete_link(self, sub: str) -> None:
+    async def delete_link(self, sub: str) -> None:
         """Remove the ``psn_links`` row for ``sub`` (unlink the PSN account).
 
         :param sub: The Identity ``sub`` claim.
         """
         sql = "DELETE FROM psn_links WHERE identity_sub = %s"
-        with self._connection_factory() as conn:
-            with conn.cursor() as cur:
-                cur.execute(sql, (sub,))
-            conn.commit()
+        async with self._pool.connection() as conn, conn.cursor() as cur:
+            await cur.execute(sql, (sub,))

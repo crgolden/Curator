@@ -16,15 +16,14 @@ python -m mypy src tests
 
 `mypy` is strict on `src/curator` (no untyped defs, no implicit `Any`); `[[tool.mypy.overrides]]` in
 `pyproject.toml` relaxes a few checks for `tests/` (hand-written fake collaborators use structural, not
-nominal, typing — see "Unit tests" below) and marks `authlib`/`psnpy` as untyped third-party imports.
+nominal, typing — see "Unit tests" below) and marks `authlib` as an untyped third-party import.
 
 ## Unit tests
 
 The whole suite under `tests/` runs fully offline: no live database, no network, no live PSN/Identity
 calls. Backends (the psycopg connection/cursor protocol, the `Repository`, the PSN agent, and
 `curator.token_validation.JwtValidator`) are stood in for with hand-written fake classes — never
-`unittest.mock` — matching the style used in the sibling `psnpy` repo's test suite (see
-`psnpy/tests/test_client.py`). `tests/test_token_validation.py` is the one place that exercises the *real*
+`unittest.mock`. `tests/test_token_validation.py` is the one place that exercises the *real*
 `JwtValidator`: it generates a local RSA key with Authlib, signs canned tokens, and serves the
 discovery/JWKS documents through an injected fake `fetch_json` — no network access even there.
 
@@ -46,7 +45,6 @@ Run:
 
 ```powershell
 python -m pip install -e ".[dev]"
-python -m pip install -e ../psnpy   # editable install; imports of psnpy.client/config/psn_api need this
 python -m pytest
 ```
 
@@ -55,14 +53,11 @@ repo root picks up `src/curator` without an editable install of Curator itself. 
 different working directory, either `Set-Location` into the repo root first or pass the tests directory
 and `-o pythonpath=<repo>/src` explicitly (or set the `PYTHONPATH` env var to `<repo>/src`).
 
-`python -m pip install -e ".[dev]"` will fail until the `psnpy` GitHub release referenced in
-`pyproject.toml`'s dependency pin exists — install the sibling `psnpy` repo editable instead (as above),
-and install `fastapi`, `uvicorn`, `authlib`, `cryptography`, `psycopg[binary]`, `httpx` (only needed for
-`fastapi.testclient.TestClient`) directly if `pip install -e ".[dev]"` doesn't resolve them:
+If `pip install -e ".[dev]"` doesn't resolve every dependency in your environment, install the runtime
+packages directly:
 
 ```powershell
-python -m pip install pytest httpx fastapi uvicorn authlib cryptography "psycopg[binary]"
-python -m pip install -e ../psnpy
+python -m pip install pytest httpx fastapi uvicorn authlib cryptography "psycopg[binary]" psycopg-pool redis azure-servicebus pycountry
 python -m pytest tests -q
 ```
 
@@ -109,12 +104,8 @@ psql -h <host> -U postgres -d postgres -c "DROP DATABASE curator_schema_test_scr
 ## CI
 
 `.github/workflows/main.yml` runs on push to `main`, on pull requests, and on `workflow_dispatch`. It
-installs the sibling `psnpy` repo from a second cross-checkout (`crgolden/psnpy`, authenticated with the
-`PACKAGES_READ_TOKEN` secret — the same PAT-backed convention other workspace repos use for cross-repo
-package access) into `./psnpy-src`, since `psnpy` is private and has no published release yet; it does
-**not** run `pip install -e .` for Curator itself, because `pyproject.toml`'s own `psnpy` dependency is a
-release-wheel URL pin that doesn't exist yet and would fail dependency resolution outright. Once `psnpy`
-starts tagging releases, replace the cross-checkout with installing the published release wheel.
+installs Curator's runtime and dev dependencies directly (rather than `pip install -e .`) so the job
+doesn't depend on any cross-repo checkout.
 
 The `test` job runs, in order: Ruff lint, Ruff format check, mypy, then the unit test suite with coverage
 (`--cov=src/curator --cov-report=xml:coverage.xml`), then a SonarCloud analysis over `coverage.xml`. Each

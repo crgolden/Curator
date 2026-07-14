@@ -1,15 +1,6 @@
 # Runtime install manifest for the Azure Web App (crgolden-curator). Oryx (SCM_DO_BUILD_DURING_DEPLOYMENT=true)
 # runs `pip install -r requirements.txt` against this file during deployment — pyproject.toml stays the
-# dev/test manifest (it pins psnpy to the GitHub Release URL, which Oryx's build environment can reach too,
-# but the deploy workflow vendors the wheel locally instead so deploys don't depend on GitHub release-asset
-# availability at Oryx build time).
-#
-# vendor/psnpy-0.2.0-py3-none-any.whl does not exist in the repo. The deploy job in
-# .github/workflows/main.yml creates vendor/ immediately before packaging by downloading the wheel from the
-# psnpy v0.2.0 GitHub Release (`gh release download`), then zips it up alongside this file. Building or
-# testing locally requires either running that download yourself or `pip install -e ../psnpy` per the
-# README quick start.
-./vendor/psnpy-0.2.0-py3-none-any.whl
+# dev/test manifest.
 
 fastapi
 uvicorn
@@ -17,9 +8,14 @@ gunicorn
 authlib
 cryptography
 psycopg[binary]>=3.1.0,<4.0.0
+psycopg-pool>=3.2.0,<4.0.0
+httpx>=0.27.0
+redis>=5.0.0,<6.0.0
+azure-servicebus>=7.12.0,<8.0.0
+pycountry>=24.6.1
 opentelemetry-sdk>=1.27.0,<2.0.0
 opentelemetry-exporter-otlp-proto-grpc>=1.27.0,<2.0.0
 opentelemetry-instrumentation-fastapi>=0.48b0
 opentelemetry-instrumentation-psycopg>=0.48b0
-opentelemetry-instrumentation-requests>=0.48b0
+opentelemetry-instrumentation-httpx>=0.48b0
 elasticsearch>=8.0.0,<9.0.0

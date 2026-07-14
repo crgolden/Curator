@@ -28,6 +28,15 @@ _ELASTICSEARCH_NODE_ENV_NAMES: tuple[str, ...] = ("ElasticsearchNode",)
 _ELASTICSEARCH_USERNAME_ENV_NAMES: tuple[str, ...] = ("ElasticsearchUsername",)
 _ELASTICSEARCH_PASSWORD_ENV_NAMES: tuple[str, ...] = ("ElasticsearchPassword",)
 
+# Enrichment/jobs settings -- all optional. Unset locally and in CI, same as the telemetry legs above:
+# GET /catalog/games and every other route work fine without them; only POST /enrichment/runs (RAWG/
+# OpenCritic) and the two job queues (library-refresh, enrichment) need them, and only once Service Bus
+# queues are actually provisioned (see the migration plan's "Open follow-ups" -- not yet done as of this
+# writing).
+_RAWG_API_KEY_ENV_NAMES: tuple[str, ...] = ("RawgApiKey",)
+_OPENCRITIC_RAPIDAPI_KEY_ENV_NAMES: tuple[str, ...] = ("OpenCriticRapidApiKey",)
+_SERVICE_BUS_CONNECTION_ENV_NAMES: tuple[str, ...] = ("ServiceBusConnectionString",)
+
 
 @dataclass(frozen=True)
 class Settings:
@@ -44,6 +53,12 @@ class Settings:
         either credential being absent) disables that telemetry leg entirely.
     :param elasticsearch_username: Basic-auth username for ``elasticsearch_node``.
     :param elasticsearch_password: Basic-auth password for ``elasticsearch_node``.
+    :param rawg_api_key: The RAWG API key; ``None`` disables live RAWG enrichment lookups.
+    :param opencritic_rapidapi_key: The RapidAPI key for the OpenCritic API; ``None`` disables live
+        OpenCritic enrichment lookups.
+    :param service_bus_connection_string: The Azure Service Bus connection string backing the
+        ``curator-library-refresh``/``curator-enrichment`` job queues; ``None`` disables the queue
+        consumer and the job-publishing routes.
     """
 
     oidc_authority: str
@@ -53,6 +68,9 @@ class Settings:
     elasticsearch_node: str | None = None
     elasticsearch_username: str | None = None
     elasticsearch_password: str | None = None
+    rawg_api_key: str | None = None
+    opencritic_rapidapi_key: str | None = None
+    service_bus_connection_string: str | None = None
 
     @classmethod
     def from_config(cls, dotenv_path: Path | None = None) -> Settings:
@@ -82,6 +100,13 @@ class Settings:
         elasticsearch_password = resolve_setting(
             None, env_names=_ELASTICSEARCH_PASSWORD_ENV_NAMES, dotenv_path=dotenv_path
         )
+        rawg_api_key = resolve_setting(None, env_names=_RAWG_API_KEY_ENV_NAMES, dotenv_path=dotenv_path)
+        opencritic_rapidapi_key = resolve_setting(
+            None, env_names=_OPENCRITIC_RAPIDAPI_KEY_ENV_NAMES, dotenv_path=dotenv_path
+        )
+        service_bus_connection_string = resolve_setting(
+            None, env_names=_SERVICE_BUS_CONNECTION_ENV_NAMES, dotenv_path=dotenv_path
+        )
 
         return cls(
             oidc_authority=oidc_authority,
@@ -91,6 +116,9 @@ class Settings:
             elasticsearch_node=elasticsearch_node,
             elasticsearch_username=elasticsearch_username,
             elasticsearch_password=elasticsearch_password,
+            rawg_api_key=rawg_api_key,
+            opencritic_rapidapi_key=opencritic_rapidapi_key,
+            service_bus_connection_string=service_bus_connection_string,
         )
 
 

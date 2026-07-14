@@ -7,17 +7,15 @@
 A multi-user PlayStation library curation API. Every user authenticates elsewhere — through Duende
 IdentityServer — and identifies themselves to Curator with a bearer access token; Curator itself is a
 pure **JWT Bearer resource server**, matching how the workspace's `Directory` API interacts with Identity.
-Once authenticated, a user links their PSN account through the sibling
-[`psnpy`](https://github.com/crgolden/psnpy) agent, and Curator ingests their entitlements, merges them
-into a shared game catalog, enriches that catalog (RAWG, OpenCritic, PS Store), and derives a per-user
-library, exclusion set, console inventory, and rotation/assignment plan. All of it is persisted in
-PostgreSQL.
+Once authenticated, a user links their PSN account through Curator's own in-repo `curator.psn` client
+(`curator.psn.session.PsnSession` and friends), and Curator ingests their entitlements, merges them into a
+shared game catalog, enriches that catalog (RAWG, OpenCritic, PS Store), and derives a per-user library,
+exclusion set, console inventory, and rotation/assignment plan. All of it is persisted in PostgreSQL.
 
 This repository builds the API in stages. The scaffold, full database schema, and persistence layer
 (config resolution, connection URL, token encryption, the account-table DAO, and a PSN token store backed
 by it) came first. This stage adds the FastAPI application itself: settings resolution, JWT Bearer
-validation against Identity's JWKS, and the PSN link/unlink service and routes built on the sibling
-`psnpy` agent.
+validation against Identity's JWKS, and the PSN link/unlink service and routes built on `curator.psn`.
 
 ## Auth model
 
@@ -47,13 +45,37 @@ scope. Routes that compare emails (`/me`'s re-verify, `POST`/`DELETE /psn/link`)
 `curator.deps.require_verified_caller`, which further 403s a token missing the `email` claim — a verified
 Identity email is mandatory for those, never treated as an absent-but-fine value.
 
+## Design conventions
+
+**Hand-written fakes, never `unittest.mock`.** Every test double in this repo (`FakeRepository`,
+`FakeSession`, `FakeTokenStore`, ...) is a plain class with real methods, not a `Mock()`/`MagicMock()`. A
+`Mock` auto-creates any attribute you touch, so a typo'd method name on the production side just returns
+another `Mock` instead of failing the test. A hand-written fake has no such attribute unless you wrote it,
+so a mismatch between the fake and the real collaborator's interface surfaces as a normal `AttributeError`
+at the call site, not a silently-passing test. It also means a test reads as "given this fake data, assert
+this real transformation" instead of a string of `.return_value`/`.assert_called_with` configuration calls
+scattered through the test body.
+
+**`typing.Protocol` over `abc.ABC` for injected collaborators.** `curator.psn.session.TokenStore`,
+`curator.link_service.PsnAgentLike`, and similar contracts are structural (`Protocol`), not nominal
+(`ABC`) — a class satisfies them by having the right async methods, not by inheriting from anything. This
+keeps modules that shouldn't know about each other decoupled (`curator.persistence.DbTokenStore` satisfies
+`curator.psn.session.TokenStore` without either module importing the other) and lets every hand-written
+fake satisfy a contract for free, with no `class FakeTokenStore(TokenStore):` boilerplate or
+`@abstractmethod` ceremony. The risk a `Protocol` normally carries — a mismatched fake or implementation
+isn't caught until it actually runs — is closed here by `mypy --strict` running in CI on every module: a
+missing or wrong-signature method fails type-checking before a test ever executes it. An `ABC` would be the
+better choice if a contract needed shared base-class behavior (not just a shared shape), or if this repo
+didn't already enforce strict mypy — under those conditions the earlier, class-definition-time failure an
+`ABC` gives you would be worth the added coupling.
+
 ## Telemetry
 
 Two independent, optional legs, wired up in `curator.telemetry.configure_telemetry` and invoked once from
 `create_app`:
 
 - **Traces + metrics**: OTLP gRPC to Grafana Alloy, enabled by setting `AlloyEndpoint`. Resource
-  `service.name` is `curator`; the FastAPI app, psycopg, and outbound `requests` calls (covers `psnpy`'s
+  `service.name` is `curator`; the FastAPI app, psycopg, and outbound `httpx` calls (covers `curator.psn`'s
   calls to Sony) are all instrumented. `/health` is excluded from tracing, matching the fleet convention.
 - **Structured logging**: root-logger documents shipped to Elasticsearch, enabled by setting
   `ElasticsearchNode` together with `ElasticsearchUsername`/`ElasticsearchPassword`. Each document carries
@@ -73,7 +95,6 @@ second provider on top of the first.
 
 ```powershell
 python -m pip install -e ".[dev]"
-python -m pip install -e ../psnpy   # editable install of the sibling psnpy agent
 python -m pytest
 ```
 
@@ -81,19 +102,36 @@ The unit test suite is fully offline (hand-written fakes, no live database, no n
 calls). See [TESTING.md](TESTING.md) for the full testing approach, including the opt-in, env-var-gated
 schema integration tests that apply the migration to a real (disposable) PostgreSQL instance.
 
+To run the app itself locally (not needed just to run the test suite), copy [`.env.example`](.env.example)
+to `.env` and fill in real values — every field `Settings.from_config` resolves is documented there, with
+required vs. optional called out. Point `CURATOR_DATABASE_URL` at your own local PostgreSQL instance (not
+the shared production server) and apply [`db/migrations/0001_initial.sql`](db/migrations/0001_initial.sql)
+to it via `psql` before starting the app.
+
 ## CI
 
 `.github/workflows/main.yml` runs Ruff lint, Ruff format check, mypy, the offline unit test suite (with
 coverage), and a SonarCloud analysis on push to `main`, on pull requests, and on `workflow_dispatch`. It
 never sets `CURATOR_TEST_DATABASE_URL`, so the schema integration tests always auto-skip there. See
-[TESTING.md](TESTING.md#ci) for how it gets the sibling `psnpy` dependency without a published release yet,
-and for the local lint/type-check commands.
+[TESTING.md](TESTING.md#ci) for the local lint/type-check commands.
 
-Run the app itself (once settings are resolvable — see `curator.settings.Settings.from_config`) with:
+Run the app itself locally (once `.env` is filled in — see Quick Start above) with:
 
 ```powershell
-uvicorn --factory curator.app:create_app
+python dev_server.py
 ```
+
+[`dev_server.py`](dev_server.py) is the local-only entry point (`app.py` is the separate Azure App Service
+entry point — see Deployment below): it starts `uvicorn` with `--reload` against `curator.app:create_app`.
+It also works around a **Windows-only gotcha**: `psycopg`'s async mode waits on the connection socket via
+`loop.add_reader()`/`add_writer()`, which Windows' default `ProactorEventLoop` (used since Python 3.8)
+doesn't implement — it raises `NotImplementedError` the first time a real query runs. The event-loop policy
+that fixes this must be set *before* the event loop is created, i.e. before `uvicorn` starts — too early for
+anything inside `curator.app` itself to set it, which is why this lives in a dedicated entry point rather
+than a one-liner a developer has to remember to paste in. It no-ops on macOS/Linux. The unit test suite
+never hits this at all (every repository test uses a hand-written fake pool, never a real
+`AsyncConnectionPool`); it only matters when running the app against a real Postgres connection on Windows.
+Production runs on Linux App Service and is unaffected.
 
 ## Deployment
 
@@ -103,18 +141,13 @@ App `crgolden-curator` via `azure/webapps-deploy`, authenticating over OIDC fede
 [`requirements.txt`](requirements.txt) during deployment; `pyproject.toml` remains the dev/test manifest and
 is not used at deploy time.
 
-`requirements.txt` pins the sibling `psnpy` dependency to a local `vendor/psnpy-0.2.0-py3-none-any.whl`
-path rather than the release-URL pin `pyproject.toml` uses. The `deploy` job creates `vendor/` immediately
-before packaging by downloading that wheel from the `psnpy` v0.2.0 GitHub Release
-(`gh release download v0.2.0 --repo crgolden/psnpy --pattern '*.whl' --dir vendor`) — `psnpy` is a private
-repo, so this needs a token that can read another repo's releases. The deploy package itself contains only
-`src/`, `db/`, `vendor/`, and `requirements.txt` — no tests, no `.github/`, no local caches.
+The deploy package itself contains only `src/`, `db/`, `requirements.txt`, and `app.py` — no tests, no
+`.github/`, no local caches.
 
 Required repository secrets:
 
 | Secret | Purpose |
 |---|---|
-| `PACKAGES_READ_TOKEN` | PAT-backed; reads the `psnpy` private-repo GitHub Release to vendor its wheel |
 | `AZUREAPPSERVICE_CLIENTID_C4CF7EE65BC442259601FFDB3B86513D` | `azure/login` client id (federated credential) |
 | `AZUREAPPSERVICE_TENANTID_D1FC42A8E15547A18F5A397D64F179D0` | `azure/login` tenant id |
 | `AZUREAPPSERVICE_SUBSCRIPTIONID_C6E3B3EB281E4D4C85FC7D1501EE1170` | `azure/login` subscription id |
@@ -148,7 +181,7 @@ src/curator/
     connection.py       # PostgreSQL connection URL resolution
     crypto.py            # TokenCrypto: Fernet encryption for tokens at rest
     repository.py        # Repository: psycopg 3 DAO over app_users / psn_links
-    db_token_store.py    # DbTokenStore: psnpy TokenStore contract, backed by Repository
+    db_token_store.py    # DbTokenStore: curator.psn.session.TokenStore contract, backed by Repository
 db/migrations/
   0001_initial.sql        # full schema, applied manually via psql
 tests/                     # offline pytest suite, plus the gated tests/test_schema.py
