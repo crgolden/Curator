@@ -133,6 +133,7 @@ module = [
     "test_psn_trophy_client",
     "test_psn_trophy_service",
     "test_repository",
+    "test_reverify",
     "test_scoring_genre_service",
     "test_scoring_scoring_service",
     "test_scoring_size_estimation_service",
