@@ -241,13 +241,14 @@ class PsnSession:
         token: dict[str, Any] = response.json()
         now = time.time()
         token["access_token_expires_at"] = token["expires_in"] + now
-        # PSN omits refresh_token/refresh_token_expires_in for some auth modes (e.g. passkey sign-in); such a
-        # token is usable for this process but isn't a candidate for cross-run caching (DbTokenStore's own
-        # save() already no-ops on a token without a refresh_token), so there's nothing to compute here.
+        # PSN omits refresh_token/refresh_token_expires_in for some auth modes (e.g. passkey sign-in). Such a
+        # token is still persisted below -- it's usable until access_token_expires_at, at which point _refresh()
+        # will raise PsnAuthError (no refresh_token to use), and reverify_link() treats that as a stale link and
+        # clears it, prompting the user for a fresh npsso.
         if "refresh_token_expires_in" in token:
             token["refresh_token_expires_at"] = token["refresh_token_expires_in"] + now
         self.token_response = token
-        if self._token_store is not None and token.get("refresh_token"):
+        if self._token_store is not None:
             await self._token_store.save(token)
 
     async def get(

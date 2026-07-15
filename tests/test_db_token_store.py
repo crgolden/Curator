@@ -102,31 +102,55 @@ async def test_load_returns_none_when_ciphertext_from_different_key():
     assert await store.load() is None
 
 
-async def test_load_returns_none_when_dict_has_no_refresh_token():
+async def test_load_returns_dict_when_no_refresh_token_but_access_token_present():
     crypto = _make_crypto()
     repo = FakeRepository()
     repo.links["sub-1"] = _encrypted_link(crypto, {"access_token": "AT"})
     store = DbTokenStore("sub-1", repo, crypto)
 
+    assert await store.load() == {"access_token": "AT"}
+
+
+async def test_load_returns_none_when_dict_has_no_access_token():
+    crypto = _make_crypto()
+    repo = FakeRepository()
+    repo.links["sub-1"] = _encrypted_link(crypto, {"refresh_token": "RT"})
+    store = DbTokenStore("sub-1", repo, crypto)
+
     assert await store.load() is None
 
 
-async def test_save_no_op_when_dict_has_no_refresh_token():
+async def test_save_no_op_when_dict_has_no_access_token():
     repo = FakeRepository()
     store = DbTokenStore("sub-1", repo, _make_crypto())
 
-    await store.save({"access_token": "AT"})
+    await store.save({"refresh_token": "RT"})
 
     assert repo.upsert_calls == []
 
 
-async def test_save_no_op_when_refresh_token_falsy():
+async def test_save_no_op_when_access_token_falsy():
     repo = FakeRepository()
     store = DbTokenStore("sub-1", repo, _make_crypto())
 
-    await store.save({"access_token": "AT", "refresh_token": ""})
+    await store.save({"access_token": "", "refresh_token": "RT"})
 
     assert repo.upsert_calls == []
+
+
+async def test_save_persists_when_access_token_present_but_refresh_token_absent():
+    crypto = _make_crypto()
+    repo = FakeRepository()
+    store = DbTokenStore("sub-1", repo, crypto)
+    token = {"access_token": "AT", "access_token_expires_at": 1_700_000_000.0}
+
+    await store.save(token)
+
+    assert len(repo.upsert_calls) == 1
+    _, token_response_enc, access_expires, refresh_expires, _ = repo.upsert_calls[0]
+    assert json.loads(crypto.decrypt(token_response_enc)) == token
+    assert access_expires == datetime.fromtimestamp(1_700_000_000.0, tz=timezone.utc)
+    assert refresh_expires is None
 
 
 async def test_save_persists_encrypted_token_and_converts_epochs_to_aware_datetimes():
@@ -157,7 +181,7 @@ async def test_save_passes_none_expiries_when_keys_absent():
     repo = FakeRepository()
     store = DbTokenStore("sub-1", repo, _make_crypto())
 
-    await store.save({"refresh_token": "RT"})
+    await store.save({"access_token": "AT", "refresh_token": "RT"})
 
     _, _, access_expires, refresh_expires, _ = repo.upsert_calls[0]
     assert access_expires is None

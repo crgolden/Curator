@@ -40,8 +40,8 @@ class DbTokenStore:
     async def load(self) -> dict[str, Any] | None:
         """Load the cached token response, or ``None`` if absent, corrupt, or unusable.
 
-        :returns: The token response dict, only when it has a truthy ``refresh_token``; ``None``
-            otherwise (no row, decryption failure, or a token response missing a refresh token).
+        :returns: The token response dict, only when it has a truthy ``access_token``; ``None``
+            otherwise (no row, decryption failure, or a token response missing an access token).
         """
         link = await self._repository.get_link(self._sub)
         if link is None:
@@ -57,19 +57,21 @@ class DbTokenStore:
         except json.JSONDecodeError:
             return None
 
-        return data if isinstance(data, dict) and data.get("refresh_token") else None
+        return data if isinstance(data, dict) and data.get("access_token") else None
 
     async def save(self, token_response: dict[str, Any]) -> None:
         """Persist a token response, replacing any previous value.
 
         Mirrors the ``TokenStore`` contract's ``load`` expectation: only a token response with a truthy
-        ``refresh_token`` is worth persisting, so anything else is silently ignored.
+        ``access_token`` is worth persisting, so anything else is silently ignored. A missing
+        ``refresh_token`` is fine -- the session remains usable until ``access_token_expires_at``, after
+        which reverification will surface the need for a fresh npsso.
 
         :param token_response: The PSN token response dict (as produced by ``curator.psn.session``).
             Its ``access_token_expires_at`` / ``refresh_token_expires_at`` keys, when present, hold
             precomputed absolute Unix epoch timestamps.
         """
-        if not isinstance(token_response, dict) or not token_response.get("refresh_token"):
+        if not isinstance(token_response, dict) or not token_response.get("access_token"):
             return
 
         encrypted = self._crypto.encrypt(json.dumps(token_response).encode("utf-8"))

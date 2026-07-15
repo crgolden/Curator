@@ -258,34 +258,42 @@ async def test_link_psn_auth_error_clears_and_raises_auth_failed():
     assert repo.touch_verified_calls == []
 
 
-async def test_link_verified_match_but_no_refresh_token_persisted_raises_auth_failed():
-    """PSN's token response omits refresh_token for some auth modes (e.g. passkey sign-in), so
-    DbTokenStore.save() silently no-ops and whoami()'s bootstrap never persists a psn_links row -- unlike
-    every other test above, this deliberately skips ``_seed_link`` to reproduce exactly that: a verified
-    email match with nothing ever written to the database. link() must fail loudly rather than report
-    linked=True for a link that doesn't exist.
+async def test_link_verified_match_with_no_refresh_token_still_links():
+    """PSN's token response omits refresh_token for some auth modes (e.g. passkey sign-in). whoami()'s
+    bootstrap now persists that access-token-only session anyway (DbTokenStore.save() only requires
+    access_token), so a verified email match must still complete the link -- it's usable until
+    access_token_expires_at, after which reverify_link() will clear it and prompt for a fresh npsso.
     """
     repo = FakeRepository()
     crypto = _make_crypto()
     sub = "sub-1"
+    encrypted = crypto.encrypt(b'{"access_token": "AT"}')
+    await repo.upsert_link(
+        sub,
+        encrypted,
+        datetime(2026, 1, 1, 1, tzinfo=timezone.utc),
+        None,
+    )
 
     async def agent_factory(sub_arg, npsso=None):
         return FakeAgent(sub_arg, npsso, email_info=("user@example.com", True))
 
-    with pytest.raises(LinkError) as exc_info:
-        await link(
-            sub,
-            "npsso",
-            "user@example.com",
-            repository=repo,
-            token_crypto=crypto,
-            agent_factory=agent_factory,
-        )
+    result = await link(
+        sub,
+        "npsso",
+        "user@example.com",
+        repository=repo,
+        token_crypto=crypto,
+        agent_factory=agent_factory,
+    )
 
-    assert exc_info.value.kind == "auth_failed"
-    assert repo.set_link_account_calls == []
-    assert repo.touch_verified_calls == []
-    assert sub not in repo.links
+    assert isinstance(result, LinkResult)
+    assert result.psn_account_id == "psn-account-1"
+    assert result.access_token_expires_at is not None
+    assert result.refresh_token_expires_at is None
+    assert repo.set_link_account_calls == [(sub, "psn-account-1")]
+    assert repo.touch_verified_calls == [sub]
+    assert repo.links[sub].psn_account_id == "psn-account-1"
 
 
 async def test_link_invalid_npsso_rejected_before_any_agent_call():
