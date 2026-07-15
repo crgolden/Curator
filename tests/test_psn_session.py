@@ -95,6 +95,28 @@ async def test_bootstrap_from_npsso_sets_token():
     assert "token" in str(recorder.requests[1].url)
 
 
+async def test_bootstrap_requests_offline_access():
+    """access_type=offline is what makes PSN issue a refresh_token at all (see session.py's comment on
+    _authorization_code()) -- a real production bug once had this missing, silently downgrading every user's
+    link to an access-token-only session that expired in ~1 hour. This locks the parameter in.
+    """
+    recorder = RequestRecorder(
+        [
+            httpx.Response(
+                302,
+                headers={"location": "com.scee.psxandroid.scecompcall://redirect?code=AUTHCODE123"},
+            ),
+            httpx.Response(200, json=_fake_token_response()),
+        ]
+    )
+    session = _session(recorder, npsso="npsso-cookie")
+
+    await session._ensure_fresh()
+
+    authorize_request = recorder.requests[0]
+    assert authorize_request.url.params["access_type"] == "offline"
+
+
 async def test_bootstrap_handles_response_without_refresh_token():
     recorder = RequestRecorder(
         [

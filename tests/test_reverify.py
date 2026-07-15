@@ -63,7 +63,8 @@ def _make_crypto() -> TokenCrypto:
 
 
 def _seed_access_token_only_link(repo: FakeRepository, crypto: TokenCrypto, sub: str) -> None:
-    """Simulate a persisted link whose token response has no refresh_token (e.g. passkey sign-in)."""
+    """Simulate a persisted link whose token response has no refresh_token (a theoretical edge case now that
+    _authorization_code() requests access_type=offline -- see reverify_link()'s docstring)."""
     encrypted = crypto.encrypt(b'{"access_token": "AT"}')
     repo.links[sub] = LinkRecord(
         psn_account_id="psn-account-1",

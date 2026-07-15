@@ -191,6 +191,7 @@ class PsnSession:
             "X-Requested-With": "com.scee.psxandroid",
         }
         params = {
+            "access_type": "offline",
             "client_id": _CLIENT_ID,
             "redirect_uri": _REDIRECT_URI,
             "scope": _SCOPE,
@@ -241,9 +242,10 @@ class PsnSession:
         token: dict[str, Any] = response.json()
         now = time.time()
         token["access_token_expires_at"] = token["expires_in"] + now
-        # PSN omits refresh_token/refresh_token_expires_in for some auth modes (e.g. passkey sign-in). Such a
-        # token is still persisted below -- it's usable until access_token_expires_at, at which point _refresh()
-        # will raise PsnAuthError (no refresh_token to use), and reverify_link() treats that as a stale link and
+        # _authorization_code() always requests access_type=offline, so a normal exchange gets a refresh_token.
+        # PSN can still theoretically omit one (rate limiting, an account-level restriction, ...); such a token
+        # is still persisted below -- it's usable until access_token_expires_at, at which point _refresh() will
+        # raise PsnAuthError (no refresh_token to use), and reverify_link() treats that as a stale link and
         # clears it, prompting the user for a fresh npsso.
         if "refresh_token_expires_in" in token:
             token["refresh_token_expires_at"] = token["refresh_token_expires_in"] + now

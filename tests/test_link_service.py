@@ -259,10 +259,11 @@ async def test_link_psn_auth_error_clears_and_raises_auth_failed():
 
 
 async def test_link_verified_match_with_no_refresh_token_still_links():
-    """PSN's token response omits refresh_token for some auth modes (e.g. passkey sign-in). whoami()'s
-    bootstrap now persists that access-token-only session anyway (DbTokenStore.save() only requires
-    access_token), so a verified email match must still complete the link -- it's usable until
-    access_token_expires_at, after which reverify_link() will clear it and prompt for a fresh npsso.
+    """A normal exchange always requests access_type=offline and gets a refresh_token, but PSN could still
+    theoretically omit one (rate limiting, an account-level restriction, ...). whoami()'s bootstrap persists
+    that access-token-only session anyway (DbTokenStore.save() only requires access_token), so a verified email
+    match must still complete the link -- it's usable until access_token_expires_at, after which
+    reverify_link() will clear it and prompt for a fresh npsso.
     """
     repo = FakeRepository()
     crypto = _make_crypto()
