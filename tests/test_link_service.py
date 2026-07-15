@@ -258,6 +258,36 @@ async def test_link_psn_auth_error_clears_and_raises_auth_failed():
     assert repo.touch_verified_calls == []
 
 
+async def test_link_verified_match_but_no_refresh_token_persisted_raises_auth_failed():
+    """PSN's token response omits refresh_token for some auth modes (e.g. passkey sign-in), so
+    DbTokenStore.save() silently no-ops and whoami()'s bootstrap never persists a psn_links row -- unlike
+    every other test above, this deliberately skips ``_seed_link`` to reproduce exactly that: a verified
+    email match with nothing ever written to the database. link() must fail loudly rather than report
+    linked=True for a link that doesn't exist.
+    """
+    repo = FakeRepository()
+    crypto = _make_crypto()
+    sub = "sub-1"
+
+    async def agent_factory(sub_arg, npsso=None):
+        return FakeAgent(sub_arg, npsso, email_info=("user@example.com", True))
+
+    with pytest.raises(LinkError) as exc_info:
+        await link(
+            sub,
+            "npsso",
+            "user@example.com",
+            repository=repo,
+            token_crypto=crypto,
+            agent_factory=agent_factory,
+        )
+
+    assert exc_info.value.kind == "auth_failed"
+    assert repo.set_link_account_calls == []
+    assert repo.touch_verified_calls == []
+    assert sub not in repo.links
+
+
 async def test_link_invalid_npsso_rejected_before_any_agent_call():
     repo = FakeRepository()
     crypto = _make_crypto()

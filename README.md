@@ -1,6 +1,6 @@
 # Curator
 
-[![Build and deploy Python app to Azure Web App - crgolden-curator](https://github.com/crgolden/Curator/actions/workflows/main.yml/badge.svg)](https://github.com/crgolden/Curator/actions/workflows/main.yml)
+[![Build and deploy Python app to Azure Web App - crgolden-curator](https://github.com/crgolden/Curator/actions/workflows/main_crgolden-curator.yml/badge.svg)](https://github.com/crgolden/Curator/actions/workflows/main_crgolden-curator.yml)
 
 [![Quality gate](https://sonarcloud.io/api/project_badges/quality_gate?project=crgolden_Curator)](https://sonarcloud.io/summary/new_code?id=crgolden_Curator)
 
@@ -79,10 +79,13 @@ Two independent, optional legs, wired up in `curator.telemetry.configure_telemet
   calls to Sony) are all instrumented. `/health` is excluded from tracing, matching the fleet convention.
 - **Structured logging**: root-logger documents shipped to Elasticsearch, enabled by setting
   `ElasticsearchNode` together with `ElasticsearchUsername`/`ElasticsearchPassword`. Each document carries
-  `service.name: "curator"` and a flat `log.level` field (never a nested `log: {level: ...}` object) —
-  mirroring what the `Churches` Node app ships — indexed into a day-bucketed `curator-logs-<yyyy.MM.dd>`
-  index. Shipping runs on a background thread (a `QueueHandler`/`QueueListener` pair), so a slow or
-  unreachable Elasticsearch node never blocks a request.
+  `service.name: "curator"` and a flat `log.level` field translated to the fleet's Serilog/ECS vocabulary
+  (`Information`/`Warning`/`Error`/... rather than Python's own `INFO`/`WARNING`/`ERROR`) — mirroring what
+  the `Churches` Node app ships — written into the `logs-dotnet-curator` data stream (`op_type="create"`,
+  matching the Grafana Elasticsearch datasource pattern `logs-dotnet-*` and Elasticsearch's built-in `logs`
+  index template, so it rolls over/retains under the same managed ILM policy as every other app instead of
+  accumulating forever in an unmanaged index). Shipping runs on a background thread (a
+  `QueueHandler`/`QueueListener` pair), so a slow or unreachable Elasticsearch node never blocks a request.
 
 Both legs are **no-op when their settings are unset** — the default for local dev and CI — and neither can
 ever prevent the app from starting: every telemetry init path is wrapped in its own broad `except Exception`

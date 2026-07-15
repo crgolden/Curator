@@ -50,7 +50,26 @@ from curator.settings import Settings
 
 SERVICE_NAME_VALUE = "curator"
 _HEALTH_EXCLUDED_URLS = "health"
-_ES_INDEX_PREFIX = "curator-logs"
+
+# Must match the Grafana Elasticsearch datasource pattern (`logs-dotnet-*`, see
+# Tools/Grafana/01-bootstrap.sh) so Curator's logs appear in the Logs/Fleet dashboards alongside the
+# .NET apps and Churches -- "dotnet" here is the fleet's app-logs dataset convention, not a claim that
+# Curator is a .NET app. This also matches Elasticsearch's built-in `logs` index template (pattern
+# `logs-*-*`, composed with the managed `logs@lifecycle` ILM policy), which is what gives the .NET
+# apps' and Churches' `logs-dotnet-*` data streams their automatic rollover/retention with zero
+# explicit bootstrap code -- the same thing a bare, unmanaged `curator-logs-<date>` index never got.
+_ES_DATA_STREAM = "logs-dotnet-curator"
+
+# Fleet log-level vocabulary (matches Serilog/ECS and Churches' pino LEVEL_NAMES map) so Grafana's
+# `log.level` filters/aggregations, built around Verbose/Debug/Information/Warning/Error/Fatal, also
+# work for Curator instead of seeing Python's own DEBUG/INFO/WARNING/ERROR/CRITICAL spelling.
+_LEVEL_NAMES = {
+    "DEBUG": "Debug",
+    "INFO": "Information",
+    "WARNING": "Warning",
+    "ERROR": "Error",
+    "CRITICAL": "Fatal",
+}
 
 _otel_lock = threading.Lock()
 _otel_configured = False
@@ -179,6 +198,9 @@ def format_log_record(record: logging.LogRecord) -> dict[str, Any]:
 
     ``service.name`` and a *flat* ``log.level`` key (not a nested ``log: {level: ...}`` object) match what
     the Grafana Logs dashboard expects, mirroring the Churches Node app's Elasticsearch documents.
+    ``log.level`` is translated from Python's own level names to the fleet's Serilog/ECS vocabulary (see
+    :data:`_LEVEL_NAMES`) so it matches every other app's spelling; an unrecognized level name (there
+    should never be one) falls back to Python's own name rather than raising.
 
     :param record: The log record to format.
     :returns: A JSON-serializable document.
@@ -186,23 +208,13 @@ def format_log_record(record: logging.LogRecord) -> dict[str, Any]:
     doc: dict[str, Any] = {
         "@timestamp": datetime.fromtimestamp(record.created, tz=timezone.utc).isoformat(),
         "message": record.getMessage(),
-        "log.level": record.levelname,
+        "log.level": _LEVEL_NAMES.get(record.levelname, record.levelname),
         "service.name": SERVICE_NAME_VALUE,
         "logger.name": record.name,
     }
     if record.exc_info:
         doc["error.stack_trace"] = logging.Formatter().formatException(record.exc_info)
     return doc
-
-
-def _log_index_name(now: datetime | None = None) -> str:
-    """Build the day-bucketed Elasticsearch index name a log document is written to.
-
-    :param now: The timestamp to bucket by; defaults to the current UTC time.
-    :returns: The index name, e.g. ``"curator-logs-2026.07.11"``.
-    """
-    moment = now or datetime.now(timezone.utc)
-    return f"{_ES_INDEX_PREFIX}-{moment:%Y.%m.%d}"
 
 
 class _ElasticsearchLogHandler(logging.Handler):
@@ -224,9 +236,23 @@ class _ElasticsearchLogHandler(logging.Handler):
         self._client = client
 
     def emit(self, record: logging.LogRecord) -> None:
-        """Index one formatted log document, swallowing any failure.
+        """Index one formatted log document into the ``logs-dotnet-curator`` data stream, swallowing any
+        failure.
+
+        Data streams are append-only: writes must use ``op_type="create"`` (the default ``"index"`` op
+        type is rejected once the target is an actual data stream, not a bare index). No document id is
+        supplied -- Elasticsearch auto-generates one, exactly like the ``create`` op type expects.
+        ``require_data_stream=True`` fails the write loudly (swallowed by the ``suppress`` below, same as
+        any other transient failure) if ``_ES_DATA_STREAM`` were ever misconfigured into resolving to a
+        bare index instead of a real data stream, rather than silently succeeding against the wrong kind
+        of target the way the previous day-bucketed bare index did.
 
         :param record: The log record to ship.
         """
         with contextlib.suppress(Exception):
-            self._client.index(index=_log_index_name(), document=format_log_record(record))
+            self._client.index(
+                index=_ES_DATA_STREAM,
+                document=format_log_record(record),
+                op_type="create",
+                require_data_stream=True,
+            )

@@ -12,19 +12,30 @@ token's own ``sub``.
 Identity email against a PSN account's email (link/unlink, ``/me``'s re-verify): a verified Identity email
 is mandatory for those, so a token missing the ``email`` claim is rejected outright rather than treated as
 an absent-but-fine value.
+
+:func:`require_bearer` also guarantees the caller's ``app_users`` row exists before the route body runs.
+Every other account table (``psn_links``, and every catalog/collections/library/job-run table) declares a
+``REFERENCES app_users (identity_sub)`` foreign key, so any write keyed by a ``sub`` that has never been
+upserted fails at the database with a foreign-key violation rather than a clean application error. Doing
+this once, here, in the single dependency every protected route already depends on, is what makes that
+invariant hold everywhere instead of requiring each route/service to remember it independently.
 """
 
 from __future__ import annotations
 
 from fastapi import Depends, HTTPException, Request
 
+from curator.persistence.repository import Repository
 from curator.token_validation import TokenClaims, TokenError, TokenValidatorLike
 
 _CURATOR_SCOPE = "curator"
 
 
-def require_bearer(request: Request) -> TokenClaims:
+async def require_bearer(request: Request) -> TokenClaims:
     """Resolve and validate the caller's bearer token, or reject the request.
+
+    On success, also upserts the caller's ``app_users`` row and stamps ``last_login_at`` -- see the module
+    docstring for why this must happen here rather than in an individual route/service.
 
     :param request: The incoming request (its ``Authorization`` header carries the token).
     :returns: The validated :class:`~curator.token_validation.TokenClaims`.
@@ -52,6 +63,10 @@ def require_bearer(request: Request) -> TokenClaims:
 
     if not claims.has_scope(_CURATOR_SCOPE):
         raise HTTPException(status_code=403, detail="curator scope required.")
+
+    repository: Repository = request.app.state.repository
+    await repository.upsert_user(claims.sub)
+    await repository.touch_login(claims.sub)
 
     return claims
 

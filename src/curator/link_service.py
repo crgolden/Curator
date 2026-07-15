@@ -130,8 +130,9 @@ async def link(
     :param agent_factory: Builds the PSN agent for this ``sub`` given the supplied ``npsso``.
     :returns: The :class:`LinkResult` on a verified match.
     :raises LinkError: ``"invalid_npsso"`` if ``npsso`` fails validation (no agent call is made);
-        ``"auth_failed"`` if PSN authentication fails; ``"mismatch"``/``"unverified"`` if the emails don't
-        both verify-match.
+        ``"auth_failed"`` if PSN authentication fails, or if PSN authenticated but issued no refresh
+        token to persist (some auth modes, e.g. passkey sign-in, omit it -- see the no-persisted-row
+        check below); ``"mismatch"``/``"unverified"`` if the emails don't both verify-match.
     """
     try:
         parse_npsso(npsso)
@@ -158,6 +159,17 @@ async def link(
     if normalize_email(identity_email) != normalize_email(psn_email):
         await DbTokenStore(sub, repository, token_crypto).clear()
         raise LinkError("mismatch", "emails do not match")
+
+    # whoami()'s bootstrap only persists a psn_links row when PSN's token response carried a
+    # refresh_token -- some auth modes (e.g. passkey sign-in) omit it, in which case DbTokenStore.save()
+    # (and the underlying TokenStore contract generally) silently no-ops. Without a persisted row there is
+    # no durable link to report -- set_link_account/touch_link_verified below are UPDATEs that would
+    # otherwise silently affect zero rows, letting this return linked=True for a link that was never saved.
+    if await repository.get_link(sub) is None:
+        raise LinkError(
+            "auth_failed",
+            "PSN did not issue a refreshable session for this sign-in; linking cannot be completed.",
+        )
 
     await repository.set_link_account(sub, account.account_id)
     await repository.touch_link_verified(sub)

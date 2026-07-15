@@ -270,6 +270,26 @@ def test_me_without_curator_scope_is_403():
     assert response.status_code == 403
 
 
+def test_authenticated_request_upserts_caller_and_touches_login():
+    """require_bearer must upsert the caller's app_users row on every authenticated request -- psn_links
+    (and every other account-scoped table) has a REFERENCES app_users(identity_sub) foreign key, so any
+    downstream write for a sub that was never upserted would fail at the database.
+    """
+    client, repo, *_ = _build_with_valid_token()
+    response = client.get("/me", headers=_bearer("valid-token"))
+    assert response.status_code == 200
+    assert SUB in repo.users
+    assert repo.login_touches == [SUB]
+
+
+def test_request_without_curator_scope_never_upserts_caller():
+    client, repo, *_ = _build_with_valid_token(scopes=("openid",))
+    response = client.get("/me", headers=_bearer("valid-token"))
+    assert response.status_code == 403
+    assert repo.users == set()
+    assert repo.login_touches == []
+
+
 def test_me_without_email_claim_is_403():
     client, *_ = _build_with_valid_token(email=None)
     response = client.get("/me", headers=_bearer("valid-token"))

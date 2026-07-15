@@ -13,8 +13,8 @@ from __future__ import annotations
 
 import logging
 import sys
-from datetime import datetime, timezone
-from typing import ClassVar
+from datetime import datetime
+from typing import Any, ClassVar
 
 from cryptography.fernet import Fernet
 from fastapi.testclient import TestClient
@@ -199,9 +199,12 @@ class _FakeElasticsearchClient:
         type(self).instances += 1
         self.args = args
         self.kwargs = kwargs
+        self.index_calls: list[dict[str, Any]] = []
 
-    def index(self, *, index, document):
-        pass
+    def index(self, *, index, document, op_type=None, require_data_stream=None):
+        self.index_calls.append(
+            {"index": index, "document": document, "op_type": op_type, "require_data_stream": require_data_stream}
+        )
 
 
 class _FakeQueueListener:
@@ -293,7 +296,7 @@ def test_format_log_record_produces_flat_log_level_and_service_name():
     doc = telemetry.format_log_record(record)
 
     assert doc["message"] == "something happened: detail"
-    assert doc["log.level"] == "WARNING"
+    assert doc["log.level"] == "Warning"  # fleet's Serilog/ECS spelling, not Python's own "WARNING"
     assert doc["service.name"] == "curator"
     assert doc["logger.name"] == "curator.psn_routes"
     assert "log" not in doc  # flat key, never a nested `log: {level: ...}` object
@@ -321,9 +324,59 @@ def test_format_log_record_includes_stack_trace_on_exception():
     assert "ValueError: boom" in doc["error.stack_trace"]
 
 
-def test_log_index_name_is_day_bucketed():
-    moment = datetime(2026, 7, 11, 3, 30, tzinfo=timezone.utc)
-    assert telemetry._log_index_name(moment) == "curator-logs-2026.07.11"
+def test_format_log_record_maps_every_python_level_to_the_fleet_vocabulary():
+    for level, expected in (
+        (logging.DEBUG, "Debug"),
+        (logging.INFO, "Information"),
+        (logging.WARNING, "Warning"),
+        (logging.ERROR, "Error"),
+        (logging.CRITICAL, "Fatal"),
+    ):
+        record = logging.LogRecord(
+            name="curator.app", level=level, pathname=__file__, lineno=1, msg="x", args=(), exc_info=None
+        )
+        assert telemetry.format_log_record(record)["log.level"] == expected
+
+
+def test_elasticsearch_log_handler_emits_a_create_write_to_the_data_stream():
+    """The target must be `logs-dotnet-curator` (matching the Grafana `logs-dotnet-*` pattern and
+    Elasticsearch's built-in `logs` index template) written with `op_type="create"` and
+    `require_data_stream=True` -- data streams are append-only and reject the default "index" op type,
+    and `require_data_stream` fails loudly instead of silently falling back to a bare index.
+    """
+    client = _FakeElasticsearchClient()
+    handler = telemetry._ElasticsearchLogHandler(client)
+    record = logging.LogRecord(
+        name="curator.app",
+        level=logging.INFO,
+        pathname=__file__,
+        lineno=1,
+        msg="hello",
+        args=(),
+        exc_info=None,
+    )
+
+    handler.emit(record)
+
+    assert len(client.index_calls) == 1
+    call = client.index_calls[0]
+    assert call["index"] == "logs-dotnet-curator"
+    assert call["op_type"] == "create"
+    assert call["require_data_stream"] is True
+    assert call["document"]["message"] == "hello"
+
+
+def test_elasticsearch_log_handler_swallows_index_failures():
+    class _FailingClient(_FakeElasticsearchClient):
+        def index(self, **kwargs):
+            raise RuntimeError("elasticsearch unreachable")
+
+    handler = telemetry._ElasticsearchLogHandler(_FailingClient())
+    record = logging.LogRecord(
+        name="curator.app", level=logging.INFO, pathname=__file__, lineno=1, msg="x", args=(), exc_info=None
+    )
+
+    handler.emit(record)  # must not raise
 
 
 # ---------------------------------------------------------------------------------------------------
