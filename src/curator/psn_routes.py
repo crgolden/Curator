@@ -59,7 +59,9 @@ async def psn_link(
     """Link the caller's PSN account, requiring a verified-matching PSN email.
 
     :raises fastapi.HTTPException: 400 (invalid npsso), 401 (PSN auth failed), or 409 (email mismatch /
-        unverified email) -- see :class:`curator.link_service.LinkError`.
+        unverified email) -- see :class:`curator.link_service.LinkError`. The body's ``detail`` is
+        ``{"error": <LinkError.kind>, "message": <human-readable>}`` so callers can branch on ``error``
+        (stable) instead of parsing ``message`` (may change wording).
     """
     repository: Repository = request.app.state.repository
     token_crypto: TokenCrypto = request.app.state.token_crypto
@@ -79,8 +81,8 @@ async def psn_link(
         )
     except LinkError as exc:
         status_code = _ERROR_STATUS.get(exc.kind, 400)
-        detail = _ERROR_DETAIL.get(exc.kind, str(exc))
-        raise HTTPException(status_code=status_code, detail=detail) from exc
+        message = _ERROR_DETAIL.get(exc.kind, str(exc))
+        raise HTTPException(status_code=status_code, detail={"error": exc.kind, "message": message}) from exc
 
     return LinkResponse(
         linked=True,

@@ -25,6 +25,7 @@ from fastapi import FastAPI
 from fastapi.openapi.utils import get_openapi
 from fastapi.responses import PlainTextResponse
 from psycopg_pool import AsyncConnectionPool
+from redis.asyncio import Redis
 
 from curator.catalog.repository import CatalogRepository
 from curator.catalog_routes import router as catalog_router
@@ -53,8 +54,12 @@ from curator.persistence.repository import Repository
 from curator.psn.account_client import AccountClient
 from curator.psn.catalog_client import CatalogClient
 from curator.psn.library_client import LibraryClient
-from curator.psn.session import PsnSession
+from curator.psn.rate_limiter import RedisRateLimiter
+from curator.psn.session import PsnSession, RateLimiter
+from curator.psn.trophy_cache import CachedTrophyClient
+from curator.psn.trophy_client import TrophyClient
 from curator.psn_routes import router as psn_router
+from curator.redis_client import RedisAdapter, build_redis_client
 from curator.settings import Settings
 from curator.telemetry import configure_telemetry
 from curator.token_validation import JwtValidator, TokenValidatorLike
@@ -73,6 +78,8 @@ def create_app(
     library_repository: LibraryRepository | None = None,
     collections_repository: CollectionsRepository | None = None,
     job_runs_repository: JobRunsRepository | None = None,
+    redis_client: Redis | None = None,
+    trophy_client_factory: TrophyClientFactory | None = None,
 ) -> FastAPI:
     """Build a configured Curator :class:`~fastapi.FastAPI` app.
 
@@ -105,6 +112,14 @@ def create_app(
         :class:`~curator.collections.repository.CollectionsRepository` over ``pool``.
     :param job_runs_repository: The background-job status repository; defaults to a real
         :class:`~curator.jobs.repository.JobRunsRepository` over ``pool``.
+    :param redis_client: The shared Redis client backing the distributed PSN rate limiter
+        (:class:`~curator.psn.rate_limiter.RedisRateLimiter`) and trophy-read caching
+        (:class:`~curator.psn.trophy_cache.CachedTrophyClient`); defaults to
+        :func:`~curator.redis_client.build_redis_client` over ``settings``, which is itself ``None`` when
+        ``settings.redis_host`` is unset -- PSN calls still work with no Redis configured, just uncached
+        and without a shared rate-limit budget.
+    :param trophy_client_factory: Builds a trophy client for a given ``sub``; defaults to
+        :func:`_default_trophy_client_factory` over the same collaborators as ``agent_factory``.
     :returns: The configured :class:`~fastapi.FastAPI` app.
     """
     settings = settings or Settings.from_config()
@@ -112,9 +127,17 @@ def create_app(
     pool = pool or (AsyncConnectionPool(settings.database_url, open=False) if repository is None else None)
     shared_pool = cast(AsyncConnectionPool, pool)
 
+    owns_redis = redis_client is None
+    redis_client = redis_client or build_redis_client(settings)
+    redis_adapter = RedisAdapter(redis_client) if redis_client is not None else None
+    rate_limiter: RateLimiter | None = RedisRateLimiter(redis_adapter) if redis_adapter is not None else None
+
     repository = repository or Repository(shared_pool)
     token_crypto = token_crypto or TokenCrypto.from_config(settings.token_key)
-    agent_factory = agent_factory or _default_agent_factory(repository, token_crypto)
+    agent_factory = agent_factory or _default_agent_factory(repository, token_crypto, rate_limiter)
+    trophy_client_factory = trophy_client_factory or _default_trophy_client_factory(
+        repository, token_crypto, rate_limiter, redis_adapter
+    )
     token_validator = token_validator or JwtValidator(settings.oidc_authority)
     catalog_repository = catalog_repository or CatalogRepository(shared_pool)
     enrichment_repository = enrichment_repository or EnrichmentRepository(shared_pool)
@@ -158,6 +181,7 @@ def create_app(
                 library_repository=library_repository,
                 rawg_client=rawg_client,
                 opencritic_client=opencritic_client,
+                rate_limiter=rate_limiter,
             ),
             on_enrichment_run=_enrichment_run_handler(enrichment_service),
             job_runs_repository=job_runs_repository,
@@ -177,6 +201,8 @@ def create_app(
             if service_bus_client is not None:
                 await service_bus_client.close()
             await http_client.aclose()
+            if owns_redis and redis_client is not None:
+                await redis_client.aclose()
             if owns_pool and pool is not None:
                 await pool.close()
 
@@ -186,6 +212,8 @@ def create_app(
     app.state.repository = repository
     app.state.token_crypto = token_crypto
     app.state.agent_factory = agent_factory
+    app.state.trophy_client_factory = trophy_client_factory
+    app.state.redis_client = redis_client
     app.state.token_validator = token_validator
     app.state.catalog_repository = catalog_repository
     app.state.enrichment_repository = enrichment_repository
@@ -269,6 +297,7 @@ def _library_refresh_handler(
     library_repository: LibraryRepository,
     rawg_client: RawgClient,
     opencritic_client: OpenCriticClient,
+    rate_limiter: RateLimiter | None,
 ) -> Callable[[str], Coroutine[Any, Any, None]]:
     """Build the ``on_library_refresh`` handler the queue consumer dispatches to.
 
@@ -278,6 +307,10 @@ def _library_refresh_handler(
     :class:`~curator.enrichment.enrichment_service.EnrichmentService`/
     :class:`~curator.library.library_build_orchestrator.LibraryBuildOrchestrator` per job instead of
     reusing one global instance.
+
+    :param rate_limiter: The shared distributed PSN rate limiter (``None`` throttles nothing); passed
+        through to the fresh :class:`~curator.psn.session.PsnSession` so a library refresh's PSN calls
+        count against the same fleet-wide budget as every other client.
     """
 
     async def handle(identity_sub: str) -> None:
@@ -286,7 +319,7 @@ def _library_refresh_handler(
         if saved is None:
             raise RuntimeError(f"No PSN link for user {identity_sub!r}; cannot refresh library.")
 
-        session = await PsnSession.restore(None, token_store)
+        session = await PsnSession.restore(None, token_store, rate_limiter=rate_limiter)
         library_client = LibraryClient(session)
         catalog_client = CatalogClient(session)
         ingestion_service = IngestionService(library_client, catalog_repository)
@@ -311,16 +344,57 @@ def _library_refresh_handler(
     return handle
 
 
-def _default_agent_factory(repository: Repository, token_crypto: TokenCrypto) -> AgentFactory:
+def _default_agent_factory(
+    repository: Repository, token_crypto: TokenCrypto, rate_limiter: RateLimiter | None
+) -> AgentFactory:
     """Build the production ``agent_factory``: a real :class:`~curator.psn.account_client.AccountClient`
     per call, backed by a fresh :class:`~curator.persistence.db_token_store.DbTokenStore` for the given
     user and a :class:`~curator.psn.session.PsnSession` restored (or freshly bootstrapped from ``npsso``)
     against it.
+
+    :param rate_limiter: The shared distributed PSN rate limiter (``None`` throttles nothing).
     """
 
     async def factory(sub: str, npsso: str | None = None) -> PsnAgentLike:
         token_store = DbTokenStore(sub, repository, token_crypto)
-        session = await PsnSession.restore(npsso, token_store)
+        session = await PsnSession.restore(npsso, token_store, rate_limiter=rate_limiter)
         return AccountClient(session)
+
+    return factory
+
+
+TrophyClientFactory = Callable[[str], Coroutine[Any, Any, TrophyClient | CachedTrophyClient]]
+"""Builds a trophy client (:class:`~curator.psn.trophy_cache.CachedTrophyClient` when Redis is configured,
+else a raw :class:`~curator.psn.trophy_client.TrophyClient`) for a given Identity ``sub``. Requires an
+existing PSN link -- unlike :data:`AgentFactory`, there is no ``npsso`` bootstrap path here."""
+
+
+def _default_trophy_client_factory(
+    repository: Repository,
+    token_crypto: TokenCrypto,
+    rate_limiter: RateLimiter | None,
+    redis_adapter: RedisAdapter | None,
+) -> TrophyClientFactory:
+    """Build the production ``trophy_client_factory``: a real :class:`~curator.psn.trophy_client.TrophyClient`
+    per call, backed by a fresh :class:`~curator.persistence.db_token_store.DbTokenStore`/
+    :class:`~curator.psn.session.PsnSession` for the given (already-linked) user, wrapped in
+    :class:`~curator.psn.trophy_cache.CachedTrophyClient` when Redis is configured.
+
+    :param rate_limiter: The shared distributed PSN rate limiter (``None`` throttles nothing).
+    :param redis_adapter: The shared Redis adapter (``None`` disables trophy-read caching).
+    :raises RuntimeError: If the caller has no stored PSN link (mirrors ``_library_refresh_handler``).
+    """
+
+    async def factory(sub: str) -> TrophyClient | CachedTrophyClient:
+        token_store = DbTokenStore(sub, repository, token_crypto)
+        saved = await token_store.load()
+        if saved is None:
+            raise RuntimeError(f"No PSN link for user {sub!r}; cannot fetch trophies.")
+
+        session = await PsnSession.restore(None, token_store, rate_limiter=rate_limiter)
+        client = TrophyClient(session)
+        if redis_adapter is None:
+            return client
+        return CachedTrophyClient(client, redis_adapter)
 
     return factory

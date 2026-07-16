@@ -37,6 +37,17 @@ _RAWG_API_KEY_ENV_NAMES: tuple[str, ...] = ("RawgApiKey",)
 _OPENCRITIC_RAPIDAPI_KEY_ENV_NAMES: tuple[str, ...] = ("OpenCriticRapidApiKey",)
 _SERVICE_BUS_CONNECTION_ENV_NAMES: tuple[str, ...] = ("ServiceBusConnectionString",)
 
+# Redis-backed trophy caching (curator.psn.trophy_cache) and distributed PSN rate limiting
+# (curator.psn.rate_limiter) -- also optional, unset in dev/CI. Names match the fleet convention already
+# used by Manuals/Infrastructure (RedisHost/RedisPort/RedisSsl config values, RedisPassword Key Vault
+# secret). Unlike those, ``redis_host`` unset here just falls back to an uncached TrophyClient and a
+# no-op NullRateLimiter rather than disabling a whole feature -- PSN calls still work, just without the
+# fleet-wide shared budget/cache.
+_REDIS_HOST_ENV_NAMES: tuple[str, ...] = ("RedisHost",)
+_REDIS_PORT_ENV_NAMES: tuple[str, ...] = ("RedisPort",)
+_REDIS_PASSWORD_ENV_NAMES: tuple[str, ...] = ("RedisPassword",)
+_REDIS_SSL_ENV_NAMES: tuple[str, ...] = ("RedisSsl",)
+
 
 @dataclass(frozen=True)
 class Settings:
@@ -59,6 +70,11 @@ class Settings:
     :param service_bus_connection_string: The Azure Service Bus connection string backing the
         ``curator-library-refresh``/``curator-enrichment`` job queues; ``None`` disables the queue
         consumer and the job-publishing routes.
+    :param redis_host: The Redis host backing trophy caching and the distributed PSN rate limiter;
+        ``None`` disables both (uncached trophy reads, no shared rate-limit budget).
+    :param redis_port: The Redis port; defaults to Azure Cache for Redis's SSL port.
+    :param redis_password: Redis auth password, if required.
+    :param redis_ssl: Whether to connect to Redis over TLS; defaults to ``True``.
     """
 
     oidc_authority: str
@@ -71,6 +87,10 @@ class Settings:
     rawg_api_key: str | None = None
     opencritic_rapidapi_key: str | None = None
     service_bus_connection_string: str | None = None
+    redis_host: str | None = None
+    redis_port: int = 6380
+    redis_password: str | None = None
+    redis_ssl: bool = True
 
     @classmethod
     def from_config(cls, dotenv_path: Path | None = None) -> Settings:
@@ -108,6 +128,11 @@ class Settings:
             None, env_names=_SERVICE_BUS_CONNECTION_ENV_NAMES, dotenv_path=dotenv_path
         )
 
+        redis_host = resolve_setting(None, env_names=_REDIS_HOST_ENV_NAMES, dotenv_path=dotenv_path)
+        redis_port_raw = resolve_setting(None, env_names=_REDIS_PORT_ENV_NAMES, dotenv_path=dotenv_path)
+        redis_password = resolve_setting(None, env_names=_REDIS_PASSWORD_ENV_NAMES, dotenv_path=dotenv_path)
+        redis_ssl_raw = resolve_setting(None, env_names=_REDIS_SSL_ENV_NAMES, dotenv_path=dotenv_path)
+
         return cls(
             oidc_authority=oidc_authority,
             token_key=token_key,
@@ -119,6 +144,10 @@ class Settings:
             rawg_api_key=rawg_api_key,
             opencritic_rapidapi_key=opencritic_rapidapi_key,
             service_bus_connection_string=service_bus_connection_string,
+            redis_host=redis_host,
+            redis_port=int(redis_port_raw) if redis_port_raw else 6380,
+            redis_password=redis_password,
+            redis_ssl=redis_ssl_raw.strip().lower() != "false" if redis_ssl_raw else True,
         )
 
 

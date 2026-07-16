@@ -15,6 +15,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from types import SimpleNamespace
 
+import pytest
 from cryptography.fernet import Fernet
 from fastapi.testclient import TestClient
 
@@ -245,6 +246,49 @@ def test_health_returns_plain_text_healthy():
     assert response.text == "Healthy"
 
 
+def test_create_app_with_no_redis_settings_disables_caching_and_rate_limiting():
+    """Redis unset (the current default in every environment) must not prevent the app from starting --
+    matching the "optional leg" philosophy every other collaborator (RAWG, OpenCritic, Service Bus,
+    telemetry) already follows."""
+    client, *_ = _build()
+
+    assert client.app.state.redis_client is None
+    assert client.app.state.trophy_client_factory is not None
+
+
+async def test_trophy_client_factory_raises_for_unlinked_user():
+    client, *_ = _build()
+
+    with pytest.raises(RuntimeError, match="No PSN link"):
+        await client.app.state.trophy_client_factory("no-such-sub")
+
+
+async def test_create_app_wires_injected_redis_client_into_rate_limiter_and_trophy_cache():
+    """A caller-supplied ``redis_client`` (the DI seam every other collaborator gets) must flow into both
+    the rate limiter used by every PSN session and the trophy-client factory's caching wrapper."""
+    from curator.psn.trophy_cache import CachedTrophyClient
+    from test_redis_client import FakeRawRedis
+
+    repository = FakeRepository()
+    crypto = TokenCrypto(Fernet.generate_key())
+    _seed_link(repository, crypto, SUB)
+    settings = _make_settings()
+    fake_redis = FakeRawRedis()
+
+    app = create_app(
+        settings,
+        repository=repository,
+        token_crypto=crypto,
+        agent_factory=FakeAgentFactory(repository, crypto),
+        token_validator=FakeTokenValidator(),
+        redis_client=fake_redis,
+    )
+
+    assert app.state.redis_client is fake_redis
+    trophy_client = await app.state.trophy_client_factory(SUB)
+    assert isinstance(trophy_client, CachedTrophyClient)
+
+
 def test_me_without_bearer_token_is_401():
     client, *_ = _build()
     response = client.get("/me")
@@ -449,7 +493,7 @@ def test_psn_link_mismatch_returns_409():
     response = client.post("/psn/link", json={"npsso": "the-npsso"}, headers=_bearer("valid-token"))
 
     assert response.status_code == 409
-    assert response.json()["detail"] == "emails do not match"
+    assert response.json()["detail"] == {"error": "mismatch", "message": "emails do not match"}
 
 
 def test_psn_link_unverified_returns_409():
@@ -459,7 +503,7 @@ def test_psn_link_unverified_returns_409():
     response = client.post("/psn/link", json={"npsso": "the-npsso"}, headers=_bearer("valid-token"))
 
     assert response.status_code == 409
-    assert response.json()["detail"] == "PSN email is not verified"
+    assert response.json()["detail"] == {"error": "unverified", "message": "PSN email is not verified"}
 
 
 def test_psn_link_invalid_npsso_returns_400():
@@ -468,6 +512,7 @@ def test_psn_link_invalid_npsso_returns_400():
     response = client.post("/psn/link", json={"npsso": "{not valid json"}, headers=_bearer("valid-token"))
 
     assert response.status_code == 400
+    assert response.json()["detail"]["error"] == "invalid_npsso"
     assert agent_factory.calls == []
 
 
@@ -478,7 +523,7 @@ def test_psn_link_auth_failure_returns_401():
     response = client.post("/psn/link", json={"npsso": "the-npsso"}, headers=_bearer("valid-token"))
 
     assert response.status_code == 401
-    assert response.json()["detail"] == "PSN authentication failed"
+    assert response.json()["detail"] == {"error": "auth_failed", "message": "PSN authentication failed"}
 
 
 def test_psn_unlink_then_me_shows_unlinked():

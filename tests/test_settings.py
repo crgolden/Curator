@@ -61,6 +61,34 @@ def test_from_config_resolves_enrichment_and_jobs_settings_when_set(monkeypatch,
     assert settings.service_bus_connection_string == "Endpoint=sb://example/;SharedAccessKey=x"
 
 
+def test_from_config_redis_settings_default_to_none_and_ssl_true(monkeypatch, tmp_path):
+    _set_all_required(monkeypatch)
+    for key in ("RedisHost", "RedisPort", "RedisPassword", "RedisSsl"):
+        monkeypatch.delenv(key, raising=False)
+
+    settings = Settings.from_config(dotenv_path=tmp_path / "absent.env")
+
+    assert settings.redis_host is None
+    assert settings.redis_port == 6380
+    assert settings.redis_password is None
+    assert settings.redis_ssl is True
+
+
+def test_from_config_resolves_redis_settings_when_set(monkeypatch, tmp_path):
+    _set_all_required(monkeypatch)
+    monkeypatch.setenv("RedisHost", "redis.example.test")
+    monkeypatch.setenv("RedisPort", "6379")
+    monkeypatch.setenv("RedisPassword", "redis-secret")
+    monkeypatch.setenv("RedisSsl", "false")
+
+    settings = Settings.from_config(dotenv_path=tmp_path / "absent.env")
+
+    assert settings.redis_host == "redis.example.test"
+    assert settings.redis_port == 6379
+    assert settings.redis_password == "redis-secret"
+    assert settings.redis_ssl is False
+
+
 @pytest.mark.parametrize("missing_key", ["OIDC_AUTHORITY", "CURATOR_TOKEN_KEY"])
 def test_from_config_raises_config_error_when_required_key_missing(monkeypatch, tmp_path, missing_key):
     _set_all_required(monkeypatch, **{missing_key: None})

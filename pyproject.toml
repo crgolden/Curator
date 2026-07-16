@@ -126,6 +126,7 @@ module = [
     "test_psn_presence_client",
     "test_psn_rate_limiter",
     "test_psn_repository",
+    "test_redis_client",
     "test_psn_safety",
     "test_psn_session",
     "test_psn_social_client",
