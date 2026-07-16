@@ -170,3 +170,19 @@ class Repository:
         sql = "DELETE FROM psn_links WHERE identity_sub = %s"
         async with self._pool.connection() as conn, conn.cursor() as cur:
             await cur.execute(sql, (sub,))
+
+    async def delete_user(self, sub: str) -> None:
+        """Remove the ``app_users`` row for ``sub`` entirely.
+
+        Every other account-scoped table (``psn_links``, ``entitlement_pulls``, ``library_entries``,
+        ``library_exclusions``, ``user_consoles``, ``measured_sizes``, ``collection_definitions``,
+        ``collection_runs``, ...) declares ``REFERENCES app_users (identity_sub) ON DELETE CASCADE`` or a
+        plain FK cleaned up alongside it, so this one delete wipes everything Curator has ever stored about
+        the user. It never touches the shared, identity_sub-free catalog tables (``games``,
+        ``game_concepts``, enrichment/cache tables).
+
+        :param sub: The Identity ``sub`` claim of the user requesting deletion.
+        """
+        sql = "DELETE FROM app_users WHERE identity_sub = %s"
+        async with self._pool.connection() as conn, conn.cursor() as cur:
+            await cur.execute(sql, (sub,))

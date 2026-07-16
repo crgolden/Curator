@@ -16,7 +16,7 @@ from __future__ import annotations
 
 from curator.link_service import AgentFactory, normalize_email
 from curator.persistence.crypto import TokenCrypto
-from curator.persistence.db_token_store import DbTokenStore
+from curator.persistence.db_token_store import DbTokenStore, RedisLike
 from curator.persistence.repository import Repository
 from curator.psn.errors import PsnAuthError
 from curator.token_validation import TokenClaims
@@ -28,6 +28,7 @@ async def reverify_link(
     repository: Repository,
     token_crypto: TokenCrypto,
     agent_factory: AgentFactory,
+    redis: RedisLike | None = None,
 ) -> None:
     """Re-check the caller's stored PSN link against ``claims``, if it hasn't been checked since this token
     was issued.
@@ -46,6 +47,8 @@ async def reverify_link(
     :param repository: The :class:`~curator.persistence.repository.Repository` to read/write through.
     :param token_crypto: The :class:`~curator.persistence.crypto.TokenCrypto` used to clear a stale link.
     :param agent_factory: Builds the PSN agent for this ``sub``.
+    :param redis: The shared Redis adapter backing the access-token cache (``None`` disables it); passed
+        through so clearing a stale link also drops its cached access token immediately.
     """
     link = await repository.get_link(claims.sub)
     if link is None:
@@ -58,7 +61,7 @@ async def reverify_link(
         agent = await agent_factory(claims.sub)
         email_info = await agent.account_email_verified()
     except PsnAuthError:
-        await DbTokenStore(claims.sub, repository, token_crypto).clear()
+        await DbTokenStore(claims.sub, repository, token_crypto, redis).clear()
         return
     except Exception:
         return
@@ -73,6 +76,6 @@ async def reverify_link(
         or normalize_email(email_info[0]) != normalize_email(claims.email)
     )
     if stale:
-        await DbTokenStore(claims.sub, repository, token_crypto).clear()
+        await DbTokenStore(claims.sub, repository, token_crypto, redis).clear()
     else:
         await repository.touch_link_verified(claims.sub)

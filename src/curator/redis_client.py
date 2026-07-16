@@ -62,6 +62,10 @@ class RedisAdapter:
         """See :meth:`curator.psn.trophy_cache.RedisLike.set`."""
         return await self._redis.set(name, value, ex=ex)
 
+    async def delete(self, name: str) -> int:
+        """See :meth:`curator.persistence.db_token_store.RedisLike.delete`."""
+        return cast(int, await self._redis.delete(name))
+
     async def zremrangebyscore(self, name: str, min: float, max: float) -> int:
         """See :meth:`curator.psn.rate_limiter.RedisLike.zremrangebyscore`."""
         return cast(int, await self._redis.zremrangebyscore(name, min, max))

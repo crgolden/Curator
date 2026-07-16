@@ -17,7 +17,7 @@ from datetime import datetime
 from typing import Any, Protocol
 
 from curator.persistence.crypto import TokenCrypto
-from curator.persistence.db_token_store import DbTokenStore
+from curator.persistence.db_token_store import DbTokenStore, RedisLike
 from curator.persistence.repository import Repository
 from curator.psn.errors import PsnAuthError
 from curator.psn.npsso import NpssoError, parse_npsso
@@ -112,6 +112,7 @@ async def link(
     repository: Repository,
     token_crypto: TokenCrypto,
     agent_factory: AgentFactory,
+    redis: RedisLike | None = None,
 ) -> LinkResult:
     """Link a user's PSN account, requiring their PSN email to match their verified Identity email.
 
@@ -128,6 +129,8 @@ async def link(
     :param repository: The :class:`~curator.persistence.repository.Repository` to read/write through.
     :param token_crypto: The :class:`~curator.persistence.crypto.TokenCrypto` used to clear failed links.
     :param agent_factory: Builds the PSN agent for this ``sub`` given the supplied ``npsso``.
+    :param redis: The shared Redis adapter backing the access-token cache (``None`` disables it); passed
+        through so a rejected link's cached access token is cleared too, not just its durable row.
     :returns: The :class:`LinkResult` on a verified match.
     :raises LinkError: ``"invalid_npsso"`` if ``npsso`` fails validation (no agent call is made);
         ``"auth_failed"`` if PSN authentication fails; ``"mismatch"``/``"unverified"`` if the emails
@@ -144,19 +147,19 @@ async def link(
         account = await agent.whoami()
         email_info = await agent.account_email_verified()
     except PsnAuthError as exc:
-        await DbTokenStore(sub, repository, token_crypto).clear()
+        await DbTokenStore(sub, repository, token_crypto, redis).clear()
         raise LinkError("auth_failed", "PSN authentication failed.") from exc
 
     if email_info is None:
-        await DbTokenStore(sub, repository, token_crypto).clear()
+        await DbTokenStore(sub, repository, token_crypto, redis).clear()
         raise LinkError("unverified", "PSN email is not verified.")
 
     psn_email, psn_verified = email_info
     if not psn_verified:
-        await DbTokenStore(sub, repository, token_crypto).clear()
+        await DbTokenStore(sub, repository, token_crypto, redis).clear()
         raise LinkError("unverified", "PSN email is not verified.")
     if normalize_email(identity_email) != normalize_email(psn_email):
-        await DbTokenStore(sub, repository, token_crypto).clear()
+        await DbTokenStore(sub, repository, token_crypto, redis).clear()
         raise LinkError("mismatch", "emails do not match")
 
     await repository.set_link_account(sub, account.account_id)
@@ -169,7 +172,9 @@ async def link(
     )
 
 
-async def unlink(sub: str, *, repository: Repository, token_crypto: TokenCrypto) -> None:
+async def unlink(
+    sub: str, *, repository: Repository, token_crypto: TokenCrypto, redis: RedisLike | None = None
+) -> None:
     """Unlink a user's PSN account: best-effort revoke, then clear the stored tokens.
 
     PSN exposes no token-revocation endpoint (``curator.psn.session.PsnSession`` only bootstraps,
@@ -180,5 +185,7 @@ async def unlink(sub: str, *, repository: Repository, token_crypto: TokenCrypto)
     :param sub: The Identity ``sub`` claim of the user unlinking their account.
     :param repository: The :class:`~curator.persistence.repository.Repository` to write through.
     :param token_crypto: The :class:`~curator.persistence.crypto.TokenCrypto` used by the token store.
+    :param redis: The shared Redis adapter backing the access-token cache (``None`` disables it); passed
+        through so the cached access token is removed immediately, not left to expire on its own TTL.
     """
-    await DbTokenStore(sub, repository, token_crypto).clear()
+    await DbTokenStore(sub, repository, token_crypto, redis).clear()

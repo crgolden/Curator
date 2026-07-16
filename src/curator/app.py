@@ -135,7 +135,7 @@ def create_app(
 
     repository = repository or Repository(shared_pool)
     token_crypto = token_crypto or TokenCrypto.from_config(settings.token_key)
-    agent_factory = agent_factory or _default_agent_factory(repository, token_crypto, rate_limiter)
+    agent_factory = agent_factory or _default_agent_factory(repository, token_crypto, rate_limiter, redis_adapter)
     trophy_client_factory = trophy_client_factory or _default_trophy_client_factory(
         repository, token_crypto, rate_limiter, redis_adapter
     )
@@ -183,6 +183,7 @@ def create_app(
                 rawg_client=rawg_client,
                 opencritic_client=opencritic_client,
                 rate_limiter=rate_limiter,
+                redis_adapter=redis_adapter,
             ),
             on_enrichment_run=_enrichment_run_handler(enrichment_service),
             job_runs_repository=job_runs_repository,
@@ -215,6 +216,7 @@ def create_app(
     app.state.agent_factory = agent_factory
     app.state.trophy_client_factory = trophy_client_factory
     app.state.redis_client = redis_client
+    app.state.redis_adapter = redis_adapter
     app.state.token_validator = token_validator
     app.state.catalog_repository = catalog_repository
     app.state.enrichment_repository = enrichment_repository
@@ -300,6 +302,7 @@ def _library_refresh_handler(
     rawg_client: RawgClient,
     opencritic_client: OpenCriticClient,
     rate_limiter: RateLimiter | None,
+    redis_adapter: RedisAdapter | None,
 ) -> Callable[[str], Coroutine[Any, Any, None]]:
     """Build the ``on_library_refresh`` handler the queue consumer dispatches to.
 
@@ -313,10 +316,12 @@ def _library_refresh_handler(
     :param rate_limiter: The shared distributed PSN rate limiter (``None`` throttles nothing); passed
         through to the fresh :class:`~curator.psn.session.PsnSession` so a library refresh's PSN calls
         count against the same fleet-wide budget as every other client.
+    :param redis_adapter: The shared Redis adapter backing the access-token cache (``None`` disables it;
+        see :class:`~curator.persistence.db_token_store.DbTokenStore`).
     """
 
     async def handle(identity_sub: str) -> None:
-        token_store = DbTokenStore(identity_sub, repository, token_crypto)
+        token_store = DbTokenStore(identity_sub, repository, token_crypto, redis_adapter)
         saved = await token_store.load()
         if saved is None:
             raise RuntimeError(f"No PSN link for user {identity_sub!r}; cannot refresh library.")
@@ -347,7 +352,10 @@ def _library_refresh_handler(
 
 
 def _default_agent_factory(
-    repository: Repository, token_crypto: TokenCrypto, rate_limiter: RateLimiter | None
+    repository: Repository,
+    token_crypto: TokenCrypto,
+    rate_limiter: RateLimiter | None,
+    redis_adapter: RedisAdapter | None,
 ) -> AgentFactory:
     """Build the production ``agent_factory``: a real :class:`~curator.psn.account_client.AccountClient`
     per call, backed by a fresh :class:`~curator.persistence.db_token_store.DbTokenStore` for the given
@@ -355,10 +363,12 @@ def _default_agent_factory(
     against it.
 
     :param rate_limiter: The shared distributed PSN rate limiter (``None`` throttles nothing).
+    :param redis_adapter: The shared Redis adapter backing the access-token cache (``None`` disables it;
+        see :class:`~curator.persistence.db_token_store.DbTokenStore`).
     """
 
     async def factory(sub: str, npsso: str | None = None) -> PsnAgentLike:
-        token_store = DbTokenStore(sub, repository, token_crypto)
+        token_store = DbTokenStore(sub, repository, token_crypto, redis_adapter)
         session = await PsnSession.restore(npsso, token_store, rate_limiter=rate_limiter)
         return AccountClient(session)
 
@@ -377,12 +387,13 @@ def _default_trophy_client_factory(
     :class:`~curator.psn.trophy_cache.CachedTrophyClient` when Redis is configured.
 
     :param rate_limiter: The shared distributed PSN rate limiter (``None`` throttles nothing).
-    :param redis_adapter: The shared Redis adapter (``None`` disables trophy-read caching).
+    :param redis_adapter: The shared Redis adapter (``None`` disables both trophy-read caching and the
+        access-token cache).
     :raises RuntimeError: If the caller has no stored PSN link (mirrors ``_library_refresh_handler``).
     """
 
     async def factory(sub: str) -> TrophyClient | CachedTrophyClient:
-        token_store = DbTokenStore(sub, repository, token_crypto)
+        token_store = DbTokenStore(sub, repository, token_crypto, redis_adapter)
         saved = await token_store.load()
         if saved is None:
             raise RuntimeError(f"No PSN link for user {sub!r}; cannot fetch trophies.")

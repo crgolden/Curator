@@ -66,6 +66,7 @@ async def psn_link(
     repository: Repository = request.app.state.repository
     token_crypto: TokenCrypto = request.app.state.token_crypto
     agent_factory: AgentFactory = request.app.state.agent_factory
+    redis_adapter = request.app.state.redis_adapter
 
     # require_verified_caller guarantees claims.email is set before this dependency chain runs.
     assert claims.email is not None, "psn_link requires a verified caller (claims.email must be set)"
@@ -78,6 +79,7 @@ async def psn_link(
             repository=repository,
             token_crypto=token_crypto,
             agent_factory=agent_factory,
+            redis=redis_adapter,
         )
     except LinkError as exc:
         status_code = _ERROR_STATUS.get(exc.kind, 400)
@@ -102,9 +104,12 @@ async def psn_unlink(
     repository: Repository = request.app.state.repository
     token_crypto: TokenCrypto = request.app.state.token_crypto
     agent_factory: AgentFactory = request.app.state.agent_factory
+    redis_adapter = request.app.state.redis_adapter
 
-    await reverify_link(claims, repository=repository, token_crypto=token_crypto, agent_factory=agent_factory)
-    await unlink_account(claims.sub, repository=repository, token_crypto=token_crypto)
+    await reverify_link(
+        claims, repository=repository, token_crypto=token_crypto, agent_factory=agent_factory, redis=redis_adapter
+    )
+    await unlink_account(claims.sub, repository=repository, token_crypto=token_crypto, redis=redis_adapter)
     return Response(status_code=204)
 
 

@@ -45,6 +45,7 @@ class FakeRepository:
         self.users: set[str] = set()
         self.login_touches: list[str] = []
         self.delete_calls: list[str] = []
+        self.delete_user_calls: list[str] = []
         self.set_link_account_calls: list[tuple[str, str]] = []
         self.touch_verified_calls: list[str] = []
 
@@ -103,6 +104,11 @@ class FakeRepository:
 
     async def delete_link(self, sub):
         self.delete_calls.append(sub)
+        self.links.pop(sub, None)
+
+    async def delete_user(self, sub):
+        self.delete_user_calls.append(sub)
+        self.users.discard(sub)
         self.links.pop(sub, None)
 
 
@@ -552,4 +558,40 @@ def test_psn_unlink_without_bearer_token_is_401():
 def test_psn_unlink_without_email_claim_is_403():
     client, *_ = _build_with_valid_token(email=None)
     response = client.delete("/psn/link", headers=_bearer("valid-token"))
+    assert response.status_code == 403
+
+
+def test_delete_me_removes_the_caller_and_their_link():
+    repo = FakeRepository()
+    crypto = TokenCrypto(Fernet.generate_key())
+    _seed_link(repo, crypto, SUB)
+    validator = FakeTokenValidator()
+    validator.register("valid-token", _claims())
+    client, *_ = _build(repository=repo, token_crypto=crypto, token_validator=validator)
+    client.get("/me", headers=_bearer("valid-token"))  # upserts app_users row, matching a real caller
+
+    response = client.delete("/me", headers=_bearer("valid-token"))
+    assert response.status_code == 204
+    assert repo.delete_user_calls == [SUB]
+    assert SUB not in repo.users
+    assert SUB not in repo.links
+
+
+def test_delete_me_is_idempotent_for_a_caller_with_no_stored_data():
+    client, repo, *_ = _build_with_valid_token()
+
+    response = client.delete("/me", headers=_bearer("valid-token"))
+    assert response.status_code == 204
+    assert repo.delete_user_calls == [SUB]
+
+
+def test_delete_me_without_bearer_token_is_401():
+    client, *_ = _build()
+    response = client.delete("/me")
+    assert response.status_code == 401
+
+
+def test_delete_me_without_email_claim_is_403():
+    client, *_ = _build_with_valid_token(email=None)
+    response = client.delete("/me", headers=_bearer("valid-token"))
     assert response.status_code == 403

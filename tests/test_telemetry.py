@@ -262,6 +262,32 @@ def test_configure_elasticsearch_logging_registers_exactly_once_across_repeated_
         root_logger.handlers = original_handlers
 
 
+def test_configure_elasticsearch_logging_disables_propagation_on_the_es_client_loggers(monkeypatch):
+    """`elastic_transport`/`elasticsearch` log every HTTP call the ES client makes, including the ones
+    this handler issues to ship a log record -- left propagating to root, each shipped record would
+    produce a new log from these loggers, which would then also get shipped, forever. This must never
+    reach root (found live in production: 1.6M+ self-referential docs before the pipeline died).
+    """
+    _patch_es_collaborators(monkeypatch)
+    settings = _settings_with_es()
+    root_logger = logging.getLogger()
+    original_handlers = list(root_logger.handlers)
+    transport_logger = logging.getLogger("elastic_transport")
+    es_logger = logging.getLogger("elasticsearch")
+    original_transport_propagate = transport_logger.propagate
+    original_es_propagate = es_logger.propagate
+
+    try:
+        telemetry._configure_elasticsearch_logging(settings)
+
+        assert transport_logger.propagate is False
+        assert es_logger.propagate is False
+    finally:
+        root_logger.handlers = original_handlers
+        transport_logger.propagate = original_transport_propagate
+        es_logger.propagate = original_es_propagate
+
+
 def test_configure_elasticsearch_logging_noop_when_node_absent(monkeypatch):
     _patch_es_collaborators(monkeypatch)
     settings = _settings_with_es(elasticsearch_node=None)

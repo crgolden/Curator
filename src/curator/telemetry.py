@@ -179,10 +179,24 @@ def _configure_elasticsearch_logging(settings: Settings) -> None:
         )
         handler = _ElasticsearchLogHandler(client)
 
+        # The elasticsearch client's own transport logger (`elastic_transport.transport`) logs every
+        # HTTP call it makes -- including the ones this handler issues to ship a log record. Left
+        # propagating to root, each shipped record produces a new "POST .../_doc ... [status:201]" log
+        # from that logger, which then also gets shipped, forever: a self-sustaining feedback loop that
+        # flooded `logs-dotnet-curator` with over a million docs in production before the pipeline
+        # itself gave out. Disabling propagation on that logger (and the parent `elasticsearch` logger,
+        # for the same reason) breaks the loop at its source, independent of any level filtering below.
+        logging.getLogger("elastic_transport").propagate = False
+        logging.getLogger("elasticsearch").propagate = False
+
         # A QueueHandler/QueueListener pair moves the actual ES `index` call onto a background thread, so a
         # slow or unreachable Elasticsearch node can never block the request thread that emitted the log.
         log_queue: SimpleQueue[logging.LogRecord] = SimpleQueue()
         queue_handler = QueueHandler(log_queue)
+        # Only Warning+ ships to Elasticsearch -- mirrors the Serilog minimum-level-override the
+        # .NET apps set in Azure app settings, keeping chatty info/debug logs out of the fleet's ES
+        # cluster. Root logger stays at INFO so console/uvicorn logging is unaffected.
+        queue_handler.setLevel(logging.WARNING)
         listener = QueueListener(log_queue, handler, respect_handler_level=True)
         listener.start()
 
