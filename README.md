@@ -81,8 +81,8 @@ Two independent, optional legs, wired up in `curator.telemetry.configure_telemet
   `ElasticsearchNode` together with `ElasticsearchUsername`/`ElasticsearchPassword`. Each document carries
   `service.name: "curator"` and a flat `log.level` field translated to the fleet's Serilog/ECS vocabulary
   (`Information`/`Warning`/`Error`/... rather than Python's own `INFO`/`WARNING`/`ERROR`) — mirroring what
-  the `Churches` Node app ships — written into the `logs-dotnet-curator` data stream (`op_type="create"`,
-  matching the Grafana Elasticsearch datasource pattern `logs-dotnet-*` and Elasticsearch's built-in `logs`
+  the `Churches` Node app ships — written into the `logs-app-curator` data stream (`op_type="create"`,
+  matching the Grafana Elasticsearch datasource pattern `logs-app-*` and Elasticsearch's built-in `logs`
   index template, so it rolls over/retains under the same managed ILM policy as every other app instead of
   accumulating forever in an unmanaged index). Shipping runs on a background thread (a
   `QueueHandler`/`QueueListener` pair), so a slow or unreachable Elasticsearch node never blocks a request.

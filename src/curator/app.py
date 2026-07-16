@@ -57,12 +57,13 @@ from curator.psn.library_client import LibraryClient
 from curator.psn.rate_limiter import RedisRateLimiter
 from curator.psn.session import PsnSession, RateLimiter
 from curator.psn.trophy_cache import CachedTrophyClient
-from curator.psn.trophy_client import TrophyClient
+from curator.psn.trophy_client import TrophyClient, TrophyClientFactory
 from curator.psn_routes import router as psn_router
 from curator.redis_client import RedisAdapter, build_redis_client
 from curator.settings import Settings
 from curator.telemetry import configure_telemetry
 from curator.token_validation import JwtValidator, TokenValidatorLike
+from curator.trophy_routes import router as trophy_router
 
 
 def create_app(
@@ -231,6 +232,7 @@ def create_app(
     app.include_router(library_router)
     app.include_router(collections_router)
     app.include_router(consoles_router)
+    app.include_router(trophy_router)
 
     @app.get("/health")
     async def health() -> PlainTextResponse:
@@ -361,12 +363,6 @@ def _default_agent_factory(
         return AccountClient(session)
 
     return factory
-
-
-TrophyClientFactory = Callable[[str], Coroutine[Any, Any, TrophyClient | CachedTrophyClient]]
-"""Builds a trophy client (:class:`~curator.psn.trophy_cache.CachedTrophyClient` when Redis is configured,
-else a raw :class:`~curator.psn.trophy_client.TrophyClient`) for a given Identity ``sub``. Requires an
-existing PSN link -- unlike :data:`AgentFactory`, there is no ``npsso`` bootstrap path here."""
 
 
 def _default_trophy_client_factory(

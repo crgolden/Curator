@@ -51,14 +51,14 @@ from curator.settings import Settings
 SERVICE_NAME_VALUE = "curator"
 _HEALTH_EXCLUDED_URLS = "health"
 
-# Must match the Grafana Elasticsearch datasource pattern (`logs-dotnet-*`, see
+# Must match the Grafana Elasticsearch datasource pattern (`logs-app-*`, see
 # Tools/Grafana/01-bootstrap.sh) so Curator's logs appear in the Logs/Fleet dashboards alongside the
-# .NET apps and Churches -- "dotnet" here is the fleet's app-logs dataset convention, not a claim that
+# .NET apps and Churches -- "app" here is the fleet's app-logs dataset convention, not a claim that
 # Curator is a .NET app. This also matches Elasticsearch's built-in `logs` index template (pattern
 # `logs-*-*`, composed with the managed `logs@lifecycle` ILM policy), which is what gives the .NET
-# apps' and Churches' `logs-dotnet-*` data streams their automatic rollover/retention with zero
+# apps' and Churches' `logs-app-*` data streams their automatic rollover/retention with zero
 # explicit bootstrap code -- the same thing a bare, unmanaged `curator-logs-<date>` index never got.
-_ES_DATA_STREAM = "logs-dotnet-curator"
+_ES_DATA_STREAM = "logs-app-curator"
 
 # Fleet log-level vocabulary (matches Serilog/ECS and Churches' pino LEVEL_NAMES map) so Grafana's
 # `log.level` filters/aggregations, built around Verbose/Debug/Information/Warning/Error/Fatal, also
@@ -236,7 +236,7 @@ class _ElasticsearchLogHandler(logging.Handler):
         self._client = client
 
     def emit(self, record: logging.LogRecord) -> None:
-        """Index one formatted log document into the ``logs-dotnet-curator`` data stream, swallowing any
+        """Index one formatted log document into the ``logs-app-curator`` data stream, swallowing any
         failure.
 
         Data streams are append-only: writes must use ``op_type="create"`` (the default ``"index"`` op

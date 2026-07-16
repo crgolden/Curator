@@ -11,7 +11,7 @@ from __future__ import annotations
 import json
 from typing import TYPE_CHECKING, Any, Protocol
 
-from curator.psn.models import TrophyCounts, TrophySummary, TrophyTitle
+from curator.psn.models import TitleStat, TrophyCounts, TrophyDetail, TrophyGroups, TrophySummary, TrophyTitle
 
 if TYPE_CHECKING:
     from curator.psn.trophy_client import TrophyClient
@@ -139,3 +139,43 @@ class CachedTrophyClient:
         titles = await self._client.trophy_titles(online_id, account_id, limit)
         await self._redis.set(key, json.dumps([_title_to_dict(title) for title in titles]), ex=self._ttl_seconds)
         return titles
+
+    async def trophy_titles_for_title(
+        self,
+        title_ids: list[str],
+        online_id: str | None = None,
+        account_id: str | None = None,
+    ) -> list[TrophyTitle]:
+        """Uncached passthrough to :meth:`~curator.psn.trophy_client.TrophyClient.trophy_titles_for_title`."""
+        return await self._client.trophy_titles_for_title(title_ids, online_id, account_id)
+
+    async def title_trophies(
+        self,
+        np_communication_id: str,
+        platform: str,
+        online_id: str | None = None,
+        account_id: str | None = None,
+        group: str = "all",
+        limit: int | None = None,
+    ) -> list[TrophyDetail]:
+        """Uncached passthrough to :meth:`~curator.psn.trophy_client.TrophyClient.title_trophies`."""
+        return await self._client.title_trophies(np_communication_id, platform, online_id, account_id, group, limit)
+
+    async def trophy_groups(
+        self,
+        np_communication_id: str,
+        platform: str,
+        online_id: str | None = None,
+        account_id: str | None = None,
+    ) -> TrophyGroups:
+        """Uncached passthrough to :meth:`~curator.psn.trophy_client.TrophyClient.trophy_groups`."""
+        return await self._client.trophy_groups(np_communication_id, platform, online_id, account_id)
+
+    async def title_stats(
+        self,
+        online_id: str | None = None,
+        account_id: str | None = None,
+        limit: int = 200,
+    ) -> list[TitleStat]:
+        """Uncached passthrough to :meth:`~curator.psn.trophy_client.TrophyClient.title_stats`."""
+        return await self._client.title_stats(online_id, account_id, limit)

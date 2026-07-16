@@ -34,6 +34,10 @@ _BEARER_REQUIRED_ROUTES = [
     ("get", "/me", {}),
     ("post", "/psn/link", {"json": {"npsso": "whatever"}}),
     ("delete", "/psn/link", {}),
+    ("get", "/trophies/summary", {}),
+    ("get", "/trophies/titles", {}),
+    ("get", "/trophies/titles/NPWR1", {"params": {"platform": "PS5"}}),
+    ("get", "/trophies/titles/NPWR1/groups", {"params": {"platform": "PS5"}}),
 ]
 
 
@@ -191,16 +195,19 @@ def test_cross_user_isolation_between_two_established_callers():
 # ---------------------------------------------------------------------------------------------------
 
 
-_ALLOWED_PATH_PARAMETERS = {"console_id", "game_id"}
+_ALLOWED_PATH_PARAMETERS = {"console_id", "game_id", "np_communication_id"}
 
 
 def test_no_route_exposes_a_caller_suppliable_user_identifier_path_parameter():
     """No route path parameter may be a "target user" identifier (a ``{sub}``-shaped segment letting one
     user name another's data) -- every route still keys identity exclusively off the validated token's own
-    ``sub``. ``{console_id}``/``{game_id}`` (``PUT /consoles/{console_id}/installs/{game_id}``) are the
-    sole exception: they name a *resource*, not a user, and the route re-checks the resource's ownership
-    against the caller's own ``sub`` before acting (see ``test_consoles_routes.py``) rather than trusting
-    the path.
+    ``sub``. ``{console_id}``/``{game_id}`` (``PUT /consoles/{console_id}/installs/{game_id}``) and
+    ``{np_communication_id}`` (``GET /trophies/titles/{np_communication_id}`` and its ``/groups``
+    sibling) are the sole exceptions: they name a *resource* (a console/game/PSN title), not a user.
+    ``consoles_routes`` re-checks the resource's ownership against the caller's own ``sub`` before acting
+    (see ``test_consoles_routes.py``); ``trophy_routes`` needs no such check because
+    ``np_communication_id`` only ever selects *which title* to read the caller's own trophy data for --
+    there is no cross-user data reachable through it.
     """
     client, *_ = _build()
     app = client.app

@@ -339,7 +339,7 @@ def test_format_log_record_maps_every_python_level_to_the_fleet_vocabulary():
 
 
 def test_elasticsearch_log_handler_emits_a_create_write_to_the_data_stream():
-    """The target must be `logs-dotnet-curator` (matching the Grafana `logs-dotnet-*` pattern and
+    """The target must be `logs-app-curator` (matching the Grafana `logs-app-*` pattern and
     Elasticsearch's built-in `logs` index template) written with `op_type="create"` and
     `require_data_stream=True` -- data streams are append-only and reject the default "index" op type,
     and `require_data_stream` fails loudly instead of silently falling back to a bare index.
@@ -360,7 +360,7 @@ def test_elasticsearch_log_handler_emits_a_create_write_to_the_data_stream():
 
     assert len(client.index_calls) == 1
     call = client.index_calls[0]
-    assert call["index"] == "logs-dotnet-curator"
+    assert call["index"] == "logs-app-curator"
     assert call["op_type"] == "create"
     assert call["require_data_stream"] is True
     assert call["document"]["message"] == "hello"

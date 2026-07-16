@@ -9,7 +9,8 @@ this client's caller may choose to wrap in :class:`~curator.psn.trophy_cache.Cac
 from __future__ import annotations
 
 import re
-from typing import Any
+from collections.abc import Callable, Coroutine
+from typing import TYPE_CHECKING, Any
 
 from curator.psn import _identity
 from curator.psn.models import (
@@ -22,6 +23,9 @@ from curator.psn.models import (
     trophy_counts,
 )
 from curator.psn.session import PsnSession
+
+if TYPE_CHECKING:
+    from curator.psn.trophy_cache import CachedTrophyClient
 
 _TROPHIES_URI = "https://m.np.playstation.com/api/trophy/v1"
 _GAMES_LIST_URI = "https://m.np.playstation.com/api/gamelist/v2"
@@ -372,3 +376,11 @@ class TrophyClient:
             if (response.get("nextOffset") or 0) <= 0:
                 break
         return stats
+
+
+TrophyClientFactory = Callable[[str], Coroutine[Any, Any, "TrophyClient | CachedTrophyClient"]]
+"""Builds a trophy client (:class:`~curator.psn.trophy_cache.CachedTrophyClient` when Redis is configured,
+else a raw :class:`TrophyClient`) for a given Identity ``sub``. Requires an existing PSN link -- unlike
+``curator.link_service.AgentFactory``, there is no ``npsso`` bootstrap path here. Lives alongside
+:class:`TrophyClient` (rather than in ``curator.app``, where it's built) so both ``curator.app`` and
+``curator.trophy_routes`` can import it without the two importing each other."""
