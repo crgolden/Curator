@@ -30,6 +30,14 @@ class LinkRecord:
     :param last_verified_at: When the link's email match was last re-verified against a bearer token (see
         ``curator.reverify.reverify_link``), or ``None`` if it has never been (re-)verified since being
         created via :meth:`Repository.upsert_link`/:meth:`Repository.set_link_account`.
+    :param harvest_trophies: Whether the user has opted in to Curator harvesting/displaying their PSN
+        trophy data. Defaults to ``False`` (opt-in-by-default) — see ``db/migrations/0002_psn_data_preferences.sql``.
+    :param harvest_identity: Whether the user has opted in to Curator harvesting/displaying their PSN
+        identity data (account id / online id lookups).
+    :param harvest_presence: Whether the user has opted in to Curator harvesting/displaying their PSN
+        presence data.
+    :param harvest_devices: Whether the user has opted in to Curator harvesting/displaying their PSN
+        device data.
     """
 
     psn_account_id: str | None
@@ -39,6 +47,10 @@ class LinkRecord:
     linked_at: datetime
     updated_at: datetime
     last_verified_at: datetime | None
+    harvest_trophies: bool = False
+    harvest_identity: bool = False
+    harvest_presence: bool = False
+    harvest_devices: bool = False
 
 
 class Repository:
@@ -83,7 +95,8 @@ class Repository:
         """
         sql = (
             "SELECT psn_account_id, token_response_enc, access_token_expires_at, "
-            "refresh_token_expires_at, linked_at, updated_at, last_verified_at "
+            "refresh_token_expires_at, linked_at, updated_at, last_verified_at, "
+            "harvest_trophies, harvest_identity, harvest_presence, harvest_devices "
             "FROM psn_links WHERE identity_sub = %s"
         )
         async with self._pool.connection() as conn, conn.cursor() as cur:
@@ -100,6 +113,10 @@ class Repository:
             linked_at=row[4],
             updated_at=row[5],
             last_verified_at=row[6],
+            harvest_trophies=row[7],
+            harvest_identity=row[8],
+            harvest_presence=row[9],
+            harvest_devices=row[10],
         )
 
     async def upsert_link(
@@ -152,6 +169,35 @@ class Repository:
         sql = "UPDATE psn_links SET psn_account_id = %s, updated_at = now() WHERE identity_sub = %s"
         async with self._pool.connection() as conn, conn.cursor() as cur:
             await cur.execute(sql, (psn_account_id, sub))
+
+    async def set_psn_preferences(
+        self,
+        sub: str,
+        *,
+        harvest_trophies: bool,
+        harvest_identity: bool,
+        harvest_presence: bool,
+        harvest_devices: bool,
+    ) -> None:
+        """Set all four PSN data-harvest preference flags for ``sub`` in one atomic update.
+
+        A no-op (0 rows affected, no exception) if the user has no ``psn_links`` row -- callers are
+        expected to check :meth:`get_link` first and 404 themselves, matching every other write in this
+        class.
+
+        :param sub: The Identity ``sub`` claim.
+        :param harvest_trophies: Whether Curator may harvest/display the user's PSN trophy data.
+        :param harvest_identity: Whether Curator may harvest/display the user's PSN identity data.
+        :param harvest_presence: Whether Curator may harvest/display the user's PSN presence data.
+        :param harvest_devices: Whether Curator may harvest/display the user's PSN device data.
+        """
+        sql = (
+            "UPDATE psn_links SET harvest_trophies = %s, harvest_identity = %s, "
+            "harvest_presence = %s, harvest_devices = %s WHERE identity_sub = %s"
+        )
+        params = (harvest_trophies, harvest_identity, harvest_presence, harvest_devices, sub)
+        async with self._pool.connection() as conn, conn.cursor() as cur:
+            await cur.execute(sql, params)
 
     async def touch_link_verified(self, sub: str) -> None:
         """Stamp ``last_verified_at`` to now, recording that the link's email match was just re-checked.

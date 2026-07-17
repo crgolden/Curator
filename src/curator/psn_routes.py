@@ -7,11 +7,18 @@ unlink another's PSN account.
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import BaseModel
 
+from curator.audit.repository import (
+    ACTION_LINK_FAILED,
+    ACTION_LINK_SUCCEEDED,
+    ACTION_UNLINKED,
+    AccountActionLogRepository,
+)
 from curator.deps import require_verified_caller
 from curator.link_service import AgentFactory, LinkError
 from curator.link_service import link as link_account
@@ -21,6 +28,8 @@ from curator.persistence.crypto import TokenCrypto
 from curator.persistence.repository import Repository
 from curator.reverify import reverify_link
 from curator.token_validation import TokenClaims
+
+logger = logging.getLogger("curator")
 
 router = APIRouter(tags=["account"])
 
@@ -67,6 +76,7 @@ async def psn_link(
     token_crypto: TokenCrypto = request.app.state.token_crypto
     agent_factory: AgentFactory = request.app.state.agent_factory
     redis_adapter = request.app.state.redis_adapter
+    audit_repository: AccountActionLogRepository = request.app.state.audit_repository
 
     # require_verified_caller guarantees claims.email is set before this dependency chain runs.
     assert claims.email is not None, "psn_link requires a verified caller (claims.email must be set)"
@@ -82,10 +92,12 @@ async def psn_link(
             redis=redis_adapter,
         )
     except LinkError as exc:
+        await _log(audit_repository, claims.sub, ACTION_LINK_FAILED, exc.kind)
         status_code = _ERROR_STATUS.get(exc.kind, 400)
         message = _ERROR_DETAIL.get(exc.kind, str(exc))
         raise HTTPException(status_code=status_code, detail={"error": exc.kind, "message": message}) from exc
 
+    await _log(audit_repository, claims.sub, ACTION_LINK_SUCCEEDED)
     return LinkResponse(
         linked=True,
         psn=PsnSummary(
@@ -105,14 +117,30 @@ async def psn_unlink(
     token_crypto: TokenCrypto = request.app.state.token_crypto
     agent_factory: AgentFactory = request.app.state.agent_factory
     redis_adapter = request.app.state.redis_adapter
+    audit_repository: AccountActionLogRepository = request.app.state.audit_repository
 
     await reverify_link(
         claims, repository=repository, token_crypto=token_crypto, agent_factory=agent_factory, redis=redis_adapter
     )
     await unlink_account(claims.sub, repository=repository, token_crypto=token_crypto, redis=redis_adapter)
+    await _log(audit_repository, claims.sub, ACTION_UNLINKED)
     return Response(status_code=204)
 
 
 def _iso(value: datetime | None) -> str | None:
     """Render a datetime as ISO-8601, or ``None``."""
     return value.isoformat() if value is not None else None
+
+
+async def _log(audit_repository: AccountActionLogRepository, sub: str, action: str, detail: str | None = None) -> None:
+    """Write one audit entry, never letting a logging failure break the user-facing request.
+
+    :param audit_repository: The :class:`~curator.audit.repository.AccountActionLogRepository`.
+    :param sub: The Identity ``sub`` claim of the affected user.
+    :param action: One of the ``account_action_log.action`` CHECK values.
+    :param detail: A short human-readable summary (never the npsso, a token, or raw PSN data).
+    """
+    try:
+        await audit_repository.log(sub, action, detail)
+    except Exception:
+        logger.exception("Failed to write account_action_log entry (sub=%s, action=%s)", sub, action)

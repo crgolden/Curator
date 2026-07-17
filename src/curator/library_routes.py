@@ -10,15 +10,19 @@ calls bound by those services' own rate limits. ``GET /library/refresh/{run_id}`
 
 from __future__ import annotations
 
+import logging
+
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 
+from curator.audit.repository import ACTION_LIBRARY_REFRESH_REQUESTED, AccountActionLogRepository
 from curator.deps import require_bearer
 from curator.jobs.queue_publisher import QueuePublisher
 from curator.jobs.repository import JobRunsRepository
 from curator.token_validation import TokenClaims
 
 router = APIRouter(prefix="/library", tags=["library"])
+logger = logging.getLogger("curator")
 
 
 class LibraryRefreshResponse(BaseModel):
@@ -47,6 +51,13 @@ async def refresh_library(request: Request, claims: TokenClaims = Depends(requir
         raise HTTPException(status_code=503, detail="Library refresh queue is not configured.")
 
     run_id = await queue_publisher.publish_library_refresh(claims.sub)
+    audit_repository: AccountActionLogRepository = request.app.state.audit_repository
+    try:
+        await audit_repository.log(claims.sub, ACTION_LIBRARY_REFRESH_REQUESTED, run_id)
+    except Exception:
+        logger.exception(
+            "Failed to write account_action_log entry (sub=%s, action=%s)", claims.sub, ACTION_LIBRARY_REFRESH_REQUESTED
+        )
     return LibraryRefreshResponse(run_id=run_id)
 
 

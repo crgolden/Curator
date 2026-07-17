@@ -14,13 +14,15 @@ link exists but is no longer usable, so they need to re-link (``POST /psn/link``
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable, Coroutine
 from typing import Any, TypeVar
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel
 
-from curator.deps import require_bearer
+from curator.audit.repository import ACTION_TROPHY_FETCH, AccountActionLogRepository
+from curator.deps import require_bearer, require_preference
 from curator.psn.errors import PsnAuthError
 from curator.psn.models import TrophyCounts, TrophyDetail, TrophyGroup, TrophyGroups, TrophySummary, TrophyTitle
 from curator.psn.trophy_cache import CachedTrophyClient
@@ -28,6 +30,7 @@ from curator.psn.trophy_client import TrophyClient, TrophyClientFactory
 from curator.token_validation import TokenClaims
 
 router = APIRouter(prefix="/trophies", tags=["trophies"])
+logger = logging.getLogger("curator")
 
 _NO_LINK_DETAIL = "PSN account not linked."
 _AUTH_FAILED_DETAIL = "PSN authentication failed; re-link your account."
@@ -120,9 +123,10 @@ class TrophyGroupsResponse(BaseModel):
 async def get_trophy_summary(request: Request, claims: TokenClaims = Depends(require_bearer)) -> TrophySummaryResponse:
     """Return the caller's overall trophy standing (level, tier, earned counts).
 
-    :raises fastapi.HTTPException: 404, if the caller has no PSN link; 401, if PSN rejects the stored
-        token.
+    :raises fastapi.HTTPException: 404, if the caller has no PSN link; 403, if ``harvest_trophies`` is not
+        enabled for this user; 401, if PSN rejects the stored token.
     """
+    await require_preference(request, claims.sub, "harvest_trophies")
     client = await _trophy_client(request, claims)
     summary = await _call(client.trophy_summary)
     return _summary_response(summary)
@@ -136,9 +140,10 @@ async def get_trophy_titles(
 ) -> TrophyTitlesResponse:
     """List the caller's games that have trophies, with per-game progress.
 
-    :raises fastapi.HTTPException: 404, if the caller has no PSN link; 401, if PSN rejects the stored
-        token.
+    :raises fastapi.HTTPException: 404, if the caller has no PSN link; 403, if ``harvest_trophies`` is not
+        enabled for this user; 401, if PSN rejects the stored token.
     """
+    await require_preference(request, claims.sub, "harvest_trophies")
     client = await _trophy_client(request, claims)
     titles = await _call(client.trophy_titles, limit=limit)
     return TrophyTitlesResponse(titles=[_title_response(title) for title in titles])
@@ -156,9 +161,10 @@ async def get_title_trophies(
 
     :param np_communication_id: The title's ``npCommunicationId`` (from ``GET /trophies/titles``).
     :param platform: The title's platform, e.g. ``"PS5"`` or ``"PS4"`` (also from ``GET /trophies/titles``).
-    :raises fastapi.HTTPException: 404, if the caller has no PSN link; 401, if PSN rejects the stored
-        token.
+    :raises fastapi.HTTPException: 404, if the caller has no PSN link; 403, if ``harvest_trophies`` is not
+        enabled for this user; 401, if PSN rejects the stored token.
     """
+    await require_preference(request, claims.sub, "harvest_trophies")
     client = await _trophy_client(request, claims)
     trophies = await _call(client.title_trophies, np_communication_id, platform, group=group)
     return TitleTrophiesResponse(trophies=[_detail_response(trophy) for trophy in trophies])
@@ -175,9 +181,10 @@ async def get_trophy_groups(
 
     :param np_communication_id: The title's ``npCommunicationId`` (from ``GET /trophies/titles``).
     :param platform: The title's platform, e.g. ``"PS5"`` or ``"PS4"`` (also from ``GET /trophies/titles``).
-    :raises fastapi.HTTPException: 404, if the caller has no PSN link; 401, if PSN rejects the stored
-        token.
+    :raises fastapi.HTTPException: 404, if the caller has no PSN link; 403, if ``harvest_trophies`` is not
+        enabled for this user; 401, if PSN rejects the stored token.
     """
+    await require_preference(request, claims.sub, "harvest_trophies")
     client = await _trophy_client(request, claims)
     groups = await _call(client.trophy_groups, np_communication_id, platform)
     return _groups_response(groups)
@@ -186,9 +193,18 @@ async def get_trophy_groups(
 async def _trophy_client(request: Request, claims: TokenClaims) -> TrophyClient | CachedTrophyClient:
     trophy_client_factory: TrophyClientFactory = request.app.state.trophy_client_factory
     try:
-        return await trophy_client_factory(claims.sub)
+        client = await trophy_client_factory(claims.sub)
     except RuntimeError as exc:
         raise HTTPException(status_code=404, detail=_NO_LINK_DETAIL) from exc
+
+    audit_repository: AccountActionLogRepository = request.app.state.audit_repository
+    try:
+        await audit_repository.log(claims.sub, ACTION_TROPHY_FETCH)
+    except Exception:
+        logger.exception(
+            "Failed to write account_action_log entry (sub=%s, action=%s)", claims.sub, ACTION_TROPHY_FETCH
+        )
+    return client
 
 
 _T = TypeVar("_T")

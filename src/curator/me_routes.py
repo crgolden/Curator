@@ -15,6 +15,7 @@ from datetime import datetime
 from fastapi import APIRouter, Depends, Request, Response
 from pydantic import BaseModel
 
+from curator.audit.repository import ACTION_ACCOUNT_DELETED, AccountActionLogEntry, AccountActionLogRepository
 from curator.deps import require_verified_caller
 from curator.link_service import AgentFactory
 from curator.persistence.crypto import TokenCrypto
@@ -40,6 +41,20 @@ class MeResponse(BaseModel):
     email: str | None
     linked: bool
     psn: PsnSummary | None
+
+
+class AccountActionResponse(BaseModel):
+    """One ``account_action_log`` row, as returned by ``GET /me/actions``."""
+
+    action: str
+    detail: str | None
+    occurred_at: str
+
+
+class AccountActionsResponse(BaseModel):
+    """The ``GET /me/actions`` response body."""
+
+    actions: list[AccountActionResponse]
 
 
 @router.get("/me", response_model=MeResponse)
@@ -81,14 +96,43 @@ async def delete_me(request: Request, claims: TokenClaims = Depends(require_veri
     matching :meth:`~curator.persistence.db_token_store.DbTokenStore.clear`'s unlink behavior. This never
     touches the shared, identity_sub-free catalog tables (``games``, ``game_concepts``, enrichment caches).
 
+    An ``account_deleted`` row is written to ``account_action_log`` *before* the ``app_users`` row is
+    removed. That log entry deliberately does not cascade away with the rest of the account -- see
+    migration ``0003_account_action_log.sql`` -- so a deleted account's history remains available for the
+    log's retention window.
+
     :returns: 204 on success, whether or not the caller had any data to delete (deletion is idempotent).
     """
     repository: Repository = request.app.state.repository
     redis_adapter = request.app.state.redis_adapter
+    audit_repository: AccountActionLogRepository = request.app.state.audit_repository
+    await audit_repository.log(claims.sub, ACTION_ACCOUNT_DELETED)
     await repository.delete_user(claims.sub)
     if redis_adapter is not None:
         await redis_adapter.delete(access_token_cache_key(claims.sub))
     return Response(status_code=204)
+
+
+@router.get("/me/actions", response_model=AccountActionsResponse)
+async def get_my_actions(
+    request: Request, claims: TokenClaims = Depends(require_verified_caller)
+) -> AccountActionsResponse:
+    """Return the caller's own account-action history, oldest first.
+
+    Backs the self-service "download my data" claim in the privacy policy -- every high-level action
+    Curator has taken on the caller's behalf (link attempts, unlink, library refresh requests, trophy
+    fetches, account deletion) is visible here. Rows are retained for the log's retention window even
+    after ``DELETE /me`` (see that route's docstring); a caller who has already deleted their account and
+    re-links later can still see their prior history via this same endpoint.
+    """
+    audit_repository: AccountActionLogRepository = request.app.state.audit_repository
+    entries: list[AccountActionLogEntry] = await audit_repository.list_for_user(claims.sub)
+    return AccountActionsResponse(
+        actions=[
+            AccountActionResponse(action=entry.action, detail=entry.detail, occurred_at=entry.occurred_at.isoformat())
+            for entry in entries
+        ]
+    )
 
 
 def _psn_summary(link: LinkRecord) -> PsnSummary:

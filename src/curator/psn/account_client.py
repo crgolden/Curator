@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import base64
 import binascii
+from collections.abc import Callable, Coroutine
 from dataclasses import dataclass
 from typing import Any
 
@@ -160,3 +161,11 @@ class AccountClient:
         """Resolve the authenticated account's id via the native session."""
         response = await self._session.get(_MY_ACCOUNT_URL)
         return str(response.json()["accountId"])
+
+
+AccountClientFactory = Callable[[str], Coroutine[Any, Any, "AccountClient"]]
+"""Builds a raw :class:`AccountClient` (never cached) for a given Identity ``sub``, used by
+``curator.identity_routes`` for its one ``whoami()`` call. Requires an existing PSN link. Lives alongside
+:class:`AccountClient` (rather than in ``curator.app``, where it's built) so both ``curator.app`` and
+``curator.identity_routes`` can import it without the two importing each other -- mirrors
+``curator.psn.trophy_client.TrophyClientFactory``."""

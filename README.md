@@ -45,6 +45,14 @@ scope. Routes that compare emails (`/me`'s re-verify, `POST`/`DELETE /psn/link`)
 `curator.deps.require_verified_caller`, which further 403s a token missing the `email` claim — a verified
 Identity email is mandatory for those, never treated as an absent-but-fine value.
 
+PSN data-harvesting is also gated per user, independent of scope/email checks: `psn_links` carries four
+boolean opt-in flags (`harvest_trophies`, `harvest_identity`, `harvest_presence`, `harvest_devices`), all
+`false` by default, settable only by the linked user themselves via `GET`/`PUT /me/psn-preferences`.
+`curator.deps.require_preference` 404s if the caller has no PSN link at all, 403s if the specific category's
+flag is off, and is called inline at the top of `trophy_routes.py`/`identity_routes.py`/
+`presence_routes.py`/`devices_routes.py`'s handlers before any PSN call is made — enforcement lives in the
+API, not just hidden in a UI toggle.
+
 ## Design conventions
 
 **Hand-written fakes, never `unittest.mock`.** Every test double in this repo (`FakeRepository`,
@@ -138,9 +146,10 @@ Production runs on Linux App Service and is unaffected.
 
 ## Deployment
 
-`main.yml`'s `deploy` job (runs after `test` passes, only on push to `main`) deploys to the Azure Linux Web
-App `crgolden-curator` via `azure/webapps-deploy`, authenticating over OIDC federated credentials with
-`azure/login` — no client secret. `SCM_DO_BUILD_DURING_DEPLOYMENT=true` is set on the app, so Oryx installs
+`main_crgolden-curator.yml`'s `deploy` job (runs after `test` passes, only on push to `main`) applies
+pending database migrations (see Schema above), then deploys to the Azure Linux Web App `crgolden-curator`
+via `azure/webapps-deploy`, authenticating over OIDC federated credentials with `azure/login` — no client
+secret. `SCM_DO_BUILD_DURING_DEPLOYMENT=true` is set on the app, so Oryx installs
 [`requirements.txt`](requirements.txt) during deployment; `pyproject.toml` remains the dev/test manifest and
 is not used at deploy time.
 
@@ -151,9 +160,10 @@ Required repository secrets:
 
 | Secret | Purpose |
 |---|---|
-| `AZUREAPPSERVICE_CLIENTID_C4CF7EE65BC442259601FFDB3B86513D` | `azure/login` client id (federated credential) |
-| `AZUREAPPSERVICE_TENANTID_D1FC42A8E15547A18F5A397D64F179D0` | `azure/login` tenant id |
-| `AZUREAPPSERVICE_SUBSCRIPTIONID_C6E3B3EB281E4D4C85FC7D1501EE1170` | `azure/login` subscription id |
+| `AZUREAPPSERVICE_CLIENTID_29C8B941EEC941B3B025951A74F5176F` | `azure/login` client id (federated credential) |
+| `AZUREAPPSERVICE_TENANTID_7933356A53994B7987CBFABB49879C36` | `azure/login` tenant id |
+| `AZUREAPPSERVICE_SUBSCRIPTIONID_1FCCBD0626644623AC4FF179F9E82B74` | `azure/login` subscription id |
+| `CURATOR_DATABASE_URL` | Production Postgres connection string, used only by the pre-deploy migration step |
 
 There is deliberately no module-level `app = create_app()` instance — building the real app resolves every
 setting (OIDC authority, token key, database URL) at construction time, which import alone must never
@@ -161,10 +171,16 @@ require.
 
 ## Schema
 
-The database schema lives in [`db/migrations/`](db/migrations/) as plain SQL, applied by hand via
-`psql` — there is no migration-runner dependency. `0001_initial.sql` has a header comment explaining the
-design (account layer, per-user append-only ingestion, the shared global catalog, curation-rule
-config-as-data, and the per-user library/console/assignment tables).
+The database schema lives in [`db/migrations/`](db/migrations/) as plain SQL. `0001_initial.sql` has a
+header comment explaining the design (account layer, per-user append-only ingestion, the shared global
+catalog, curation-rule config-as-data, and the per-user library/console/assignment tables).
+
+[`db/run_migrations.py`](db/run_migrations.py) applies every migration file not yet recorded as applied,
+tracked in a `schema_migrations` table (one row per filename) — the deploy job runs it against production
+before every deploy (see Deployment below), so a new migration file lands automatically on the next push to
+`main` instead of requiring a manual `psql` run. It's idempotent: rerunning it when nothing is new is a
+no-op. For local development, either run it yourself (`python db/run_migrations.py "$CURATOR_DATABASE_URL"`)
+or apply the files by hand via `psql` — either way ends at the same schema.
 
 ## Layout
 
@@ -179,6 +195,11 @@ src/curator/
   me_routes.py                # GET /me
   link_service.py               # link()/unlink(): PSN account linking, email verification rules
   psn_routes.py                   # POST/DELETE /psn/link
+  preferences_routes.py             # GET/PUT /me/psn-preferences: per-category harvest opt-in flags
+  trophy_routes.py                    # GET /trophies/summary|titles|titles/{id}|titles/{id}/groups
+  identity_routes.py                    # GET /identity
+  presence_routes.py                      # GET /presence
+  devices_routes.py                         # GET /devices
   persistence/
     config.py          # generic arg -> env var -> .env resolution
     connection.py       # PostgreSQL connection URL resolution
@@ -186,8 +207,44 @@ src/curator/
     repository.py        # Repository: psycopg 3 DAO over app_users / psn_links
     db_token_store.py    # DbTokenStore: curator.psn.session.TokenStore contract, backed by Repository
 db/migrations/
-  0001_initial.sql        # full schema, applied manually via psql
+  0001_initial.sql        # full schema
+  run_migrations.py       # idempotent runner, applied automatically by the deploy job
 tests/                     # offline pytest suite, plus the gated tests/test_schema.py
 .github/workflows/
   main.yml                # CI: offline unit tests only, on push/PR/workflow_dispatch
 ```
+
+## Known gaps / outstanding work
+
+- **Library refresh queue not configured in production.** `POST /library/refresh` needs
+  `ServiceBusConnectionString` resolved (see `curator.settings`); the production `crgolden-curator` App
+  Service has no such setting, so the endpoint 503s ("Library refresh queue is not configured.") and
+  Librarian's `/library` page can't trigger a refresh. Needs an Azure Service Bus namespace/queue plus the
+  app setting, matching the pattern the `Functions`/`Identity` apps already use for their own queues.
+- **No endpoint returns the finished library.** `GET /library/refresh/{run_id}` only reports the refresh
+  job's status (`queued`/`running`/`succeeded`/`failed`), never the resulting entries — there is no
+  `GET /library` (or similar) yet. Librarian's `/library` page is therefore refresh-trigger-and-poll only;
+  it cannot show "your library" until such an endpoint exists.
+- **No console list/create endpoints.** Only `PUT /consoles/{id}/installs/{gameId}` exists. Librarian's
+  UI accepts a manually-typed `console_id` as a stopgap (an explicit, agreed-on decision, not a bug) — a
+  404 from an unrecognized console is the expected path, not an error to chase.
+- **`POST /enrichment/runs` has no UI.** It's an admin-only global operation, not a per-user feature, and
+  intentionally out of scope for Librarian so far.
+- **Only the trophy summary is wired into Librarian's UI, not the title-level endpoints.** Librarian's
+  `/psn` preferences panel surfaces `GET /trophies/summary` as a compact, opt-in card (level/tier/progress/
+  earned counts). `GET /trophies/titles`, `/trophies/titles/{id}`, and `/trophies/titles/{id}/groups` exist
+  but have no UI yet — no drilldown was requested.
+- **Production catalog is unseeded.** `games`/`game_enrichment` are empty in the production database, so
+  Catalog/Collections pages correctly show "no results" rather than any real content — there is no
+  catalog-ingestion run against production yet.
+- **Elasticsearch structured logging had two separate live bugs, both now fixed but worth re-verifying
+  end-to-end after the next deploy:** (1) the ES client's own transport logger re-shipping its own HTTP
+  calls forever (a self-sustaining feedback loop that filled `logs-dotnet-curator` with 1M+ docs before
+  dying); (2) unhandled-exception logs never reaching the root logger's Elasticsearch handler at all,
+  because uvicorn's default logging config sets `propagate=False` on the `uvicorn` logger, silently
+  breaking the chain from `uvicorn.error` up to root. Confirm a real production 500 now actually produces
+  a document in `logs-app-curator`.
+- **Production schema had drifted from `db/migrations/` before this was caught** (missing `genres` table
+  and others) because nothing ever applied migrations to the live database. Now fixed by
+  `db/run_migrations.py` running in the deploy job — but any other repo with a similar "migrations exist
+  in source but nothing runs them" gap should be checked.

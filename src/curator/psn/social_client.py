@@ -6,6 +6,7 @@ here is a live passthrough.
 
 from __future__ import annotations
 
+from collections.abc import Callable, Coroutine
 from typing import Any
 
 from curator.psn import _identity
@@ -328,3 +329,11 @@ class SocialClient:
             share_image_url=data.get("shareImageUrl"),
             share_image_url_destination=data.get("shareImageUrlDestination"),
         )
+
+
+DevicesClientFactory = Callable[[str], Coroutine[Any, Any, "SocialClient"]]
+"""Builds a raw :class:`SocialClient` (never cached) for a given Identity ``sub``, used by
+``curator.devices_routes`` for its one ``devices()`` call. Requires an existing PSN link. Lives alongside
+:class:`SocialClient` (rather than in ``curator.app``, where it's built) so both ``curator.app`` and
+``curator.devices_routes`` can import it without the two importing each other -- mirrors
+``curator.psn.trophy_client.TrophyClientFactory``."""

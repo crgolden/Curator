@@ -7,6 +7,7 @@ now").
 
 from __future__ import annotations
 
+from collections.abc import Callable, Coroutine
 from typing import Any
 
 from curator.psn import _identity
@@ -85,3 +86,10 @@ class PresenceClient:
             for entry in basic_presences
             if entry.get("accountId") is not None
         }
+
+
+PresenceClientFactory = Callable[[str], Coroutine[Any, Any, "PresenceClient"]]
+"""Builds a raw :class:`PresenceClient` (never cached -- presence is live-only) for a given Identity
+``sub``. Requires an existing PSN link. Lives alongside :class:`PresenceClient` (rather than in
+``curator.app``, where it's built) so both ``curator.app`` and ``curator.presence_routes`` can import it
+without the two importing each other -- mirrors ``curator.psn.trophy_client.TrophyClientFactory``."""

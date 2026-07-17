@@ -105,6 +105,10 @@ async def test_get_link_maps_row_to_link_record():
         linked_at,
         updated_at,
         last_verified_at,
+        False,
+        False,
+        False,
+        False,
     )
     pool = FakePool(fetchone_result=row)
     repo = Repository(pool)
@@ -119,11 +123,44 @@ async def test_get_link_maps_row_to_link_record():
         linked_at=linked_at,
         updated_at=updated_at,
         last_verified_at=last_verified_at,
+        harvest_trophies=False,
+        harvest_identity=False,
+        harvest_presence=False,
+        harvest_devices=False,
     )
     sql, params = pool.connections[0].executed[0]
     assert "SELECT" in sql
+    assert "harvest_trophies, harvest_identity, harvest_presence, harvest_devices" in sql
     assert "FROM psn_links WHERE identity_sub = %s" in sql
     assert params == ("sub-1",)
+
+
+async def test_get_link_maps_harvest_flags_when_some_are_true():
+    linked_at = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    updated_at = datetime(2026, 2, 1, tzinfo=timezone.utc)
+    row = (
+        "psn-account-1",
+        b"encrypted-bytes",
+        None,
+        None,
+        linked_at,
+        updated_at,
+        None,
+        True,
+        False,
+        True,
+        False,
+    )
+    pool = FakePool(fetchone_result=row)
+    repo = Repository(pool)
+
+    result = await repo.get_link("sub-1")
+
+    assert result is not None
+    assert result.harvest_trophies is True
+    assert result.harvest_identity is False
+    assert result.harvest_presence is True
+    assert result.harvest_devices is False
 
 
 async def test_touch_link_verified_executes_update():
@@ -181,6 +218,41 @@ async def test_set_link_account_executes_update():
     sql, params = conn.executed[0]
     assert "UPDATE psn_links SET psn_account_id" in sql
     assert params == ("psn-account-1", "sub-1")
+
+
+async def test_set_psn_preferences_executes_update_with_all_four_flags():
+    pool = FakePool()
+    repo = Repository(pool)
+
+    await repo.set_psn_preferences(
+        "sub-1",
+        harvest_trophies=True,
+        harvest_identity=False,
+        harvest_presence=True,
+        harvest_devices=False,
+    )
+
+    conn = pool.connections[0]
+    sql, params = conn.executed[0]
+    assert "UPDATE psn_links SET harvest_trophies = %s, harvest_identity = %s" in sql
+    assert "harvest_presence = %s, harvest_devices = %s WHERE identity_sub = %s" in sql
+    assert params == (True, False, True, False, "sub-1")
+
+
+async def test_set_psn_preferences_noops_without_raising_when_unlinked():
+    pool = FakePool()
+    repo = Repository(pool)
+
+    await repo.set_psn_preferences(
+        "unlinked-sub",
+        harvest_trophies=True,
+        harvest_identity=True,
+        harvest_presence=True,
+        harvest_devices=True,
+    )
+
+    conn = pool.connections[0]
+    assert len(conn.executed) == 1
 
 
 async def test_delete_link_executes_delete():

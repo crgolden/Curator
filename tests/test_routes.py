@@ -48,6 +48,7 @@ class FakeRepository:
         self.delete_user_calls: list[str] = []
         self.set_link_account_calls: list[tuple[str, str]] = []
         self.touch_verified_calls: list[str] = []
+        self.set_psn_preferences_calls: list[tuple[str, bool, bool, bool, bool]] = []
 
     async def upsert_user(self, sub):
         self.users.add(sub)
@@ -72,6 +73,10 @@ class FakeRepository:
             linked_at=existing.linked_at if existing else datetime(2026, 1, 1, tzinfo=timezone.utc),
             updated_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
             last_verified_at=existing.last_verified_at if existing else None,
+            harvest_trophies=existing.harvest_trophies if existing else False,
+            harvest_identity=existing.harvest_identity if existing else False,
+            harvest_presence=existing.harvest_presence if existing else False,
+            harvest_devices=existing.harvest_devices if existing else False,
         )
 
     async def set_link_account(self, sub, psn_account_id):
@@ -86,6 +91,10 @@ class FakeRepository:
                 linked_at=existing.linked_at,
                 updated_at=existing.updated_at,
                 last_verified_at=existing.last_verified_at,
+                harvest_trophies=existing.harvest_trophies,
+                harvest_identity=existing.harvest_identity,
+                harvest_presence=existing.harvest_presence,
+                harvest_devices=existing.harvest_devices,
             )
 
     async def touch_link_verified(self, sub):
@@ -100,6 +109,30 @@ class FakeRepository:
                 linked_at=existing.linked_at,
                 updated_at=existing.updated_at,
                 last_verified_at=TOUCHED_AT,
+                harvest_trophies=existing.harvest_trophies,
+                harvest_identity=existing.harvest_identity,
+                harvest_presence=existing.harvest_presence,
+                harvest_devices=existing.harvest_devices,
+            )
+
+    async def set_psn_preferences(self, sub, *, harvest_trophies, harvest_identity, harvest_presence, harvest_devices):
+        self.set_psn_preferences_calls.append(
+            (sub, harvest_trophies, harvest_identity, harvest_presence, harvest_devices)
+        )
+        existing = self.links.get(sub)
+        if existing is not None:
+            self.links[sub] = LinkRecord(
+                psn_account_id=existing.psn_account_id,
+                token_response_enc=existing.token_response_enc,
+                access_token_expires_at=existing.access_token_expires_at,
+                refresh_token_expires_at=existing.refresh_token_expires_at,
+                linked_at=existing.linked_at,
+                updated_at=existing.updated_at,
+                last_verified_at=existing.last_verified_at,
+                harvest_trophies=harvest_trophies,
+                harvest_identity=harvest_identity,
+                harvest_presence=harvest_presence,
+                harvest_devices=harvest_devices,
             )
 
     async def delete_link(self, sub):
@@ -112,8 +145,36 @@ class FakeRepository:
         self.links.pop(sub, None)
 
 
+class FakeAuditRepository:
+    """Stands in for AccountActionLogRepository: in-memory list of (sub, action, detail) call records."""
+
+    def __init__(self) -> None:
+        self.entries: list[tuple[str, str, str | None]] = []
+
+    async def log(self, identity_sub: str, action: str, detail: str | None = None) -> None:
+        self.entries.append((identity_sub, action, detail))
+
+    async def list_for_user(self, identity_sub: str):
+        return [
+            SimpleNamespace(action=action, detail=detail, occurred_at=datetime(2027, 1, 1, tzinfo=timezone.utc))
+            for sub, action, detail in self.entries
+            if sub == identity_sub
+        ]
+
+    async def purge_older_than(self, cutoff) -> int:
+        return 0
+
+
 def _seed_link(
-    repo: FakeRepository, crypto: TokenCrypto, sub: str, account_id: str = "psn-account-1", last_verified_at=None
+    repo: FakeRepository,
+    crypto: TokenCrypto,
+    sub: str,
+    account_id: str = "psn-account-1",
+    last_verified_at=None,
+    harvest_trophies: bool = False,
+    harvest_identity: bool = False,
+    harvest_presence: bool = False,
+    harvest_devices: bool = False,
 ) -> None:
     """Seed a pre-existing PSN link, as if a previous /psn/link call (or DbTokenStore.save) had run."""
     encrypted = crypto.encrypt(b'{"access_token": "AT", "refresh_token": "RT"}')
@@ -125,6 +186,10 @@ def _seed_link(
         linked_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
         updated_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
         last_verified_at=last_verified_at,
+        harvest_trophies=harvest_trophies,
+        harvest_identity=harvest_identity,
+        harvest_presence=harvest_presence,
+        harvest_devices=harvest_devices,
     )
 
 
@@ -215,27 +280,29 @@ def _make_settings() -> Settings:
     )
 
 
-def _build(repository=None, token_crypto=None, agent_factory=None, token_validator=None):
+def _build(repository=None, token_crypto=None, agent_factory=None, token_validator=None, audit_repository=None):
     settings = _make_settings()
     repository = repository if repository is not None else FakeRepository()
     token_crypto = token_crypto if token_crypto is not None else TokenCrypto(Fernet.generate_key())
     agent_factory = agent_factory if agent_factory is not None else FakeAgentFactory(repository, token_crypto)
     token_validator = token_validator if token_validator is not None else FakeTokenValidator()
+    audit_repository = audit_repository if audit_repository is not None else FakeAuditRepository()
     app = create_app(
         settings,
         repository=repository,
         token_crypto=token_crypto,
         agent_factory=agent_factory,
         token_validator=token_validator,
+        audit_repository=audit_repository,
     )
     client = TestClient(app)
-    return client, repository, token_crypto, agent_factory, token_validator
+    return client, repository, token_crypto, agent_factory, token_validator, audit_repository
 
 
 def _build_with_valid_token(token="valid-token", **claims_kwargs):
-    client, repo, crypto, agent_factory, validator = _build()
+    client, repo, crypto, agent_factory, validator, audit_repository = _build()
     validator.register(token, _claims(**claims_kwargs))
-    return client, repo, crypto, agent_factory, validator
+    return client, repo, crypto, agent_factory, validator, audit_repository
 
 
 def test_create_app_returns_a_fastapi_instance():
@@ -250,6 +317,37 @@ def test_health_returns_plain_text_healthy():
     response = client.get("/health")
     assert response.status_code == 200
     assert response.text == "Healthy"
+
+
+def test_unhandled_exception_returns_500_and_is_logged(caplog):
+    """An unhandled exception in a route must still return Starlette's default plain-text 500 (no
+    behavior change for callers) but must ALSO be logged through the ``curator`` logger -- this is what
+    lets it reach the Elasticsearch handler attached to the root logger, unlike uvicorn's own
+    ``uvicorn.error`` logging of the same exception (blocked from reaching root by ``uvicorn``'s
+    ``propagate=False``)."""
+    settings = _make_settings()
+    repository = FakeRepository()
+    app = create_app(
+        settings,
+        repository=repository,
+        token_crypto=TokenCrypto(Fernet.generate_key()),
+        agent_factory=FakeAgentFactory(repository, TokenCrypto(Fernet.generate_key())),
+        token_validator=FakeTokenValidator(),
+    )
+
+    @app.get("/boom")
+    def _boom():
+        raise RuntimeError("kaboom")
+
+    client = TestClient(app, raise_server_exceptions=False)
+
+    with caplog.at_level("ERROR", logger="curator"):
+        response = client.get("/boom")
+
+    assert response.status_code == 500
+    assert response.text == "Internal Server Error"
+    assert any("Unhandled exception" in record.getMessage() for record in caplog.records)
+    assert any(record.exc_info is not None for record in caplog.records)
 
 
 def test_create_app_with_no_redis_settings_disables_caching_and_rate_limiting():
@@ -473,7 +571,7 @@ def test_psn_link_without_email_claim_is_403():
 
 
 def test_psn_link_happy_path_then_me_shows_linked_with_expirations():
-    client, repo, _crypto, agent_factory, _validator = _build_with_valid_token()
+    client, repo, _crypto, agent_factory, _validator, _audit = _build_with_valid_token()
     agent_factory.email_info = (EMAIL, True)
 
     response = client.post("/psn/link", json={"npsso": "the-npsso"}, headers=_bearer("valid-token"))
@@ -493,7 +591,7 @@ def test_psn_link_happy_path_then_me_shows_linked_with_expirations():
 
 
 def test_psn_link_mismatch_returns_409():
-    client, _repo, _crypto, agent_factory, _validator = _build_with_valid_token()
+    client, _repo, _crypto, agent_factory, _validator, _audit = _build_with_valid_token()
     agent_factory.email_info = ("someone-else@example.com", True)
 
     response = client.post("/psn/link", json={"npsso": "the-npsso"}, headers=_bearer("valid-token"))
@@ -503,7 +601,7 @@ def test_psn_link_mismatch_returns_409():
 
 
 def test_psn_link_unverified_returns_409():
-    client, _repo, _crypto, agent_factory, _validator = _build_with_valid_token()
+    client, _repo, _crypto, agent_factory, _validator, _audit = _build_with_valid_token()
     agent_factory.email_info = (EMAIL, False)
 
     response = client.post("/psn/link", json={"npsso": "the-npsso"}, headers=_bearer("valid-token"))
@@ -513,7 +611,7 @@ def test_psn_link_unverified_returns_409():
 
 
 def test_psn_link_invalid_npsso_returns_400():
-    client, _repo, _crypto, agent_factory, _validator = _build_with_valid_token()
+    client, _repo, _crypto, agent_factory, _validator, _audit = _build_with_valid_token()
 
     response = client.post("/psn/link", json={"npsso": "{not valid json"}, headers=_bearer("valid-token"))
 
@@ -523,7 +621,7 @@ def test_psn_link_invalid_npsso_returns_400():
 
 
 def test_psn_link_auth_failure_returns_401():
-    client, _repo, _crypto, agent_factory, _validator = _build_with_valid_token()
+    client, _repo, _crypto, agent_factory, _validator, _audit = _build_with_valid_token()
     agent_factory.raise_kind = "whoami"
 
     response = client.post("/psn/link", json={"npsso": "the-npsso"}, headers=_bearer("valid-token"))
@@ -595,3 +693,69 @@ def test_delete_me_without_email_claim_is_403():
     client, *_ = _build_with_valid_token(email=None)
     response = client.delete("/me", headers=_bearer("valid-token"))
     assert response.status_code == 403
+
+
+def test_delete_me_logs_account_deleted_before_removing_the_user():
+    client, _repo, _crypto, _agent_factory, _validator, audit = _build_with_valid_token()
+
+    response = client.delete("/me", headers=_bearer("valid-token"))
+
+    assert response.status_code == 204
+    assert (SUB, "account_deleted", None) in audit.entries
+
+
+def test_psn_link_happy_path_logs_link_succeeded():
+    client, _repo, _crypto, agent_factory, _validator, audit = _build_with_valid_token()
+    agent_factory.email_info = (EMAIL, True)
+
+    response = client.post("/psn/link", json={"npsso": "the-npsso"}, headers=_bearer("valid-token"))
+
+    assert response.status_code == 200
+    assert (SUB, "link_succeeded", None) in audit.entries
+
+
+def test_psn_link_mismatch_logs_link_failed_with_reason():
+    client, _repo, _crypto, agent_factory, _validator, audit = _build_with_valid_token()
+    agent_factory.email_info = ("someone-else@example.com", True)
+
+    response = client.post("/psn/link", json={"npsso": "the-npsso"}, headers=_bearer("valid-token"))
+
+    assert response.status_code == 409
+    assert (SUB, "link_failed", "mismatch") in audit.entries
+
+
+def test_psn_unlink_logs_unlinked():
+    repo = FakeRepository()
+    crypto = TokenCrypto(Fernet.generate_key())
+    agent_factory = FakeAgentFactory(repo, crypto)
+    agent_factory.email_info = (EMAIL, True)
+    _seed_link(repo, crypto, SUB)
+    validator = FakeTokenValidator()
+    validator.register("valid-token", _claims())
+    client, _repo, _crypto, _agent_factory, _validator, audit = _build(
+        repository=repo, token_crypto=crypto, agent_factory=agent_factory, token_validator=validator
+    )
+
+    response = client.delete("/psn/link", headers=_bearer("valid-token"))
+
+    assert response.status_code == 204
+    assert (SUB, "unlinked", None) in audit.entries
+
+
+def test_get_my_actions_returns_the_callers_own_history():
+    client, _repo, _crypto, agent_factory, _validator, _audit = _build_with_valid_token()
+    agent_factory.email_info = (EMAIL, True)
+    client.post("/psn/link", json={"npsso": "the-npsso"}, headers=_bearer("valid-token"))
+
+    response = client.get("/me/actions", headers=_bearer("valid-token"))
+
+    assert response.status_code == 200
+    actions = response.json()["actions"]
+    assert len(actions) == 1
+    assert actions[0]["action"] == "link_succeeded"
+
+
+def test_get_my_actions_without_bearer_token_is_401():
+    client, *_ = _build()
+    response = client.get("/me/actions")
+    assert response.status_code == 401

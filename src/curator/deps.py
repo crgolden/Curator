@@ -25,10 +25,12 @@ from __future__ import annotations
 
 from fastapi import Depends, HTTPException, Request
 
-from curator.persistence.repository import Repository
+from curator.persistence.repository import LinkRecord, Repository
 from curator.token_validation import TokenClaims, TokenError, TokenValidatorLike
 
 _CURATOR_SCOPE = "curator"
+
+_HARVEST_CATEGORIES = {"harvest_trophies", "harvest_identity", "harvest_presence", "harvest_devices"}
 
 
 async def require_bearer(request: Request) -> TokenClaims:
@@ -99,6 +101,34 @@ def require_admin(claims: TokenClaims = Depends(require_bearer)) -> TokenClaims:
     if not claims.is_admin:
         raise HTTPException(status_code=403, detail="curator.admin claim required.")
     return claims
+
+
+async def require_preference(request: Request, sub: str, category: str) -> LinkRecord:
+    """Require that ``sub`` has a PSN link with the named data-harvest ``category`` flag enabled.
+
+    Called from inside a route handler body (not as a nested ``Depends``) once the caller is already
+    resolved via :func:`require_bearer` -- mirrors how ``curator.trophy_routes`` does its own inline
+    link/auth checks rather than layering another FastAPI dependency on top.
+
+    :param request: The incoming request (used to reach ``request.app.state.repository``).
+    :param sub: The Identity ``sub`` claim of the caller whose preference is being checked.
+    :param category: One of ``"harvest_trophies"``, ``"harvest_identity"``, ``"harvest_presence"``,
+        ``"harvest_devices"``.
+    :returns: The caller's :class:`~curator.persistence.repository.LinkRecord`.
+    :raises fastapi.HTTPException: 404, if the caller has no PSN link; 403, if the named category flag is
+        not enabled for this user.
+    """
+    assert category in _HARVEST_CATEGORIES, f"unknown harvest category: {category!r}"
+
+    repository: Repository = request.app.state.repository
+    link = await repository.get_link(sub)
+    if link is None:
+        raise HTTPException(status_code=404, detail="PSN account not linked.")
+
+    if getattr(link, category) is not True:
+        raise HTTPException(status_code=403, detail=f"PSN data category '{category}' is not enabled for this user")
+
+    return link
 
 
 def _extract_bearer_token(request: Request) -> str | None:

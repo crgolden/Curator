@@ -101,6 +101,22 @@ jobs:
           tenant-id: ${{ secrets.AZUREAPPSERVICE_TENANTID_7933356A53994B7987CBFABB49879C36 }}
           subscription-id: ${{ secrets.AZUREAPPSERVICE_SUBSCRIPTIONID_1FCCBD0626644623AC4FF179F9E82B74 }}
 
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
+
+      # Runs BEFORE the app deploy (matching Identity's SqlPackage-before-app-deploy pattern) so the new
+      # code never starts against a schema it doesn't expect. db/run_migrations.py is idempotent -- it
+      # tracks applied filenames in a schema_migrations table and only runs files not already recorded --
+      # so this is safe to run on every deploy, not just ones that actually changed db/migrations/.
+      - name: Run database migrations
+        env:
+          CURATOR_DATABASE_URL: ${{ secrets.CURATOR_DATABASE_URL }}
+        run: |
+          python -m pip install "psycopg[binary]>=3.1.0,<4.0.0"
+          python db/run_migrations.py "$CURATOR_DATABASE_URL"
+
       - name: Deploy to Azure Web App
         id: deploy-to-webapp
         uses: azure/webapps-deploy@02a81bead70021f5284939794bcec79c271ab383  # v3.0.8

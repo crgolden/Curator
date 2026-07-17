@@ -38,6 +38,22 @@ _BEARER_REQUIRED_ROUTES = [
     ("get", "/trophies/titles", {}),
     ("get", "/trophies/titles/NPWR1", {"params": {"platform": "PS5"}}),
     ("get", "/trophies/titles/NPWR1/groups", {"params": {"platform": "PS5"}}),
+    ("get", "/me/psn-preferences", {}),
+    (
+        "put",
+        "/me/psn-preferences",
+        {
+            "json": {
+                "harvest_trophies": True,
+                "harvest_identity": True,
+                "harvest_presence": True,
+                "harvest_devices": True,
+            }
+        },
+    ),
+    ("get", "/identity", {}),
+    ("get", "/presence", {}),
+    ("get", "/devices", {}),
 ]
 
 
