@@ -320,9 +320,7 @@ async def test_save_skips_redis_cache_when_access_token_already_expired():
     redis = FakeRedis()
     store = DbTokenStore("sub-1", repo, _make_crypto(), redis)
 
-    await store.save(
-        {"access_token": "AT", "refresh_token": "RT", "access_token_expires_at": time.time() - 10}
-    )
+    await store.save({"access_token": "AT", "refresh_token": "RT", "access_token_expires_at": time.time() - 10})
 
     assert redis.set_calls == []
 
