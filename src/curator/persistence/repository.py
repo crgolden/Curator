@@ -193,7 +193,7 @@ class Repository:
         """
         sql = (
             "UPDATE psn_links SET harvest_trophies = %s, harvest_identity = %s, "
-            "harvest_presence = %s, harvest_devices = %s WHERE identity_sub = %s"
+            "harvest_presence = %s, harvest_devices = %s, updated_at = now() WHERE identity_sub = %s"
         )
         params = (harvest_trophies, harvest_identity, harvest_presence, harvest_devices, sub)
         async with self._pool.connection() as conn, conn.cursor() as cur:

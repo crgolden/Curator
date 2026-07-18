@@ -235,7 +235,7 @@ async def test_set_psn_preferences_executes_update_with_all_four_flags():
     conn = pool.connections[0]
     sql, params = conn.executed[0]
     assert "UPDATE psn_links SET harvest_trophies = %s, harvest_identity = %s" in sql
-    assert "harvest_presence = %s, harvest_devices = %s WHERE identity_sub = %s" in sql
+    assert "harvest_presence = %s, harvest_devices = %s, updated_at = now() WHERE identity_sub = %s" in sql
     assert params == (True, False, True, False, "sub-1")
 
 
