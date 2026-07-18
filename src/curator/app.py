@@ -21,6 +21,7 @@ from contextlib import asynccontextmanager
 from typing import Any, cast
 
 import httpx
+from azure.identity.aio import DefaultAzureCredential
 from azure.servicebus.aio import ServiceBusClient
 from fastapi import FastAPI, Request
 from fastapi.openapi.utils import get_openapi
@@ -192,11 +193,17 @@ def create_app(
         rawg_client=rawg_client, opencritic_client=opencritic_client, repository=enrichment_repository
     )
 
-    service_bus_client = (
-        ServiceBusClient.from_connection_string(settings.service_bus_connection_string)
-        if settings.service_bus_connection_string
-        else None
-    )
+    service_bus_credential: DefaultAzureCredential | None = None
+    if settings.service_bus_namespace:
+        service_bus_credential = DefaultAzureCredential()
+        service_bus_client = ServiceBusClient(
+            fully_qualified_namespace=settings.service_bus_namespace,
+            credential=service_bus_credential,
+        )
+    elif settings.service_bus_connection_string:
+        service_bus_client = ServiceBusClient.from_connection_string(settings.service_bus_connection_string)
+    else:
+        service_bus_client = None
     queue_publisher: QueuePublisher | None = None
     queue_consumer: QueueConsumer | None = None
     if service_bus_client is not None:
@@ -236,6 +243,8 @@ def create_app(
                 await queue_consumer.stop()
             if service_bus_client is not None:
                 await service_bus_client.close()
+            if service_bus_credential is not None:
+                await service_bus_credential.close()
             await http_client.aclose()
             if owns_redis and redis_client is not None:
                 await redis_client.aclose()

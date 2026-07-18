@@ -38,13 +38,14 @@ def test_from_config_resolves_all_fields(monkeypatch, tmp_path):
 
 def test_from_config_enrichment_and_jobs_settings_default_to_none(monkeypatch, tmp_path):
     _set_all_required(monkeypatch)
-    for key in ("RawgApiKey", "OpenCriticRapidApiKey", "ServiceBusConnectionString"):
+    for key in ("RawgApiKey", "OpenCriticRapidApiKey", "ServiceBusNamespace", "ServiceBusConnectionString"):
         monkeypatch.delenv(key, raising=False)
 
     settings = Settings.from_config(dotenv_path=tmp_path / "absent.env")
 
     assert settings.rawg_api_key is None
     assert settings.opencritic_rapidapi_key is None
+    assert settings.service_bus_namespace is None
     assert settings.service_bus_connection_string is None
 
 
@@ -52,12 +53,14 @@ def test_from_config_resolves_enrichment_and_jobs_settings_when_set(monkeypatch,
     _set_all_required(monkeypatch)
     monkeypatch.setenv("RawgApiKey", "rawg-key")
     monkeypatch.setenv("OpenCriticRapidApiKey", "oc-key")
+    monkeypatch.setenv("ServiceBusNamespace", "crgolden.servicebus.windows.net")
     monkeypatch.setenv("ServiceBusConnectionString", "Endpoint=sb://example/;SharedAccessKey=x")
 
     settings = Settings.from_config(dotenv_path=tmp_path / "absent.env")
 
     assert settings.rawg_api_key == "rawg-key"
     assert settings.opencritic_rapidapi_key == "oc-key"
+    assert settings.service_bus_namespace == "crgolden.servicebus.windows.net"
     assert settings.service_bus_connection_string == "Endpoint=sb://example/;SharedAccessKey=x"
 
 

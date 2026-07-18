@@ -5,6 +5,8 @@ declare), using a hand-written fake standing in for redis.asyncio.Redis's broade
 
 from __future__ import annotations
 
+from typing import Any
+
 from redis.asyncio import Redis
 
 from curator.redis_client import RedisAdapter, build_redis_client
@@ -12,7 +14,9 @@ from curator.settings import Settings
 
 
 def _settings(**overrides) -> Settings:
-    values = dict(oidc_authority="https://identity.example.test", token_key="key", database_url="postgresql://unused")
+    values: dict[str, Any] = dict(
+        oidc_authority="https://identity.example.test", token_key="key", database_url="postgresql://unused"
+    )
     values.update(overrides)
     return Settings(**values)
 

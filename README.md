@@ -216,11 +216,14 @@ tests/                     # offline pytest suite, plus the gated tests/test_sch
 
 ## Known gaps / outstanding work
 
-- **Library refresh queue not configured in production.** `POST /library/refresh` needs
-  `ServiceBusConnectionString` resolved (see `curator.settings`); the production `crgolden-curator` App
-  Service has no such setting, so the endpoint 503s ("Library refresh queue is not configured.") and
-  Librarian's `/library` page can't trigger a refresh. Needs an Azure Service Bus namespace/queue plus the
-  app setting, matching the pattern the `Functions`/`Identity` apps already use for their own queues.
+- ~~Library refresh queue not configured in production.~~ **Fixed.** `curator-library-refresh` and
+  `curator-enrichment` queues exist on the shared `crgolden` Service Bus namespace; `crgolden-curator`'s
+  system-assigned managed identity holds Data Sender + Data Receiver on that namespace; the App Service has
+  a `ServiceBusNamespace` setting. `POST /library/refresh` and `POST /enrichment/runs` now publish for real,
+  and the in-process `QueueConsumer` (started from `create_app()`'s lifespan — no separate Functions
+  deployable) drains both queues, matching Identity/Directory/Functions' production convention of
+  managed-identity-only access (the shared namespace has `DisableLocalAuth` enabled, so a connection string
+  was never going to work there). `service_bus_connection_string` remains only as a local-dev/CI fallback.
 - **No endpoint returns the finished library.** `GET /library/refresh/{run_id}` only reports the refresh
   job's status (`queued`/`running`/`succeeded`/`failed`), never the resulting entries — there is no
   `GET /library` (or similar) yet. Librarian's `/library` page is therefore refresh-trigger-and-poll only;

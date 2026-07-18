@@ -12,6 +12,7 @@ psycopg.
 
 from __future__ import annotations
 
+import dataclasses
 from datetime import datetime, timezone
 from types import SimpleNamespace
 
@@ -358,6 +359,76 @@ def test_create_app_with_no_redis_settings_disables_caching_and_rate_limiting():
 
     assert client.app.state.redis_client is None
     assert client.app.state.trophy_client_factory is not None
+
+
+def _build_with_settings(settings):
+    repository = FakeRepository()
+    token_crypto = TokenCrypto(Fernet.generate_key())
+    app = create_app(
+        settings,
+        repository=repository,
+        token_crypto=token_crypto,
+        agent_factory=FakeAgentFactory(repository, token_crypto),
+        token_validator=FakeTokenValidator(),
+    )
+    return TestClient(app)
+
+
+def test_create_app_with_neither_service_bus_setting_disables_queue_publisher_and_consumer():
+    client = _build_with_settings(_make_settings())
+
+    assert client.app.state.queue_publisher is None
+    assert client.app.state.queue_consumer is None
+
+
+def test_create_app_with_service_bus_namespace_wires_queue_publisher_and_consumer():
+    """Production sets only ``ServiceBusNamespace`` -- the fleet's shared namespace has ``DisableLocalAuth``
+    enabled, so this is the only path that actually works there (managed identity via
+    ``DefaultAzureCredential``, no connection string)."""
+    settings = dataclasses.replace(_make_settings(), service_bus_namespace="crgolden.servicebus.windows.net")
+    client = _build_with_settings(settings)
+
+    assert client.app.state.queue_publisher is not None
+    assert client.app.state.queue_consumer is not None
+
+
+def test_create_app_with_service_bus_connection_string_wires_queue_publisher_and_consumer():
+    """The connection-string fallback (local dev / an environment without a real managed identity) must
+    still wire the queues, matching the pre-managed-identity behavior."""
+    settings = dataclasses.replace(
+        _make_settings(),
+        service_bus_connection_string=(
+            "Endpoint=sb://example.servicebus.windows.net/;SharedAccessKeyName=RootManageSharedAccessKey;"
+            "SharedAccessKey=x"
+        ),
+    )
+    client = _build_with_settings(settings)
+
+    assert client.app.state.queue_publisher is not None
+    assert client.app.state.queue_consumer is not None
+
+
+def test_create_app_prefers_service_bus_namespace_over_connection_string_when_both_set(monkeypatch):
+    """If a stray ``ServiceBusConnectionString`` setting is ever left behind alongside the new
+    ``ServiceBusNamespace`` one, the managed-identity path must win -- the fleet's shared namespace rejects
+    connection-string auth outright (``DisableLocalAuth``), so silently preferring the connection string
+    here would just 401 at first queue use instead of working."""
+    from azure.servicebus.aio import ServiceBusClient
+
+    def _fail_from_connection_string(*_args, **_kwargs):
+        raise AssertionError("connection-string path must not be used when a namespace is set")
+
+    monkeypatch.setattr(ServiceBusClient, "from_connection_string", _fail_from_connection_string)
+
+    settings = dataclasses.replace(
+        _make_settings(),
+        service_bus_namespace="crgolden.servicebus.windows.net",
+        service_bus_connection_string="Endpoint=sb://example/;SharedAccessKey=x",
+    )
+    client = _build_with_settings(settings)
+
+    assert client.app.state.queue_publisher is not None
+    assert client.app.state.queue_consumer is not None
 
 
 async def test_trophy_client_factory_raises_for_unlinked_user():

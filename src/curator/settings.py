@@ -35,6 +35,7 @@ _ELASTICSEARCH_PASSWORD_ENV_NAMES: tuple[str, ...] = ("ElasticsearchPassword",)
 # writing).
 _RAWG_API_KEY_ENV_NAMES: tuple[str, ...] = ("RawgApiKey",)
 _OPENCRITIC_RAPIDAPI_KEY_ENV_NAMES: tuple[str, ...] = ("OpenCriticRapidApiKey",)
+_SERVICE_BUS_NAMESPACE_ENV_NAMES: tuple[str, ...] = ("ServiceBusNamespace",)
 _SERVICE_BUS_CONNECTION_ENV_NAMES: tuple[str, ...] = ("ServiceBusConnectionString",)
 
 # Redis-backed trophy caching (curator.psn.trophy_cache) and distributed PSN rate limiting
@@ -67,9 +68,15 @@ class Settings:
     :param rawg_api_key: The RAWG API key; ``None`` disables live RAWG enrichment lookups.
     :param opencritic_rapidapi_key: The RapidAPI key for the OpenCritic API; ``None`` disables live
         OpenCritic enrichment lookups.
-    :param service_bus_connection_string: The Azure Service Bus connection string backing the
-        ``curator-library-refresh``/``curator-enrichment`` job queues; ``None`` disables the queue
-        consumer and the job-publishing routes.
+    :param service_bus_namespace: The fully-qualified Azure Service Bus namespace (e.g.
+        ``crgolden.servicebus.windows.net``) backing the ``curator-library-refresh``/``curator-enrichment``
+        job queues, authenticated via ``DefaultAzureCredential`` (managed identity in production). Takes
+        precedence over ``service_bus_connection_string`` when both are set. This is the only path that
+        works against the fleet's shared namespace, which has ``DisableLocalAuth`` enabled.
+    :param service_bus_connection_string: A Service Bus connection string, for local development or an
+        environment without a real managed identity (the fleet's production namespace rejects this outright).
+        Ignored when ``service_bus_namespace`` is set. ``None`` for both disables the queue consumer and the
+        job-publishing routes.
     :param redis_host: The Redis host backing trophy caching and the distributed PSN rate limiter;
         ``None`` disables both (uncached trophy reads, no shared rate-limit budget).
     :param redis_port: The Redis port; defaults to Azure Cache for Redis's SSL port.
@@ -86,6 +93,7 @@ class Settings:
     elasticsearch_password: str | None = None
     rawg_api_key: str | None = None
     opencritic_rapidapi_key: str | None = None
+    service_bus_namespace: str | None = None
     service_bus_connection_string: str | None = None
     redis_host: str | None = None
     redis_port: int = 6380
@@ -124,6 +132,9 @@ class Settings:
         opencritic_rapidapi_key = resolve_setting(
             None, env_names=_OPENCRITIC_RAPIDAPI_KEY_ENV_NAMES, dotenv_path=dotenv_path
         )
+        service_bus_namespace = resolve_setting(
+            None, env_names=_SERVICE_BUS_NAMESPACE_ENV_NAMES, dotenv_path=dotenv_path
+        )
         service_bus_connection_string = resolve_setting(
             None, env_names=_SERVICE_BUS_CONNECTION_ENV_NAMES, dotenv_path=dotenv_path
         )
@@ -143,6 +154,7 @@ class Settings:
             elasticsearch_password=elasticsearch_password,
             rawg_api_key=rawg_api_key,
             opencritic_rapidapi_key=opencritic_rapidapi_key,
+            service_bus_namespace=service_bus_namespace,
             service_bus_connection_string=service_bus_connection_string,
             redis_host=redis_host,
             redis_port=int(redis_port_raw) if redis_port_raw else 6380,
