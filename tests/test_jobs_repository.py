@@ -99,6 +99,7 @@ async def test_mark_succeeded_serializes_result_summary_as_json():
     await repo.mark_succeeded("run-1", {"rawg_enriched_titles": ["Elden Ring"]})
 
     _sql, params = pool.connections[0].executed[0]
+    assert params is not None
     assert params[0] == "succeeded"
     assert params[1] == '{"rawg_enriched_titles": ["Elden Ring"]}'
     assert params[2] == "run-1"
