@@ -1,4 +1,4 @@
-"""Tests for JwtValidator: a locally generated RSA key signs tokens with Authlib, and a fake ``fetch_json``
+"""Tests for JwtValidator: a locally generated RSA key signs tokens with joserfc, and a fake ``fetch_json``
 serves the discovery document + JWKS -- no network access, no real Identity instance."""
 
 from __future__ import annotations
@@ -6,7 +6,8 @@ from __future__ import annotations
 import time
 
 import pytest
-from authlib.jose import JsonWebKey, JsonWebToken
+from joserfc import jwt
+from joserfc.jwk import RSAKey
 
 from curator.token_validation import JwtValidator, TokenError, _parse_scopes
 
@@ -14,14 +15,12 @@ AUTHORITY = "https://identity.example.test"
 DISCOVERY_URL = f"{AUTHORITY}/.well-known/openid-configuration"
 JWKS_URL = f"{AUTHORITY}/.well-known/jwks"
 
-_jwt = JsonWebToken(["RS256"])
+
+def _generate_key(kid: str) -> RSAKey:
+    return RSAKey.generate_key(2048, {"kid": kid, "use": "sig", "alg": "RS256"}, private=True)
 
 
-def _generate_key(kid: str):
-    return JsonWebKey.generate_key("RSA", 2048, {"kid": kid, "use": "sig", "alg": "RS256"}, is_private=True)
-
-
-def _sign(key, kid: str, **payload_overrides) -> str:
+def _sign(key: RSAKey, kid: str, **payload_overrides: object) -> str:
     now = int(time.time())
     payload = {
         "iss": AUTHORITY,
@@ -33,9 +32,7 @@ def _sign(key, kid: str, **payload_overrides) -> str:
     }
     payload.update(payload_overrides)
     header = {"alg": "RS256", "kid": kid}
-    # authlib ships no type stubs, so `.encode(...)` resolves as Any; `str(...)` narrows it back to the
-    # `str` this helper declares, with no behavioral change (the value is already a decoded ascii str).
-    return str(_jwt.encode(header, payload, key).decode("ascii"))
+    return jwt.encode(header, payload, key)
 
 
 class FakeFetcher:
@@ -61,7 +58,7 @@ def _make_validator(jwks: dict) -> tuple[JwtValidator, FakeFetcher]:
 
 def test_valid_token_is_accepted_and_claims_extracted():
     key = _generate_key("key-1")
-    jwks = {"keys": [key.as_dict(is_private=False)]}
+    jwks = {"keys": [key.as_dict(private=False)]}
     validator, _fetcher = _make_validator(jwks)
     token = _sign(key, "key-1")
 
@@ -77,7 +74,7 @@ def test_valid_token_is_accepted_and_claims_extracted():
 def test_wrong_signature_is_rejected():
     key = _generate_key("key-1")
     other_key = _generate_key("key-1")  # same kid, different key material
-    jwks = {"keys": [key.as_dict(is_private=False)]}
+    jwks = {"keys": [key.as_dict(private=False)]}
     validator, _fetcher = _make_validator(jwks)
     token = _sign(other_key, "key-1")
 
@@ -87,7 +84,7 @@ def test_wrong_signature_is_rejected():
 
 def test_wrong_issuer_is_rejected():
     key = _generate_key("key-1")
-    jwks = {"keys": [key.as_dict(is_private=False)]}
+    jwks = {"keys": [key.as_dict(private=False)]}
     validator, _fetcher = _make_validator(jwks)
     token = _sign(key, "key-1", iss="https://evil.example.test")
 
@@ -97,7 +94,7 @@ def test_wrong_issuer_is_rejected():
 
 def test_expired_token_is_rejected():
     key = _generate_key("key-1")
-    jwks = {"keys": [key.as_dict(is_private=False)]}
+    jwks = {"keys": [key.as_dict(private=False)]}
     validator, _fetcher = _make_validator(jwks)
     now = int(time.time())
     token = _sign(key, "key-1", iat=now - 7200, exp=now - 3600)
@@ -108,7 +105,7 @@ def test_expired_token_is_rejected():
 
 def test_scope_as_space_delimited_string_is_accepted():
     key = _generate_key("key-1")
-    jwks = {"keys": [key.as_dict(is_private=False)]}
+    jwks = {"keys": [key.as_dict(private=False)]}
     validator, _fetcher = _make_validator(jwks)
     token = _sign(key, "key-1", scope="curator openid")
 
@@ -119,7 +116,7 @@ def test_scope_as_space_delimited_string_is_accepted():
 
 def test_scope_as_json_array_is_accepted():
     key = _generate_key("key-1")
-    jwks = {"keys": [key.as_dict(is_private=False)]}
+    jwks = {"keys": [key.as_dict(private=False)]}
     validator, _fetcher = _make_validator(jwks)
     token = _sign(key, "key-1", scope=["curator"])
 
@@ -130,12 +127,12 @@ def test_scope_as_json_array_is_accepted():
 
 def test_missing_sub_is_rejected():
     key = _generate_key("key-1")
-    jwks = {"keys": [key.as_dict(is_private=False)]}
+    jwks = {"keys": [key.as_dict(private=False)]}
     validator, _fetcher = _make_validator(jwks)
     now = int(time.time())
     header = {"alg": "RS256", "kid": "key-1"}
     payload = {"iss": AUTHORITY, "email": "user@example.test", "iat": now, "exp": now + 3600}
-    token = _jwt.encode(header, payload, key).decode("ascii")
+    token = jwt.encode(header, payload, key)
 
     with pytest.raises(TokenError):
         validator.validate(token)
@@ -143,12 +140,12 @@ def test_missing_sub_is_rejected():
 
 def test_missing_email_claim_yields_none_email():
     key = _generate_key("key-1")
-    jwks = {"keys": [key.as_dict(is_private=False)]}
+    jwks = {"keys": [key.as_dict(private=False)]}
     validator, _fetcher = _make_validator(jwks)
     now = int(time.time())
     header = {"alg": "RS256", "kid": "key-1"}
     payload = {"iss": AUTHORITY, "sub": "sub-1", "scope": ["curator"], "iat": now, "exp": now + 3600}
-    token = _jwt.encode(header, payload, key).decode("ascii")
+    token = jwt.encode(header, payload, key)
 
     claims = validator.validate(token)
 
@@ -158,7 +155,7 @@ def test_missing_email_claim_yields_none_email():
 def test_unknown_kid_triggers_a_refetch_and_succeeds_once_the_key_is_present():
     old_key = _generate_key("key-1")
     new_key = _generate_key("key-2")
-    fetcher = FakeFetcher({"keys": [old_key.as_dict(is_private=False)]})
+    fetcher = FakeFetcher({"keys": [old_key.as_dict(private=False)]})
     validator = JwtValidator(AUTHORITY, fetch_json=fetcher)
 
     # Prime the validator's cache with the "old" JWKS (simulating a Curator process that started before
@@ -169,7 +166,7 @@ def test_unknown_kid_triggers_a_refetch_and_succeeds_once_the_key_is_present():
 
     # Identity rotates: key-2 appears in the JWKS. A token signed with it carries an unrecognized kid, so
     # the validator must refetch (not just fail) before giving up.
-    fetcher.jwks = {"keys": [old_key.as_dict(is_private=False), new_key.as_dict(is_private=False)]}
+    fetcher.jwks = {"keys": [old_key.as_dict(private=False), new_key.as_dict(private=False)]}
     token_new = _sign(new_key, "key-2")
 
     claims = validator.validate(token_new)
@@ -180,7 +177,7 @@ def test_unknown_kid_triggers_a_refetch_and_succeeds_once_the_key_is_present():
 
 def test_unknown_kid_still_rejected_after_refetch_if_truly_absent():
     key = _generate_key("key-1")
-    jwks = {"keys": [key.as_dict(is_private=False)]}
+    jwks = {"keys": [key.as_dict(private=False)]}
     validator, _fetcher = _make_validator(jwks)
     other_key = _generate_key("key-999")
     token = _sign(other_key, "key-999")

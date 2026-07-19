@@ -92,6 +92,18 @@ async def test_mark_succeeded_updates_status():
     assert params == ("succeeded", None, "run-1")
 
 
+async def test_mark_succeeded_serializes_result_summary_as_json():
+    pool = FakePool()
+    repo = JobRunsRepository(pool)
+
+    await repo.mark_succeeded("run-1", {"rawg_enriched_titles": ["Elden Ring"]})
+
+    _sql, params = pool.connections[0].executed[0]
+    assert params[0] == "succeeded"
+    assert params[1] == '{"rawg_enriched_titles": ["Elden Ring"]}'
+    assert params[2] == "run-1"
+
+
 async def test_mark_failed_records_error():
     pool = FakePool()
     repo = JobRunsRepository(pool)
@@ -103,7 +115,7 @@ async def test_mark_failed_records_error():
 
 
 async def test_get_returns_run():
-    pool = FakePool(fetchone_results=[("run-1", "library_refresh", "sub-1", "running", None)])
+    pool = FakePool(fetchone_results=[("run-1", "library_refresh", "sub-1", "running", None, None)])
     repo = JobRunsRepository(pool)
 
     run = await repo.get("run-1")
@@ -114,6 +126,18 @@ async def test_get_returns_run():
     assert run.identity_sub == "sub-1"
     assert run.status == "running"
     assert run.error is None
+    assert run.result_summary is None
+
+
+async def test_get_returns_result_summary():
+    summary = {"rawg_enriched_titles": ["Elden Ring"], "opencritic_topup_incomplete": True}
+    pool = FakePool(fetchone_results=[("run-1", "library_refresh", "sub-1", "succeeded", None, summary)])
+    repo = JobRunsRepository(pool)
+
+    run = await repo.get("run-1")
+
+    assert run is not None
+    assert run.result_summary == summary
 
 
 async def test_get_returns_none_when_not_found():

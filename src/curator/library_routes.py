@@ -1,7 +1,8 @@
-"""``POST /library/refresh`` -- queues a library-build job for the caller's own PSN entitlements.
+"""``GET /library`` (the caller's own library, with per-provider enrichment status) and
+``POST/GET /library/refresh`` (queue + poll a library-build job).
 
-Publishes to the ``curator-library-refresh`` Service Bus queue and returns immediately; the actual
-ingest -> canonicalize -> persist -> enrich-delta pipeline
+``POST /library/refresh`` publishes to the ``curator-library-refresh`` Service Bus queue and returns
+immediately; the actual ingest -> canonicalize -> persist -> enrich-delta pipeline
 (:class:`curator.library.library_build_orchestrator.LibraryBuildOrchestrator`) runs on
 :mod:`curator.jobs.queue_consumer`'s own schedule, since it can involve many uncached RAWG/OpenCritic/PSN
 calls bound by those services' own rate limits. ``GET /library/refresh/{run_id}`` polls the resulting
@@ -11,6 +12,7 @@ calls bound by those services' own rate limits. ``GET /library/refresh/{run_id}`
 from __future__ import annotations
 
 import logging
+from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
@@ -19,10 +21,20 @@ from curator.audit.repository import ACTION_LIBRARY_REFRESH_REQUESTED, AccountAc
 from curator.deps import require_bearer
 from curator.jobs.queue_publisher import QueuePublisher
 from curator.jobs.repository import JobRunsRepository
+from curator.library.repository import LibraryRepository
 from curator.token_validation import TokenClaims
 
 router = APIRouter(prefix="/library", tags=["library"])
 logger = logging.getLogger("curator")
+
+
+class LibraryGameResponse(BaseModel):
+    """One entry in the ``GET /library`` response."""
+
+    game_id: str
+    title: str
+    rawg_enriched: bool
+    opencritic_enriched: bool
 
 
 class LibraryRefreshResponse(BaseModel):
@@ -37,6 +49,28 @@ class LibraryRefreshStatusResponse(BaseModel):
     run_id: str
     status: str
     error: str | None
+    result_summary: dict[str, Any] | None
+
+
+@router.get("", response_model=list[LibraryGameResponse])
+async def get_library(request: Request, claims: TokenClaims = Depends(require_bearer)) -> list[LibraryGameResponse]:
+    """Return the caller's own library, with per-provider (RAWG/OpenCritic) enrichment status per game.
+
+    Every entry is included, even ones no provider has enriched yet (both flags ``False``) -- this is the
+    finished-library view Librarian's ``/library`` page renders as a checkmark table, distinct from
+    ``GET /library/refresh/{run_id}``'s job-status polling.
+    """
+    library_repository: LibraryRepository = request.app.state.library_repository
+    games = await library_repository.list_entries_with_enrichment(claims.sub)
+    return [
+        LibraryGameResponse(
+            game_id=game.game_id,
+            title=game.title,
+            rawg_enriched=game.rawg_enriched,
+            opencritic_enriched=game.opencritic_enriched,
+        )
+        for game in games
+    ]
 
 
 @router.post("/refresh", response_model=LibraryRefreshResponse, status_code=202)
@@ -75,4 +109,6 @@ async def get_library_refresh_status(
     if run is None or run.kind != "library_refresh" or run.identity_sub != claims.sub:
         raise HTTPException(status_code=404, detail="Library refresh run not found.")
 
-    return LibraryRefreshStatusResponse(run_id=run.run_id, status=run.status, error=run.error)
+    return LibraryRefreshStatusResponse(
+        run_id=run.run_id, status=run.status, error=run.error, result_summary=run.result_summary
+    )

@@ -21,6 +21,8 @@ ACTION_UNLINKED = "unlinked"
 ACTION_LIBRARY_REFRESH_REQUESTED = "library_refresh_requested"
 ACTION_TROPHY_FETCH = "trophy_fetch"
 ACTION_ACCOUNT_DELETED = "account_deleted"
+ACTION_ENRICHMENT_KEY_ADDED = "enrichment_key_added"
+ACTION_ENRICHMENT_KEY_REMOVED = "enrichment_key_removed"
 
 
 @dataclass(frozen=True, slots=True)

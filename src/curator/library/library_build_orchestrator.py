@@ -23,12 +23,33 @@ from curator.scoring.size_estimation_service import SizeEstimate
 
 
 @dataclass(frozen=True, slots=True)
+class EnrichDeltaResult:
+    """Summary of one :meth:`LibraryBuildOrchestrator.enrich_delta` call."""
+
+    enriched_count: int
+    rawg_enriched_titles: list[str]
+    opencritic_enriched_titles: list[str]
+
+
+@dataclass(frozen=True, slots=True)
 class LibraryBuildResult:
-    """Summary of one build run, for the caller/route to report back."""
+    """Summary of one build run, for the caller/route to report back.
+
+    :param rawg_enriched_titles: Titles newly enriched by RAWG this run (see
+        ``curator.jobs.repository.JobRunsRepository.mark_succeeded``'s ``result_summary``).
+    :param opencritic_enriched_titles: Titles newly enriched by OpenCritic this run.
+    :param opencritic_topup_incomplete: Whether the OpenCritic pagination top-up (see
+        ``curator.enrichment.enrichment_service.EnrichmentService._resolve_opencritic``) stopped early
+        rather than exhausting the catalog -- a future refresh (by this user or any other, since the
+        cache/cursor are shared) picks up where it left off.
+    """
 
     pull_id: str
     games_canonicalized: int
     games_enriched: int
+    rawg_enriched_titles: list[str]
+    opencritic_enriched_titles: list[str]
+    opencritic_topup_incomplete: bool
 
 
 class LibraryBuildOrchestrator:
@@ -115,7 +136,7 @@ class LibraryBuildOrchestrator:
         *,
         publisher_tier_rules: list[PublisherTierRule],
         size_estimates: list[SizeEstimate],
-    ) -> int:
+    ) -> EnrichDeltaResult:
         """Stage 4: enrich only the games that don't already have a ``game_enrichment`` row.
 
         :param canonical_games: The same list :meth:`persist_and_link` was called with (same order as
@@ -123,7 +144,7 @@ class LibraryBuildOrchestrator:
         :param game_ids: The resolved game ids from :meth:`persist_and_link`.
         :param publisher_tier_rules: Every publisher-tier classification rule.
         :param size_estimates: Every install-size estimate row.
-        :returns: The number of games actually enriched.
+        :returns: The :class:`EnrichDeltaResult` summary.
         """
         unenriched = set(await self._enrichment_repository.get_unenriched_game_ids(game_ids))
         genre_rows = await self._enrichment_repository.get_active_genres()
@@ -131,6 +152,8 @@ class LibraryBuildOrchestrator:
         genre_ids_by_name = {name.lower(): genre_id for genre_id, name, _ in genre_rows}
 
         enriched_count = 0
+        rawg_enriched_titles: list[str] = []
+        opencritic_enriched_titles: list[str] = []
         for game, game_id in zip(canonical_games, game_ids, strict=True):
             if game_id not in unenriched:
                 continue
@@ -146,7 +169,15 @@ class LibraryBuildOrchestrator:
             subgenre_id = genre_ids_by_name.get(result.subgenre.lower())
             await self._enrichment_repository.save_game_enrichment(game_id, genre_id, subgenre_id, result)
             enriched_count += 1
-        return enriched_count
+            if result.rawg_enriched:
+                rawg_enriched_titles.append(game.canonical_title)
+            if result.opencritic_enriched:
+                opencritic_enriched_titles.append(game.canonical_title)
+        return EnrichDeltaResult(
+            enriched_count=enriched_count,
+            rawg_enriched_titles=rawg_enriched_titles,
+            opencritic_enriched_titles=opencritic_enriched_titles,
+        )
 
     async def build(
         self,
@@ -180,10 +211,15 @@ class LibraryBuildOrchestrator:
         )
 
         game_ids = await self.persist_and_link(identity_sub, canonical_games)
-        enriched_count = await self.enrich_delta(
+        enrich_result = await self.enrich_delta(
             canonical_games, game_ids, publisher_tier_rules=publisher_tier_rules, size_estimates=size_estimates
         )
 
         return LibraryBuildResult(
-            pull_id=pull_id, games_canonicalized=len(canonical_games), games_enriched=enriched_count
+            pull_id=pull_id,
+            games_canonicalized=len(canonical_games),
+            games_enriched=enrich_result.enriched_count,
+            rawg_enriched_titles=enrich_result.rawg_enriched_titles,
+            opencritic_enriched_titles=enrich_result.opencritic_enriched_titles,
+            opencritic_topup_incomplete=self._enrichment_service.opencritic_topup_incomplete,
         )

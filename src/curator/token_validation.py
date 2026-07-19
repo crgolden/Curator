@@ -22,10 +22,12 @@ import urllib.request
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any, Protocol
+from typing import Any, Protocol, cast
 
-from authlib.jose import JsonWebKey, JsonWebToken
-from authlib.jose.errors import JoseError
+from joserfc import jwt
+from joserfc.errors import InvalidKeyIdError, JoseError
+from joserfc.jwk import KeySet, KeySetSerialization
+from joserfc.jwt import JWTClaimsRegistry
 
 _ALGORITHMS = ["RS256"]
 
@@ -102,8 +104,14 @@ class JwtValidator:
     def __init__(self, authority: str, fetch_json: Callable[[str], dict[str, Any]] = fetch_json) -> None:
         self._authority = authority.rstrip("/")
         self._fetch_json = fetch_json
-        self._jwt = JsonWebToken(_ALGORITHMS)
-        self._keyset: Any | None = None
+        # `algorithms=` on every `jwt.decode()` call below is a required, not cosmetic, argument: passing
+        # no restriction (or deriving one from the token's own `alg` header) is exactly the classic JWT
+        # "algorithm confusion" hole (see https://github.com/authlib/joserfc/issues/27) -- a token could
+        # otherwise claim `alg: HS256` and get "verified" by HMAC-signing it with Identity's *public* RSA
+        # key, which an attacker has (it's published at `jwks_uri`). Pinning to RS256 here, matching
+        # Identity's actual signing algorithm, closes that off.
+        self._claims_registry = JWTClaimsRegistry(iss={"essential": True, "value": self._authority})
+        self._keyset: KeySet | None = None
 
     def validate(self, token: str) -> TokenClaims:
         """Validate ``token`` and extract the claims Curator cares about.
@@ -117,7 +125,7 @@ class JwtValidator:
         claims = self._decode(token)
 
         try:
-            claims.validate()
+            self._claims_registry.validate(claims)
         except JoseError as exc:
             raise TokenError(str(exc)) from exc
 
@@ -137,31 +145,34 @@ class JwtValidator:
             is_admin=_is_true(claims.get("curator.admin")),
         )
 
-    def _decode(self, token: str) -> Any:
+    def _decode(self, token: str) -> dict[str, Any]:
         """Decode and structurally validate ``token``'s signature, refetching the JWKS once on an
         unrecognized ``kid`` before giving up.
         """
-        options = {"iss": {"essential": True, "value": self._authority}}
         keyset = self._ensure_keyset()
         try:
-            return self._jwt.decode(token, keyset, claims_options=options)
-        except ValueError:
+            return jwt.decode(token, keyset, algorithms=_ALGORITHMS).claims
+        except InvalidKeyIdError:
             pass  # unknown kid: fall through to a forced refetch-and-retry, below
         except JoseError as exc:
             raise TokenError(f"Malformed or unverifiable token: {exc}") from exc
 
         keyset = self._ensure_keyset(force=True)
         try:
-            return self._jwt.decode(token, keyset, claims_options=options)
-        except (ValueError, JoseError) as exc:
+            return jwt.decode(token, keyset, algorithms=_ALGORITHMS).claims
+        except JoseError as exc:
             raise TokenError(f"Malformed or unverifiable token: {exc}") from exc
 
-    def _ensure_keyset(self, *, force: bool = False) -> Any:
-        """Return the cached :class:`~authlib.jose.KeySet`, fetching (or refetching) it when needed."""
+    def _ensure_keyset(self, *, force: bool = False) -> KeySet:
+        """Return the cached :class:`~joserfc.jwk.KeySet`, fetching (or refetching) it when needed."""
         if self._keyset is None or force:
             discovery = self._fetch_json(f"{self._authority}/.well-known/openid-configuration")
-            jwks = self._fetch_json(discovery["jwks_uri"])
-            self._keyset = JsonWebKey.import_key_set(jwks)
+            # `fetch_json` is typed generically (`dict[str, Any]`, since it also serves the unrelated-shape
+            # discovery document above); the JWKS response's actual shape is exactly `KeySetSerialization`
+            # (a `{"keys": [...]}` document), which this cast only asserts for the type checker -- it adds
+            # no runtime behavior, and `KeySet.import_key_set` itself still validates the real content.
+            jwks = cast(KeySetSerialization, self._fetch_json(discovery["jwks_uri"]))
+            self._keyset = KeySet.import_key_set(jwks)
         return self._keyset
 
 

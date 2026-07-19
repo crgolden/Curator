@@ -16,8 +16,13 @@ import sys
 from datetime import datetime
 from typing import Any, ClassVar
 
+import httpx
 from cryptography.fernet import Fernet
 from fastapi.testclient import TestClient
+from opentelemetry.instrumentation.httpx import RequestInfo
+from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 
 import curator.telemetry as telemetry
 from curator.app import create_app
@@ -71,7 +76,7 @@ class _FakeInstrumentor:
     def __init__(self):
         self.is_instrumented_by_opentelemetry = False
 
-    def instrument(self):
+    def instrument(self, **kwargs):
         type(self).instrument_calls += 1
         self.is_instrumented_by_opentelemetry = True
 
@@ -429,3 +434,74 @@ def test_create_app_health_check_unaffected_by_telemetry_wiring(monkeypatch):
 
     assert response.status_code == 200
     assert response.text == "Healthy"
+
+
+# ---------------------------------------------------------------------------------------------------
+# _redact_rawg_key_from_span: RAWG's API key must never land in a Tempo span attribute.
+# ---------------------------------------------------------------------------------------------------
+
+
+def _traced_span(url_attribute_keys=("http.url", "url.full")):
+    """Start and immediately end a real recording span with URL attributes pre-set, mimicking what
+    HTTPXClientInstrumentor does before invoking the async_request_hook -- returns (span, exporter)."""
+    exporter = InMemorySpanExporter()
+    provider = TracerProvider()
+    provider.add_span_processor(SimpleSpanProcessor(exporter))
+    tracer = provider.get_tracer(__name__)
+    attributes = {key: "https://api.rawg.io/api/games?key=super-secret&search=Foo" for key in url_attribute_keys}
+    span = tracer.start_span("test-span", attributes=attributes)
+    return span, exporter
+
+
+async def test_redact_rawg_key_from_span_strips_key_param_for_rawg_host():
+    span, exporter = _traced_span()
+    request_info = RequestInfo(
+        method=b"GET",
+        url=httpx.URL("https://api.rawg.io/api/games?key=super-secret&search=Foo"),
+        headers=None,
+        stream=None,
+        extensions=None,
+    )
+
+    await telemetry._redact_rawg_key_from_span(span, request_info)
+    span.end()
+
+    (recorded,) = exporter.get_finished_spans()
+    for attribute_key in ("http.url", "url.full"):
+        assert "super-secret" not in recorded.attributes[attribute_key]
+        assert "search=Foo" in recorded.attributes[attribute_key]
+
+
+async def test_redact_rawg_key_from_span_leaves_non_rawg_hosts_untouched():
+    span, exporter = _traced_span()
+    request_info = RequestInfo(
+        method=b"GET",
+        url=httpx.URL("https://opencritic-api.p.rapidapi.com/game?platforms=ps5"),
+        headers=None,
+        stream=None,
+        extensions=None,
+    )
+
+    await telemetry._redact_rawg_key_from_span(span, request_info)
+    span.end()
+
+    (recorded,) = exporter.get_finished_spans()
+    assert recorded.attributes["http.url"] == "https://api.rawg.io/api/games?key=super-secret&search=Foo"
+
+
+async def test_redact_rawg_key_from_span_noop_when_span_not_recording():
+    exporter = InMemorySpanExporter()
+    provider = TracerProvider()
+    provider.add_span_processor(SimpleSpanProcessor(exporter))
+    tracer = provider.get_tracer(__name__)
+    span = tracer.start_span("test-span", attributes={"http.url": "https://api.rawg.io/api/games?key=secret"})
+    span.end()  # already ended -- is_recording() is now False
+
+    request_info = RequestInfo(
+        method=b"GET",
+        url=httpx.URL("https://api.rawg.io/api/games?key=secret"),
+        headers=None,
+        stream=None,
+        extensions=None,
+    )
+    await telemetry._redact_rawg_key_from_span(span, request_info)  # must not raise

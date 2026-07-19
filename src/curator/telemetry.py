@@ -38,18 +38,47 @@ from opentelemetry import metrics, trace
 from opentelemetry.exporter.otlp.proto.grpc.metric_exporter import OTLPMetricExporter
 from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExporter
 from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
-from opentelemetry.instrumentation.httpx import HTTPXClientInstrumentor
+from opentelemetry.instrumentation.httpx import HTTPXClientInstrumentor, RequestInfo
 from opentelemetry.instrumentation.psycopg import PsycopgInstrumentor
 from opentelemetry.sdk.metrics import MeterProvider
 from opentelemetry.sdk.metrics.export import PeriodicExportingMetricReader
 from opentelemetry.sdk.resources import SERVICE_NAME, Resource
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import BatchSpanProcessor
+from opentelemetry.trace import Span
 
 from curator.settings import Settings
 
 SERVICE_NAME_VALUE = "curator"
 _HEALTH_EXCLUDED_URLS = "health"
+
+# RAWG sends its API key as a URL query parameter (?key=...), which OpenTelemetry's httpx instrumentation
+# otherwise records verbatim as a span attribute on every call, success or failure -- independent of (and
+# not covered by) the exception-message sanitization in curator.enrichment.rawg_client. The instrumentor's
+# own built-in redact_query_parameters only strips a fixed allowlist (AWSAccessKeyId/Signature/sig/
+# X-Goog-Signature) that doesn't include "key", so this needs its own hook.
+_REDACT_QUERY_PARAM_HOSTS = ("api.rawg.io",)
+_REDACT_QUERY_PARAM_NAME = "key"
+_URL_SPAN_ATTRIBUTE_KEYS = ("http.url", "url.full")  # old and new HTTP semconv, respectively
+
+
+async def _redact_rawg_key_from_span(span: Span, request_info: RequestInfo) -> None:
+    """Strip the RAWG ``key`` query parameter from a span's URL attribute right after the httpx
+    instrumentor sets it, so a user's own RAWG API key never lands in a Tempo trace.
+    """
+    if not span.is_recording() or request_info.url.host not in _REDACT_QUERY_PARAM_HOSTS:
+        return
+    sanitized = request_info.url.copy_with(
+        params={key: value for key, value in request_info.url.params.items() if key != _REDACT_QUERY_PARAM_NAME}
+    )
+    # `Span.attributes` is an SDK-level detail (always present on the real/no-op spans this hook actually
+    # runs against) not declared on the API-level `Span` type this hook is typed against -- getattr avoids
+    # depending on that undeclared attribute while still overwriting it when present.
+    existing_attributes = getattr(span, "attributes", None) or {}
+    for attribute_key in _URL_SPAN_ATTRIBUTE_KEYS:
+        if attribute_key in existing_attributes:
+            span.set_attribute(attribute_key, str(sanitized))
+
 
 # Must match the Grafana Elasticsearch datasource pattern (`logs-app-*`, see
 # Tools/Grafana/01-bootstrap.sh) so Curator's logs appear in the Logs/Fleet dashboards alongside the
@@ -142,7 +171,7 @@ def _register_otlp_providers(alloy_endpoint: str) -> None:
 
         httpx_instrumentor = HTTPXClientInstrumentor()
         if not httpx_instrumentor.is_instrumented_by_opentelemetry:
-            httpx_instrumentor.instrument()
+            httpx_instrumentor.instrument(async_request_hook=_redact_rawg_key_from_span)
 
         _otel_configured = True
 

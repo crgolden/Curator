@@ -164,6 +164,35 @@ class EnrichmentRepository:
                     (game.oc_game_id, game.name, game.top_critic_score, game.tier, game.percent_recommended),
                 )
 
+    async def get_opencritic_cursor(self, platform: str) -> int:
+        """Return where OpenCritic catalog pagination for ``platform`` should resume from.
+
+        Shared across every caller (the admin's catalog-wide re-scrape and every user's BYOK top-up) --
+        see ``db/migrations/0004_user_enrichment_keys.sql`` for why this needs to be resumable and
+        cooperative rather than per-caller.
+
+        :param platform: The RapidAPI platform slug (``"ps4"`` or ``"ps5"``).
+        :returns: ``0`` if no row exists yet (pagination never started for this platform).
+        """
+        async with self._pool.connection() as conn, conn.cursor() as cur:
+            await cur.execute("SELECT next_skip FROM opencritic_pagination_cursor WHERE platform = %s", (platform,))
+            row = await cur.fetchone()
+        return row[0] if row is not None else 0
+
+    async def set_opencritic_cursor(self, platform: str, next_skip: int) -> None:
+        """Persist where the next OpenCritic pagination call for ``platform`` should resume from.
+
+        :param platform: The RapidAPI platform slug.
+        :param next_skip: The new resume offset (``0`` when a pagination pass reached the end of the
+            catalog, per :class:`curator.enrichment.opencritic_client.PaginationResult.exhausted`).
+        """
+        sql = (
+            "INSERT INTO opencritic_pagination_cursor (platform, next_skip) VALUES (%s, %s) "
+            "ON CONFLICT (platform) DO UPDATE SET next_skip = EXCLUDED.next_skip, updated_at = now()"
+        )
+        async with self._pool.connection() as conn, conn.cursor() as cur:
+            await cur.execute(sql, (platform, next_skip))
+
     async def get_psn_catalog_cache(self, product_id: str) -> PsnCatalogCacheEntry | None:
         """Return the cached official-PSN-catalog lookup for a product id, or ``None`` if never looked up."""
         async with self._pool.connection() as conn, conn.cursor() as cur:
@@ -231,9 +260,10 @@ class EnrichmentRepository:
                 """
                 INSERT INTO game_enrichment (
                     game_id, genre_id, subgenre_id, release_year, developer, publisher, esrb, multiplayer,
-                    critical_score, oc_score, oc_tier, oc_percent_recommended, score_source, aaa_tier
+                    critical_score, oc_score, oc_tier, oc_percent_recommended, score_source, aaa_tier,
+                    rawg_enriched, opencritic_enriched
                 )
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 ON CONFLICT (game_id) DO UPDATE SET
                     genre_id = EXCLUDED.genre_id,
                     subgenre_id = EXCLUDED.subgenre_id,
@@ -248,6 +278,8 @@ class EnrichmentRepository:
                     oc_percent_recommended = EXCLUDED.oc_percent_recommended,
                     score_source = EXCLUDED.score_source,
                     aaa_tier = EXCLUDED.aaa_tier,
+                    rawg_enriched = EXCLUDED.rawg_enriched,
+                    opencritic_enriched = EXCLUDED.opencritic_enriched,
                     enriched_at = now()
                 """,
                 (
@@ -265,6 +297,8 @@ class EnrichmentRepository:
                     result.oc_percent_recommended,
                     result.score_source,
                     result.aaa_tier,
+                    result.rawg_enriched,
+                    result.opencritic_enriched,
                 ),
             )
 

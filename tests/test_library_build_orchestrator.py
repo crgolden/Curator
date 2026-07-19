@@ -66,9 +66,12 @@ class FakeEnrichmentService:
             oc_percent_recommended=None,
             score_source=None,
             aaa_tier="Indie",
+            rawg_enriched=False,
+            opencritic_enriched=False,
         )
         self._size = size
         self.enrich_calls: list[str] = []
+        self.opencritic_topup_incomplete = False
 
     async def enrich_game(self, title, *, product_id, is_ps5, genre_priorities, publisher_tier_rules, size_estimates):
         self.enrich_calls.append(title)
@@ -177,13 +180,41 @@ async def test_enrich_delta_only_enriches_unenriched_games():
     orchestrator = _orchestrator(enrichment_service=enrichment_service, enrichment_repository=enrichment_repository)
     games = [_fake_canonical("Game A"), _fake_canonical("Game B")]
 
-    enriched_count = await orchestrator.enrich_delta(
-        games, ["game-1", "game-2"], publisher_tier_rules=[], size_estimates=[]
-    )
+    result = await orchestrator.enrich_delta(games, ["game-1", "game-2"], publisher_tier_rules=[], size_estimates=[])
 
-    assert enriched_count == 1
+    assert result.enriched_count == 1
     assert enrichment_service.enrich_calls == ["Game B"]
     assert enrichment_repository.save_calls[0][0] == "game-2"
+
+
+async def test_enrich_delta_tracks_newly_enriched_titles_per_provider():
+    from curator.enrichment.enrichment_service import EnrichmentResult
+
+    result_both = EnrichmentResult(
+        genre="Action",
+        subgenre="",
+        release_year=None,
+        developer=None,
+        publisher=None,
+        esrb=None,
+        multiplayer=None,
+        critical_score=None,
+        oc_score=None,
+        oc_tier=None,
+        oc_percent_recommended=None,
+        score_source=None,
+        aaa_tier="Indie",
+        rawg_enriched=True,
+        opencritic_enriched=False,
+    )
+    enrichment_service = FakeEnrichmentService(result=result_both)
+    orchestrator = _orchestrator(enrichment_service=enrichment_service)
+    games = [_fake_canonical("Game A")]
+
+    result = await orchestrator.enrich_delta(games, ["game-1"], publisher_tier_rules=[], size_estimates=[])
+
+    assert result.rawg_enriched_titles == ["Game A"]
+    assert result.opencritic_enriched_titles == []
 
 
 async def test_enrich_delta_resolves_genre_id_from_active_genres():
@@ -208,6 +239,9 @@ async def test_build_runs_full_pipeline_end_to_end():
     assert result.pull_id == "pull-1"
     assert result.games_canonicalized == 1
     assert result.games_enriched == 1
+    assert result.rawg_enriched_titles == []
+    assert result.opencritic_enriched_titles == []
+    assert result.opencritic_topup_incomplete is False
 
 
 def _fake_canonical(title):

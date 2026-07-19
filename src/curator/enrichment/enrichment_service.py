@@ -13,17 +13,36 @@ from dataclasses import dataclass
 from typing import Any
 
 from curator.enrichment.genre_reconciliation_service import reconcile_genres
-from curator.enrichment.opencritic_client import OpenCriticClient
+from curator.enrichment.opencritic_client import OpenCriticApiError, OpenCriticClient
 from curator.enrichment.opencritic_matcher import OpenCriticGame, build_name_index
 from curator.enrichment.opencritic_matcher import find_match as find_opencritic_match
 from curator.enrichment.publisher_tier import PublisherTierRule, classify_tier
-from curator.enrichment.rawg_client import RawgClient
+from curator.enrichment.rawg_client import RawgApiError, RawgClient
 from curator.enrichment.rawg_matcher import find_best_match as find_rawg_match
 from curator.enrichment.repository import EnrichmentRepository, PsnCatalogCacheEntry
 from curator.psn.catalog_client import CatalogClient
 from curator.scoring.size_estimation_service import SizeEstimate, estimate_install_size_gb
 
 _MULTIPLAYER_KEYWORDS = ("multiplayer", "co-op", "online", "pvp", "cooperative")
+_OPENCRITIC_TOPUP_PLATFORMS = ("ps4", "ps5")
+_OPENCRITIC_TOPUP_MAX_PAGES = 5
+_AUTH_FAILURE_STATUS_CODES = (401, 403)
+
+
+class EnrichmentAuthError(Exception):
+    """Raised when a configured provider key is rejected (401/403) -- distinct from a transient failure
+    (429/5xx) or the provider simply not being configured at all (which is not an error).
+
+    Aborting the run fast on this, rather than continuing to grind through every remaining game with a
+    key that's already known to be bad, is deliberate -- see
+    :meth:`EnrichmentService._resolve_rawg`/:meth:`EnrichmentService._resolve_opencritic_topup`.
+
+    :param provider: ``"rawg"`` or ``"opencritic"``.
+    """
+
+    def __init__(self, provider: str, message: str) -> None:
+        super().__init__(message)
+        self.provider = provider
 
 
 @dataclass(frozen=True, slots=True)
@@ -43,6 +62,8 @@ class EnrichmentResult:
     oc_percent_recommended: float | None
     score_source: str | None
     aaa_tier: str
+    rawg_enriched: bool
+    opencritic_enriched: bool
 
 
 def _score_source(critical_score: float | None, oc_score: float | None) -> str | None:
@@ -58,8 +79,13 @@ def _score_source(critical_score: float | None, oc_score: float | None) -> str |
 class EnrichmentService:
     """Orchestrates every enrichment signal for one game at a time.
 
-    :param rawg_client: The RAWG API client.
-    :param opencritic_client: The OpenCritic API client (only used by :meth:`refresh_opencritic_cache`).
+    :param rawg_client: The caller's RAWG API client, or ``None`` if they haven't configured a RAWG key --
+        ``enrich_game`` then skips the RAWG signal entirely for every game rather than failing. Curator
+        never provisions a shared/fallback RAWG key (see ``curator.app._library_refresh_handler``).
+    :param opencritic_client: The caller's OpenCritic API client, or ``None`` if they haven't configured an
+        OpenCritic key. Used two ways: :meth:`refresh_opencritic_cache` (admin-only catalog-wide re-scrape)
+        and, when this instance is built for a user's own library refresh, a bounded once-per-run top-up in
+        :meth:`_resolve_opencritic` on a cache miss (see that method).
     :param catalog_client: The PSN official-catalog client. PSN's catalog API needs an authenticated
         session scoped to one user, unlike RAWG/OpenCritic, so callers that only need
         :meth:`refresh_opencritic_cache` (no PSN signal involved) may omit it; :meth:`enrich_game` then
@@ -70,8 +96,8 @@ class EnrichmentService:
     def __init__(
         self,
         *,
-        rawg_client: RawgClient,
-        opencritic_client: OpenCriticClient,
+        rawg_client: RawgClient | None,
+        opencritic_client: OpenCriticClient | None,
         catalog_client: CatalogClient | None = None,
         repository: EnrichmentRepository,
     ) -> None:
@@ -79,22 +105,34 @@ class EnrichmentService:
         self._opencritic_client = opencritic_client
         self._catalog_client = catalog_client
         self._repository = repository
+        self._opencritic_topup_attempted = False
+        self.opencritic_topup_incomplete = False
 
     async def refresh_opencritic_cache(self, platforms: tuple[str, ...] = ("ps4", "ps5")) -> int:
-        """Paginate OpenCritic's full PS4/PS5 catalog into ``opencritic_cache``.
+        """Paginate OpenCritic's PS4/PS5 catalog into ``opencritic_cache``, resuming from the shared
+        cursor (see ``db/migrations/0004_user_enrichment_keys.sql``).
 
         Call this on a schedule (it's the "background worker, not a bursty backfill" workflow the
         migration plan's rate-limit section calls for), not per-request -- OpenCritic's RapidAPI BASIC
-        plan caps at 200 requests/day total.
+        plan caps at 200 requests/day total. Shares its progress cursor with per-user BYOK top-ups
+        (:meth:`_resolve_opencritic`), so both cooperatively sweep the same catalog over time.
 
         :param platforms: The RapidAPI platform slugs to paginate.
         :returns: The total number of games fetched across all platforms.
+        :raises RuntimeError: If no OpenCritic client is configured (this method requires one -- unlike
+            :meth:`enrich_game`, it has no "skip silently" fallback since it's the admin's own explicit
+            re-scrape action).
         """
+        if self._opencritic_client is None:
+            raise RuntimeError("refresh_opencritic_cache requires an OpenCritic client.")
+
         total = 0
         for platform in platforms:
-            games = await self._opencritic_client.fetch_platform_games(platform)
-            await self._repository.save_opencritic_games(games)
-            total += len(games)
+            start_skip = await self._repository.get_opencritic_cursor(platform)
+            result = await self._opencritic_client.fetch_platform_games(platform, start_skip=start_skip)
+            await self._repository.save_opencritic_games(result.games)
+            await self._repository.set_opencritic_cursor(platform, result.next_skip)
+            total += len(result.games)
         return total
 
     async def enrich_game(
@@ -166,29 +204,82 @@ class EnrichmentService:
             oc_percent_recommended=oc_percent,
             score_source=_score_source(critical_score, oc_score),
             aaa_tier=aaa_tier,
+            rawg_enriched=rawg_detail is not None,
+            opencritic_enriched=oc_game is not None,
         )
         estimated_size = estimate_install_size_gb(title, genre, is_ps5, aaa_tier, size_estimates)
         return result, estimated_size
 
     async def _resolve_rawg(self, title: str) -> dict[str, Any] | None:
+        if self._rawg_client is None:
+            return None
+
         cached = await self._repository.get_rawg_cache(title)
         if cached is not None:
             return cached.raw
 
-        candidates = await self._rawg_client.search_games(title)
+        try:
+            candidates = await self._rawg_client.search_games(title)
+        except RawgApiError as exc:
+            if exc.status_code in _AUTH_FAILURE_STATUS_CODES:
+                raise EnrichmentAuthError("rawg", str(exc)) from None
+            return None  # transient (429/5xx) -- skip this game's RAWG signal, don't cache a false negative
+
         match = find_rawg_match(title, candidates)
         if match is None:
             await self._repository.save_rawg_cache(title, rawg_game_id=None, raw=None)
             return None
 
-        detail = await self._rawg_client.fetch_detail(match.rawg_game_id)
+        try:
+            detail = await self._rawg_client.fetch_detail(match.rawg_game_id)
+        except RawgApiError as exc:
+            if exc.status_code in _AUTH_FAILURE_STATUS_CODES:
+                raise EnrichmentAuthError("rawg", str(exc)) from None
+            return None
+
         await self._repository.save_rawg_cache(title, rawg_game_id=match.rawg_game_id, raw=detail)
         return detail
 
     async def _resolve_opencritic(self, title: str) -> OpenCriticGame | None:
+        """Match ``title`` against the shared ``opencritic_cache``, topping it up at most once per
+        :class:`EnrichmentService` instance (i.e. once per library-refresh run) via the caller's own key
+        on the first cache miss -- see the class docstring and
+        ``db/migrations/0004_user_enrichment_keys.sql``.
+        """
+        match = await self._match_opencritic_cache(title)
+        if match is not None:
+            return match
+
+        if self._opencritic_client is None or self._opencritic_topup_attempted:
+            return match
+
+        self._opencritic_topup_attempted = True
+        await self._run_opencritic_topup()
+        return await self._match_opencritic_cache(title)
+
+    async def _match_opencritic_cache(self, title: str) -> OpenCriticGame | None:
         games = await self._repository.get_all_opencritic_games()
         index, nospace_index = build_name_index(games)
         return find_opencritic_match(title, index, nospace_index)
+
+    async def _run_opencritic_topup(self) -> None:
+        assert self._opencritic_client is not None
+        for platform in _OPENCRITIC_TOPUP_PLATFORMS:
+            start_skip = await self._repository.get_opencritic_cursor(platform)
+            try:
+                result = await self._opencritic_client.fetch_platform_games(
+                    platform, start_skip=start_skip, max_pages=_OPENCRITIC_TOPUP_MAX_PAGES
+                )
+            except OpenCriticApiError as exc:
+                if exc.status_code in _AUTH_FAILURE_STATUS_CODES:
+                    raise EnrichmentAuthError("opencritic", str(exc)) from None
+                self.opencritic_topup_incomplete = True  # transient -- stop the top-up, don't fail the run
+                return
+
+            await self._repository.save_opencritic_games(result.games)
+            await self._repository.set_opencritic_cursor(platform, result.next_skip)
+            if not result.exhausted:
+                self.opencritic_topup_incomplete = True
 
     async def _resolve_psn_genres(self, product_id: str | None) -> list[str]:
         if product_id is None or self._catalog_client is None:

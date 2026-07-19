@@ -116,6 +116,35 @@ async def test_save_opencritic_games_upserts_each():
     assert conn.executed[0][1] == (1, "Game A", 85, "Strong", 90)
 
 
+async def test_get_opencritic_cursor_returns_zero_when_no_row():
+    repo = EnrichmentRepository(FakePool(fetchone_results=[None]))
+
+    assert await repo.get_opencritic_cursor("ps5") == 0
+
+
+async def test_get_opencritic_cursor_returns_stored_value():
+    pool = FakePool(fetchone_results=[(140,)])
+    repo = EnrichmentRepository(pool)
+
+    cursor = await repo.get_opencritic_cursor("ps4")
+
+    assert cursor == 140
+    _sql, params = pool.connections[0].executed[0]
+    assert params == ("ps4",)
+
+
+async def test_set_opencritic_cursor_upserts():
+    pool = FakePool()
+    repo = EnrichmentRepository(pool)
+
+    await repo.set_opencritic_cursor("ps5", 220)
+
+    sql, params = pool.connections[0].executed[0]
+    assert "INSERT INTO opencritic_pagination_cursor" in sql
+    assert "ON CONFLICT (platform) DO UPDATE" in sql
+    assert params == ("ps5", 220)
+
+
 async def test_get_psn_catalog_cache_maps_row():
     pool = FakePool(fetchone_results=[("p1", "c1", ["Action", "RPG"], 4.5, "Sony", "2020-01-01", "cover.png")])
     repo = EnrichmentRepository(pool)
@@ -201,6 +230,8 @@ async def test_save_game_enrichment_executes_upsert():
         oc_percent_recommended=90.0,
         score_source="RAWG + OC",
         aaa_tier="AAA",
+        rawg_enriched=True,
+        opencritic_enriched=True,
     )
 
     await repo.save_game_enrichment("game-1", "genre-id-1", "subgenre-id-1", result)

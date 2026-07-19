@@ -7,7 +7,9 @@ Same shape as every other repository in this codebase: backed by a shared
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
+from typing import Any
 
 from psycopg_pool import AsyncConnectionPool
 
@@ -21,6 +23,7 @@ class JobRun:
     identity_sub: str | None
     status: str
     error: str | None
+    result_summary: dict[str, Any] | None
 
 
 class JobRunsRepository:
@@ -51,9 +54,18 @@ class JobRunsRepository:
         """Transition a run to ``running``."""
         await self._set_status(run_id, "running")
 
-    async def mark_succeeded(self, run_id: str) -> None:
-        """Transition a run to ``succeeded``."""
-        await self._set_status(run_id, "succeeded")
+    async def mark_succeeded(self, run_id: str, result_summary: dict[str, Any] | None = None) -> None:
+        """Transition a run to ``succeeded``, optionally recording a JSON summary of what it did.
+
+        :param result_summary: E.g. newly-enriched titles per provider (see
+            ``curator.library.library_build_orchestrator.LibraryBuildResult``); ``None`` for runs with
+            nothing to summarize (an ``"enrichment"`` admin re-scrape, or a fake in tests).
+        """
+        async with self._pool.connection() as conn, conn.cursor() as cur:
+            await cur.execute(
+                "UPDATE job_runs SET status = %s, result_summary = %s, updated_at = now() WHERE run_id = %s",
+                ("succeeded", json.dumps(result_summary) if result_summary is not None else None, run_id),
+            )
 
     async def mark_failed(self, run_id: str, error: str) -> None:
         """Transition a run to ``failed``, recording ``error``."""
@@ -70,7 +82,7 @@ class JobRunsRepository:
         """Return one run, or ``None`` if ``run_id`` is unknown."""
         async with self._pool.connection() as conn, conn.cursor() as cur:
             await cur.execute(
-                "SELECT run_id, kind, identity_sub, status, error FROM job_runs WHERE run_id = %s",
+                "SELECT run_id, kind, identity_sub, status, error, result_summary FROM job_runs WHERE run_id = %s",
                 (run_id,),
             )
             row = await cur.fetchone()
@@ -82,4 +94,5 @@ class JobRunsRepository:
             identity_sub=str(row[2]) if row[2] is not None else None,
             status=row[3],
             error=row[4],
+            result_summary=row[5],
         )

@@ -16,7 +16,7 @@ python -m mypy src tests
 
 `mypy` is strict on `src/curator` (no untyped defs, no implicit `Any`); `[[tool.mypy.overrides]]` in
 `pyproject.toml` relaxes a few checks for `tests/` (hand-written fake collaborators use structural, not
-nominal, typing — see "Unit tests" below) and marks `authlib` as an untyped third-party import.
+nominal, typing — see "Unit tests" below).
 
 ## Unit tests
 
@@ -24,7 +24,7 @@ The whole suite under `tests/` runs fully offline: no live database, no network,
 calls. Backends (the psycopg connection/cursor protocol, the `Repository`, the PSN agent, and
 `curator.token_validation.JwtValidator`) are stood in for with hand-written fake classes — never
 `unittest.mock`. `tests/test_token_validation.py` is the one place that exercises the *real*
-`JwtValidator`: it generates a local RSA key with Authlib, signs canned tokens, and serves the
+`JwtValidator`: it generates a local RSA key with joserfc, signs canned tokens, and serves the
 discovery/JWKS documents through an injected fake `fetch_json` — no network access even there.
 
 Curator is a pure JWT Bearer resource server — there is no session, no cookie, no login route — so every
@@ -57,7 +57,7 @@ If `pip install -e ".[dev]"` doesn't resolve every dependency in your environmen
 packages directly:
 
 ```powershell
-python -m pip install pytest httpx fastapi uvicorn authlib cryptography "psycopg[binary]" psycopg-pool redis azure-servicebus pycountry
+python -m pip install pytest httpx fastapi uvicorn joserfc cryptography "psycopg[binary]" psycopg-pool redis azure-servicebus pycountry
 python -m pytest tests -q
 ```
 

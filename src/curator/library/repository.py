@@ -12,6 +12,17 @@ from psycopg_pool import AsyncConnectionPool
 
 
 @dataclass(frozen=True, slots=True)
+class LibraryGameView:
+    """One row of a user's library, joined with its enrichment status -- backs ``GET /library``'s
+    per-provider checkmarks."""
+
+    game_id: str
+    title: str
+    rawg_enriched: bool
+    opencritic_enriched: bool
+
+
+@dataclass(frozen=True, slots=True)
 class LibraryEntry:
     """One row from ``library_entries``: a user's derived ownership of one game."""
 
@@ -99,5 +110,34 @@ class LibraryRepository:
                 winning_entitlement_id=row[5],
                 product_id=row[6],
             )
+            for row in rows
+        ]
+
+    async def list_entries_with_enrichment(self, identity_sub: str) -> list[LibraryGameView]:
+        """Return every game a user owns with its per-provider enrichment status, for ``GET /library``'s
+        checkmark view.
+
+        ``LEFT JOIN game_enrichment`` -- a freshly-ingested-but-not-yet-enriched game has no
+        ``game_enrichment`` row yet, and both flags correctly default to ``False`` in that case (not
+        enriched yet, not an error).
+
+        :param identity_sub: The Curator user id (Identity's ``sub``).
+        """
+        async with self._pool.connection() as conn, conn.cursor() as cur:
+            await cur.execute(
+                """
+                SELECT g.game_id, g.canonical_title,
+                       COALESCE(ge.rawg_enriched, false), COALESCE(ge.opencritic_enriched, false)
+                FROM library_entries le
+                JOIN games g ON g.game_id = le.game_id
+                LEFT JOIN game_enrichment ge ON ge.game_id = le.game_id
+                WHERE le.identity_sub = %s
+                ORDER BY g.canonical_title
+                """,
+                (identity_sub,),
+            )
+            rows = await cur.fetchall()
+        return [
+            LibraryGameView(game_id=str(row[0]), title=row[1], rawg_enriched=row[2], opencritic_enriched=row[3])
             for row in rows
         ]

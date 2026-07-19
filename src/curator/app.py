@@ -22,7 +22,7 @@ from typing import Any, cast
 
 import httpx
 from azure.identity.aio import DefaultAzureCredential
-from azure.servicebus.aio import ServiceBusClient
+from azure.servicebus.aio import AutoLockRenewer, ServiceBusClient
 from fastapi import FastAPI, Request
 from fastapi.openapi.utils import get_openapi
 from fastapi.responses import PlainTextResponse
@@ -41,6 +41,7 @@ from curator.enrichment.enrichment_service import EnrichmentService
 from curator.enrichment.opencritic_client import OpenCriticClient
 from curator.enrichment.rawg_client import RawgClient
 from curator.enrichment.repository import EnrichmentRepository
+from curator.enrichment_keys_routes import router as enrichment_keys_router
 from curator.enrichment_routes import router as enrichment_router
 from curator.identity_routes import router as identity_router
 from curator.jobs import ENRICHMENT_QUEUE, LIBRARY_REFRESH_QUEUE
@@ -55,6 +56,7 @@ from curator.link_service import AgentFactory, PsnAgentLike
 from curator.me_routes import router as me_router
 from curator.persistence.crypto import TokenCrypto
 from curator.persistence.db_token_store import DbTokenStore
+from curator.persistence.enrichment_keys_repository import EnrichmentKeysRepository
 from curator.persistence.repository import Repository
 from curator.preferences_routes import router as preferences_router
 from curator.presence_routes import router as presence_router
@@ -77,6 +79,28 @@ from curator.trophy_routes import router as trophy_router
 logger = logging.getLogger("curator")
 
 
+class ServiceBusLockRenewer:
+    """Thin :class:`~curator.jobs.queue_consumer.LockRenewer` adapter over
+    :class:`azure.servicebus.aio.AutoLockRenewer` -- the real implementation, wired only here (production
+    ``create_app()``), never in :class:`~curator.jobs.queue_consumer.QueueConsumer` itself, which stays
+    Azure-agnostic and testable against hand-written fakes (see ``curator.jobs.queue_consumer.NullLockRenewer``,
+    the default every existing test implicitly uses).
+
+    :param max_lock_renewal_duration: Maximum total seconds to keep renewing one message's lock.
+    """
+
+    def __init__(self, *, max_lock_renewal_duration: int) -> None:
+        self._renewer = AutoLockRenewer(max_lock_renewal_duration=max_lock_renewal_duration)
+
+    def register(self, receiver: Any, message: Any) -> None:
+        """Start auto-renewing ``message``'s lock on ``receiver``."""
+        self._renewer.register(receiver, message)
+
+    async def close(self) -> None:
+        """Stop renewing every registered message and release the renewer's resources."""
+        await self._renewer.close()
+
+
 def create_app(
     settings: Settings | None = None,
     *,
@@ -91,11 +115,13 @@ def create_app(
     collections_repository: CollectionsRepository | None = None,
     job_runs_repository: JobRunsRepository | None = None,
     audit_repository: AccountActionLogRepository | None = None,
+    enrichment_keys_repository: EnrichmentKeysRepository | None = None,
     redis_client: Redis | None = None,
     trophy_client_factory: TrophyClientFactory | None = None,
     identity_client_factory: AccountClientFactory | None = None,
     presence_client_factory: PresenceClientFactory | None = None,
     devices_client_factory: DevicesClientFactory | None = None,
+    http_client: httpx.AsyncClient | None = None,
 ) -> FastAPI:
     """Build a configured Curator :class:`~fastapi.FastAPI` app.
 
@@ -131,6 +157,9 @@ def create_app(
     :param audit_repository: The defensive account-action-log repository; defaults to a real
         :class:`~curator.audit.repository.AccountActionLogRepository` over ``pool``. Deliberately kept
         separate from ``repository`` -- see that class's docstring.
+    :param enrichment_keys_repository: The per-user BYOK RAWG/OpenCritic key repository; defaults to a
+        real :class:`~curator.persistence.enrichment_keys_repository.EnrichmentKeysRepository` over
+        ``pool``.
     :param redis_client: The shared Redis client backing the distributed PSN rate limiter
         (:class:`~curator.psn.rate_limiter.RedisRateLimiter`) and trophy-read caching
         (:class:`~curator.psn.trophy_cache.CachedTrophyClient`); defaults to
@@ -146,6 +175,10 @@ def create_app(
         -- presence is live-only.
     :param devices_client_factory: Builds a :class:`~curator.psn.social_client.SocialClient` for a given
         (already-linked) ``sub``; defaults to :func:`_default_devices_client_factory`. Never cached.
+    :param http_client: The shared outbound HTTP client used for the admin RAWG/OpenCritic singletons, the
+        per-user library-refresh clients, and BYOK key-save validation; defaults to a real
+        :class:`httpx.AsyncClient`. Tests inject one wired to an ``httpx.MockTransport`` instead of hitting
+        the network.
     :returns: The configured :class:`~fastapi.FastAPI` app.
     """
     settings = settings or Settings.from_config()
@@ -181,16 +214,24 @@ def create_app(
     collection_orchestrator = CollectionOrchestrator(collections_repository)
     job_runs_repository = job_runs_repository or JobRunsRepository(shared_pool)
     audit_repository = audit_repository or AccountActionLogRepository(shared_pool)
+    enrichment_keys_repository = enrichment_keys_repository or EnrichmentKeysRepository(shared_pool)
 
-    http_client = httpx.AsyncClient()
-    rawg_client = RawgClient(http_client, settings.rawg_api_key or "")
-    opencritic_client = OpenCriticClient(http_client, settings.opencritic_rapidapi_key or "")
-    # No catalog_client here: the official PSN-catalog signal needs a per-user authenticated PsnSession,
-    # unlike RAWG/OpenCritic -- this singleton only ever calls refresh_opencritic_cache() (admin-scoped
-    # global re-scrape, PSN-free), never enrich_game(). The library-refresh job handler below builds its
-    # own per-user EnrichmentService with a real catalog_client instead.
+    owns_http_client = http_client is None
+    http_client = http_client or httpx.AsyncClient()
+    # Admin-only catalog-wide singleton, built from Settings.rawg_api_key/opencritic_rapidapi_key -- its
+    # ONLY remaining caller is _enrichment_run_handler -> refresh_opencritic_cache() (POST /enrichment/runs,
+    # require_admin-gated). Per-user library refreshes never use this: Curator provisions no shared/
+    # fallback RAWG/OpenCritic key (it doesn't scale to every user's library) -- _library_refresh_handler
+    # below builds its own per-user clients from that user's own stored keys instead, via
+    # enrichment_keys_repository. No catalog_client here either: the official PSN-catalog signal needs a
+    # per-user authenticated PsnSession, unlike RAWG/OpenCritic, and this singleton never calls
+    # enrich_game(), only refresh_opencritic_cache().
+    admin_rawg_client = RawgClient(http_client, settings.rawg_api_key) if settings.rawg_api_key else None
+    admin_opencritic_client = (
+        OpenCriticClient(http_client, settings.opencritic_rapidapi_key) if settings.opencritic_rapidapi_key else None
+    )
     enrichment_service = EnrichmentService(
-        rawg_client=rawg_client, opencritic_client=opencritic_client, repository=enrichment_repository
+        rawg_client=admin_rawg_client, opencritic_client=admin_opencritic_client, repository=enrichment_repository
     )
 
     service_bus_credential: DefaultAzureCredential | None = None
@@ -206,12 +247,17 @@ def create_app(
         service_bus_client = None
     queue_publisher: QueuePublisher | None = None
     queue_consumer: QueueConsumer | None = None
+    lock_renewer: ServiceBusLockRenewer | None = None
     if service_bus_client is not None:
         queue_publisher = QueuePublisher(
             library_refresh_sender=service_bus_client.get_queue_sender(LIBRARY_REFRESH_QUEUE),
             enrichment_sender=service_bus_client.get_queue_sender(ENRICHMENT_QUEUE),
             job_runs_repository=job_runs_repository,
         )
+        # 15 minutes: generous enough to cover a large library at RAWG's ~1 req/sec per-user throttle
+        # (see _library_refresh_handler), well past the queue's 1-minute LockDuration, while still bounding
+        # worst-case duplicate-redelivery exposure if a message somehow hangs forever.
+        lock_renewer = ServiceBusLockRenewer(max_lock_renewal_duration=900)
         queue_consumer = QueueConsumer(
             library_refresh_receiver=service_bus_client.get_queue_receiver(LIBRARY_REFRESH_QUEUE),
             enrichment_receiver=service_bus_client.get_queue_receiver(ENRICHMENT_QUEUE),
@@ -221,13 +267,14 @@ def create_app(
                 catalog_repository=catalog_repository,
                 enrichment_repository=enrichment_repository,
                 library_repository=library_repository,
-                rawg_client=rawg_client,
-                opencritic_client=opencritic_client,
+                enrichment_keys_repository=enrichment_keys_repository,
+                http_client=http_client,
                 rate_limiter=rate_limiter,
                 redis_adapter=redis_adapter,
             ),
             on_enrichment_run=_enrichment_run_handler(enrichment_service),
             job_runs_repository=job_runs_repository,
+            lock_renewer=lock_renewer,
         )
 
     @asynccontextmanager
@@ -241,11 +288,14 @@ def create_app(
         finally:
             if queue_consumer is not None:
                 await queue_consumer.stop()
+            if lock_renewer is not None:
+                await lock_renewer.close()
             if service_bus_client is not None:
                 await service_bus_client.close()
             if service_bus_credential is not None:
                 await service_bus_credential.close()
-            await http_client.aclose()
+            if owns_http_client:
+                await http_client.aclose()
             if owns_redis and redis_client is not None:
                 await redis_client.aclose()
             if owns_pool and pool is not None:
@@ -254,6 +304,7 @@ def create_app(
     app = FastAPI(title="Curator", lifespan=lifespan)
 
     app.state.settings = settings
+    app.state.http_client = http_client
     app.state.repository = repository
     app.state.token_crypto = token_crypto
     app.state.agent_factory = agent_factory
@@ -271,6 +322,7 @@ def create_app(
     app.state.collection_orchestrator = collection_orchestrator
     app.state.job_runs_repository = job_runs_repository
     app.state.audit_repository = audit_repository
+    app.state.enrichment_keys_repository = enrichment_keys_repository
     app.state.queue_publisher = queue_publisher
     app.state.queue_consumer = queue_consumer
 
@@ -286,6 +338,7 @@ def create_app(
     app.include_router(identity_router)
     app.include_router(presence_router)
     app.include_router(devices_router)
+    app.include_router(enrichment_keys_router)
 
     @app.get("/health")
     async def health() -> PlainTextResponse:
@@ -361,6 +414,10 @@ def _enrichment_run_handler(enrichment_service: EnrichmentService) -> Callable[[
     return handle
 
 
+_RAWG_USER_MAX_REQUESTS = 1
+_RAWG_USER_WINDOW_SECONDS = 1
+
+
 def _library_refresh_handler(
     *,
     repository: Repository,
@@ -368,11 +425,11 @@ def _library_refresh_handler(
     catalog_repository: CatalogRepository,
     enrichment_repository: EnrichmentRepository,
     library_repository: LibraryRepository,
-    rawg_client: RawgClient,
-    opencritic_client: OpenCriticClient,
+    enrichment_keys_repository: EnrichmentKeysRepository,
+    http_client: httpx.AsyncClient,
     rate_limiter: RateLimiter | None,
     redis_adapter: RedisAdapter | None,
-) -> Callable[[str], Coroutine[Any, Any, None]]:
+) -> Callable[[str], Coroutine[Any, Any, dict[str, Any] | None]]:
     """Build the ``on_library_refresh`` handler the queue consumer dispatches to.
 
     Unlike the module-level ``enrichment_service`` singleton, a library refresh needs a PSN catalog
@@ -380,16 +437,21 @@ def _library_refresh_handler(
     :class:`~curator.psn.session.PsnSession`/:class:`~curator.psn.catalog_client.CatalogClient`/
     :class:`~curator.enrichment.enrichment_service.EnrichmentService`/
     :class:`~curator.library.library_build_orchestrator.LibraryBuildOrchestrator` per job instead of
-    reusing one global instance.
+    reusing one global instance. It also looks up the refreshing user's own RAWG/OpenCritic keys (see
+    ``curator.enrichment_keys_routes``) and builds per-user clients from them -- there is deliberately no
+    fallback to any shared/global key here; a provider a user hasn't configured is simply skipped
+    (:class:`~curator.enrichment.enrichment_service.EnrichmentService` tolerates a ``None`` client for
+    either).
 
     :param rate_limiter: The shared distributed PSN rate limiter (``None`` throttles nothing); passed
         through to the fresh :class:`~curator.psn.session.PsnSession` so a library refresh's PSN calls
         count against the same fleet-wide budget as every other client.
     :param redis_adapter: The shared Redis adapter backing the access-token cache (``None`` disables it;
-        see :class:`~curator.persistence.db_token_store.DbTokenStore`).
+        see :class:`~curator.persistence.db_token_store.DbTokenStore`) and the per-user RAWG rate limiter
+        below (``None`` disables throttling entirely, matching the fleet's ``NullRateLimiter`` philosophy).
     """
 
-    async def handle(identity_sub: str) -> None:
+    async def handle(identity_sub: str) -> dict[str, Any] | None:
         token_store = DbTokenStore(identity_sub, repository, token_crypto, redis_adapter)
         saved = await token_store.load()
         if saved is None:
@@ -399,9 +461,30 @@ def _library_refresh_handler(
         library_client = LibraryClient(session)
         catalog_client = CatalogClient(session)
         ingestion_service = IngestionService(library_client, catalog_repository)
+
+        rawg_key_enc, opencritic_key_enc = await enrichment_keys_repository.get_decrypted_key_material(identity_sub)
+        user_rawg_client: RawgClient | None = None
+        if rawg_key_enc is not None:
+            rawg_key = token_crypto.decrypt(rawg_key_enc).decode()
+            rawg_rate_limiter = (
+                RedisRateLimiter(
+                    redis_adapter,
+                    key=f"curator:rawg:{identity_sub}",
+                    max_requests=_RAWG_USER_MAX_REQUESTS,
+                    window_seconds=_RAWG_USER_WINDOW_SECONDS,
+                )
+                if redis_adapter is not None
+                else None
+            )
+            user_rawg_client = RawgClient(http_client, rawg_key, rate_limiter=rawg_rate_limiter)
+        user_opencritic_client: OpenCriticClient | None = None
+        if opencritic_key_enc is not None:
+            opencritic_key = token_crypto.decrypt(opencritic_key_enc).decode()
+            user_opencritic_client = OpenCriticClient(http_client, opencritic_key)
+
         per_user_enrichment_service = EnrichmentService(
-            rawg_client=rawg_client,
-            opencritic_client=opencritic_client,
+            rawg_client=user_rawg_client,
+            opencritic_client=user_opencritic_client,
             catalog_client=catalog_client,
             repository=enrichment_repository,
         )
@@ -415,7 +498,14 @@ def _library_refresh_handler(
 
         publisher_tier_rules = await enrichment_repository.list_publisher_tier_rules()
         size_estimates = await catalog_repository.get_size_estimates()
-        await orchestrator.build(identity_sub, publisher_tier_rules=publisher_tier_rules, size_estimates=size_estimates)
+        result = await orchestrator.build(
+            identity_sub, publisher_tier_rules=publisher_tier_rules, size_estimates=size_estimates
+        )
+        return {
+            "rawg_enriched_titles": result.rawg_enriched_titles,
+            "opencritic_enriched_titles": result.opencritic_enriched_titles,
+            "opencritic_topup_incomplete": result.opencritic_topup_incomplete,
+        }
 
     return handle
 

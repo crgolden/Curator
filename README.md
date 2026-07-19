@@ -12,6 +12,11 @@ Once authenticated, a user links their PSN account through Curator's own in-repo
 shared game catalog, enriches that catalog (RAWG, OpenCritic, PS Store), and derives a per-user library,
 exclusion set, console inventory, and rotation/assignment plan. All of it is persisted in PostgreSQL.
 
+RAWG/OpenCritic enrichment is **bring-your-own-key**: Curator never provisions a shared RAWG/OpenCritic key
+for every user's library (it doesn't scale), so a user optionally supplies their own key for either or both
+providers (`GET/PUT/DELETE /me/enrichment-keys/{rawg|opencritic}`), encrypted at rest and used only for
+their own enrichment. See "Security considerations" below.
+
 This repository builds the API in stages. The scaffold, full database schema, and persistence layer
 (config resolution, connection URL, token encryption, the account-table DAO, and a PSN token store backed
 by it) came first. This stage adds the FastAPI application itself: settings resolution, JWT Bearer
@@ -52,6 +57,37 @@ boolean opt-in flags (`harvest_trophies`, `harvest_identity`, `harvest_presence`
 flag is off, and is called inline at the top of `trophy_routes.py`/`identity_routes.py`/
 `presence_routes.py`/`devices_routes.py`'s handlers before any PSN call is made — enforcement lives in the
 API, not just hidden in a UI toggle.
+
+## Security considerations
+
+- **`PUT /me/enrichment-keys/{provider}` validates the key against the real provider before persisting
+  anything** — one cheap request (RAWG: `GET /genres?page_size=1`; OpenCritic: one page of the same
+  non-search catalog listing every other OpenCritic call in this codebase uses) confirms the key is
+  accepted. A rejected key (401/403) is a 400 and never written to the database; a provider that can't be
+  reached at all is a 503, also never persisted — either way the caller finds out immediately and gets a
+  chance to correct it, instead of only discovering a bad key when a later library refresh silently fails.
+- **Per-user BYOK keys are encrypted with the same Fernet key as PSN tokens** (`curator.persistence.crypto.TokenCrypto`,
+  keyed by `CURATOR_TOKEN_KEY`) — no separate encryption key was introduced for this feature. `GET
+  /me/enrichment-keys` never returns a key value, only whether one is configured and when it was added;
+  `PUT`/`DELETE` never echo the value back either.
+- **A user's own key is never exposed to anyone else** — but the *game metadata* it retrieves (title,
+  genre, score) is written into the shared `rawg_cache`/`opencritic_cache` tables so future lookups for
+  that game, by any user or the admin's own catalog-wide re-scrape, don't need to call RAWG/OpenCritic
+  again. This is a deliberate, disclosed trade-off (see Librarian's `/faq` and `/privacy` pages) — only the
+  retrieved data is shared, never the key.
+- **A cautionary tale for any future external API integration that puts a secret in a URL query
+  parameter**: RAWG's API key (`?key=...`) was found leaking into `job_runs.error`, the browser, Elasticsearch
+  logs, and Tempo spans during this feature's own live testing, before BYOK even shipped. Closed at three
+  independent points, all required together: (1) `curator.enrichment.rawg_client.RawgApiError` re-raises
+  `from None` so a sanitized message (`"RAWG request failed with status {code}"`) is the only thing a
+  downstream `logger.exception(...)` can render — the original `httpx.HTTPStatusError`'s message, which
+  embeds the full URL, is fully suppressed from the exception chain; (2) `curator.telemetry`'s httpx
+  instrumentation `async_request_hook` strips the `key` query param from the OTel span attribute after the
+  instrumentor sets it (OTel's own built-in query-param redaction only covers a fixed, unrelated allowlist —
+  `AWSAccessKeyId`/`Signature`/`sig`/`X-Goog-Signature` — not `key`); (3) `curator.jobs.error_messages.friendly_job_error`
+  maps every caught job exception to short, category-based, safe text before it's ever persisted to
+  `job_runs.error` or returned from `GET /library/refresh/{run_id}`, so even a future exception type nobody
+  thought to sanitize can't leak anything through that path.
 
 ## Design conventions
 
@@ -136,11 +172,15 @@ python dev_server.py
 entry point — see Deployment below): it starts `uvicorn` with `--reload` against `curator.app:create_app`.
 It also works around a **Windows-only gotcha**: `psycopg`'s async mode waits on the connection socket via
 `loop.add_reader()`/`add_writer()`, which Windows' default `ProactorEventLoop` (used since Python 3.8)
-doesn't implement — it raises `NotImplementedError` the first time a real query runs. The event-loop policy
-that fixes this must be set *before* the event loop is created, i.e. before `uvicorn` starts — too early for
-anything inside `curator.app` itself to set it, which is why this lives in a dedicated entry point rather
-than a one-liner a developer has to remember to paste in. It no-ops on macOS/Linux. The unit test suite
-never hits this at all (every repository test uses a hand-written fake pool, never a real
+doesn't implement — it raises `NotImplementedError` the first time a real query runs. On Windows,
+`dev_server.py` points `uvicorn.run(..., loop=...)` at
+[`curator._windows_event_loop.selector_loop_factory`](src/curator/_windows_event_loop.py), which builds a
+`SelectorEventLoop` instead. This replaces an older approach that called
+`asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())` before starting `uvicorn`: that API
+is deprecated (removal slated for Python 3.16) and, separately, stopped having any effect once uvicorn 0.36
+started building its loop straight from `Config.get_loop_factory()` rather than consulting the ambient
+policy — see `_windows_event_loop.py`'s module docstring for the full history. It no-ops on macOS/Linux. The
+unit test suite never hits this at all (every repository test uses a hand-written fake pool, never a real
 `AsyncConnectionPool`); it only matters when running the app against a real Postgres connection on Windows.
 Production runs on Linux App Service and is unaffected.
 
@@ -173,7 +213,10 @@ require.
 
 The database schema lives in [`db/migrations/`](db/migrations/) as plain SQL. `0001_initial.sql` has a
 header comment explaining the design (account layer, per-user append-only ingestion, the shared global
-catalog, curation-rule config-as-data, and the per-user library/console/assignment tables).
+catalog, curation-rule config-as-data, and the per-user library/console/assignment tables). `0004_user_enrichment_keys.sql`
+adds the per-user BYOK enrichment keys table, the `game_enrichment.rawg_enriched`/`opencritic_enriched`
+checkmark columns, `job_runs.result_summary`, and `opencritic_pagination_cursor` (the shared, resumable
+cursor both the admin catalog-wide re-scrape and per-user OpenCritic top-ups advance cooperatively).
 
 [`db/run_migrations.py`](db/run_migrations.py) applies every migration file not yet recorded as applied,
 tracked in a `schema_migrations` table (one row per filename) — the deploy job runs it against production
@@ -196,18 +239,27 @@ src/curator/
   link_service.py               # link()/unlink(): PSN account linking, email verification rules
   psn_routes.py                   # POST/DELETE /psn/link
   preferences_routes.py             # GET/PUT /me/psn-preferences: per-category harvest opt-in flags
+  enrichment_keys_routes.py           # GET/PUT/DELETE /me/enrichment-keys/{provider}: BYOK RAWG/OpenCritic keys
   trophy_routes.py                    # GET /trophies/summary|titles|titles/{id}|titles/{id}/groups
   identity_routes.py                    # GET /identity
   presence_routes.py                      # GET /presence
   devices_routes.py                         # GET /devices
+  library_routes.py                           # GET /library, POST/GET /library/refresh
+  jobs/
+    error_messages.py    # friendly_job_error(): sanitized, category-based job-failure text
+    queue_consumer.py    # QueueConsumer: drains both job queues; LockRenewer keeps long runs' locks alive
+    queue_publisher.py   # QueuePublisher: publishes library-refresh/enrichment job messages
+    repository.py        # JobRunsRepository: job_runs DAO, incl. result_summary
   persistence/
     config.py          # generic arg -> env var -> .env resolution
     connection.py       # PostgreSQL connection URL resolution
     crypto.py            # TokenCrypto: Fernet encryption for tokens at rest
     repository.py        # Repository: psycopg 3 DAO over app_users / psn_links
+    enrichment_keys_repository.py  # EnrichmentKeysRepository: psycopg 3 DAO over user_enrichment_keys
     db_token_store.py    # DbTokenStore: curator.psn.session.TokenStore contract, backed by Repository
 db/migrations/
   0001_initial.sql        # full schema
+  0004_user_enrichment_keys.sql  # BYOK keys, enrichment checkmarks, job result_summary, OC pagination cursor
   run_migrations.py       # idempotent runner, applied automatically by the deploy job
 tests/                     # offline pytest suite, plus the gated tests/test_schema.py
 .github/workflows/
@@ -224,10 +276,15 @@ tests/                     # offline pytest suite, plus the gated tests/test_sch
   deployable) drains both queues, matching Identity/Directory/Functions' production convention of
   managed-identity-only access (the shared namespace has `DisableLocalAuth` enabled, so a connection string
   was never going to work there). `service_bus_connection_string` remains only as a local-dev/CI fallback.
-- **No endpoint returns the finished library.** `GET /library/refresh/{run_id}` only reports the refresh
-  job's status (`queued`/`running`/`succeeded`/`failed`), never the resulting entries — there is no
-  `GET /library` (or similar) yet. Librarian's `/library` page is therefore refresh-trigger-and-poll only;
-  it cannot show "your library" until such an endpoint exists.
+- ~~Every library refresh 401s because no shared RAWG/OpenCritic key is configured.~~ **Fixed by design,
+  not by provisioning a shared key.** Enrichment is bring-your-own-key — a user with no key configured for
+  a provider simply gets no signal from that provider (not an error); RAWG/OpenCritic are cache-first
+  against the shared `rawg_cache`/`opencritic_cache` tables regardless, so many titles enrich for free even
+  with zero keys configured.
+- ~~No endpoint returns the finished library.~~ **Fixed.** `GET /library` returns the caller's own library
+  with per-provider (`rawg_enriched`/`opencritic_enriched`) checkmarks per game; `GET /library/refresh/{run_id}`
+  additionally now returns a `result_summary` (newly-enriched titles per provider, whether the OpenCritic
+  top-up stopped early) once a run succeeds.
 - **No console list/create endpoints.** Only `PUT /consoles/{id}/installs/{gameId}` exists. Librarian's
   UI accepts a manually-typed `console_id` as a stopgap (an explicit, agreed-on decision, not a bug) — a
   404 from an unrecognized console is the expected path, not an error to chase.

@@ -5,7 +5,7 @@ from __future__ import annotations
 import httpx
 import pytest
 
-from curator.enrichment.rawg_client import RawgClient
+from curator.enrichment.rawg_client import RawgApiError, RawgClient
 
 
 class RequestRecorder:
@@ -77,9 +77,67 @@ async def test_fetch_detail_returns_none_on_404():
     assert await client.fetch_detail(999) is None
 
 
-async def test_fetch_detail_raises_on_server_error():
+async def test_fetch_detail_raises_sanitized_error_on_server_error():
     recorder = RequestRecorder([httpx.Response(500)])
     client = _client(recorder)
 
-    with pytest.raises(httpx.HTTPStatusError):
+    with pytest.raises(RawgApiError) as exc_info:
         await client.fetch_detail(1)
+
+    assert exc_info.value.status_code == 500
+    assert exc_info.value.__cause__ is None
+
+
+async def test_search_games_raises_sanitized_error_never_containing_the_url_or_key():
+    recorder = RequestRecorder([httpx.Response(401, json={"error": "invalid key"})])
+    client = _client(recorder)
+
+    with pytest.raises(RawgApiError) as exc_info:
+        await client.search_games("Some Title")
+
+    message = str(exc_info.value)
+    assert "test-key" not in message
+    assert "api.rawg.io" not in message
+    assert exc_info.value.status_code == 401
+    assert exc_info.value.__cause__ is None  # 'from None' -- logger.exception must not render the original URL
+
+
+async def test_validate_key_succeeds_on_200():
+    recorder = RequestRecorder([httpx.Response(200, json={"results": []})])
+    client = _client(recorder)
+
+    await client.validate_key()  # no exception
+
+    assert recorder.requests[0].url.path.endswith("/genres")
+    assert recorder.requests[0].url.params["key"] == "test-key"
+    assert recorder.requests[0].url.params["page_size"] == "1"
+
+
+async def test_validate_key_raises_sanitized_error_on_401():
+    recorder = RequestRecorder([httpx.Response(401)])
+    client = _client(recorder)
+
+    with pytest.raises(RawgApiError) as exc_info:
+        await client.validate_key()
+
+    assert exc_info.value.status_code == 401
+    assert "test-key" not in str(exc_info.value)
+
+
+async def test_search_games_throttles_via_rate_limiter():
+    calls: list[None] = []
+
+    class RecordingRateLimiter:
+        async def acquire(self) -> None:
+            calls.append(None)
+
+    recorder = RequestRecorder([httpx.Response(200, json={"results": []})])
+    client = RawgClient(
+        httpx.AsyncClient(transport=httpx.MockTransport(recorder)),
+        api_key="test-key",
+        rate_limiter=RecordingRateLimiter(),
+    )
+
+    await client.search_games("Anything")
+
+    assert len(calls) == 1
