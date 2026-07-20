@@ -19,6 +19,15 @@ Every other account table (``psn_links``, and every catalog/collections/library/
 upserted fails at the database with a foreign-key violation rather than a clean application error. Doing
 this once, here, in the single dependency every protected route already depends on, is what makes that
 invariant hold everywhere instead of requiring each route/service to remember it independently.
+
+``curator.profile_routes`` is the first (and, as of this writing, only) place a caller-supplied path
+parameter names *another user's account* rather than a game/console/title resource -- ``GET
+/users/{sub}/profile`` and its follow/library/collections siblings take a target ``sub`` on purpose, a
+deliberate, narrow exception to the "no caller-supplied target user" rule stated above. Every one of those
+routes still depends on :func:`require_bearer` for the *caller's own* identity; ``sub`` only ever selects
+which profile/follow-graph/library/collections to read or mutate, gated by that profile's own visibility
+settings -- see that module's docstring for the full exception, including the cross-user PSN lookup it
+performs using the *viewer's* own stored PSN session.
 """
 
 from __future__ import annotations

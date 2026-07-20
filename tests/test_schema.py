@@ -1,12 +1,14 @@
-"""Integration tests for ``db/migrations/0001_initial.sql``, applied to a **real** PostgreSQL instance.
+"""Integration tests for every ``db/migrations/*.sql`` file, applied in order to a **real** PostgreSQL
+instance.
 
 These are the only tests in this suite that touch a live database. They are gated on the
 ``CURATOR_TEST_DATABASE_URL`` environment variable via a module-level ``pytest.mark.skipif`` — when it is
 unset (the default in CI and any plain local ``pytest`` run), every test in this module is skipped, not
 run against a fake or an in-memory substitute. When you do set it, **point it at a disposable, throwaway
-database created solely for this purpose** — never a shared or production database. Each test applies the
-full migration and every insert inside one transaction, then rolls that transaction back in teardown, so a
-correctly-configured disposable database is left exactly as it started; nothing here ever commits.
+database created solely for this purpose** — never a shared or production database. Each test applies
+every migration file (in filename order) and every insert inside one transaction, then rolls that
+transaction back in teardown, so a correctly-configured disposable database is left exactly as it started;
+nothing here ever commits.
 
 Example (PowerShell), using a scratch database on a local/dev PostgreSQL instance you control:
 
@@ -34,7 +36,7 @@ pytestmark = pytest.mark.skipif(
     ),
 )
 
-MIGRATION_PATH = Path(__file__).resolve().parent.parent / "db" / "migrations" / "0001_initial.sql"
+MIGRATIONS_DIR = Path(__file__).resolve().parent.parent / "db" / "migrations"
 
 EXPECTED_TABLES = {
     "app_users",
@@ -69,12 +71,18 @@ EXPECTED_TABLES = {
     "collection_items",
     "console_installs",
     "job_runs",
+    "user_enrichment_keys",
+    "opencritic_pagination_cursor",
+    "account_action_log",
+    "user_profiles",
+    "follows",
 }
 
 
 @pytest.fixture
 def db_connection():
-    """Open a connection, apply the full migration inside one transaction, and roll it all back on exit.
+    """Open a connection, apply every migration file (in filename order) inside one transaction, and roll
+    it all back on exit.
 
     Every test using this fixture (directly or via ``seeded_user_and_game``) therefore leaves the target
     database exactly as it found it, regardless of pass/fail/exception — including a deliberately-raised
@@ -82,9 +90,9 @@ def db_connection():
     be rolled back.
     """
     connection = psycopg.connect(DATABASE_URL, autocommit=False)
-    migration_sql = MIGRATION_PATH.read_text(encoding="utf-8")
     with connection.cursor() as cur:
-        cur.execute(migration_sql)
+        for migration_file in sorted(MIGRATIONS_DIR.glob("*.sql")):
+            cur.execute(migration_file.read_text(encoding="utf-8"))
     try:
         yield connection
     finally:
@@ -186,6 +194,53 @@ def test_job_runs_rejects_invalid_status(db_connection):
             "INSERT INTO job_runs (run_id, kind, status) VALUES (%s, %s, %s)",
             (run_id, "library_refresh", "bogus"),
         )
+
+
+def test_follows_rejects_self_follow(db_connection, seeded_user_and_game):
+    user_sub, _game_id = seeded_user_and_game
+    with pytest.raises(psycopg_errors.CheckViolation), db_connection.cursor() as cur:
+        cur.execute("INSERT INTO follows (follower_sub, followed_sub) VALUES (%s, %s)", (user_sub, user_sub))
+
+
+def test_follows_cascade_deletes_when_either_user_is_deleted(db_connection):
+    follower_sub = str(uuid.uuid4())
+    followed_sub = str(uuid.uuid4())
+    with db_connection.cursor() as cur:
+        cur.execute("INSERT INTO app_users (identity_sub) VALUES (%s), (%s)", (follower_sub, followed_sub))
+        cur.execute("INSERT INTO follows (follower_sub, followed_sub) VALUES (%s, %s)", (follower_sub, followed_sub))
+        cur.execute("DELETE FROM app_users WHERE identity_sub = %s", (follower_sub,))
+        cur.execute(
+            "SELECT count(*) FROM follows WHERE follower_sub = %s AND followed_sub = %s",
+            (follower_sub, followed_sub),
+        )
+        (count,) = cur.fetchone()
+    assert count == 0
+
+
+def test_user_profiles_cascade_deletes_when_user_is_deleted(db_connection, seeded_user_and_game):
+    user_sub, _game_id = seeded_user_and_game
+    with db_connection.cursor() as cur:
+        cur.execute("INSERT INTO user_profiles (identity_sub, is_public) VALUES (%s, %s)", (user_sub, True))
+        cur.execute("DELETE FROM app_users WHERE identity_sub = %s", (user_sub,))
+        cur.execute("SELECT count(*) FROM user_profiles WHERE identity_sub = %s", (user_sub,))
+        (count,) = cur.fetchone()
+    assert count == 0
+
+
+def test_account_action_log_accepts_followed_and_unfollowed_actions(db_connection, seeded_user_and_game):
+    user_sub, _game_id = seeded_user_and_game
+    with db_connection.cursor() as cur:
+        cur.execute(
+            "INSERT INTO account_action_log (identity_sub, action, detail) VALUES (%s, %s, %s)",
+            (user_sub, "followed", "some-other-sub"),
+        )
+        cur.execute(
+            "INSERT INTO account_action_log (identity_sub, action, detail) VALUES (%s, %s, %s)",
+            (user_sub, "unfollowed", "some-other-sub"),
+        )
+        cur.execute("SELECT count(*) FROM account_action_log WHERE identity_sub = %s", (user_sub,))
+        (count,) = cur.fetchone()
+    assert count == 2
 
 
 def test_no_email_or_npsso_columns_anywhere(db_connection):

@@ -54,6 +54,27 @@ _BEARER_REQUIRED_ROUTES = [
     ("get", "/identity", {}),
     ("get", "/presence", {}),
     ("get", "/devices", {}),
+    ("get", "/me/profile-settings", {}),
+    (
+        "put",
+        "/me/profile-settings",
+        {
+            "json": {
+                "is_public": True,
+                "show_library": True,
+                "show_collections": True,
+                "show_trophies": True,
+                "show_identity": True,
+            }
+        },
+    ),
+    ("get", "/users/sub-x/profile", {}),
+    ("post", "/users/sub-x/follow", {}),
+    ("delete", "/users/sub-x/follow", {}),
+    ("get", "/users/sub-x/followers", {}),
+    ("get", "/users/sub-x/following", {}),
+    ("get", "/users/sub-x/library", {}),
+    ("get", "/users/sub-x/collections", {}),
 ]
 
 
@@ -211,7 +232,7 @@ def test_cross_user_isolation_between_two_established_callers():
 # ---------------------------------------------------------------------------------------------------
 
 
-_ALLOWED_PATH_PARAMETERS = {"console_id", "game_id", "np_communication_id"}
+_ALLOWED_PATH_PARAMETERS = {"console_id", "game_id", "np_communication_id", "sub"}
 
 
 def test_no_route_exposes_a_caller_suppliable_user_identifier_path_parameter():
@@ -219,11 +240,16 @@ def test_no_route_exposes_a_caller_suppliable_user_identifier_path_parameter():
     user name another's data) -- every route still keys identity exclusively off the validated token's own
     ``sub``. ``{console_id}``/``{game_id}`` (``PUT /consoles/{console_id}/installs/{game_id}``) and
     ``{np_communication_id}`` (``GET /trophies/titles/{np_communication_id}`` and its ``/groups``
-    sibling) are the sole exceptions: they name a *resource* (a console/game/PSN title), not a user.
+    sibling) are the sole *resource*-naming exceptions: they name a console/game/PSN title, not a user.
     ``consoles_routes`` re-checks the resource's ownership against the caller's own ``sub`` before acting
     (see ``test_consoles_routes.py``); ``trophy_routes`` needs no such check because
     ``np_communication_id`` only ever selects *which title* to read the caller's own trophy data for --
     there is no cross-user data reachable through it.
+
+    ``{sub}`` (``curator.profile_routes``'s ``/users/{sub}/...`` family) is the one deliberate exception
+    that *does* name another user's account, on purpose -- see that module's docstring and
+    ``curator.deps``'s module docstring for the full rationale (viewer-B-looks-at-owner-A's-public-profile,
+    always using B's own stored PSN session, never A's).
     """
     client, *_ = _build()
     app = client.app

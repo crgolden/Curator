@@ -50,7 +50,7 @@ class FakeSocialClientFactory:
         return client
 
 
-def _build(devices_client_factory=None, repository=None):
+def _build(social_client_factory=None, repository=None):
     settings = _make_settings()
     repository = repository if repository is not None else FakeRepository()
     validator = FakeTokenValidator()
@@ -59,16 +59,16 @@ def _build(devices_client_factory=None, repository=None):
         settings,
         repository=repository,
         token_validator=validator,
-        devices_client_factory=devices_client_factory or FakeSocialClientFactory(),
+        social_client_factory=social_client_factory or FakeSocialClientFactory(),
     )
-    return TestClient(app), app.state.devices_client_factory
+    return TestClient(app), app.state.social_client_factory
 
 
-def _build_linked(devices_client_factory=None):
+def _build_linked(social_client_factory=None):
     repository = FakeRepository()
     crypto = TokenCrypto(Fernet.generate_key())
     _seed_link(repository, crypto, SUB, harvest_devices=True)
-    return _build(devices_client_factory, repository=repository)
+    return _build(social_client_factory, repository=repository)
 
 
 def test_get_devices_no_link_is_404():

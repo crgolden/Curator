@@ -311,6 +311,20 @@ class SocialClient:
             )
         return devices
 
+    async def online_id(self, account_id: str) -> str | None:
+        """Resolve a PSN account id to its current online id.
+
+        Backs ``curator.profile_routes``'s cross-user identity-card lookup: the viewer's own
+        :class:`SocialClient` resolves the profile owner's already-public online id from their
+        ``psn_account_id``, without ever touching the owner's own stored token. Thin wrapper over
+        :func:`curator.psn._identity.online_id_for`, the same private resolver :meth:`friends`/
+        :meth:`blocked`/:meth:`available_to_play`/:meth:`friend_requests` already use internally.
+
+        :param account_id: The target account's PSN account id.
+        :returns: The online id, or ``None`` if PSN has none on record for this account.
+        """
+        return await self._session.run_with_reauth(lambda: _identity.online_id_for(self._session, account_id))
+
     async def share_link(self) -> ProfileShareLink:
         """Get a shareable link to the authenticated user's PSN profile, plus a QR-code image URL.
 
@@ -331,9 +345,11 @@ class SocialClient:
         )
 
 
-DevicesClientFactory = Callable[[str], Coroutine[Any, Any, "SocialClient"]]
-"""Builds a raw :class:`SocialClient` (never cached) for a given Identity ``sub``, used by
-``curator.devices_routes`` for its one ``devices()`` call. Requires an existing PSN link. Lives alongside
-:class:`SocialClient` (rather than in ``curator.app``, where it's built) so both ``curator.app`` and
-``curator.devices_routes`` can import it without the two importing each other -- mirrors
-``curator.psn.trophy_client.TrophyClientFactory``."""
+SocialClientFactory = Callable[[str], Coroutine[Any, Any, "SocialClient"]]
+"""Builds a raw :class:`SocialClient` (never cached) for a given Identity ``sub``. Requires an existing PSN
+link. Backs two call sites: ``curator.devices_routes``'s ``devices()`` call (self-only) and
+``curator.profile_routes``'s cross-user ``profile()``/``online_id()`` calls (built from the *viewer's* own
+sub, called with the *profile owner's* ``account_id`` -- see that module's docstring). Lives alongside
+:class:`SocialClient` (rather than in ``curator.app``, where it's built) so callers can import it without
+importing ``curator.app`` -- mirrors ``curator.psn.trophy_client.TrophyClientFactory``. Named
+``DevicesClientFactory`` prior to the profile feature, when ``devices()`` was its only caller."""

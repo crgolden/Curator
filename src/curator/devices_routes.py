@@ -13,7 +13,7 @@ from pydantic import BaseModel
 from curator.deps import require_bearer, require_preference
 from curator.psn.errors import PsnAuthError
 from curator.psn.models import AccountDevice
-from curator.psn.social_client import DevicesClientFactory, SocialClient
+from curator.psn.social_client import SocialClient, SocialClientFactory
 from curator.token_validation import TokenClaims
 
 router = APIRouter(tags=["devices"])
@@ -48,9 +48,9 @@ async def get_devices(request: Request, claims: TokenClaims = Depends(require_be
     """
     await require_preference(request, claims.sub, "harvest_devices")
 
-    devices_client_factory: DevicesClientFactory = request.app.state.devices_client_factory
+    social_client_factory: SocialClientFactory = request.app.state.social_client_factory
     try:
-        client: SocialClient = await devices_client_factory(claims.sub)
+        client: SocialClient = await social_client_factory(claims.sub)
     except RuntimeError as exc:
         raise HTTPException(status_code=404, detail=_NO_LINK_DETAIL) from exc
 

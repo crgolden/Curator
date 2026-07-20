@@ -58,6 +58,34 @@ flag is off, and is called inline at the top of `trophy_routes.py`/`identity_rou
 `presence_routes.py`/`devices_routes.py`'s handlers before any PSN call is made — enforcement lives in the
 API, not just hidden in a UI toggle.
 
+## Social profile
+
+Every user has a public profile, keyed by their Identity `sub`, that other users can view and follow.
+A profile is **private by default** (`user_profiles.is_public = false`) until the owner turns it on from
+their own profile settings page — no row exists until a user visits that page for the first time, and a
+missing row behaves exactly like a private, all-toggles-off profile rather than a 404.
+
+An owner controls four independent display toggles, each shown on their profile only if it's on:
+`show_library`, `show_collections`, `show_trophies`, `show_identity`. None of these toggles works alone.
+`show_library`/`show_collections` also require `is_public`. `show_trophies`/`show_identity` require both
+`is_public` **and** the matching PSN data-harvesting flag (`psn_links.harvest_trophies`/`harvest_identity`)
+— a user has to opt in twice, once to harvest the data at all and once to show it publicly, before a
+stranger ever sees it. The owner viewing their own profile always sees their own sections, governed by
+their own `show_*`/`harvest_*` settings, never by `is_public` — `is_public` only controls what *other*
+viewers see.
+
+Following is a simple, first-party directed graph (`follows`), unrelated to PSN. Follow/unfollow is
+idempotent — following someone already followed, or unfollowing someone not followed, is a no-op, not an
+error. **Follower/following counts and lists are always visible on any profile, regardless of whether
+that profile is public.** They're Curator's own data, not PSN-derived, so there's nothing to gate: you can
+see who follows a private profile and who it follows, even though you can't see that profile's library,
+collections, trophies, or PSN identity unless the owner has made them public.
+
+That split — follow graph always visible, PSN/library/collections content gated — is deliberate. A
+private profile still participates fully in the social graph (findable, followable, with visible
+follower/following lists); it just doesn't expose anything PSN-derived or curation-derived until the
+owner opts in.
+
 ## Security considerations
 
 - **`PUT /me/enrichment-keys/{provider}` validates the key against the real provider before persisting
@@ -75,6 +103,30 @@ API, not just hidden in a UI toggle.
   that game, by any user or the admin's own catalog-wide re-scrape, don't need to call RAWG/OpenCritic
   again. This is a deliberate, disclosed trade-off (see Librarian's `/faq` and `/privacy` pages) — only the
   retrieved data is shared, never the key.
+- **No display-name field exists anywhere in the social-profile feature.** The only identity a profile
+  shows is its PSN account id (if linked and shown) or "Unlinked user" — there was never a free-text name
+  field to sanitize, spoof-check, or moderate.
+- **Region is structurally absent from the profile identity response, not just hidden in the UI.**
+  `ProfileIdentityResponse` has no `region` field at all — PSN only ever exposes an account's region to
+  that account itself, which makes it meaningless for a cross-user lookup like this one (see below), and
+  it isn't useful for browsing or curation anyway. Librarian also removed the region display from the
+  existing `/psn` identity card, so region no longer appears anywhere in the product, even for a user's
+  own account.
+- **Cross-user PSN lookups always use the viewer's own token, never the profile owner's.** When viewer B
+  looks at owner A's public profile, Curator builds B's own `TrophyClient`/`SocialClient` — the same
+  client B's own requests already use — and calls it with A's `psn_account_id` as the target. A's stored
+  token is never touched on B's behalf; B's own live PSN session is simply looking up A's already-public
+  PSN account, the same way friend/profile lookups against an arbitrary account id already work. If B has
+  no PSN link of their own, or PSN rejects B's stored token, the trophy/identity sections are silently
+  omitted from the response rather than erroring — another user's PSN state can never break a profile page
+  render.
+- **Self-follow is rejected at both the database and the route layer.** The `follows` table has a
+  `follows_no_self_follow` CHECK constraint, and the follow route additionally checks `sub == claims.sub`
+  itself before that constraint would ever fire, so a self-follow attempt gets a clean 400 instead of a
+  raw database error.
+- **Follow/unfollow actions are recorded in `account_action_log`** (`followed`/`unfollowed`), the same
+  defensive audit trail used for linking, unlinking, and library refreshes. The logged detail is the other
+  user's `sub` only — never PSN data.
 - **A cautionary tale for any future external API integration that puts a secret in a URL query
   parameter**: RAWG's API key (`?key=...`) was found leaking into `job_runs.error`, the browser, Elasticsearch
   logs, and Tempo spans during this feature's own live testing, before BYOK even shipped. Closed at three
@@ -245,6 +297,9 @@ src/curator/
   presence_routes.py                      # GET /presence
   devices_routes.py                         # GET /devices
   library_routes.py                           # GET /library, POST/GET /library/refresh
+  profile_routes.py                             # GET/PUT /me/profile-settings, GET /users/{sub}/profile,
+                                                 # POST/DELETE /users/{sub}/follow, followers/following,
+                                                 # library/collections passthrough for another user's sub
   jobs/
     error_messages.py    # friendly_job_error(): sanitized, category-based job-failure text
     queue_consumer.py    # QueueConsumer: drains both job queues; LockRenewer keeps long runs' locks alive
@@ -256,10 +311,14 @@ src/curator/
     crypto.py            # TokenCrypto: Fernet encryption for tokens at rest
     repository.py        # Repository: psycopg 3 DAO over app_users / psn_links
     enrichment_keys_repository.py  # EnrichmentKeysRepository: psycopg 3 DAO over user_enrichment_keys
+    profile_repository.py  # ProfileRepository: psycopg 3 DAO over user_profiles (display toggles)
+    follow_repository.py   # FollowRepository: psycopg 3 DAO over follows (the follow graph)
     db_token_store.py    # DbTokenStore: curator.psn.session.TokenStore contract, backed by Repository
 db/migrations/
   0001_initial.sql        # full schema
   0004_user_enrichment_keys.sql  # BYOK keys, enrichment checkmarks, job result_summary, OC pagination cursor
+  0005_user_profiles.sql  # user_profiles: is_public + per-section show_* display toggles
+  0006_follows.sql        # follows: the directed follow graph, plus account_action_log's followed/unfollowed actions
   run_migrations.py       # idempotent runner, applied automatically by the deploy job
 tests/                     # offline pytest suite, plus the gated tests/test_schema.py
 .github/workflows/

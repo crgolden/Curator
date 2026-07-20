@@ -57,16 +57,19 @@ from curator.me_routes import router as me_router
 from curator.persistence.crypto import TokenCrypto
 from curator.persistence.db_token_store import DbTokenStore
 from curator.persistence.enrichment_keys_repository import EnrichmentKeysRepository
+from curator.persistence.follow_repository import FollowRepository
+from curator.persistence.profile_repository import ProfileRepository
 from curator.persistence.repository import Repository
 from curator.preferences_routes import router as preferences_router
 from curator.presence_routes import router as presence_router
+from curator.profile_routes import router as profile_router
 from curator.psn.account_client import AccountClient, AccountClientFactory
 from curator.psn.catalog_client import CatalogClient
 from curator.psn.library_client import LibraryClient
 from curator.psn.presence_client import PresenceClient, PresenceClientFactory
 from curator.psn.rate_limiter import RedisRateLimiter
 from curator.psn.session import PsnSession, RateLimiter
-from curator.psn.social_client import DevicesClientFactory, SocialClient
+from curator.psn.social_client import SocialClient, SocialClientFactory
 from curator.psn.trophy_cache import CachedTrophyClient
 from curator.psn.trophy_client import TrophyClient, TrophyClientFactory
 from curator.psn_routes import router as psn_router
@@ -116,11 +119,13 @@ def create_app(
     job_runs_repository: JobRunsRepository | None = None,
     audit_repository: AccountActionLogRepository | None = None,
     enrichment_keys_repository: EnrichmentKeysRepository | None = None,
+    profile_repository: ProfileRepository | None = None,
+    follow_repository: FollowRepository | None = None,
     redis_client: Redis | None = None,
     trophy_client_factory: TrophyClientFactory | None = None,
     identity_client_factory: AccountClientFactory | None = None,
     presence_client_factory: PresenceClientFactory | None = None,
-    devices_client_factory: DevicesClientFactory | None = None,
+    social_client_factory: SocialClientFactory | None = None,
     http_client: httpx.AsyncClient | None = None,
 ) -> FastAPI:
     """Build a configured Curator :class:`~fastapi.FastAPI` app.
@@ -160,6 +165,10 @@ def create_app(
     :param enrichment_keys_repository: The per-user BYOK RAWG/OpenCritic key repository; defaults to a
         real :class:`~curator.persistence.enrichment_keys_repository.EnrichmentKeysRepository` over
         ``pool``.
+    :param profile_repository: The per-user public-profile display-settings repository; defaults to a real
+        :class:`~curator.persistence.profile_repository.ProfileRepository` over ``pool``.
+    :param follow_repository: The follow-graph repository; defaults to a real
+        :class:`~curator.persistence.follow_repository.FollowRepository` over ``pool``.
     :param redis_client: The shared Redis client backing the distributed PSN rate limiter
         (:class:`~curator.psn.rate_limiter.RedisRateLimiter`) and trophy-read caching
         (:class:`~curator.psn.trophy_cache.CachedTrophyClient`); defaults to
@@ -173,8 +182,11 @@ def create_app(
     :param presence_client_factory: Builds a :class:`~curator.psn.presence_client.PresenceClient` for a
         given (already-linked) ``sub``; defaults to :func:`_default_presence_client_factory`. Never cached
         -- presence is live-only.
-    :param devices_client_factory: Builds a :class:`~curator.psn.social_client.SocialClient` for a given
-        (already-linked) ``sub``; defaults to :func:`_default_devices_client_factory`. Never cached.
+    :param social_client_factory: Builds a :class:`~curator.psn.social_client.SocialClient` for a given
+        (already-linked) ``sub``; defaults to :func:`_default_social_client_factory`. Never cached. Backs
+        both ``curator.devices_routes``'s self-only ``devices()`` call and ``curator.profile_routes``'s
+        cross-user ``profile()``/``online_id()`` calls (built from the *viewer's* own sub, called with the
+        *target's* ``account_id`` -- see that module's docstring).
     :param http_client: The shared outbound HTTP client used for the admin RAWG/OpenCritic singletons, the
         per-user library-refresh clients, and BYOK key-save validation; defaults to a real
         :class:`httpx.AsyncClient`. Tests inject one wired to an ``httpx.MockTransport`` instead of hitting
@@ -203,7 +215,7 @@ def create_app(
     presence_client_factory = presence_client_factory or _default_presence_client_factory(
         repository, token_crypto, rate_limiter, redis_adapter
     )
-    devices_client_factory = devices_client_factory or _default_devices_client_factory(
+    social_client_factory = social_client_factory or _default_social_client_factory(
         repository, token_crypto, rate_limiter, redis_adapter
     )
     token_validator = token_validator or JwtValidator(settings.oidc_authority)
@@ -215,6 +227,8 @@ def create_app(
     job_runs_repository = job_runs_repository or JobRunsRepository(shared_pool)
     audit_repository = audit_repository or AccountActionLogRepository(shared_pool)
     enrichment_keys_repository = enrichment_keys_repository or EnrichmentKeysRepository(shared_pool)
+    profile_repository = profile_repository or ProfileRepository(shared_pool)
+    follow_repository = follow_repository or FollowRepository(shared_pool)
 
     owns_http_client = http_client is None
     http_client = http_client or httpx.AsyncClient()
@@ -311,7 +325,7 @@ def create_app(
     app.state.trophy_client_factory = trophy_client_factory
     app.state.identity_client_factory = identity_client_factory
     app.state.presence_client_factory = presence_client_factory
-    app.state.devices_client_factory = devices_client_factory
+    app.state.social_client_factory = social_client_factory
     app.state.redis_client = redis_client
     app.state.redis_adapter = redis_adapter
     app.state.token_validator = token_validator
@@ -323,6 +337,8 @@ def create_app(
     app.state.job_runs_repository = job_runs_repository
     app.state.audit_repository = audit_repository
     app.state.enrichment_keys_repository = enrichment_keys_repository
+    app.state.profile_repository = profile_repository
+    app.state.follow_repository = follow_repository
     app.state.queue_publisher = queue_publisher
     app.state.queue_consumer = queue_consumer
 
@@ -339,6 +355,7 @@ def create_app(
     app.include_router(presence_router)
     app.include_router(devices_router)
     app.include_router(enrichment_keys_router)
+    app.include_router(profile_router)
 
     @app.get("/health")
     async def health() -> PlainTextResponse:
@@ -623,13 +640,13 @@ def _default_presence_client_factory(
     return factory
 
 
-def _default_devices_client_factory(
+def _default_social_client_factory(
     repository: Repository,
     token_crypto: TokenCrypto,
     rate_limiter: RateLimiter | None,
     redis_adapter: RedisAdapter | None,
-) -> DevicesClientFactory:
-    """Build the production ``devices_client_factory``: a real
+) -> SocialClientFactory:
+    """Build the production ``social_client_factory``: a real
     :class:`~curator.psn.social_client.SocialClient` per call, backed by a fresh
     :class:`~curator.persistence.db_token_store.DbTokenStore`/:class:`~curator.psn.session.PsnSession` for
     the given (already-linked) user. Never wrapped in a cache.
@@ -643,7 +660,7 @@ def _default_devices_client_factory(
         token_store = DbTokenStore(sub, repository, token_crypto, redis_adapter)
         saved = await token_store.load()
         if saved is None:
-            raise RuntimeError(f"No PSN link for user {sub!r}; cannot fetch devices.")
+            raise RuntimeError(f"No PSN link for user {sub!r}; cannot build a social client.")
 
         session = await PsnSession.restore(None, token_store, rate_limiter=rate_limiter)
         return SocialClient(session)

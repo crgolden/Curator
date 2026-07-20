@@ -23,6 +23,8 @@ ACTION_TROPHY_FETCH = "trophy_fetch"
 ACTION_ACCOUNT_DELETED = "account_deleted"
 ACTION_ENRICHMENT_KEY_ADDED = "enrichment_key_added"
 ACTION_ENRICHMENT_KEY_REMOVED = "enrichment_key_removed"
+ACTION_FOLLOWED = "followed"
+ACTION_UNFOLLOWED = "unfollowed"
 
 
 @dataclass(frozen=True, slots=True)

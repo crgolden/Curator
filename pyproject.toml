@@ -122,6 +122,8 @@ module = [
     "test_link_service",
     "test_preferences_routes",
     "test_presence_routes",
+    "test_profile_persistence",
+    "test_profile_routes",
     "test_psn_account_client",
     "test_psn_catalog_client",
     "test_psn_chat_client",

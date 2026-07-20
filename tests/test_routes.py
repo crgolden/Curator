@@ -54,6 +54,9 @@ class FakeRepository:
     async def upsert_user(self, sub):
         self.users.add(sub)
 
+    async def user_exists(self, sub):
+        return sub in self.users
+
     async def touch_login(self, sub):
         self.login_touches.append(sub)
 

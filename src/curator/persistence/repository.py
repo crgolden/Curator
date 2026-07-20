@@ -78,6 +78,21 @@ class Repository:
         async with self._pool.connection() as conn, conn.cursor() as cur:
             await cur.execute(sql, (sub,))
 
+    async def user_exists(self, sub: str) -> bool:
+        """Check whether ``sub`` has an ``app_users`` row at all.
+
+        Backs the 404-if-target-unknown check every profile/follow route (``curator.profile_routes``)
+        performs before treating a path ``sub`` as a real target -- distinct from :meth:`get_link`, which
+        answers "does this user have a PSN link", not "does this user exist".
+
+        :param sub: The Identity ``sub`` claim to check.
+        """
+        sql = "SELECT 1 FROM app_users WHERE identity_sub = %s"
+        async with self._pool.connection() as conn, conn.cursor() as cur:
+            await cur.execute(sql, (sub,))
+            row = await cur.fetchone()
+        return row is not None
+
     async def touch_login(self, sub: str) -> None:
         """Record a login: set ``last_login_at`` (and ``updated_at``) to now.
 
