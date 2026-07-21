@@ -39,19 +39,69 @@ class FakeJobRunsRepository:
 
 
 class FakeLibraryGameView:
-    def __init__(self, game_id, title, rawg_enriched=False, opencritic_enriched=False):
+    def __init__(
+        self,
+        game_id,
+        title,
+        category=None,
+        rawg_rating=None,
+        opencritic_rating=None,
+        psn_rating=None,
+        psn_product_id=None,
+        rawg_enriched=False,
+        opencritic_enriched=False,
+    ):
         self.game_id = game_id
         self.title = title
+        self.category = category
+        self.rawg_rating = rawg_rating
+        self.opencritic_rating = opencritic_rating
+        self.psn_rating = psn_rating
+        self.psn_product_id = psn_product_id
         self.rawg_enriched = rawg_enriched
         self.opencritic_enriched = opencritic_enriched
 
 
+_SORT_ATTRS = {
+    "title": "title",
+    "category": "category",
+    "rawg_rating": "rawg_rating",
+    "opencritic_rating": "opencritic_rating",
+    "psn_rating": "psn_rating",
+}
+
+
 class FakeLibraryRepository:
+    """Hand-written fake that actually implements search/category/sort/paging in memory, so tests
+    against it exercise real filter/sort/page behavior, not just a passthrough."""
+
     def __init__(self, games_by_sub=None):
         self._games_by_sub = games_by_sub or {}
 
-    async def list_entries_with_enrichment(self, identity_sub):
-        return self._games_by_sub.get(identity_sub, [])
+    async def list_entries_with_enrichment(
+        self, identity_sub, *, search=None, category=None, sort="title", sort_dir="asc", limit=20, offset=0
+    ):
+        games = list(self._games_by_sub.get(identity_sub, []))
+        if search:
+            games = [g for g in games if search.lower() in g.title.lower()]
+        if category:
+            games = [g for g in games if g.category == category]
+
+        attr = _SORT_ATTRS[sort]
+        reverse = sort_dir == "desc"
+        games.sort(key=lambda g: (getattr(g, attr) is None, getattr(g, attr), g.title), reverse=False)
+        if reverse:
+            non_null = [g for g in games if getattr(g, attr) is not None]
+            non_null.sort(key=lambda g: getattr(g, attr), reverse=True)
+            null = [g for g in games if getattr(g, attr) is None]
+            games = non_null + null
+
+        total = len(games)
+        return games[offset : offset + limit], total
+
+    async def list_categories(self, identity_sub):
+        games = self._games_by_sub.get(identity_sub, [])
+        return sorted({g.category for g in games if g.category is not None})
 
 
 def _build(job_runs_repository=None, library_repository=None):
@@ -158,9 +208,19 @@ def test_get_library_requires_bearer_token():
     assert client.get("/library").status_code == 401
 
 
-def test_get_library_returns_callers_own_games_with_enrichment_status():
+def test_get_library_returns_callers_own_games_with_ratings_and_category():
     games = [
-        FakeLibraryGameView("game-1", "Elden Ring", rawg_enriched=True, opencritic_enriched=True),
+        FakeLibraryGameView(
+            "game-1",
+            "Elden Ring",
+            category="Action RPG",
+            rawg_rating=96.0,
+            opencritic_rating=94.0,
+            psn_rating=4.8,
+            psn_product_id="UP0700-CUSA23100_00-ELDENRING0000000",
+            rawg_enriched=True,
+            opencritic_enriched=True,
+        ),
         FakeLibraryGameView("game-2", "Unmatched Game", rawg_enriched=False, opencritic_enriched=False),
     ]
     client, validator, _publisher = _build(library_repository=FakeLibraryRepository({"sub-a": games}))
@@ -169,20 +229,43 @@ def test_get_library_returns_callers_own_games_with_enrichment_status():
     response = client.get("/library", headers=_bearer("token-a"))
 
     assert response.status_code == 200
-    assert response.json() == [
-        {"game_id": "game-1", "title": "Elden Ring", "rawg_enriched": True, "opencritic_enriched": True},
-        {"game_id": "game-2", "title": "Unmatched Game", "rawg_enriched": False, "opencritic_enriched": False},
-    ]
+    assert response.json() == {
+        "games": [
+            {
+                "game_id": "game-1",
+                "title": "Elden Ring",
+                "category": "Action RPG",
+                "rawg_rating": 96.0,
+                "opencritic_rating": 94.0,
+                "psn_rating": 4.8,
+                "psn_product_id": "UP0700-CUSA23100_00-ELDENRING0000000",
+                "rawg_enriched": True,
+                "opencritic_enriched": True,
+            },
+            {
+                "game_id": "game-2",
+                "title": "Unmatched Game",
+                "category": None,
+                "rawg_rating": None,
+                "opencritic_rating": None,
+                "psn_rating": None,
+                "psn_product_id": None,
+                "rawg_enriched": False,
+                "opencritic_enriched": False,
+            },
+        ],
+        "total": 2,
+    }
 
 
-def test_get_library_returns_empty_list_for_a_user_with_no_entries():
+def test_get_library_returns_empty_page_for_a_user_with_no_entries():
     client, validator, _publisher = _build()
     validator.register("token-a", _claims(sub="sub-a"))
 
     response = client.get("/library", headers=_bearer("token-a"))
 
     assert response.status_code == 200
-    assert response.json() == []
+    assert response.json() == {"games": [], "total": 0}
 
 
 def test_get_library_scoped_to_caller_only():
@@ -195,4 +278,94 @@ def test_get_library_scoped_to_caller_only():
 
     response = client.get("/library", headers=_bearer("token-a"))
 
-    assert [game["title"] for game in response.json()] == ["A's Game"]
+    assert [game["title"] for game in response.json()["games"]] == ["A's Game"]
+
+
+def test_get_library_search_filters_by_title_substring_case_insensitively():
+    games = [FakeLibraryGameView("game-1", "Elden Ring"), FakeLibraryGameView("game-2", "Bloodborne")]
+    client, validator, _publisher = _build(library_repository=FakeLibraryRepository({"sub-a": games}))
+    validator.register("token-a", _claims(sub="sub-a"))
+
+    response = client.get("/library?q=elden", headers=_bearer("token-a"))
+
+    body = response.json()
+    assert [g["title"] for g in body["games"]] == ["Elden Ring"]
+    assert body["total"] == 1
+
+
+def test_get_library_category_filters_exact_match():
+    games = [
+        FakeLibraryGameView("game-1", "Elden Ring", category="Action RPG"),
+        FakeLibraryGameView("game-2", "Tetris Effect", category="Puzzle"),
+    ]
+    client, validator, _publisher = _build(library_repository=FakeLibraryRepository({"sub-a": games}))
+    validator.register("token-a", _claims(sub="sub-a"))
+
+    response = client.get("/library?category=Puzzle", headers=_bearer("token-a"))
+
+    body = response.json()
+    assert [g["title"] for g in body["games"]] == ["Tetris Effect"]
+    assert body["total"] == 1
+
+
+def test_get_library_sort_by_rating_nulls_last_ascending_and_descending():
+    games = [
+        FakeLibraryGameView("g1", "No Rating"),
+        FakeLibraryGameView("g2", "High", rawg_rating=90.0),
+        FakeLibraryGameView("g3", "Low", rawg_rating=40.0),
+    ]
+    client, validator, _publisher = _build(library_repository=FakeLibraryRepository({"sub-a": games}))
+    validator.register("token-a", _claims(sub="sub-a"))
+
+    asc = client.get("/library?sort=rawg_rating&sortDir=asc", headers=_bearer("token-a")).json()
+    assert [g["title"] for g in asc["games"]] == ["Low", "High", "No Rating"]
+
+    desc = client.get("/library?sort=rawg_rating&sortDir=desc", headers=_bearer("token-a")).json()
+    assert [g["title"] for g in desc["games"]] == ["High", "Low", "No Rating"]
+
+
+def test_get_library_rejects_unknown_sort_field():
+    client, validator, _publisher = _build()
+    validator.register("token-a", _claims(sub="sub-a"))
+
+    response = client.get("/library?sort=not_a_real_field", headers=_bearer("token-a"))
+
+    assert response.status_code == 422
+
+
+def test_get_library_pagination_limit_and_offset():
+    games = [FakeLibraryGameView(f"g{i}", f"Game {i}") for i in range(5)]
+    client, validator, _publisher = _build(library_repository=FakeLibraryRepository({"sub-a": games}))
+    validator.register("token-a", _claims(sub="sub-a"))
+
+    response = client.get("/library?limit=2&offset=2", headers=_bearer("token-a"))
+
+    body = response.json()
+    assert [g["title"] for g in body["games"]] == ["Game 2", "Game 3"]
+    assert body["total"] == 5
+
+
+def test_get_library_categories_returns_distinct_sorted_categories():
+    games = [
+        FakeLibraryGameView("g1", "A", category="RPG"),
+        FakeLibraryGameView("g2", "B", category="Puzzle"),
+        FakeLibraryGameView("g3", "C", category="RPG"),
+        FakeLibraryGameView("g4", "D", category=None),
+    ]
+    client, validator, _publisher = _build(library_repository=FakeLibraryRepository({"sub-a": games}))
+    validator.register("token-a", _claims(sub="sub-a"))
+
+    response = client.get("/library/categories", headers=_bearer("token-a"))
+
+    assert response.status_code == 200
+    assert response.json() == {"categories": ["Puzzle", "RPG"]}
+
+
+def test_get_library_categories_empty_for_user_with_no_categorized_games():
+    client, validator, _publisher = _build()
+    validator.register("token-a", _claims(sub="sub-a"))
+
+    response = client.get("/library/categories", headers=_bearer("token-a"))
+
+    assert response.status_code == 200
+    assert response.json() == {"categories": []}

@@ -154,14 +154,37 @@ class FakeLibraryRepository:
     def __init__(self, games_by_sub=None) -> None:
         self._games_by_sub = games_by_sub or {}
 
-    async def list_entries_with_enrichment(self, identity_sub: str):
-        return self._games_by_sub.get(identity_sub, [])
+    async def list_entries_with_enrichment(
+        self, identity_sub: str, *, search=None, category=None, sort="title", sort_dir="asc", limit=20, offset=0
+    ):
+        games = self._games_by_sub.get(identity_sub, [])
+        return games[offset : offset + limit], len(games)
+
+    async def list_categories(self, identity_sub: str):
+        games = self._games_by_sub.get(identity_sub, [])
+        return sorted({g.category for g in games if g.category is not None})
 
 
 class FakeLibraryGameView:
-    def __init__(self, game_id, title, rawg_enriched=False, opencritic_enriched=False) -> None:
+    def __init__(
+        self,
+        game_id,
+        title,
+        category=None,
+        rawg_rating=None,
+        opencritic_rating=None,
+        psn_rating=None,
+        psn_product_id=None,
+        rawg_enriched=False,
+        opencritic_enriched=False,
+    ) -> None:
         self.game_id = game_id
         self.title = title
+        self.category = category
+        self.rawg_rating = rawg_rating
+        self.opencritic_rating = opencritic_rating
+        self.psn_rating = psn_rating
+        self.psn_product_id = psn_product_id
         self.rawg_enriched = rawg_enriched
         self.opencritic_enriched = opencritic_enriched
 
@@ -609,9 +632,22 @@ def test_library_200_with_data_when_public_and_show_library_true():
 
     response = client.get(f"/users/{SUB_A}/library", headers=_bearer("token-b"))
     assert response.status_code == 200
-    assert response.json() == [
-        {"game_id": "game-1", "title": "Elden Ring", "rawg_enriched": True, "opencritic_enriched": False}
-    ]
+    assert response.json() == {
+        "games": [
+            {
+                "game_id": "game-1",
+                "title": "Elden Ring",
+                "category": None,
+                "rawg_rating": None,
+                "opencritic_rating": None,
+                "psn_rating": None,
+                "psn_product_id": None,
+                "rawg_enriched": True,
+                "opencritic_enriched": False,
+            }
+        ],
+        "total": 1,
+    }
 
 
 def test_library_200_for_owner_regardless_of_flags():
@@ -628,7 +664,41 @@ def test_library_200_for_owner_regardless_of_flags():
 
     response = client.get(f"/users/{SUB_A}/library", headers=_bearer("token-a"))
     assert response.status_code == 200
-    assert len(response.json()) == 1
+    body = response.json()
+    assert len(body["games"]) == 1
+    assert body["total"] == 1
+
+
+def test_library_categories_returns_distinct_categories_when_visible():
+    repository = FakeRepository()
+    _seed_users(repository, SUB_A, SUB_B)
+    profile_repository = FakeProfileRepository()
+    profile_repository.settings[SUB_A] = ProfileSettings(
+        is_public=True, show_library=True, show_collections=False, show_trophies=False, show_identity=False
+    )
+    library_repository = FakeLibraryRepository(
+        {SUB_A: [FakeLibraryGameView("g1", "A", category="RPG"), FakeLibraryGameView("g2", "B", category="Puzzle")]}
+    )
+    client, *_ = _build(
+        repository=repository, profile_repository=profile_repository, library_repository=library_repository
+    )
+
+    response = client.get(f"/users/{SUB_A}/library/categories", headers=_bearer("token-b"))
+    assert response.status_code == 200
+    assert response.json() == {"categories": ["Puzzle", "RPG"]}
+
+
+def test_library_categories_403_when_private():
+    repository = FakeRepository()
+    _seed_users(repository, SUB_A, SUB_B)
+    profile_repository = FakeProfileRepository()
+    profile_repository.settings[SUB_A] = ProfileSettings(
+        is_public=False, show_library=True, show_collections=False, show_trophies=False, show_identity=False
+    )
+    client, *_ = _build(repository=repository, profile_repository=profile_repository)
+
+    response = client.get(f"/users/{SUB_A}/library/categories", headers=_bearer("token-b"))
+    assert response.status_code == 403
 
 
 def test_collections_403_when_private():

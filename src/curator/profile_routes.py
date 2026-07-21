@@ -26,6 +26,7 @@ see).
 from __future__ import annotations
 
 import logging
+from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from pydantic import BaseModel
@@ -33,7 +34,8 @@ from pydantic import BaseModel
 from curator.audit.repository import ACTION_FOLLOWED, ACTION_UNFOLLOWED, AccountActionLogRepository
 from curator.collections.repository import CollectionsRepository
 from curator.deps import require_bearer
-from curator.library.repository import LibraryRepository
+from curator.library.repository import LibraryRepository, LibrarySortField
+from curator.library_routes import LibraryCategoriesResponse
 from curator.persistence.follow_repository import FollowEdge, FollowRepository
 from curator.persistence.profile_repository import ProfileRepository, ProfileSettings
 from curator.persistence.repository import LinkRecord, Repository
@@ -122,12 +124,26 @@ class FollowListResponse(BaseModel):
 
 class ProfileLibraryGameResponse(BaseModel):
     """One entry of ``GET /users/{sub}/library`` -- same shape as ``curator.library_routes
-    .LibraryGameResponse``, the caller's-own equivalent."""
+    .LibraryGameResponse``, the caller's-own equivalent. No privacy reduction versus the owner's own
+    view: every field here describes the game, not the viewing user."""
 
     game_id: str
     title: str
+    category: str | None
+    rawg_rating: float | None
+    opencritic_rating: float | None
+    psn_rating: float | None
+    psn_product_id: str | None
     rawg_enriched: bool
     opencritic_enriched: bool
+
+
+class ProfileLibraryPageResponse(BaseModel):
+    """The ``GET /users/{sub}/library`` response body -- same shape as ``curator.library_routes
+    .LibraryPageResponse``, the caller's-own equivalent."""
+
+    games: list[ProfileLibraryGameResponse]
+    total: int
 
 
 class ProfileDefinitionResponse(BaseModel):
@@ -400,11 +416,12 @@ async def _follow_entry(request: Request, edge: FollowEdge) -> FollowListEntryRe
     )
 
 
-@router.get("/users/{sub}/library", response_model=list[ProfileLibraryGameResponse])
-async def get_user_library(
+@router.get("/users/{sub}/library/categories", response_model=LibraryCategoriesResponse)
+async def get_user_library_categories(
     sub: str, request: Request, claims: TokenClaims = Depends(require_bearer)
-) -> list[ProfileLibraryGameResponse]:
-    """Return ``sub``'s library, read-only.
+) -> LibraryCategoriesResponse:
+    """Return the distinct, sorted set of categories in ``sub``'s library, read-only -- backs the
+    viewer-mode library page's category filter dropdown.
 
     :raises fastapi.HTTPException: 404, if ``sub`` has no ``app_users`` row. 403, unless the caller is the
         owner or the target's profile is both public and ``show_library``.
@@ -412,16 +429,51 @@ async def get_user_library(
     await _require_visible_section(request, sub, claims, "show_library")
 
     library_repository: LibraryRepository = request.app.state.library_repository
-    games = await library_repository.list_entries_with_enrichment(sub)
-    return [
-        ProfileLibraryGameResponse(
-            game_id=game.game_id,
-            title=game.title,
-            rawg_enriched=game.rawg_enriched,
-            opencritic_enriched=game.opencritic_enriched,
-        )
-        for game in games
-    ]
+    categories = await library_repository.list_categories(sub)
+    return LibraryCategoriesResponse(categories=categories)
+
+
+@router.get("/users/{sub}/library", response_model=ProfileLibraryPageResponse)
+async def get_user_library(
+    sub: str,
+    request: Request,
+    q: str | None = Query(default=None),
+    category: str | None = Query(default=None),
+    sort: LibrarySortField = Query(default="title"),
+    sort_dir: Literal["asc", "desc"] = Query(default="asc", alias="sortDir"),
+    limit: int = Query(default=20, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
+    claims: TokenClaims = Depends(require_bearer),
+) -> ProfileLibraryPageResponse:
+    """Return one page of ``sub``'s library, read-only -- same search/filter/sort/paging support as
+    the caller's-own ``GET /library``.
+
+    :raises fastapi.HTTPException: 404, if ``sub`` has no ``app_users`` row. 403, unless the caller is the
+        owner or the target's profile is both public and ``show_library``.
+    """
+    await _require_visible_section(request, sub, claims, "show_library")
+
+    library_repository: LibraryRepository = request.app.state.library_repository
+    games, total = await library_repository.list_entries_with_enrichment(
+        sub, search=q, category=category, sort=sort, sort_dir=sort_dir, limit=limit, offset=offset
+    )
+    return ProfileLibraryPageResponse(
+        games=[
+            ProfileLibraryGameResponse(
+                game_id=game.game_id,
+                title=game.title,
+                category=game.category,
+                rawg_rating=game.rawg_rating,
+                opencritic_rating=game.opencritic_rating,
+                psn_rating=game.psn_rating,
+                psn_product_id=game.psn_product_id,
+                rawg_enriched=game.rawg_enriched,
+                opencritic_enriched=game.opencritic_enriched,
+            )
+            for game in games
+        ],
+        total=total,
+    )
 
 
 @router.get("/users/{sub}/collections", response_model=list[ProfileDefinitionResponse])

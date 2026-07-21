@@ -7,17 +7,33 @@ Same shape as :class:`curator.persistence.repository.Repository`: backed by a sh
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Any, Literal
 
 from psycopg_pool import AsyncConnectionPool
+
+LibrarySortField = Literal["title", "category", "rawg_rating", "opencritic_rating", "psn_rating"]
+
+_SORT_COLUMNS: dict[str, str] = {
+    "title": "g.canonical_title",
+    "category": "gen.name",
+    "rawg_rating": "ge.critical_score",
+    "opencritic_rating": "ge.oc_score",
+    "psn_rating": "ge.psn_rating",
+}
 
 
 @dataclass(frozen=True, slots=True)
 class LibraryGameView:
     """One row of a user's library, joined with its enrichment status -- backs ``GET /library``'s
-    per-provider checkmarks."""
+    rating/category columns."""
 
     game_id: str
     title: str
+    category: str | None
+    rawg_rating: float | None
+    opencritic_rating: float | None
+    psn_rating: float | None
+    psn_product_id: str | None
     rawg_enriched: bool
     opencritic_enriched: bool
 
@@ -113,31 +129,108 @@ class LibraryRepository:
             for row in rows
         ]
 
-    async def list_entries_with_enrichment(self, identity_sub: str) -> list[LibraryGameView]:
-        """Return every game a user owns with its per-provider enrichment status, for ``GET /library``'s
-        checkmark view.
+    async def list_entries_with_enrichment(
+        self,
+        identity_sub: str,
+        *,
+        search: str | None = None,
+        category: str | None = None,
+        sort: LibrarySortField = "title",
+        sort_dir: str = "asc",
+        limit: int = 20,
+        offset: int = 0,
+    ) -> tuple[list[LibraryGameView], int]:
+        """Return one page of a user's library, joined with its category/ratings/enrichment status,
+        for ``GET /library``'s (and ``GET /users/{sub}/library``'s) table -- plus the total count of
+        every row matching ``search``/``category``, independent of ``limit``/``offset``.
 
-        ``LEFT JOIN game_enrichment`` -- a freshly-ingested-but-not-yet-enriched game has no
-        ``game_enrichment`` row yet, and both flags correctly default to ``False`` in that case (not
-        enriched yet, not an error).
+        ``LEFT JOIN game_enrichment``/``genres`` -- a freshly-ingested-but-not-yet-enriched game has
+        no ``game_enrichment`` row yet, and every rating/category field correctly comes back ``None``
+        (not enriched yet, not an error); ``rawg_enriched``/``opencritic_enriched`` still default to
+        ``False`` via ``COALESCE``.
+
+        :param identity_sub: The Curator user id (Identity's ``sub``).
+        :param search: Optional case-insensitive title substring filter.
+        :param category: Optional exact-match category (resolved genre name) filter.
+        :param sort: Which column to sort by -- looked up through :data:`_SORT_COLUMNS` rather than
+            trusted directly, even though the route layer already constrains it to a safe literal.
+        :param sort_dir: ``"asc"`` or ``"desc"``; anything else is treated as ``"asc"``.
+        :param limit: Page size.
+        :param offset: Number of matching rows to skip.
+        """
+        conditions: list[str] = ["le.identity_sub = %s"]
+        params: list[Any] = [identity_sub]
+        if search:
+            conditions.append("g.canonical_title ILIKE %s")
+            params.append(f"%{search}%")
+        if category:
+            conditions.append("gen.name = %s")
+            params.append(category)
+        where_clause = " AND ".join(conditions)
+
+        sort_column = _SORT_COLUMNS[sort]
+        direction = "DESC" if sort_dir == "desc" else "ASC"
+
+        base_query = f"""
+            FROM library_entries le
+            JOIN games g ON g.game_id = le.game_id
+            LEFT JOIN game_enrichment ge ON ge.game_id = le.game_id
+            LEFT JOIN genres gen ON gen.genre_id = ge.genre_id
+            WHERE {where_clause}
+        """
+
+        async with self._pool.connection() as conn, conn.cursor() as cur:
+            await cur.execute(f"SELECT COUNT(*) {base_query}", tuple(params))
+            count_row = await cur.fetchone()
+            assert count_row is not None  # COUNT(*) always returns exactly one row
+            total = count_row[0]
+
+            await cur.execute(
+                f"""
+                SELECT g.game_id, g.canonical_title, gen.name, ge.critical_score, ge.oc_score,
+                       ge.psn_rating, le.product_id,
+                       COALESCE(ge.rawg_enriched, false), COALESCE(ge.opencritic_enriched, false)
+                {base_query}
+                ORDER BY {sort_column} {direction} NULLS LAST, g.canonical_title ASC
+                LIMIT %s OFFSET %s
+                """,
+                (*params, limit, offset),
+            )
+            rows = await cur.fetchall()
+
+        games = [
+            LibraryGameView(
+                game_id=str(row[0]),
+                title=row[1],
+                category=row[2],
+                rawg_rating=row[3],
+                opencritic_rating=row[4],
+                psn_rating=row[5],
+                psn_product_id=row[6],
+                rawg_enriched=row[7],
+                opencritic_enriched=row[8],
+            )
+            for row in rows
+        ]
+        return games, total
+
+    async def list_categories(self, identity_sub: str) -> list[str]:
+        """Return the distinct, sorted set of categories (resolved genres) present in a user's
+        library -- backs the library page's category filter dropdown.
 
         :param identity_sub: The Curator user id (Identity's ``sub``).
         """
         async with self._pool.connection() as conn, conn.cursor() as cur:
             await cur.execute(
                 """
-                SELECT g.game_id, g.canonical_title,
-                       COALESCE(ge.rawg_enriched, false), COALESCE(ge.opencritic_enriched, false)
+                SELECT DISTINCT gen.name
                 FROM library_entries le
-                JOIN games g ON g.game_id = le.game_id
-                LEFT JOIN game_enrichment ge ON ge.game_id = le.game_id
-                WHERE le.identity_sub = %s
-                ORDER BY g.canonical_title
+                JOIN game_enrichment ge ON ge.game_id = le.game_id
+                JOIN genres gen ON gen.genre_id = ge.genre_id
+                WHERE le.identity_sub = %s AND gen.name IS NOT NULL
+                ORDER BY gen.name
                 """,
                 (identity_sub,),
             )
             rows = await cur.fetchall()
-        return [
-            LibraryGameView(game_id=str(row[0]), title=row[1], rawg_enriched=row[2], opencritic_enriched=row[3])
-            for row in rows
-        ]
+        return [row[0] for row in rows]

@@ -260,10 +260,10 @@ class EnrichmentRepository:
                 """
                 INSERT INTO game_enrichment (
                     game_id, genre_id, subgenre_id, release_year, developer, publisher, esrb, multiplayer,
-                    critical_score, oc_score, oc_tier, oc_percent_recommended, score_source, aaa_tier,
-                    rawg_enriched, opencritic_enriched
+                    critical_score, oc_score, oc_tier, oc_percent_recommended, psn_rating, score_source,
+                    aaa_tier, rawg_enriched, opencritic_enriched
                 )
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 ON CONFLICT (game_id) DO UPDATE SET
                     genre_id = EXCLUDED.genre_id,
                     subgenre_id = EXCLUDED.subgenre_id,
@@ -276,6 +276,7 @@ class EnrichmentRepository:
                     oc_score = EXCLUDED.oc_score,
                     oc_tier = EXCLUDED.oc_tier,
                     oc_percent_recommended = EXCLUDED.oc_percent_recommended,
+                    psn_rating = EXCLUDED.psn_rating,
                     score_source = EXCLUDED.score_source,
                     aaa_tier = EXCLUDED.aaa_tier,
                     rawg_enriched = EXCLUDED.rawg_enriched,
@@ -295,6 +296,7 @@ class EnrichmentRepository:
                     result.oc_score,
                     result.oc_tier,
                     result.oc_percent_recommended,
+                    result.psn_rating,
                     result.score_source,
                     result.aaa_tier,
                     result.rawg_enriched,

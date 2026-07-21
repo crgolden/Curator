@@ -12,16 +12,16 @@ calls bound by those services' own rate limits. ``GET /library/refresh/{run_id}`
 from __future__ import annotations
 
 import logging
-from typing import Any
+from typing import Any, Literal
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel
 
 from curator.audit.repository import ACTION_LIBRARY_REFRESH_REQUESTED, AccountActionLogRepository
 from curator.deps import require_bearer
 from curator.jobs.queue_publisher import QueuePublisher
 from curator.jobs.repository import JobRunsRepository
-from curator.library.repository import LibraryRepository
+from curator.library.repository import LibraryRepository, LibrarySortField
 from curator.token_validation import TokenClaims
 
 router = APIRouter(prefix="/library", tags=["library"])
@@ -33,8 +33,27 @@ class LibraryGameResponse(BaseModel):
 
     game_id: str
     title: str
+    category: str | None
+    rawg_rating: float | None
+    opencritic_rating: float | None
+    psn_rating: float | None
+    psn_product_id: str | None
     rawg_enriched: bool
     opencritic_enriched: bool
+
+
+class LibraryPageResponse(BaseModel):
+    """The ``GET /library`` response body: one page of the caller's library plus the total count of
+    every row matching the current search/filter, independent of ``limit``/``offset``."""
+
+    games: list[LibraryGameResponse]
+    total: int
+
+
+class LibraryCategoriesResponse(BaseModel):
+    """The ``GET /library/categories`` response body."""
+
+    categories: list[str]
 
 
 class LibraryRefreshResponse(BaseModel):
@@ -52,25 +71,63 @@ class LibraryRefreshStatusResponse(BaseModel):
     result_summary: dict[str, Any] | None
 
 
-@router.get("", response_model=list[LibraryGameResponse])
-async def get_library(request: Request, claims: TokenClaims = Depends(require_bearer)) -> list[LibraryGameResponse]:
-    """Return the caller's own library, with per-provider (RAWG/OpenCritic) enrichment status per game.
+@router.get("/categories", response_model=LibraryCategoriesResponse)
+async def get_library_categories(
+    request: Request, claims: TokenClaims = Depends(require_bearer)
+) -> LibraryCategoriesResponse:
+    """Return the distinct, sorted set of categories (resolved genres) present in the caller's own
+    library -- backs the library page's category filter dropdown."""
+    library_repository: LibraryRepository = request.app.state.library_repository
+    categories = await library_repository.list_categories(claims.sub)
+    return LibraryCategoriesResponse(categories=categories)
 
-    Every entry is included, even ones no provider has enriched yet (both flags ``False``) -- this is the
-    finished-library view Librarian's ``/library`` page renders as a checkmark table, distinct from
+
+@router.get("", response_model=LibraryPageResponse)
+async def get_library(
+    request: Request,
+    q: str | None = Query(default=None),
+    category: str | None = Query(default=None),
+    sort: LibrarySortField = Query(default="title"),
+    sort_dir: Literal["asc", "desc"] = Query(default="asc", alias="sortDir"),
+    limit: int = Query(default=20, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
+    claims: TokenClaims = Depends(require_bearer),
+) -> LibraryPageResponse:
+    """Return one page of the caller's own library, with per-provider (RAWG/OpenCritic) ratings,
+    the resolved category, and PSN's own catalog rating/product id per game.
+
+    Every entry is included, even ones no provider has enriched yet (all rating fields ``None``) --
+    this is the finished-library view Librarian's ``/library`` page renders, distinct from
     ``GET /library/refresh/{run_id}``'s job-status polling.
+
+    :param q: Optional case-insensitive title substring filter.
+    :param category: Optional exact-match category (resolved genre name) filter.
+    :param sort: Which column to sort by.
+    :param sort_dir: Sort direction; unresolved (``None``) values always sort last regardless.
+    :param limit: Page size.
+    :param offset: Number of matching rows to skip.
     """
     library_repository: LibraryRepository = request.app.state.library_repository
-    games = await library_repository.list_entries_with_enrichment(claims.sub)
-    return [
-        LibraryGameResponse(
-            game_id=game.game_id,
-            title=game.title,
-            rawg_enriched=game.rawg_enriched,
-            opencritic_enriched=game.opencritic_enriched,
-        )
-        for game in games
-    ]
+    games, total = await library_repository.list_entries_with_enrichment(
+        claims.sub, search=q, category=category, sort=sort, sort_dir=sort_dir, limit=limit, offset=offset
+    )
+    return LibraryPageResponse(
+        games=[
+            LibraryGameResponse(
+                game_id=game.game_id,
+                title=game.title,
+                category=game.category,
+                rawg_rating=game.rawg_rating,
+                opencritic_rating=game.opencritic_rating,
+                psn_rating=game.psn_rating,
+                psn_product_id=game.psn_product_id,
+                rawg_enriched=game.rawg_enriched,
+                opencritic_enriched=game.opencritic_enriched,
+            )
+            for game in games
+        ],
+        total=total,
+    )
 
 
 @router.post("/refresh", response_model=LibraryRefreshResponse, status_code=202)

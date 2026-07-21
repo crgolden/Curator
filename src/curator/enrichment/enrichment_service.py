@@ -60,10 +60,20 @@ class EnrichmentResult:
     oc_score: float | None
     oc_tier: str | None
     oc_percent_recommended: float | None
+    psn_rating: float | None
     score_source: str | None
     aaa_tier: str
     rawg_enriched: bool
     opencritic_enriched: bool
+
+
+@dataclass(frozen=True, slots=True)
+class PsnCatalogLookup:
+    """The official-PSN-catalog signals resolved for one product id: its genres (used for genre
+    reconciliation) and its star rating (persisted as ``game_enrichment.psn_rating``)."""
+
+    genres: list[str]
+    star_rating: float | None
 
 
 def _score_source(critical_score: float | None, oc_score: float | None) -> str | None:
@@ -159,7 +169,8 @@ class EnrichmentService:
             per-user/per-console install-size tracking lives).
         """
         rawg_detail = await self._resolve_rawg(title)
-        psn_genres = await self._resolve_psn_genres(product_id)
+        psn_catalog = await self._resolve_psn_catalog(product_id)
+        psn_genres = psn_catalog.genres
 
         rawg_genres = [genre["name"] for genre in (rawg_detail or {}).get("genres", [])]
         genre, subgenre = reconcile_genres(psn_genres, rawg_genres, genre_priorities)
@@ -202,6 +213,7 @@ class EnrichmentService:
             oc_score=oc_score,
             oc_tier=oc_tier,
             oc_percent_recommended=oc_percent,
+            psn_rating=psn_catalog.star_rating,
             score_source=_score_source(critical_score, oc_score),
             aaa_tier=aaa_tier,
             rawg_enriched=rawg_detail is not None,
@@ -281,12 +293,16 @@ class EnrichmentService:
             if not result.exhausted:
                 self.opencritic_topup_incomplete = True
 
-    async def _resolve_psn_genres(self, product_id: str | None) -> list[str]:
+    async def _resolve_psn_catalog(self, product_id: str | None) -> PsnCatalogLookup:
+        """Resolve a product id's official-PSN-catalog genres and star rating, cache-first.
+
+        :param product_id: The game's PSN product id, or ``None`` if unknown.
+        """
         if product_id is None or self._catalog_client is None:
-            return []
+            return PsnCatalogLookup(genres=[], star_rating=None)
         cached = await self._repository.get_psn_catalog_cache(product_id)
         if cached is not None:
-            return list(cached.genres)
+            return PsnCatalogLookup(genres=list(cached.genres), star_rating=cached.star_rating)
 
         concept = await self._catalog_client.title_concept(product_id)
         await self._repository.save_psn_catalog_cache(
@@ -300,4 +316,4 @@ class EnrichmentService:
                 cover_image_url=concept.cover_image_url,
             )
         )
-        return list(concept.genres)
+        return PsnCatalogLookup(genres=list(concept.genres), star_rating=concept.star_rating)

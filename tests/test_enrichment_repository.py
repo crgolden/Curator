@@ -228,6 +228,7 @@ async def test_save_game_enrichment_executes_upsert():
         oc_score=80.0,
         oc_tier="Strong",
         oc_percent_recommended=90.0,
+        psn_rating=4.5,
         score_source="RAWG + OC",
         aaa_tier="AAA",
         rawg_enriched=True,
@@ -238,7 +239,9 @@ async def test_save_game_enrichment_executes_upsert():
 
     sql, params = pool.connections[0].executed[0]
     assert "INSERT INTO game_enrichment" in sql
+    assert "psn_rating" in sql
     assert params is not None
     assert params[0] == "game-1"
     assert params[1] == "genre-id-1"
     assert params[2] == "subgenre-id-1"
+    assert params[12] == 4.5  # psn_rating bind position
