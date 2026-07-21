@@ -145,7 +145,7 @@ async def test_list_entries_with_enrichment_rejects_unknown_sort_field():
     repo = LibraryRepository(pool)
 
     try:
-        await repo.list_entries_with_enrichment("sub-1", sort="not_a_real_field")  # type: ignore[arg-type]
+        await repo.list_entries_with_enrichment("sub-1", sort="not_a_real_field")
     except KeyError:
         return
     raise AssertionError("expected a KeyError for an unknown sort field")
@@ -168,6 +168,7 @@ async def test_list_entries_with_enrichment_applies_limit_and_offset():
     await repo.list_entries_with_enrichment("sub-1", limit=5, offset=10)
 
     _, select_params = pool.connections[0].executed[1]
+    assert select_params is not None
     assert select_params[-2:] == (5, 10)
 
 
