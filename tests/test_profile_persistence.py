@@ -5,6 +5,7 @@ unittest.mock)."""
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from uuid import UUID
 
 from curator.persistence.follow_repository import FollowRepository
 from curator.persistence.profile_repository import ProfileRepository
@@ -219,3 +220,29 @@ async def test_list_following_returns_newest_first_and_respects_pagination_param
     assert "ORDER BY created_at DESC" in sql
     assert "follower_sub = %s" in sql
     assert params == ("sub-a", 25, 0)
+
+
+async def test_list_followers_coerces_uuid_column_to_str():
+    """Regression test: psycopg returns a ``uuid.UUID`` instance (not ``str``) for a ``UUID`` column --
+    reproduces a production bug where ``FollowEdge.sub`` stayed a ``UUID`` and failed
+    ``FollowListEntryResponse`` pydantic validation (``sub: str``) with a real ``ValidationError``.
+    """
+    row = (UUID("9bd7af1c-7196-46f1-cadd-08dee5d60140"), datetime(2026, 2, 1, tzinfo=timezone.utc))
+    pool = FakePool(fetchall_results=[[row]])
+    repo = FollowRepository(pool)
+
+    edges = await repo.list_followers("sub-a")
+
+    assert edges[0].sub == "9bd7af1c-7196-46f1-cadd-08dee5d60140"
+    assert isinstance(edges[0].sub, str)
+
+
+async def test_list_following_coerces_uuid_column_to_str():
+    row = (UUID("cb6d81d9-c670-425b-bfdb-08de789d89c0"), datetime(2026, 2, 1, tzinfo=timezone.utc))
+    pool = FakePool(fetchall_results=[[row]])
+    repo = FollowRepository(pool)
+
+    edges = await repo.list_following("sub-a")
+
+    assert edges[0].sub == "cb6d81d9-c670-425b-bfdb-08de789d89c0"
+    assert isinstance(edges[0].sub, str)

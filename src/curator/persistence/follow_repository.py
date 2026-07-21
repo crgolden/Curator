@@ -113,7 +113,7 @@ class FollowRepository:
         async with self._pool.connection() as conn, conn.cursor() as cur:
             await cur.execute(sql, (sub, limit, offset))
             rows = await cur.fetchall()
-        return [FollowEdge(sub=row[0], followed_at=row[1]) for row in rows]
+        return [FollowEdge(sub=str(row[0]), followed_at=row[1]) for row in rows]
 
     async def list_following(self, sub: str, *, limit: int = 100, offset: int = 0) -> list[FollowEdge]:
         """List the users ``sub`` follows, newest edge first.
@@ -129,4 +129,4 @@ class FollowRepository:
         async with self._pool.connection() as conn, conn.cursor() as cur:
             await cur.execute(sql, (sub, limit, offset))
             rows = await cur.fetchall()
-        return [FollowEdge(sub=row[0], followed_at=row[1]) for row in rows]
+        return [FollowEdge(sub=str(row[0]), followed_at=row[1]) for row in rows]
