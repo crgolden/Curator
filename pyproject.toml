@@ -105,6 +105,7 @@ module = [
     "test_enrichment_rawg_matcher",
     "test_enrichment_repository",
     "test_enrichment_routes",
+    "test_enrichment_run_handler",
     "test_enrichment_service",
     "test_config",
     "test_connection",
