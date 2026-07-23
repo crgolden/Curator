@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING, Any
 from psycopg_pool import AsyncConnectionPool
 
 from curator.enrichment.opencritic_matcher import OpenCriticGame
-from curator.enrichment.publisher_tier import PublisherTierRule
+from curator.enrichment.publisher_tier import PublisherTierRule, classify_tier
 from curator.enrichment.rawg_matcher import normalize as normalize_rawg_title
 
 if TYPE_CHECKING:
@@ -58,6 +58,37 @@ class EnrichmentRepository:
             await cur.execute("SELECT tier_id, pattern, tier, match_kind FROM publisher_tiers")
             rows = await cur.fetchall()
         return [PublisherTierRule(tier_id=str(row[0]), pattern=row[1], tier=row[2], match_kind=row[3]) for row in rows]
+
+    async def reclassify_tier(self, rules: list[PublisherTierRule]) -> int:
+        """Recompute ``aaa_tier`` for every already-enriched game against the current
+        ``publisher_tiers``, updating only the rows whose tier actually changes.
+
+        ``get_unenriched_game_ids`` means an already-enriched game is never revisited by the normal
+        per-user refresh path -- without this, a game enriched before ``publisher_tiers`` was seeded
+        would stay misclassified (defaulted to ``"Indie"``) forever. No new RAWG/OpenCritic/PSN call
+        is needed: ``publisher``/``developer`` were already resolved and stored by the original
+        enrichment, so this just reclassifies already-known data.
+
+        :param rules: Every publisher-tier classification rule (see :meth:`list_publisher_tier_rules`).
+        :returns: The number of games whose ``aaa_tier`` changed.
+        """
+        async with self._pool.connection() as conn, conn.cursor() as cur:
+            await cur.execute(
+                "SELECT game_id, publisher, developer, aaa_tier FROM game_enrichment "
+                "WHERE publisher IS NOT NULL OR developer IS NOT NULL"
+            )
+            rows = await cur.fetchall()
+
+            updated = 0
+            for game_id, publisher, developer, current_tier in rows:
+                new_tier = classify_tier(publisher or "", rules) or classify_tier(developer or "", rules) or "Indie"
+                if new_tier != current_tier:
+                    await cur.execute(
+                        "UPDATE game_enrichment SET aaa_tier = %s WHERE game_id = %s",
+                        (new_tier, game_id),
+                    )
+                    updated += 1
+        return updated
 
     async def get_unenriched_game_ids(self, game_ids: list[str]) -> list[str]:
         """Return the subset of ``game_ids`` that have no ``game_enrichment`` row yet.

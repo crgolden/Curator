@@ -243,6 +243,22 @@ def test_account_action_log_accepts_followed_and_unfollowed_actions(db_connectio
     assert count == 2
 
 
+def test_curation_rule_tables_are_seeded(db_connection):
+    with db_connection.cursor() as cur:
+        cur.execute("SELECT count(*) FROM franchise_rules")
+        (franchise_rule_count,) = cur.fetchone()
+        cur.execute("SELECT count(*) FROM publisher_tiers")
+        (publisher_tier_count,) = cur.fetchone()
+        cur.execute("SELECT count(*) FROM genres")
+        (genre_count,) = cur.fetchone()
+        cur.execute("SELECT franchise FROM franchise_rules WHERE pattern = %s", ("call of duty",))
+        (call_of_duty_franchise,) = cur.fetchone()
+    assert franchise_rule_count > 0
+    assert publisher_tier_count > 0
+    assert genre_count > 0
+    assert call_of_duty_franchise == "Call of Duty"
+
+
 def test_no_email_or_npsso_columns_anywhere(db_connection):
     with db_connection.cursor() as cur:
         cur.execute(

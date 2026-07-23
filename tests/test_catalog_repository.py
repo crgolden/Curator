@@ -9,6 +9,7 @@ results consumed in call order instead of returning one fixed value.
 from __future__ import annotations
 
 from curator.catalog.canonicalization_service import CanonicalGame, EntitlementSnapshot
+from curator.catalog.franchise_assigner import FranchiseRule
 from curator.catalog.repository import CatalogRepository
 
 
@@ -238,3 +239,49 @@ async def test_upsert_game_with_no_concept_ids_skips_concept_lookup():
     assert game_id == "matched-by-title"
     conn = pool.connections[0]
     assert "SELECT game_id FROM games WHERE normalized_title" in conn.executed[0][0]
+
+
+async def test_list_all_game_ids_and_titles_maps_rows():
+    pool = FakePool(fetchall_results=[[("id-1", "God of War"), ("id-2", "Horizon Zero Dawn")]])
+    repo = CatalogRepository(pool)
+
+    games = await repo.list_all_game_ids_and_titles()
+
+    assert games == [("id-1", "God of War"), ("id-2", "Horizon Zero Dawn")]
+
+
+async def test_reclassify_franchise_updates_only_changed_rows():
+    # "Call of Duty: Black Ops 4" currently has no franchise, but a rule now matches it;
+    # "God of War" already has the correct franchise assigned, so it should be left alone.
+    pool = FakePool(
+        fetchall_results=[
+            [
+                ("id-1", "Call of Duty: Black Ops 4", None),
+                ("id-2", "God of War", "God of War"),
+            ]
+        ]
+    )
+    repo = CatalogRepository(pool)
+    rules = [
+        FranchiseRule(rule_id="r1", pattern="call of duty", franchise="Call of Duty", priority=0),
+        FranchiseRule(rule_id="r2", pattern="god of war", franchise="God of War", priority=1),
+    ]
+
+    updated = await repo.reclassify_franchise(rules)
+
+    assert updated == 1
+    conn = pool.connections[0]
+    update_calls = [call for call in conn.executed if call[0].startswith("UPDATE games")]
+    assert len(update_calls) == 1
+    assert update_calls[0][1] == ("Call of Duty", "id-1")
+
+
+async def test_reclassify_franchise_returns_zero_when_nothing_changes():
+    pool = FakePool(fetchall_results=[[("id-1", "Unmatched Game", None)]])
+    repo = CatalogRepository(pool)
+
+    updated = await repo.reclassify_franchise([])
+
+    assert updated == 0
+    conn = pool.connections[0]
+    assert not any(call[0].startswith("UPDATE games") for call in conn.executed)

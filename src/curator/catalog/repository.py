@@ -16,7 +16,7 @@ from psycopg_pool import AsyncConnectionPool
 
 from curator.catalog.canonicalization_service import CanonicalGame, EntitlementSnapshot
 from curator.catalog.exclusion_rules import ExclusionRule
-from curator.catalog.franchise_assigner import FranchiseRule
+from curator.catalog.franchise_assigner import FranchiseRule, assign_franchise
 from curator.scoring.size_estimation_service import SizeEstimate
 
 
@@ -103,6 +103,39 @@ class CatalogRepository:
             await cur.execute("SELECT rule_id, pattern, franchise, priority FROM franchise_rules")
             rows = await cur.fetchall()
         return [FranchiseRule(rule_id=str(row[0]), pattern=row[1], franchise=row[2], priority=row[3]) for row in rows]
+
+    async def list_all_game_ids_and_titles(self) -> list[tuple[str, str]]:
+        """Return every game's ``(game_id, canonical_title)``, for a catalog-wide admin pass."""
+        async with self._pool.connection() as conn, conn.cursor() as cur:
+            await cur.execute("SELECT game_id, canonical_title FROM games")
+            rows = await cur.fetchall()
+        return [(str(row[0]), row[1]) for row in rows]
+
+    async def reclassify_franchise(self, rules: list[FranchiseRule]) -> int:
+        """Recompute every game's franchise against the current ``franchise_rules``, updating only the
+        rows whose value actually changes.
+
+        Franchise assignment is pure title-regex matching -- no external API dependency -- so this can
+        run for every game in the catalog regardless of enrichment status, unlike genre/tier
+        reclassification which needs already-resolved publisher/developer or genre-tag data.
+
+        :param rules: Every franchise-assignment rule (see :meth:`list_franchise_rules`).
+        :returns: The number of games whose franchise changed.
+        """
+        async with self._pool.connection() as conn, conn.cursor() as cur:
+            await cur.execute("SELECT game_id, canonical_title, franchise FROM games")
+            rows = await cur.fetchall()
+
+            updated = 0
+            for game_id, canonical_title, current_franchise in rows:
+                new_franchise = assign_franchise(canonical_title, rules) or None
+                if new_franchise != current_franchise:
+                    await cur.execute(
+                        "UPDATE games SET franchise = %s, updated_at = now() WHERE game_id = %s",
+                        (new_franchise, game_id),
+                    )
+                    updated += 1
+        return updated
 
     async def get_edition_ranks(self) -> dict[str, int]:
         """Return the edition-keyword -> rank mapping."""

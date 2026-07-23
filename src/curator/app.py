@@ -233,13 +233,14 @@ def create_app(
     owns_http_client = http_client is None
     http_client = http_client or httpx.AsyncClient()
     # Admin-only catalog-wide singleton, built from Settings.rawg_api_key/opencritic_rapidapi_key -- its
-    # ONLY remaining caller is _enrichment_run_handler -> refresh_opencritic_cache() (POST /enrichment/runs,
-    # require_admin-gated). Per-user library refreshes never use this: Curator provisions no shared/
-    # fallback RAWG/OpenCritic key (it doesn't scale to every user's library) -- _library_refresh_handler
-    # below builds its own per-user clients from that user's own stored keys instead, via
-    # enrichment_keys_repository. No catalog_client here either: the official PSN-catalog signal needs a
-    # per-user authenticated PsnSession, unlike RAWG/OpenCritic, and this singleton never calls
-    # enrich_game(), only refresh_opencritic_cache().
+    # ONLY caller is _enrichment_run_handler (POST /enrichment/runs, require_admin-gated), which uses it
+    # both for refresh_opencritic_cache() and, for still-unenriched catalog games, enrich_game() itself.
+    # Per-user library refreshes never use this: Curator provisions no shared/fallback RAWG/OpenCritic
+    # key (it doesn't scale to every user's library) -- _library_refresh_handler below builds its own
+    # per-user clients from that user's own stored keys instead, via enrichment_keys_repository. No
+    # catalog_client here either: the official PSN-catalog signal needs a per-user authenticated
+    # PsnSession, unlike RAWG/OpenCritic, so this singleton's enrich_game() calls always pass
+    # product_id=None and skip the PSN-native genre/rating supplement.
     admin_rawg_client = RawgClient(http_client, settings.rawg_api_key) if settings.rawg_api_key else None
     admin_opencritic_client = (
         OpenCriticClient(http_client, settings.opencritic_rapidapi_key) if settings.opencritic_rapidapi_key else None
@@ -286,7 +287,7 @@ def create_app(
                 rate_limiter=rate_limiter,
                 redis_adapter=redis_adapter,
             ),
-            on_enrichment_run=_enrichment_run_handler(enrichment_service),
+            on_enrichment_run=_enrichment_run_handler(enrichment_service, catalog_repository, enrichment_repository),
             job_runs_repository=job_runs_repository,
             lock_renewer=lock_renewer,
         )
@@ -421,12 +422,64 @@ def _openapi_schema_with_bearer_auth(app: FastAPI) -> dict[str, Any]:
     return schema
 
 
-def _enrichment_run_handler(enrichment_service: EnrichmentService) -> Callable[[], Coroutine[Any, Any, None]]:
-    """Adapt ``EnrichmentService.refresh_opencritic_cache`` (takes an optional arg, returns a count) to the
-    queue consumer's ``on_enrichment_run`` shape (no args, no return value)."""
+def _enrichment_run_handler(
+    enrichment_service: EnrichmentService,
+    catalog_repository: CatalogRepository,
+    enrichment_repository: EnrichmentRepository,
+) -> Callable[[], Coroutine[Any, Any, None]]:
+    """Build the ``POST /enrichment/runs`` admin action: a full catalog-wide re-enrichment pass, not
+    just an OpenCritic cache refresh.
+
+    Four passes, in order:
+
+    1. ``refresh_opencritic_cache()`` -- pages OpenCritic's PS4/PS5 catalog into ``opencritic_cache``
+       (unchanged from before this pass was broadened).
+    2. Franchise reclassification for every game in ``games`` -- pure title-regex matching against
+       ``franchise_rules``, no external API dependency, so this always runs for the whole catalog.
+    3. Tier reclassification for every already-enriched ``game_enrichment`` row -- reclassifies
+       ``aaa_tier`` from the publisher/developer that enrichment already resolved and stored, against
+       the current ``publisher_tiers``. Needed because ``get_unenriched_game_ids`` means an
+       already-enriched game is never revisited by the normal per-user refresh path.
+    4. Best-effort full enrichment (franchise/tier/genre/scores) for games nobody has enriched yet,
+       using this admin ``enrichment_service`` instance (built from ``Settings.rawg_api_key``/
+       ``opencritic_rapidapi_key`` -- an optional admin-level key, independent of any user's BYOK key;
+       if neither is configured, ``enrich_game`` degrades gracefully, same as it already does for any
+       caller without a configured client).
+    """
 
     async def handle() -> None:
         await enrichment_service.refresh_opencritic_cache()
+
+        franchise_rules = await catalog_repository.list_franchise_rules()
+        await catalog_repository.reclassify_franchise(franchise_rules)
+
+        publisher_tier_rules = await enrichment_repository.list_publisher_tier_rules()
+        await enrichment_repository.reclassify_tier(publisher_tier_rules)
+
+        all_games = await catalog_repository.list_all_game_ids_and_titles()
+        unenriched = set(await enrichment_repository.get_unenriched_game_ids([game_id for game_id, _ in all_games]))
+        if not unenriched:
+            return
+
+        genre_rows = await enrichment_repository.get_active_genres()
+        genre_priorities = {name.lower(): priority for _, name, priority in genre_rows}
+        genre_ids_by_name = {name.lower(): genre_id for genre_id, name, _ in genre_rows}
+        size_estimates = await catalog_repository.get_size_estimates()
+
+        for game_id, title in all_games:
+            if game_id not in unenriched:
+                continue
+            result, _size = await enrichment_service.enrich_game(
+                title,
+                product_id=None,
+                is_ps5=False,
+                genre_priorities=genre_priorities,
+                publisher_tier_rules=publisher_tier_rules,
+                size_estimates=size_estimates,
+            )
+            genre_id = genre_ids_by_name.get(result.genre.lower())
+            subgenre_id = genre_ids_by_name.get(result.subgenre.lower())
+            await enrichment_repository.save_game_enrichment(game_id, genre_id, subgenre_id, result)
 
     return handle
 

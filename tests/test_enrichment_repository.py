@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from curator.enrichment.opencritic_matcher import OpenCriticGame
+from curator.enrichment.publisher_tier import PublisherTierRule
 from curator.enrichment.repository import EnrichmentRepository, PsnCatalogCacheEntry
 
 
@@ -197,6 +198,43 @@ async def test_get_active_genres_maps_rows():
     genres = await repo.get_active_genres()
 
     assert genres == [("id-1", "Shooter", 0), ("id-2", "RPG", 1)]
+
+
+async def test_reclassify_tier_updates_only_changed_rows():
+    # "id-1" was enriched before publisher_tiers existed and defaulted to Indie; a rule now matches
+    # its publisher. "id-2" is already correctly classified and should be left alone.
+    pool = FakePool(
+        fetchall_results=[
+            [
+                ("id-1", "Ubisoft", None, "Indie"),
+                ("id-2", "Team17", None, "AA"),
+            ]
+        ]
+    )
+    repo = EnrichmentRepository(pool)
+    rules = [
+        PublisherTierRule(tier_id="t1", pattern="ubisoft", tier="AAA", match_kind="substring"),
+        PublisherTierRule(tier_id="t2", pattern="team17", tier="AA", match_kind="substring"),
+    ]
+
+    updated = await repo.reclassify_tier(rules)
+
+    assert updated == 1
+    conn = pool.connections[0]
+    update_calls = [call for call in conn.executed if call[0].startswith("UPDATE game_enrichment")]
+    assert len(update_calls) == 1
+    assert update_calls[0][1] == ("AAA", "id-1")
+
+
+async def test_reclassify_tier_falls_back_to_developer_and_then_indie():
+    pool = FakePool(fetchall_results=[[("id-1", None, "Unknown Studio", "Indie")]])
+    repo = EnrichmentRepository(pool)
+
+    updated = await repo.reclassify_tier([])
+
+    assert updated == 0
+    conn = pool.connections[0]
+    assert not any(call[0].startswith("UPDATE game_enrichment") for call in conn.executed)
 
 
 async def test_flag_data_quality_executes_insert():
