@@ -8,6 +8,9 @@ from __future__ import annotations
 from typing import Any
 
 from redis.asyncio import Redis
+from redis.backoff import ExponentialBackoff
+from redis.exceptions import ConnectionError as RedisConnectionError
+from redis.exceptions import TimeoutError as RedisTimeoutError
 
 from curator.redis_client import RedisAdapter, build_redis_client
 from curator.settings import Settings
@@ -28,6 +31,28 @@ def test_build_redis_client_returns_none_when_host_unset():
 def test_build_redis_client_builds_real_client_when_host_set():
     client = build_redis_client(_settings(redis_host="redis.example.test", redis_port=6380, redis_password="secret"))
     assert isinstance(client, Redis)
+
+
+def test_build_redis_client_configures_connection_resilience():
+    """A dropped/reset idle connection (production: `redis.exceptions.ConnectionError: ... Connection
+    reset by peer` mid library-refresh job -- see 504_TRACKING.md's Librarian/Churches node-redis
+    incidents for the same idle-connection-death mechanism hitting a different client library) must be
+    retried against a fresh connection rather than surfacing straight into the caller, and a
+    long-idle pooled connection must be health-checked before reuse.
+    """
+    client = build_redis_client(_settings(redis_host="redis.example.test"))
+    assert client is not None
+    connection_kwargs = client.connection_pool.connection_kwargs
+
+    assert connection_kwargs["socket_keepalive"] is True
+    assert connection_kwargs["health_check_interval"] == 30
+    assert connection_kwargs["retry_on_error"] == [RedisConnectionError, RedisTimeoutError]
+
+    retry = connection_kwargs["retry"]
+    assert retry._retries == 3
+    assert isinstance(retry._backoff, ExponentialBackoff)
+    assert retry._backoff._base == 0.1
+    assert retry._backoff._cap == 1.0
 
 
 class FakeRawRedis:
