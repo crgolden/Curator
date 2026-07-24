@@ -21,8 +21,10 @@ from contextlib import asynccontextmanager
 from typing import Any, cast
 
 import httpx
+from azure.identity import DefaultAzureCredential as SyncDefaultAzureCredential
 from azure.identity.aio import DefaultAzureCredential
 from azure.servicebus.aio import AutoLockRenewer, ServiceBusClient
+from azure.servicebus.management import ServiceBusAdministrationClient
 from fastapi import FastAPI, Request
 from fastapi.openapi.utils import get_openapi
 from fastapi.responses import PlainTextResponse
@@ -46,6 +48,7 @@ from curator.enrichment_routes import router as enrichment_router
 from curator.identity_routes import router as identity_router
 from curator.jobs import ENRICHMENT_QUEUE, LIBRARY_REFRESH_QUEUE
 from curator.jobs.queue_consumer import QueueConsumer
+from curator.jobs.queue_depth_monitor import QueueDepthMonitor
 from curator.jobs.queue_publisher import QueuePublisher
 from curator.jobs.repository import JobRunsRepository
 from curator.library.ingestion_service import IngestionService
@@ -250,11 +253,24 @@ def create_app(
     )
 
     service_bus_credential: DefaultAzureCredential | None = None
+    service_bus_admin_credential: SyncDefaultAzureCredential | None = None
+    queue_depth_monitor: QueueDepthMonitor | None = None
     if settings.service_bus_namespace:
         service_bus_credential = DefaultAzureCredential()
         service_bus_client = ServiceBusClient(
             fully_qualified_namespace=settings.service_bus_namespace,
             credential=service_bus_credential,
+        )
+        # The Python SDK has no async administration client -- QueueDepthMonitor runs this sync client's
+        # calls via asyncio.to_thread. Only meaningful against the real namespace (Manage claims, RBAC),
+        # same as why this is gated on service_bus_namespace and not service_bus_connection_string below.
+        service_bus_admin_credential = SyncDefaultAzureCredential()
+        queue_depth_monitor = QueueDepthMonitor(
+            admin_client=ServiceBusAdministrationClient(
+                fully_qualified_namespace=settings.service_bus_namespace,
+                credential=service_bus_admin_credential,
+            ),
+            queue_names=[LIBRARY_REFRESH_QUEUE, ENRICHMENT_QUEUE],
         )
     elif settings.service_bus_connection_string:
         service_bus_client = ServiceBusClient.from_connection_string(settings.service_bus_connection_string)
@@ -298,17 +314,23 @@ def create_app(
             await pool.open()
         if queue_consumer is not None:
             queue_consumer.start()
+        if queue_depth_monitor is not None:
+            queue_depth_monitor.start()
         try:
             yield
         finally:
             if queue_consumer is not None:
                 await queue_consumer.stop()
+            if queue_depth_monitor is not None:
+                await queue_depth_monitor.stop()
             if lock_renewer is not None:
                 await lock_renewer.close()
             if service_bus_client is not None:
                 await service_bus_client.close()
             if service_bus_credential is not None:
                 await service_bus_credential.close()
+            if service_bus_admin_credential is not None:
+                service_bus_admin_credential.close()
             if owns_http_client:
                 await http_client.aclose()
             if owns_redis and redis_client is not None:
@@ -342,6 +364,7 @@ def create_app(
     app.state.follow_repository = follow_repository
     app.state.queue_publisher = queue_publisher
     app.state.queue_consumer = queue_consumer
+    app.state.queue_depth_monitor = queue_depth_monitor
 
     app.include_router(me_router)
     app.include_router(psn_router)

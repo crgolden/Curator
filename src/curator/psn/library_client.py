@@ -51,24 +51,28 @@ class LibraryClient:
     def __init__(self, session: PsnSession) -> None:
         self._session = session
 
-    async def entitlements(self, limit: int = 500) -> list[Entitlement]:
+    async def entitlements(self, limit: int | None = None) -> list[Entitlement]:
         """List the authenticated user's owned PS4/PS5 games and add-ons (entitlements).
 
         .. note::
            This is a self-only capability -- PSN exposes entitlements only for the authenticated account,
            and only for PS4/PS5 titles (the mobile-app endpoint is limited to those generations).
 
-        :param limit: Maximum number of entitlements to return.
+        :param limit: Maximum number of entitlements to return, or ``None`` (the default) to fetch every
+            entitlement PSN reports -- matching ``psnawp_api``'s own ``game_entitlements(limit=None)``
+            default. A libraries of many hundreds of titles is normal (PS+ Extra/Premium catalog titles,
+            monthly games, and years of purchases all accumulate here), and this endpoint has no
+            documented rate limit, so there is no reason to truncate by default.
         :returns: A list of :class:`~curator.psn.models.Entitlement`.
         """
         return await self._session.run_with_reauth(lambda: self._entitlements(limit))
 
-    async def _entitlements(self, limit: int) -> list[Entitlement]:
+    async def _entitlements(self, limit: int | None) -> list[Entitlement]:
         entitlements: list[Entitlement] = []
         offset = 0
         page_size = 20
-        while len(entitlements) < limit:
-            page_limit = min(page_size, limit - len(entitlements))
+        while limit is None or len(entitlements) < limit:
+            page_limit = page_size if limit is None else min(page_size, limit - len(entitlements))
             response = (
                 await self._session.get(
                     _ENTITLEMENTS_URL,

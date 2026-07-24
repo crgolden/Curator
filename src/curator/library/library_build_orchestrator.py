@@ -87,7 +87,9 @@ class LibraryBuildOrchestrator:
         pull_id, _ = await self._ingestion_service.ingest(identity_sub)
         return pull_id
 
-    async def canonicalize_current_entitlements(self, identity_sub: str, *, limit: int = 500) -> list[CanonicalGame]:
+    async def canonicalize_current_entitlements(
+        self, identity_sub: str, *, limit: int | None = None
+    ) -> list[CanonicalGame]:
         """Stage 2: canonicalize the caller's current entitlements (re-fetches; does not re-ingest).
 
         Loads every canonicalization rule fresh from the catalog repository, so a rule change (a new
@@ -185,14 +187,15 @@ class LibraryBuildOrchestrator:
         *,
         publisher_tier_rules: list[PublisherTierRule],
         size_estimates: list[SizeEstimate],
-        limit: int = 500,
+        limit: int | None = None,
     ) -> LibraryBuildResult:
         """Run every stage in sequence: ingest, canonicalize, persist, enrich the delta.
 
         :param identity_sub: The Curator user id (Identity's ``sub``) to build a library for.
         :param publisher_tier_rules: Every publisher-tier classification rule.
         :param size_estimates: Every install-size estimate row.
-        :param limit: Maximum number of entitlements to fetch.
+        :param limit: Maximum number of entitlements to fetch, or ``None`` (the default) to fetch every
+            entitlement PSN reports -- see :meth:`~curator.psn.library_client.LibraryClient.entitlements`.
         :returns: The :class:`LibraryBuildResult` summary.
         """
         pull_id, snapshots = await self._ingestion_service.ingest(identity_sub, limit=limit)

@@ -40,6 +40,7 @@ from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExport
 from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
 from opentelemetry.instrumentation.httpx import HTTPXClientInstrumentor, RequestInfo
 from opentelemetry.instrumentation.psycopg import PsycopgInstrumentor
+from opentelemetry.metrics import CallbackOptions, Observation
 from opentelemetry.sdk.metrics import MeterProvider
 from opentelemetry.sdk.metrics.export import PeriodicExportingMetricReader
 from opentelemetry.sdk.resources import SERVICE_NAME, Resource
@@ -299,3 +300,51 @@ class _ElasticsearchLogHandler(logging.Handler):
                 op_type="create",
                 require_data_stream=True,
             )
+
+
+# Service Bus queue-depth gauges -- mirrors Functions' QueueDepthMonitorJob/Telemetry.cs (functions.
+# servicebus.queue.active/deadletter) for Curator's own curator-library-refresh/curator-enrichment queues.
+# Nothing else watches dead-lettered messages: a message that fails processing dead-letters silently (see
+# curator.jobs.queue_consumer) with no alert until someone looks. curator.jobs.queue_depth_monitor polls
+# each queue's runtime properties on a timer and calls record_queue_depth(); these gauges just report
+# whatever was last recorded, exactly like the .NET ObservableGauge callbacks read a ConcurrentDictionary.
+#
+# Registered at module level (not inside configure_telemetry) because OTel's proxy-meter mechanism defers
+# an instrument created via metrics.get_meter() to whichever MeterProvider is installed later by
+# _register_otlp_providers -- these gauges work whether that happens before or after this module is
+# imported, and are a harmless no-op when telemetry is unconfigured (no AlloyEndpoint), same as every other
+# instrument in this module.
+_QUEUE_DEPTH_METER = metrics.get_meter(__name__)
+_QUEUE_ACTIVE_COUNTS: dict[str, int] = {}
+_QUEUE_DEAD_LETTER_COUNTS: dict[str, int] = {}
+
+
+def _observe_queue_active(_options: CallbackOptions) -> list[Observation]:
+    return [Observation(count, {"queue": queue}) for queue, count in _QUEUE_ACTIVE_COUNTS.items()]
+
+
+def _observe_queue_dead_letter(_options: CallbackOptions) -> list[Observation]:
+    return [Observation(count, {"queue": queue}) for queue, count in _QUEUE_DEAD_LETTER_COUNTS.items()]
+
+
+_QUEUE_DEPTH_METER.create_observable_gauge(
+    "curator.servicebus.queue.active",
+    callbacks=[_observe_queue_active],
+    description="Active message count per Service Bus queue, refreshed by QueueDepthMonitor.",
+)
+_QUEUE_DEPTH_METER.create_observable_gauge(
+    "curator.servicebus.queue.deadletter",
+    callbacks=[_observe_queue_dead_letter],
+    description="Dead-lettered message count per Service Bus queue, refreshed by QueueDepthMonitor.",
+)
+
+
+def record_queue_depth(queue: str, active_message_count: int, dead_letter_message_count: int) -> None:
+    """Records the latest active/dead-lettered message counts for a Service Bus queue.
+
+    :param queue: The queue name.
+    :param active_message_count: The queue's current active message count.
+    :param dead_letter_message_count: The queue's current dead-lettered message count.
+    """
+    _QUEUE_ACTIVE_COUNTS[queue] = active_message_count
+    _QUEUE_DEAD_LETTER_COUNTS[queue] = dead_letter_message_count

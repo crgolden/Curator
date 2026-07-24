@@ -40,11 +40,12 @@ class IngestionService:
         self._library_client = library_client
         self._repository = repository
 
-    async def ingest(self, identity_sub: str, *, limit: int = 500) -> tuple[str, list[EntitlementSnapshot]]:
+    async def ingest(self, identity_sub: str, *, limit: int | None = None) -> tuple[str, list[EntitlementSnapshot]]:
         """Fetch and persist the caller's current entitlements as a new pull.
 
         :param identity_sub: The Curator user id (Identity's ``sub``) this pull belongs to.
-        :param limit: Maximum number of entitlements to fetch.
+        :param limit: Maximum number of entitlements to fetch, or ``None`` (the default) to fetch every
+            entitlement PSN reports -- see :meth:`~curator.psn.library_client.LibraryClient.entitlements`.
         :returns: ``(pull_id, snapshots)`` -- the new pull's id and the snapshots just recorded, ready for
             :class:`~curator.library.library_build_orchestrator.LibraryBuildOrchestrator` to canonicalize.
         """
