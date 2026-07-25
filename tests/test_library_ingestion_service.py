@@ -11,7 +11,7 @@ class FakeLibraryClient:
         self._entitlements = entitlements or []
         self.entitlements_calls: list[int] = []
 
-    async def entitlements(self, limit=500):
+    async def entitlements(self, limit=None):
         self.entitlements_calls.append(limit)
         return self._entitlements
 
@@ -81,6 +81,16 @@ async def test_ingest_respects_limit():
     await service.ingest("sub-1", limit=100)
 
     assert library_client.entitlements_calls == [100]
+
+
+async def test_ingest_default_limit_is_unbounded():
+    """Regression test: ingest() must default to limit=None (unbounded), not silently reintroduce a cap."""
+    library_client = FakeLibraryClient(entitlements=[])
+    service = IngestionService(library_client, FakeCatalogRepository())
+
+    await service.ingest("sub-1")
+
+    assert library_client.entitlements_calls == [None]
 
 
 async def test_ingest_handles_missing_entitlement_id():

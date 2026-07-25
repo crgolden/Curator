@@ -16,9 +16,9 @@ class FakeIngestionService:
     def __init__(self, pull_id="pull-1", snapshots=None):
         self._pull_id = pull_id
         self._snapshots = snapshots or []
-        self.ingest_calls: list[tuple[str, int]] = []
+        self.ingest_calls: list[tuple[str, int | None]] = []
 
-    async def ingest(self, identity_sub, limit=500):
+    async def ingest(self, identity_sub, limit=None):
         self.ingest_calls.append((identity_sub, limit))
         return self._pull_id, self._snapshots
 
@@ -144,7 +144,8 @@ async def test_ingest_delegates_to_ingestion_service():
     pull_id = await orchestrator.ingest("sub-1")
 
     assert pull_id == "pull-99"
-    assert ingestion_service.ingest_calls == [("sub-1", 500)]
+    # Regression: no explicit limit means unbounded (None), never a silently reintroduced cap.
+    assert ingestion_service.ingest_calls == [("sub-1", None)]
 
 
 async def test_canonicalize_current_entitlements_runs_real_canonicalization():
@@ -244,6 +245,8 @@ async def test_build_runs_full_pipeline_end_to_end():
     assert result.rawg_enriched_titles == []
     assert result.opencritic_enriched_titles == []
     assert result.opencritic_topup_incomplete is False
+    # Regression: build()'s own limit default must stay unbounded (None), not silently reintroduce a cap.
+    assert ingestion_service.ingest_calls == [("sub-1", None)]
 
 
 def _fake_canonical(title):

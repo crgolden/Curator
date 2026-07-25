@@ -103,6 +103,46 @@ async def test_entitlements_stops_when_page_is_empty():
     assert await client.entitlements() == []
 
 
+def _synthetic_page(start_id, count, *, total_results):
+    return {
+        "entitlements": [
+            {"id": f"ent-{start_id + i}", "gameMeta": {"name": f"Game {start_id + i}"}} for i in range(count)
+        ],
+        "totalResults": total_results,
+    }
+
+
+async def test_entitlements_default_is_unbounded_past_500():
+    """Regression test: entitlements() must not silently cap at 500 -- a real PSN library can easily
+    exceed that (see the ~845-title account that exposed this bug), and this endpoint has no documented
+    rate limit, so there is no reason to stop early. Builds 26 full pages of 20 (page_size is fixed at 20)
+    plus one partial page, totalling 523 entries -- more than a would-be 500 cap could ever return -- and
+    asserts the default call (no ``limit`` argument) fetches every one of them.
+    """
+    total = 523
+    full_pages, remainder = divmod(total, 20)
+    pages = [_synthetic_page(i * 20, 20, total_results=total) for i in range(full_pages)]
+    if remainder:
+        pages.append(_synthetic_page(full_pages * 20, remainder, total_results=total))
+    client = LibraryClient(FakeSession(entitlements_pages=pages))
+
+    entitlements = await client.entitlements()
+
+    assert len(entitlements) == total
+
+
+async def test_entitlements_explicit_limit_still_caps():
+    # PSN honors the requested page limit, so a single page of exactly 15 (page_limit = min(20, 15)) is
+    # what a real response would look like -- proves an explicit limit still stops the loop early even
+    # though totalResults says there's far more available.
+    page = _synthetic_page(0, 15, total_results=1000)
+    client = LibraryClient(FakeSession(entitlements_pages=[page]))
+
+    entitlements = await client.entitlements(limit=15)
+
+    assert len(entitlements) == 15
+
+
 async def test_recently_played_maps_games():
     graphql_responses = {
         "getUserGameList": {
