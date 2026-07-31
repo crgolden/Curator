@@ -39,8 +39,11 @@ LibraryRefreshContinuationHandler = Callable[[dict[str, Any]], Coroutine[Any, An
 result-summary payload for ``JobRunsRepository.mark_succeeded`` -- or raises :class:`RateLimitRetryScheduled`
 if it hit the rate limit again and has already republished (see that exception's docstring)."""
 
-EnrichmentRunHandler = Callable[[], Coroutine[Any, Any, None]]
-"""Processes one global enrichment-catalog re-scrape job."""
+EnrichmentRunHandler = Callable[[], Coroutine[Any, Any, dict[str, Any] | None]]
+"""Processes one global enrichment-catalog re-scrape job. Returns an optional result-summary payload for
+``JobRunsRepository.mark_succeeded`` describing each pass's outcome (provider availability, auth/rate-limit
+errors, rule-set-unchanged skips) -- never raises for a provider being unconfigured, auth-rejected, or
+rate-limited (see ``curator.app._enrichment_run_handler``)."""
 
 
 class RateLimitRetryScheduled(Exception):

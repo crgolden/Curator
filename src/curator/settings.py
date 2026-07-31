@@ -33,8 +33,13 @@ _ELASTICSEARCH_PASSWORD_ENV_NAMES: tuple[str, ...] = ("ElasticsearchPassword",)
 # OpenCritic) and the two job queues (library-refresh, enrichment) need them, and only once Service Bus
 # queues are actually provisioned (see the migration plan's "Open follow-ups" -- not yet done as of this
 # writing).
-_RAWG_API_KEY_ENV_NAMES: tuple[str, ...] = ("RawgApiKey",)
-_OPENCRITIC_RAPIDAPI_KEY_ENV_NAMES: tuple[str, ...] = ("OpenCriticRapidApiKey",)
+#
+# RawgApiKey/OpenCriticRapidApiKey are array-shaped (zero or more admin keys) -- resolved via indexed env
+# vars (RawgApiKey__0, RawgApiKey__1, ...), matching the __N array convention ASP.NET Core's configuration
+# system already uses fleet-wide for a real array setting (e.g. Identity's CorsPolicy__Origins__N in
+# appsettings.json/Azure App Service), not a comma-joined string. See _resolve_indexed_keys.
+_RAWG_API_KEY_PREFIX = "RawgApiKey"
+_OPENCRITIC_RAPIDAPI_KEY_PREFIX = "OpenCriticRapidApiKey"
 _SERVICE_BUS_NAMESPACE_ENV_NAMES: tuple[str, ...] = ("ServiceBusNamespace",)
 _SERVICE_BUS_CONNECTION_ENV_NAMES: tuple[str, ...] = ("ServiceBusConnectionString",)
 
@@ -65,9 +70,16 @@ class Settings:
         either credential being absent) disables that telemetry leg entirely.
     :param elasticsearch_username: Basic-auth username for ``elasticsearch_node``.
     :param elasticsearch_password: Basic-auth password for ``elasticsearch_node``.
-    :param rawg_api_key: The RAWG API key; ``None`` disables live RAWG enrichment lookups.
-    :param opencritic_rapidapi_key: The RapidAPI key for the OpenCritic API; ``None`` disables live
-        OpenCritic enrichment lookups.
+    :param rawg_api_keys: RAWG API keys for the admin catalog-wide re-scrape (``POST /enrichment/runs``),
+        resolved from indexed env vars ``RawgApiKey__0``, ``RawgApiKey__1``, ...; empty disables live RAWG
+        enrichment lookups in that context. More than one key lets the admin singleton rotate to the next
+        on a rejected/rate-limited key rather than being capped at one key's daily quota (see
+        ``curator.enrichment.rawg_client.RotatingRawgClient``) -- per-user BYOK
+        (``EnrichmentKeysRepository``) is unaffected and always exactly one key.
+    :param opencritic_rapidapi_keys: RapidAPI keys for the OpenCritic API, resolved from
+        ``OpenCriticRapidApiKey__0``, ``OpenCriticRapidApiKey__1``, ..., same admin-only multi-key rotation
+        as ``rawg_api_keys`` (see ``curator.enrichment.opencritic_client.RotatingOpenCriticClient``); empty
+        disables live OpenCritic enrichment lookups in that context.
     :param service_bus_namespace: The fully-qualified Azure Service Bus namespace (e.g.
         ``crgolden.servicebus.windows.net``) backing the ``curator-library-refresh``/``curator-enrichment``
         job queues, authenticated via ``DefaultAzureCredential`` (managed identity in production). Takes
@@ -91,8 +103,8 @@ class Settings:
     elasticsearch_node: str | None = None
     elasticsearch_username: str | None = None
     elasticsearch_password: str | None = None
-    rawg_api_key: str | None = None
-    opencritic_rapidapi_key: str | None = None
+    rawg_api_keys: tuple[str, ...] = ()
+    opencritic_rapidapi_keys: tuple[str, ...] = ()
     service_bus_namespace: str | None = None
     service_bus_connection_string: str | None = None
     redis_host: str | None = None
@@ -128,10 +140,8 @@ class Settings:
         elasticsearch_password = resolve_setting(
             None, env_names=_ELASTICSEARCH_PASSWORD_ENV_NAMES, dotenv_path=dotenv_path
         )
-        rawg_api_key = resolve_setting(None, env_names=_RAWG_API_KEY_ENV_NAMES, dotenv_path=dotenv_path)
-        opencritic_rapidapi_key = resolve_setting(
-            None, env_names=_OPENCRITIC_RAPIDAPI_KEY_ENV_NAMES, dotenv_path=dotenv_path
-        )
+        rawg_api_keys = _resolve_indexed_keys(_RAWG_API_KEY_PREFIX, dotenv_path)
+        opencritic_rapidapi_keys = _resolve_indexed_keys(_OPENCRITIC_RAPIDAPI_KEY_PREFIX, dotenv_path)
         service_bus_namespace = resolve_setting(
             None, env_names=_SERVICE_BUS_NAMESPACE_ENV_NAMES, dotenv_path=dotenv_path
         )
@@ -152,8 +162,8 @@ class Settings:
             elasticsearch_node=elasticsearch_node,
             elasticsearch_username=elasticsearch_username,
             elasticsearch_password=elasticsearch_password,
-            rawg_api_key=rawg_api_key,
-            opencritic_rapidapi_key=opencritic_rapidapi_key,
+            rawg_api_keys=rawg_api_keys,
+            opencritic_rapidapi_keys=opencritic_rapidapi_keys,
             service_bus_namespace=service_bus_namespace,
             service_bus_connection_string=service_bus_connection_string,
             redis_host=redis_host,
@@ -161,6 +171,25 @@ class Settings:
             redis_password=redis_password,
             redis_ssl=redis_ssl_raw.strip().lower() != "false" if redis_ssl_raw else True,
         )
+
+
+def _resolve_indexed_keys(prefix: str, dotenv_path: Path | None) -> tuple[str, ...]:
+    """Resolve an array-shaped setting from indexed env vars: ``{prefix}__0``, ``{prefix}__1``, ...,
+    stopping at the first missing index.
+
+    Matches the ``__N`` array convention ASP.NET Core's configuration system already uses fleet-wide for a
+    genuine array setting (e.g. Identity's ``CorsPolicy__Origins__N``), rather than inventing a one-off
+    comma-joined-string convention just for Curator.
+    """
+    keys: list[str] = []
+    index = 0
+    while True:
+        value = resolve_setting(None, env_names=(f"{prefix}__{index}",), dotenv_path=dotenv_path)
+        if value is None:
+            break
+        keys.append(value)
+        index += 1
+    return tuple(keys)
 
 
 def _require(key: str, env_names: tuple[str, ...], dotenv_path: Path | None) -> str:

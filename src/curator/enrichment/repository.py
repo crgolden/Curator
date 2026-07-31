@@ -90,6 +90,30 @@ class EnrichmentRepository:
                     updated += 1
         return updated
 
+    async def get_publisher_tier_rules_fingerprint(self) -> str | None:
+        """Return the ``publisher_tiers`` content fingerprint as of the last completed
+        :meth:`reclassify_tier` pass, or ``None`` if that pass has never run (see
+        ``db/migrations/0016_curation_rule_pass_state.sql``)."""
+        async with self._pool.connection() as conn, conn.cursor() as cur:
+            await cur.execute(
+                "SELECT rules_fingerprint FROM curation_rule_pass_state WHERE pass_name = 'tier_reclassification'"
+            )
+            row = await cur.fetchone()
+        return row[0] if row is not None else None
+
+    async def set_publisher_tier_rules_fingerprint(self, fingerprint: str) -> None:
+        """Record ``fingerprint`` as the ``publisher_tiers`` content as of the pass that just ran."""
+        async with self._pool.connection() as conn, conn.cursor() as cur:
+            await cur.execute(
+                """
+                INSERT INTO curation_rule_pass_state (pass_name, rules_fingerprint)
+                VALUES ('tier_reclassification', %s)
+                ON CONFLICT (pass_name) DO UPDATE SET
+                    rules_fingerprint = EXCLUDED.rules_fingerprint, last_ran_at = now()
+                """,
+                (fingerprint,),
+            )
+
     async def get_unenriched_game_ids(self, game_ids: list[str]) -> list[str]:
         """Return the subset of ``game_ids`` that have no ``game_enrichment`` row yet.
 

@@ -15,11 +15,11 @@ from typing import Any
 import httpx
 
 from curator.enrichment.genre_reconciliation_service import reconcile_genres
-from curator.enrichment.opencritic_client import OpenCriticApiError, OpenCriticClient
+from curator.enrichment.opencritic_client import OpenCriticApiError, OpenCriticClientProtocol
 from curator.enrichment.opencritic_matcher import OpenCriticGame, build_name_index
 from curator.enrichment.opencritic_matcher import find_match as find_opencritic_match
 from curator.enrichment.publisher_tier import PublisherTierRule, classify_tier
-from curator.enrichment.rawg_client import RawgApiError, RawgClient
+from curator.enrichment.rawg_client import RawgApiError, RawgClientProtocol
 from curator.enrichment.rawg_matcher import find_best_match as find_rawg_match
 from curator.enrichment.repository import EnrichmentRepository, PsnCatalogCacheEntry
 from curator.psn.catalog_client import CatalogClient
@@ -152,8 +152,8 @@ class EnrichmentService:
     def __init__(
         self,
         *,
-        rawg_client: RawgClient | None,
-        opencritic_client: OpenCriticClient | None,
+        rawg_client: RawgClientProtocol | None,
+        opencritic_client: OpenCriticClientProtocol | None,
         catalog_client: CatalogClient | None = None,
         repository: EnrichmentRepository,
         rate_limit_backoff_seconds: dict[str, float] | None = None,
@@ -165,6 +165,24 @@ class EnrichmentService:
         self._opencritic_topup_attempted = False
         self.opencritic_topup_incomplete = False
         self._next_rate_limit_backoff_seconds: dict[str, float] = dict(rate_limit_backoff_seconds or {})
+
+    @property
+    def has_rawg_client(self) -> bool:
+        """Whether a RAWG client is configured -- lets callers (e.g. ``curator.app._enrichment_run_handler``)
+        report a consistent "not configured" status for this provider without reaching into private state."""
+        return self._rawg_client is not None
+
+    @property
+    def has_opencritic_client(self) -> bool:
+        """Whether an OpenCritic client is configured -- see :attr:`has_rawg_client`."""
+        return self._opencritic_client is not None
+
+    @property
+    def has_catalog_client(self) -> bool:
+        """Whether an official-PSN-catalog client is configured -- see :attr:`has_rawg_client`. Always
+        ``False`` for the admin catalog-wide singleton (``curator.app``'s ``enrichment_service``), since
+        that signal needs a per-user authenticated ``PsnSession``."""
+        return self._catalog_client is not None
 
     def _rate_limit_retry_after(self, provider: str, hinted_seconds: float | None) -> float:
         """Resolve how long to wait before retrying ``provider``, on a 429.
@@ -196,6 +214,8 @@ class EnrichmentService:
         :raises RuntimeError: If no OpenCritic client is configured (this method requires one -- unlike
             :meth:`enrich_game`, it has no "skip silently" fallback since it's the admin's own explicit
             re-scrape action).
+        :raises EnrichmentAuthError: If the configured key is rejected (401/403).
+        :raises EnrichmentRateLimitError: If OpenCritic rate-limits the request (429).
         """
         if self._opencritic_client is None:
             raise RuntimeError("refresh_opencritic_cache requires an OpenCritic client.")
@@ -203,7 +223,17 @@ class EnrichmentService:
         total = 0
         for platform in platforms:
             start_skip = await self._repository.get_opencritic_cursor(platform)
-            result = await self._opencritic_client.fetch_platform_games(platform, start_skip=start_skip)
+            try:
+                result = await self._opencritic_client.fetch_platform_games(platform, start_skip=start_skip)
+            except OpenCriticApiError as exc:
+                if exc.status_code in _AUTH_FAILURE_STATUS_CODES:
+                    raise EnrichmentAuthError("opencritic", str(exc)) from None
+                if exc.status_code == _RATE_LIMIT_STATUS_CODE:
+                    retry_after = self._rate_limit_retry_after("opencritic", exc.retry_after_seconds)
+                    raise EnrichmentRateLimitError("opencritic", retry_after) from None
+                continue  # transient (5xx) -- skip this platform's page, same swallow as _run_opencritic_topup
+            except httpx.HTTPError:
+                continue  # network error/timeout reaching OpenCritic -- same as a transient 5xx
             await self._repository.save_opencritic_games(result.games)
             await self._repository.set_opencritic_cursor(platform, result.next_skip)
             total += len(result.games)

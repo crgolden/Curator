@@ -32,6 +32,7 @@ from psycopg_pool import AsyncConnectionPool
 from redis.asyncio import Redis
 
 from curator.audit.repository import AccountActionLogRepository
+from curator.catalog.franchise_assigner import fingerprint_franchise_rules
 from curator.catalog.repository import CatalogRepository
 from curator.catalog_routes import router as catalog_router
 from curator.collections.collection_orchestrator import CollectionOrchestrator
@@ -39,9 +40,15 @@ from curator.collections.repository import CollectionsRepository
 from curator.collections_routes import router as collections_router
 from curator.consoles_routes import router as consoles_router
 from curator.devices_routes import router as devices_router
-from curator.enrichment.enrichment_service import EnrichmentService, next_rate_limit_backoff_seconds
-from curator.enrichment.opencritic_client import OpenCriticClient
-from curator.enrichment.rawg_client import RawgClient
+from curator.enrichment.enrichment_service import (
+    EnrichmentAuthError,
+    EnrichmentRateLimitError,
+    EnrichmentService,
+    next_rate_limit_backoff_seconds,
+)
+from curator.enrichment.opencritic_client import OpenCriticClient, OpenCriticClientProtocol, RotatingOpenCriticClient
+from curator.enrichment.publisher_tier import PublisherTierRule, fingerprint_publisher_tier_rules
+from curator.enrichment.rawg_client import RawgClient, RawgClientProtocol, RotatingRawgClient
 from curator.enrichment.repository import EnrichmentRepository
 from curator.enrichment_keys_routes import router as enrichment_keys_router
 from curator.enrichment_routes import router as enrichment_router
@@ -235,7 +242,7 @@ def create_app(
 
     owns_http_client = http_client is None
     http_client = http_client or httpx.AsyncClient()
-    # Admin-only catalog-wide singleton, built from Settings.rawg_api_key/opencritic_rapidapi_key -- its
+    # Admin-only catalog-wide singleton, built from Settings.rawg_api_keys/opencritic_rapidapi_keys -- its
     # ONLY caller is _enrichment_run_handler (POST /enrichment/runs, require_admin-gated), which uses it
     # both for refresh_opencritic_cache() and, for still-unenriched catalog games, enrich_game() itself.
     # Per-user library refreshes never use this: Curator provisions no shared/fallback RAWG/OpenCritic
@@ -244,9 +251,27 @@ def create_app(
     # catalog_client here either: the official PSN-catalog signal needs a per-user authenticated
     # PsnSession, unlike RAWG/OpenCritic, so this singleton's enrich_game() calls always pass
     # product_id=None and skip the PSN-native genre/rating supplement.
-    admin_rawg_client = RawgClient(http_client, settings.rawg_api_key) if settings.rawg_api_key else None
-    admin_opencritic_client = (
-        OpenCriticClient(http_client, settings.opencritic_rapidapi_key) if settings.opencritic_rapidapi_key else None
+    #
+    # More than one configured key per provider wraps in a rotating client (advances to the next key on a
+    # 401/403/429 from the current one) so a full-catalog run isn't capped at a single key's daily quota --
+    # per-user BYOK is unaffected, always exactly one key. A single key skips the wrapper entirely.
+    admin_rawg_clients: list[RawgClientProtocol] = [RawgClient(http_client, key) for key in settings.rawg_api_keys]
+    admin_rawg_client: RawgClientProtocol | None = (
+        admin_rawg_clients[0]
+        if len(admin_rawg_clients) == 1
+        else RotatingRawgClient(admin_rawg_clients)
+        if admin_rawg_clients
+        else None
+    )
+    admin_opencritic_clients: list[OpenCriticClientProtocol] = [
+        OpenCriticClient(http_client, key) for key in settings.opencritic_rapidapi_keys
+    ]
+    admin_opencritic_client: OpenCriticClientProtocol | None = (
+        admin_opencritic_clients[0]
+        if len(admin_opencritic_clients) == 1
+        else RotatingOpenCriticClient(admin_opencritic_clients)
+        if admin_opencritic_clients
+        else None
     )
     enrichment_service = EnrichmentService(
         rawg_client=admin_rawg_client, opencritic_client=admin_opencritic_client, repository=enrichment_repository
@@ -464,53 +489,69 @@ def _openapi_schema_with_bearer_auth(app: FastAPI) -> dict[str, Any]:
     return schema
 
 
-def _enrichment_run_handler(
+async def _run_opencritic_refresh_pass(enrichment_service: EnrichmentService) -> dict[str, Any]:
+    """Run ``EnrichmentService.refresh_opencritic_cache()``, reporting the outcome instead of letting a
+    missing/rejected/rate-limited key raise out of the caller -- see problem #1/#2 in the plan this
+    implements: a missing or bad OpenCritic key must never block the franchise/tier/enrichment passes
+    that don't need it.
+    """
+    if not enrichment_service.has_opencritic_client:
+        return {"status": "not_configured"}
+    try:
+        games_fetched = await enrichment_service.refresh_opencritic_cache()
+    except EnrichmentAuthError as exc:
+        return {"status": "auth_error", "detail": str(exc)}
+    except EnrichmentRateLimitError as exc:
+        return {"status": "rate_limited", "retry_after_seconds": exc.retry_after_seconds}
+    return {"status": "ok", "games_fetched": games_fetched}
+
+
+async def _run_enrichment_pass(
     enrichment_service: EnrichmentService,
     catalog_repository: CatalogRepository,
     enrichment_repository: EnrichmentRepository,
-) -> Callable[[], Coroutine[Any, Any, None]]:
-    """Build the ``POST /enrichment/runs`` admin action: a full catalog-wide re-enrichment pass, not
-    just an OpenCritic cache refresh.
+    publisher_tier_rules: list[PublisherTierRule],
+) -> dict[str, Any]:
+    """Best-effort full enrichment (franchise/tier/genre/scores) for games nobody has enriched yet, using
+    the admin ``enrichment_service`` singleton (built from ``Settings.rawg_api_keys``/
+    ``opencritic_rapidapi_keys`` -- optional admin-level keys, independent of any user's BYOK key).
 
-    Four passes, in order:
-
-    1. ``refresh_opencritic_cache()`` -- pages OpenCritic's PS4/PS5 catalog into ``opencritic_cache``
-       (unchanged from before this pass was broadened).
-    2. Franchise reclassification for every game in ``games`` -- pure title-regex matching against
-       ``franchise_rules``, no external API dependency, so this always runs for the whole catalog.
-    3. Tier reclassification for every already-enriched ``game_enrichment`` row -- reclassifies
-       ``aaa_tier`` from the publisher/developer that enrichment already resolved and stored, against
-       the current ``publisher_tiers``. Needed because ``get_unenriched_game_ids`` means an
-       already-enriched game is never revisited by the normal per-user refresh path.
-    4. Best-effort full enrichment (franchise/tier/genre/scores) for games nobody has enriched yet,
-       using this admin ``enrichment_service`` instance (built from ``Settings.rawg_api_key``/
-       ``opencritic_rapidapi_key`` -- an optional admin-level key, independent of any user's BYOK key;
-       if neither is configured, ``enrich_game`` degrades gracefully, same as it already does for any
-       caller without a configured client).
+    Reports each provider's availability (``psn`` is always ``"not_configured"`` here -- the official-PSN-
+    catalog signal needs a per-user authenticated session, which this admin context never has) and stops
+    early on an auth/rate-limit error from either configured provider, recording exactly how far it got --
+    games saved before the stop stay saved; the rest are picked up again by ``get_unenriched_game_ids`` on
+    the next run, no special resume bookkeeping needed since this pass is always a full worklist rebuild.
     """
+    providers = {
+        "rawg": "ok" if enrichment_service.has_rawg_client else "not_configured",
+        "opencritic": "ok" if enrichment_service.has_opencritic_client else "not_configured",
+        "psn": "not_configured",
+    }
 
-    async def handle() -> None:
-        await enrichment_service.refresh_opencritic_cache()
+    all_games = await catalog_repository.list_all_game_ids_and_titles()
+    unenriched = set(await enrichment_repository.get_unenriched_game_ids([game_id for game_id, _ in all_games]))
+    if not unenriched:
+        return {
+            "providers": providers,
+            "attempted_count": 0,
+            "enriched_count": 0,
+            "remaining_count": 0,
+            "stopped_provider": None,
+            "stopped_reason": None,
+        }
 
-        franchise_rules = await catalog_repository.list_franchise_rules()
-        await catalog_repository.reclassify_franchise(franchise_rules)
+    genre_rows = await enrichment_repository.get_active_genres()
+    genre_priorities = {name.lower(): priority for _, name, priority in genre_rows}
+    genre_ids_by_name = {name.lower(): genre_id for genre_id, name, _ in genre_rows}
+    size_estimates = await catalog_repository.get_size_estimates()
 
-        publisher_tier_rules = await enrichment_repository.list_publisher_tier_rules()
-        await enrichment_repository.reclassify_tier(publisher_tier_rules)
-
-        all_games = await catalog_repository.list_all_game_ids_and_titles()
-        unenriched = set(await enrichment_repository.get_unenriched_game_ids([game_id for game_id, _ in all_games]))
-        if not unenriched:
-            return
-
-        genre_rows = await enrichment_repository.get_active_genres()
-        genre_priorities = {name.lower(): priority for _, name, priority in genre_rows}
-        genre_ids_by_name = {name.lower(): genre_id for genre_id, name, _ in genre_rows}
-        size_estimates = await catalog_repository.get_size_estimates()
-
-        for game_id, title in all_games:
-            if game_id not in unenriched:
-                continue
+    enriched_count = 0
+    stopped_provider: str | None = None
+    stopped_reason: str | None = None
+    for game_id, title in all_games:
+        if game_id not in unenriched:
+            continue
+        try:
             result, _size = await enrichment_service.enrich_game(
                 title,
                 product_id=None,
@@ -519,9 +560,88 @@ def _enrichment_run_handler(
                 publisher_tier_rules=publisher_tier_rules,
                 size_estimates=size_estimates,
             )
-            genre_id = genre_ids_by_name.get(result.genre.lower())
-            subgenre_id = genre_ids_by_name.get(result.subgenre.lower())
-            await enrichment_repository.save_game_enrichment(game_id, genre_id, subgenre_id, result)
+        except EnrichmentAuthError as exc:
+            stopped_provider, stopped_reason = exc.provider, "auth_error"
+            break
+        except EnrichmentRateLimitError as exc:
+            stopped_provider, stopped_reason = exc.provider, "rate_limited"
+            break
+        genre_id = genre_ids_by_name.get(result.genre.lower())
+        subgenre_id = genre_ids_by_name.get(result.subgenre.lower())
+        await enrichment_repository.save_game_enrichment(game_id, genre_id, subgenre_id, result)
+        enriched_count += 1
+
+    return {
+        "providers": providers,
+        "attempted_count": enriched_count + (1 if stopped_reason else 0),
+        "enriched_count": enriched_count,
+        "remaining_count": len(unenriched) - enriched_count,
+        "stopped_provider": stopped_provider,
+        "stopped_reason": stopped_reason,
+    }
+
+
+def _enrichment_run_handler(
+    enrichment_service: EnrichmentService,
+    catalog_repository: CatalogRepository,
+    enrichment_repository: EnrichmentRepository,
+) -> Callable[[], Coroutine[Any, Any, dict[str, Any] | None]]:
+    """Build the ``POST /enrichment/runs`` admin action: a full catalog-wide re-enrichment pass, not
+    just an OpenCritic cache refresh.
+
+    Four passes, in order, each reported in the returned result summary rather than raising -- a provider
+    being unconfigured, rejected, or rate-limited never fails the whole job (see the module's Follow-up
+    plan): the run is fully idempotent (this pass's own cursor/no-op-write/worklist-rebuild behavior means
+    a restart can always pick up exactly where a stop left off), so there is nothing here a genuinely
+    failed run couldn't just as easily redo from scratch.
+
+    1. ``refresh_opencritic_cache()`` -- pages OpenCritic's PS4/PS5 catalog into ``opencritic_cache``.
+    2. Franchise reclassification for every game -- pure title-regex matching against ``franchise_rules``,
+       no external API dependency. Skipped when ``franchise_rules`` hasn't changed since the last pass
+       that actually ran (see :func:`~curator.catalog.franchise_assigner.fingerprint_franchise_rules`) --
+       every newly-canonicalized game is already classified with the current rules at ingestion time, so
+       this pass only exists to retroactively fix pre-existing games after a rule edit.
+    3. Tier reclassification for every already-enriched ``game_enrichment`` row -- reclassifies
+       ``aaa_tier`` from the publisher/developer that enrichment already resolved and stored, against
+       the current ``publisher_tiers``. Needed because ``get_unenriched_game_ids`` means an
+       already-enriched game is never revisited by the normal per-user refresh path. Skipped on an
+       unchanged rule-set fingerprint, same reasoning as pass 2.
+    4. Best-effort full enrichment for games nobody has enriched yet (see :func:`_run_enrichment_pass`).
+    """
+
+    async def handle() -> dict[str, Any]:
+        opencritic_summary = await _run_opencritic_refresh_pass(enrichment_service)
+
+        franchise_rules = await catalog_repository.list_franchise_rules()
+        franchise_fingerprint = fingerprint_franchise_rules(franchise_rules)
+        previous_franchise_fingerprint = await catalog_repository.get_franchise_rules_fingerprint()
+        if franchise_fingerprint != previous_franchise_fingerprint:
+            updated = await catalog_repository.reclassify_franchise(franchise_rules)
+            await catalog_repository.set_franchise_rules_fingerprint(franchise_fingerprint)
+            franchise_summary: dict[str, Any] = {"status": "ran", "updated_count": updated}
+        else:
+            franchise_summary = {"status": "skipped_unchanged"}
+
+        publisher_tier_rules = await enrichment_repository.list_publisher_tier_rules()
+        tier_fingerprint = fingerprint_publisher_tier_rules(publisher_tier_rules)
+        previous_tier_fingerprint = await enrichment_repository.get_publisher_tier_rules_fingerprint()
+        if tier_fingerprint != previous_tier_fingerprint:
+            updated = await enrichment_repository.reclassify_tier(publisher_tier_rules)
+            await enrichment_repository.set_publisher_tier_rules_fingerprint(tier_fingerprint)
+            tier_summary: dict[str, Any] = {"status": "ran", "updated_count": updated}
+        else:
+            tier_summary = {"status": "skipped_unchanged"}
+
+        enrichment_summary = await _run_enrichment_pass(
+            enrichment_service, catalog_repository, enrichment_repository, publisher_tier_rules
+        )
+
+        return {
+            "opencritic_cache_refresh": opencritic_summary,
+            "franchise_reclassification": franchise_summary,
+            "tier_reclassification": tier_summary,
+            "enrichment": enrichment_summary,
+        }
 
     return handle
 

@@ -8,6 +8,8 @@ instead of three copies of the same two Python sets.
 
 from __future__ import annotations
 
+import hashlib
+import json
 from dataclasses import dataclass
 
 
@@ -19,6 +21,19 @@ class PublisherTierRule:
     pattern: str
     tier: str  # "AAA" | "AA" | "Indie"
     match_kind: str  # "exact" | "substring"
+
+
+def fingerprint_publisher_tier_rules(rules: list[PublisherTierRule]) -> str:
+    """A stable content hash of every publisher-tier rule.
+
+    Used by ``curator.app._enrichment_run_handler`` to skip a full-catalog
+    ``EnrichmentRepository.reclassify_tier`` pass when ``publisher_tiers`` hasn't changed since the last
+    time that pass ran -- safe because every write path (``EnrichmentService.enrich_game``, per-user
+    refresh) already classifies tier with the *current* rules at write time; the reclassification pass only
+    exists to retroactively fix games enriched before a rule edit.
+    """
+    canonical = sorted((rule.tier_id, rule.pattern, rule.tier, rule.match_kind) for rule in rules)
+    return hashlib.sha256(json.dumps(canonical).encode()).hexdigest()
 
 
 def classify_tier(publisher: str, rules: list[PublisherTierRule]) -> str:

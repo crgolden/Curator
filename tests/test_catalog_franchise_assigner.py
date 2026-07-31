@@ -7,7 +7,7 @@ its precedence order, so this preserves every regression exactly.
 
 from __future__ import annotations
 
-from curator.catalog.franchise_assigner import FranchiseRule, assign_franchise
+from curator.catalog.franchise_assigner import FranchiseRule, assign_franchise, fingerprint_franchise_rules
 
 _FRANCHISE_MAP = [
     (r"assassin.s creed", "Assassin's Creed"),
@@ -281,3 +281,27 @@ def test_ys_franchise():
 def test_rule_order_is_independent_of_input_list_order():
     shuffled = list(reversed(_RULES))
     assert assign_franchise("Elden Ring", shuffled) == "FromSoftware"
+
+
+def test_fingerprint_is_stable_for_the_same_rules():
+    assert fingerprint_franchise_rules(_RULES) == fingerprint_franchise_rules(_RULES)
+
+
+def test_fingerprint_is_independent_of_input_list_order():
+    shuffled = list(reversed(_RULES))
+    assert fingerprint_franchise_rules(_RULES) == fingerprint_franchise_rules(shuffled)
+
+
+def test_fingerprint_changes_when_a_rule_changes():
+    rules = [FranchiseRule(rule_id="r1", pattern="halo", franchise="Halo", priority=0)]
+    changed_rules = [FranchiseRule(rule_id="r1", pattern="halo", franchise="Halo: Infinite", priority=0)]
+
+    assert fingerprint_franchise_rules(rules) != fingerprint_franchise_rules(changed_rules)
+
+
+def test_fingerprint_changes_when_a_rule_is_added_or_removed():
+    rules = [FranchiseRule(rule_id="r1", pattern="halo", franchise="Halo", priority=0)]
+    more_rules = [*rules, FranchiseRule(rule_id="r2", pattern="gears", franchise="Gears of War", priority=1)]
+
+    assert fingerprint_franchise_rules(rules) != fingerprint_franchise_rules(more_rules)
+    assert fingerprint_franchise_rules([]) != fingerprint_franchise_rules(rules)

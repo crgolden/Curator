@@ -285,3 +285,35 @@ async def test_reclassify_franchise_returns_zero_when_nothing_changes():
     assert updated == 0
     conn = pool.connections[0]
     assert not any(call[0].startswith("UPDATE games") for call in conn.executed)
+
+
+async def test_get_franchise_rules_fingerprint_returns_none_when_no_row():
+    pool = FakePool(fetchone_results=[None])
+    repo = CatalogRepository(pool)
+
+    fingerprint = await repo.get_franchise_rules_fingerprint()
+
+    assert fingerprint is None
+
+
+async def test_get_franchise_rules_fingerprint_returns_stored_value():
+    pool = FakePool(fetchone_results=[("abc123",)])
+    repo = CatalogRepository(pool)
+
+    fingerprint = await repo.get_franchise_rules_fingerprint()
+
+    assert fingerprint == "abc123"
+
+
+async def test_set_franchise_rules_fingerprint_upserts_the_pass_state_row():
+    pool = FakePool()
+    repo = CatalogRepository(pool)
+
+    await repo.set_franchise_rules_fingerprint("abc123")
+
+    conn = pool.connections[0]
+    assert len(conn.executed) == 1
+    sql, params = conn.executed[0]
+    assert "curation_rule_pass_state" in sql
+    assert "franchise_reclassification" in sql
+    assert params == ("abc123",)

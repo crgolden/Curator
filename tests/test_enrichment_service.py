@@ -371,6 +371,69 @@ async def test_refresh_opencritic_cache_requires_a_configured_client():
         await service.refresh_opencritic_cache()
 
 
+async def test_refresh_opencritic_cache_translates_401_to_auth_error():
+    opencritic_client = FakeOpenCriticClient(raises=OpenCriticApiError("bad key", status_code=401))
+    service = _service(opencritic_client=opencritic_client)
+
+    with pytest.raises(EnrichmentAuthError) as exc_info:
+        await service.refresh_opencritic_cache()
+
+    assert exc_info.value.provider == "opencritic"
+
+
+async def test_refresh_opencritic_cache_translates_403_to_auth_error():
+    opencritic_client = FakeOpenCriticClient(raises=OpenCriticApiError("forbidden", status_code=403))
+    service = _service(opencritic_client=opencritic_client)
+
+    with pytest.raises(EnrichmentAuthError):
+        await service.refresh_opencritic_cache()
+
+
+async def test_refresh_opencritic_cache_translates_429_to_rate_limit_error():
+    opencritic_client = FakeOpenCriticClient(
+        raises=OpenCriticApiError("rate limited", status_code=429, retry_after_seconds=120.0)
+    )
+    service = _service(opencritic_client=opencritic_client)
+
+    with pytest.raises(EnrichmentRateLimitError) as exc_info:
+        await service.refresh_opencritic_cache()
+
+    assert exc_info.value.provider == "opencritic"
+    assert exc_info.value.retry_after_seconds == 120.0
+
+
+async def test_refresh_opencritic_cache_skips_platform_on_5xx():
+    opencritic_client = FakeOpenCriticClient(raises=OpenCriticApiError("server error", status_code=503))
+    repository = FakeEnrichmentRepository()
+    service = _service(opencritic_client=opencritic_client, repository=repository)
+
+    total = await service.refresh_opencritic_cache()
+
+    assert total == 0
+    assert repository.saved_opencritic_batches == []
+
+
+async def test_has_rawg_client_reflects_configured_client():
+    assert _service(rawg_client=FakeRawgClient()).has_rawg_client is True
+    assert _service(rawg_client=None).has_rawg_client is False
+
+
+async def test_has_opencritic_client_reflects_configured_client():
+    assert _service(opencritic_client=FakeOpenCriticClient()).has_opencritic_client is True
+    assert _service(opencritic_client=None).has_opencritic_client is False
+
+
+async def test_has_catalog_client_reflects_configured_client():
+    assert _service(catalog_client=FakeCatalogClient()).has_catalog_client is True
+    # _service() substitutes a falsy catalog_client with a FakeCatalogClient() default (matching how
+    # every other caller treats "no client given" as "use the default"), so exercising the True-`None`
+    # case needs a direct construction rather than going through that helper.
+    service = EnrichmentService(
+        rawg_client=FakeRawgClient(), opencritic_client=FakeOpenCriticClient(), repository=FakeEnrichmentRepository()
+    )
+    assert service.has_catalog_client is False
+
+
 async def test_enrich_game_with_no_rawg_client_skips_rawg_signal_silently():
     service = _service(rawg_client=None)
 

@@ -7,9 +7,10 @@ Ported from ``ps_enrich.py``'s ``urllib``-based ``rawg_get()``/``search_rawg()``
 
 from __future__ import annotations
 
+from collections.abc import Callable, Coroutine
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
-from typing import Any
+from typing import Any, Protocol, TypeVar
 
 import httpx
 
@@ -185,3 +186,67 @@ class RawgClient:
                 retry_after_seconds=_parse_retry_after(exc.response),
                 provider_detail=_response_detail(exc.response, self._api_key),
             ) from None
+
+
+class RawgClientProtocol(Protocol):
+    """The subset of :class:`RawgClient` that :class:`~curator.enrichment.enrichment_service.EnrichmentService`
+    depends on -- satisfied structurally by both :class:`RawgClient` and :class:`RotatingRawgClient`."""
+
+    async def search_games(self, title: str, *, page_size: int = 5) -> list[RawgCandidate]: ...
+
+    async def validate_key(self) -> None: ...
+
+    async def fetch_detail(self, rawg_game_id: int) -> dict[str, Any] | None: ...
+
+
+_T = TypeVar("_T")
+
+_ROTATE_ON_STATUS_CODES = (401, 403, 429)
+
+
+class RotatingRawgClient:
+    """Rotates across multiple single-key :class:`RawgClient` instances behind the same interface
+    :class:`~curator.enrichment.enrichment_service.EnrichmentService` depends on
+    (:class:`RawgClientProtocol`), advancing to the next key on a 401/403/429 from the current one.
+
+    Used only for the admin catalog-wide singleton (``curator.app``) when more than one ``RawgApiKey`` is
+    configured -- per-user BYOK is always exactly one key, so it never needs this. Transparent to
+    everything above it: a :class:`RawgApiError` only reaches ``EnrichmentService``'s existing 401/403/429
+    translation once every configured key has already been tried and failed, so that translation logic
+    never needs to know rotation happened.
+
+    :param clients: Every admin RAWG client, one per configured key, in rotation order.
+    """
+
+    def __init__(self, clients: list[RawgClientProtocol]) -> None:
+        if not clients:
+            raise ValueError("RotatingRawgClient requires at least one client.")
+        self._clients = clients
+        self._index = 0
+
+    async def search_games(self, title: str, *, page_size: int = 5) -> list[RawgCandidate]:
+        return await self._call(lambda client: client.search_games(title, page_size=page_size))
+
+    async def validate_key(self) -> None:
+        await self._call(lambda client: client.validate_key())
+
+    async def fetch_detail(self, rawg_game_id: int) -> dict[str, Any] | None:
+        return await self._call(lambda client: client.fetch_detail(rawg_game_id))
+
+    async def _call(self, invoke: Callable[[RawgClientProtocol], Coroutine[Any, Any, _T]]) -> _T:
+        """Try the current client, rotating to the next on a 401/403/429 and retrying the same call,
+        until either one succeeds or every client has failed once (in which case the last error is
+        raised, and the index stays wherever it landed rather than resetting to 0 for the next call)."""
+        last_exc: RawgApiError | None = None
+        for _ in range(len(self._clients)):
+            client = self._clients[self._index]
+            try:
+                return await invoke(client)
+            except RawgApiError as exc:
+                last_exc = exc
+                if exc.status_code in _ROTATE_ON_STATUS_CODES:
+                    self._index = (self._index + 1) % len(self._clients)
+                    continue
+                raise
+        assert last_exc is not None  # the loop above only exits without returning after setting last_exc
+        raise last_exc

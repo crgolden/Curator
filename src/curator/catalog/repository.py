@@ -137,6 +137,30 @@ class CatalogRepository:
                     updated += 1
         return updated
 
+    async def get_franchise_rules_fingerprint(self) -> str | None:
+        """Return the ``franchise_rules`` content fingerprint as of the last completed
+        :meth:`reclassify_franchise` pass, or ``None`` if that pass has never run (see
+        ``db/migrations/0016_curation_rule_pass_state.sql``)."""
+        async with self._pool.connection() as conn, conn.cursor() as cur:
+            await cur.execute(
+                "SELECT rules_fingerprint FROM curation_rule_pass_state WHERE pass_name = 'franchise_reclassification'"
+            )
+            row = await cur.fetchone()
+        return row[0] if row is not None else None
+
+    async def set_franchise_rules_fingerprint(self, fingerprint: str) -> None:
+        """Record ``fingerprint`` as the ``franchise_rules`` content as of the pass that just ran."""
+        async with self._pool.connection() as conn, conn.cursor() as cur:
+            await cur.execute(
+                """
+                INSERT INTO curation_rule_pass_state (pass_name, rules_fingerprint)
+                VALUES ('franchise_reclassification', %s)
+                ON CONFLICT (pass_name) DO UPDATE SET
+                    rules_fingerprint = EXCLUDED.rules_fingerprint, last_ran_at = now()
+                """,
+                (fingerprint,),
+            )
+
     async def get_edition_ranks(self) -> dict[str, int]:
         """Return the edition-keyword -> rank mapping."""
         async with self._pool.connection() as conn, conn.cursor() as cur:

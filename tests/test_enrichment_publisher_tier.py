@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from curator.enrichment.publisher_tier import PublisherTierRule, classify_tier
+from curator.enrichment.publisher_tier import PublisherTierRule, classify_tier, fingerprint_publisher_tier_rules
 
 _RULES = [
     PublisherTierRule(tier_id="1", pattern="sony interactive entertainment", tier="AAA", match_kind="substring"),
@@ -49,3 +49,27 @@ def test_exact_match_kind_requires_full_equality():
 
 def test_no_rules_matching_indie_for_nonempty_publisher():
     assert classify_tier("Anything", []) == "Indie"
+
+
+def test_fingerprint_is_stable_for_the_same_rules():
+    assert fingerprint_publisher_tier_rules(_RULES) == fingerprint_publisher_tier_rules(_RULES)
+
+
+def test_fingerprint_is_independent_of_input_list_order():
+    shuffled = list(reversed(_RULES))
+    assert fingerprint_publisher_tier_rules(_RULES) == fingerprint_publisher_tier_rules(shuffled)
+
+
+def test_fingerprint_changes_when_a_rule_changes():
+    rules = [PublisherTierRule(tier_id="1", pattern="sony", tier="AAA", match_kind="substring")]
+    changed_rules = [PublisherTierRule(tier_id="1", pattern="sony", tier="AA", match_kind="substring")]
+
+    assert fingerprint_publisher_tier_rules(rules) != fingerprint_publisher_tier_rules(changed_rules)
+
+
+def test_fingerprint_changes_when_a_rule_is_added_or_removed():
+    rules = [PublisherTierRule(tier_id="1", pattern="sony", tier="AAA", match_kind="substring")]
+    more_rules = [*rules, PublisherTierRule(tier_id="2", pattern="ea", tier="AAA", match_kind="substring")]
+
+    assert fingerprint_publisher_tier_rules(rules) != fingerprint_publisher_tier_rules(more_rules)
+    assert fingerprint_publisher_tier_rules([]) != fingerprint_publisher_tier_rules(rules)

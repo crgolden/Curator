@@ -6,6 +6,8 @@ Ported from ``ps_curate.py``'s ``assign_franchise()``, decoupled from its hardco
 
 from __future__ import annotations
 
+import hashlib
+import json
 import re
 from dataclasses import dataclass
 
@@ -18,6 +20,19 @@ class FranchiseRule:
     pattern: str
     franchise: str
     priority: int
+
+
+def fingerprint_franchise_rules(rules: list[FranchiseRule]) -> str:
+    """A stable content hash of every franchise rule.
+
+    Used by ``curator.app._enrichment_run_handler`` to skip a full-catalog
+    ``CatalogRepository.reclassify_franchise`` pass when ``franchise_rules`` hasn't changed since the last
+    time that pass ran -- safe because every newly-canonicalized game is already classified with the
+    *current* rules at ingestion time (``canonicalization_service.py``); the reclassification pass only
+    exists to retroactively fix pre-existing games after a rule edit.
+    """
+    canonical = sorted((rule.rule_id, rule.pattern, rule.franchise, rule.priority) for rule in rules)
+    return hashlib.sha256(json.dumps(canonical).encode()).hexdigest()
 
 
 def assign_franchise(name: str, rules: list[FranchiseRule]) -> str:

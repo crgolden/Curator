@@ -239,6 +239,38 @@ async def test_reclassify_tier_falls_back_to_developer_and_then_indie():
     assert not any(call[0].startswith("UPDATE game_enrichment") for call in conn.executed)
 
 
+async def test_get_publisher_tier_rules_fingerprint_returns_none_when_no_row():
+    pool = FakePool(fetchone_results=[None])
+    repo = EnrichmentRepository(pool)
+
+    fingerprint = await repo.get_publisher_tier_rules_fingerprint()
+
+    assert fingerprint is None
+
+
+async def test_get_publisher_tier_rules_fingerprint_returns_stored_value():
+    pool = FakePool(fetchone_results=[("abc123",)])
+    repo = EnrichmentRepository(pool)
+
+    fingerprint = await repo.get_publisher_tier_rules_fingerprint()
+
+    assert fingerprint == "abc123"
+
+
+async def test_set_publisher_tier_rules_fingerprint_upserts_the_pass_state_row():
+    pool = FakePool()
+    repo = EnrichmentRepository(pool)
+
+    await repo.set_publisher_tier_rules_fingerprint("abc123")
+
+    conn = pool.connections[0]
+    assert len(conn.executed) == 1
+    sql, params = conn.executed[0]
+    assert "curation_rule_pass_state" in sql
+    assert "tier_reclassification" in sql
+    assert params == ("abc123",)
+
+
 async def test_flag_data_quality_executes_insert():
     pool = FakePool()
     repo = EnrichmentRepository(pool)

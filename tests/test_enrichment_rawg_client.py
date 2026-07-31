@@ -5,7 +5,8 @@ from __future__ import annotations
 import httpx
 import pytest
 
-from curator.enrichment.rawg_client import MAX_PROVIDER_DETAIL_CHARS, RawgApiError, RawgClient
+from curator.enrichment.rawg_client import MAX_PROVIDER_DETAIL_CHARS, RawgApiError, RawgClient, RotatingRawgClient
+from curator.enrichment.rawg_matcher import RawgCandidate
 
 
 class RequestRecorder:
@@ -223,3 +224,109 @@ async def test_search_games_throttles_via_rate_limiter():
     await client.search_games("Anything")
 
     assert len(calls) == 1
+
+
+class FakeSingleKeyRawgClient:
+    """A hand-written fake satisfying RawgClientProtocol -- used instead of the real RawgClient so
+    RotatingRawgClient's rotation logic is tested in isolation from HTTP/mock-transport concerns."""
+
+    def __init__(self, *, key_label: str, raises: RawgApiError | None = None):
+        self.key_label = key_label
+        self._raises = raises
+        self.search_calls: list[str] = []
+        self.detail_calls: list[int] = []
+        self.validate_calls = 0
+
+    async def search_games(self, title, *, page_size=5):
+        self.search_calls.append(title)
+        if self._raises is not None:
+            raise self._raises
+        return [RawgCandidate(rawg_game_id=0, name=self.key_label, platform_ids=frozenset())]
+
+    async def validate_key(self):
+        self.validate_calls += 1
+        if self._raises is not None:
+            raise self._raises
+
+    async def fetch_detail(self, rawg_game_id):
+        self.detail_calls.append(rawg_game_id)
+        if self._raises is not None:
+            raise self._raises
+        return {"id": rawg_game_id}
+
+
+def test_rotating_client_requires_at_least_one_client():
+    with pytest.raises(ValueError, match="at least one client"):
+        RotatingRawgClient([])
+
+
+async def test_rotating_client_rotates_to_next_key_on_401_and_succeeds():
+    failing = FakeSingleKeyRawgClient(key_label="key-1", raises=RawgApiError("bad key", status_code=401))
+    working = FakeSingleKeyRawgClient(key_label="key-2")
+    client = RotatingRawgClient([failing, working])
+
+    result = await client.search_games("Some Title")
+
+    assert [candidate.name for candidate in result] == ["key-2"]
+    assert failing.search_calls == ["Some Title"]
+    assert working.search_calls == ["Some Title"]
+
+
+@pytest.mark.parametrize("status_code", [401, 403, 429])
+async def test_rotating_client_rotates_on_every_rotatable_status_code(status_code):
+    failing = FakeSingleKeyRawgClient(key_label="key-1", raises=RawgApiError("x", status_code=status_code))
+    working = FakeSingleKeyRawgClient(key_label="key-2")
+    client = RotatingRawgClient([failing, working])
+
+    result = await client.search_games("Title")
+
+    assert [candidate.name for candidate in result] == ["key-2"]
+
+
+async def test_rotating_client_raises_last_error_once_every_key_exhausted():
+    first = FakeSingleKeyRawgClient(key_label="key-1", raises=RawgApiError("first", status_code=429))
+    second = FakeSingleKeyRawgClient(key_label="key-2", raises=RawgApiError("second", status_code=429))
+    client = RotatingRawgClient([first, second])
+
+    with pytest.raises(RawgApiError) as exc_info:
+        await client.search_games("Title")
+
+    assert str(exc_info.value) == "second"
+    assert first.search_calls == ["Title"]
+    assert second.search_calls == ["Title"]
+
+
+async def test_rotating_client_does_not_rotate_on_a_non_rotatable_status_code():
+    failing = FakeSingleKeyRawgClient(key_label="key-1", raises=RawgApiError("server error", status_code=500))
+    working = FakeSingleKeyRawgClient(key_label="key-2")
+    client = RotatingRawgClient([failing, working])
+
+    with pytest.raises(RawgApiError):
+        await client.search_games("Title")
+
+    assert working.search_calls == []  # never rotated to -- a 500 isn't a rotate-on status code
+
+
+async def test_rotating_client_stays_on_last_good_index_across_calls():
+    failing = FakeSingleKeyRawgClient(key_label="key-1", raises=RawgApiError("bad key", status_code=401))
+    working = FakeSingleKeyRawgClient(key_label="key-2")
+    client = RotatingRawgClient([failing, working])
+
+    await client.search_games("First Call")
+    await client.search_games("Second Call")
+
+    # the second call goes straight to key-2 rather than re-trying key-1 first
+    assert failing.search_calls == ["First Call"]
+    assert working.search_calls == ["First Call", "Second Call"]
+
+
+async def test_rotating_client_delegates_fetch_detail_and_validate_key():
+    working = FakeSingleKeyRawgClient(key_label="key-1")
+    client = RotatingRawgClient([working])
+
+    detail = await client.fetch_detail(42)
+    await client.validate_key()
+
+    assert detail == {"id": 42}
+    assert working.detail_calls == [42]
+    assert working.validate_calls == 1

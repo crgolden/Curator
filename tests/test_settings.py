@@ -38,30 +38,55 @@ def test_from_config_resolves_all_fields(monkeypatch, tmp_path):
 
 def test_from_config_enrichment_and_jobs_settings_default_to_none(monkeypatch, tmp_path):
     _set_all_required(monkeypatch)
-    for key in ("RawgApiKey", "OpenCriticRapidApiKey", "ServiceBusNamespace", "ServiceBusConnectionString"):
+    for key in ("RawgApiKey__0", "OpenCriticRapidApiKey__0", "ServiceBusNamespace", "ServiceBusConnectionString"):
         monkeypatch.delenv(key, raising=False)
 
     settings = Settings.from_config(dotenv_path=tmp_path / "absent.env")
 
-    assert settings.rawg_api_key is None
-    assert settings.opencritic_rapidapi_key is None
+    assert settings.rawg_api_keys == ()
+    assert settings.opencritic_rapidapi_keys == ()
     assert settings.service_bus_namespace is None
     assert settings.service_bus_connection_string is None
 
 
 def test_from_config_resolves_enrichment_and_jobs_settings_when_set(monkeypatch, tmp_path):
     _set_all_required(monkeypatch)
-    monkeypatch.setenv("RawgApiKey", "rawg-key")
-    monkeypatch.setenv("OpenCriticRapidApiKey", "oc-key")
+    monkeypatch.setenv("RawgApiKey__0", "rawg-key")
+    monkeypatch.setenv("OpenCriticRapidApiKey__0", "oc-key")
     monkeypatch.setenv("ServiceBusNamespace", "crgolden.servicebus.windows.net")
     monkeypatch.setenv("ServiceBusConnectionString", "Endpoint=sb://example/;SharedAccessKey=x")
 
     settings = Settings.from_config(dotenv_path=tmp_path / "absent.env")
 
-    assert settings.rawg_api_key == "rawg-key"
-    assert settings.opencritic_rapidapi_key == "oc-key"
+    assert settings.rawg_api_keys == ("rawg-key",)
+    assert settings.opencritic_rapidapi_keys == ("oc-key",)
     assert settings.service_bus_namespace == "crgolden.servicebus.windows.net"
     assert settings.service_bus_connection_string == "Endpoint=sb://example/;SharedAccessKey=x"
+
+
+def test_from_config_resolves_multiple_indexed_api_keys(monkeypatch, tmp_path):
+    _set_all_required(monkeypatch)
+    monkeypatch.setenv("RawgApiKey__0", "rawg-key-1")
+    monkeypatch.setenv("RawgApiKey__1", "rawg-key-2")
+    monkeypatch.setenv("RawgApiKey__2", "rawg-key-3")
+    monkeypatch.setenv("OpenCriticRapidApiKey__0", "oc-key-1")
+    monkeypatch.setenv("OpenCriticRapidApiKey__1", "oc-key-2")
+
+    settings = Settings.from_config(dotenv_path=tmp_path / "absent.env")
+
+    assert settings.rawg_api_keys == ("rawg-key-1", "rawg-key-2", "rawg-key-3")
+    assert settings.opencritic_rapidapi_keys == ("oc-key-1", "oc-key-2")
+
+
+def test_from_config_stops_at_the_first_missing_index(monkeypatch, tmp_path):
+    _set_all_required(monkeypatch)
+    monkeypatch.setenv("RawgApiKey__0", "rawg-key-1")
+    monkeypatch.delenv("RawgApiKey__1", raising=False)
+    monkeypatch.setenv("RawgApiKey__2", "rawg-key-3")  # a gap after a missing index is never reached
+
+    settings = Settings.from_config(dotenv_path=tmp_path / "absent.env")
+
+    assert settings.rawg_api_keys == ("rawg-key-1",)
 
 
 def test_from_config_redis_settings_default_to_none_and_ssl_true(monkeypatch, tmp_path):
