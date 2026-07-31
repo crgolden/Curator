@@ -88,6 +88,16 @@ owner opts in.
 
 ## Security considerations
 
+- **Linking a PSN account is a deliberate trade of safety for capability.** A tool that never asks for a PSN
+  credential — a community trophy tracker polling its own shared service account, say — can't be
+  compromised via any individual user's token, but is throttled to whatever queue that one shared
+  credential can sustain (hence paid tiers for faster updates on sites built that way). Curator instead asks
+  each user for their own npsso, broad enough to mint the same session tokens the official PlayStation App
+  uses, so a user's own throughput is limited only by their own account, not a shared queue or a paywall.
+  That capability is bought with a wider credential than a token-free design needs, which is why the rest
+  of this section — and the schema itself — is built to earn the safety back: npsso is never persisted or
+  logged, no email column exists anywhere in the schema (`db/migrations/0001_initial.sql`'s header
+  comment), and every stored token is Fernet-encrypted at rest.
 - **`PUT /me/enrichment-keys/{provider}` validates the key against the real provider before persisting
   anything** — one cheap request (RAWG: `GET /genres?page_size=1`; OpenCritic: one page of the same
   non-search catalog listing every other OpenCritic call in this codebase uses) confirms the key is
@@ -270,6 +280,12 @@ adds the per-user BYOK enrichment keys table, the `game_enrichment.rawg_enriched
 checkmark columns, `job_runs.result_summary`, and `opencritic_pagination_cursor` (the shared, resumable
 cursor both the admin catalog-wide re-scrape and per-user OpenCritic top-ups advance cooperatively).
 
+Every migration file carries a header comment explaining *why* it exists. For several of them that comment
+is the only written record of the decision behind a design — `0011` on why a collection is a stored list of
+games rather than a re-evaluated filter, `0012` on why a title's active/lapsed state belongs to a user and
+not to the shared catalog, and `0015` on why per-game trophy completion earns a column when the rest of the
+trophy data does not.
+
 [`db/run_migrations.py`](db/run_migrations.py) applies every migration file not yet recorded as applied,
 tracked in a `schema_migrations` table (one row per filename) — the deploy job runs it against production
 before every deploy (see Deployment below), so a new migration file lands automatically on the next push to
@@ -296,15 +312,33 @@ src/curator/
   identity_routes.py                    # GET /identity
   presence_routes.py                      # GET /presence
   devices_routes.py                         # GET /devices
-  library_routes.py                           # GET /library, POST/GET /library/refresh
+  library_routes.py                           # GET /library, GET /library/categories, POST/GET /library/refresh
+  catalog_routes.py                           # GET /catalog/games
+  collections_routes.py                       # POST /collections/preview, POST/GET /collections,
+                                               # GET/PATCH/DELETE /collections/{id}, POST /collections/{id}/runs
+  consoles_routes.py                          # PUT /consoles/{id}/installs/{gameId}
+  enrichment_routes.py                        # POST /enrichment/runs (admin-only)
   profile_routes.py                             # GET/PUT /me/profile-settings, GET /users/{sub}/profile,
                                                  # POST/DELETE /users/{sub}/follow, followers/following,
                                                  # library/collections passthrough for another user's sub
   jobs/
     error_messages.py    # friendly_job_error(): sanitized, category-based job-failure text
-    queue_consumer.py    # QueueConsumer: drains both job queues; LockRenewer keeps long runs' locks alive
-    queue_publisher.py   # QueuePublisher: publishes library-refresh/enrichment job messages
-    repository.py        # JobRunsRepository: job_runs DAO, incl. result_summary
+    queue_consumer.py    # QueueConsumer: drains all three job queues; LockRenewer keeps long runs' locks alive
+    queue_publisher.py   # QueuePublisher: publishes library-refresh/continuation/enrichment job messages
+    repository.py        # JobRunsRepository: job_runs DAO, incl. result_summary and mark_rate_limited
+  library/
+    ingestion_service.py # IngestionService: PSN entitlements -> entitlement_pulls/entitlement_snapshots
+    library_build_orchestrator.py  # build(): ingest -> canonicalize -> enrich -> match_trophies
+    repository.py        # LibraryRepository: library_entries DAO, incl. the trophy match/progress columns
+  collections/
+    repository.py        # CollectionsRepository: definitions, definition items, run history, candidate pool
+    collection_orchestrator.py     # dispatches a spec to a strategy
+    filter_list_strategy.py        # apply_filter_list(): the console-free authoring aid
+    capacity_fill_strategy.py      # fill_capacity(): the opt-in per-console capacity mode
+  catalog/
+    canonicalization_service.py    # entitlements -> one catalog game per title, carrying is_active through
+  psn/
+    trophy_completion.py # fuzzy-matches PSN trophy titles to catalog titles at ingestion time only
   persistence/
     config.py          # generic arg -> env var -> .env resolution
     connection.py       # PostgreSQL connection URL resolution
@@ -319,51 +353,23 @@ db/migrations/
   0004_user_enrichment_keys.sql  # BYOK keys, enrichment checkmarks, job result_summary, OC pagination cursor
   0005_user_profiles.sql  # user_profiles: is_public + per-section show_* display toggles
   0006_follows.sql        # follows: the directed follow graph, plus account_action_log's followed/unfollowed actions
+  0008_job_runs_rate_limited_status.sql   # job_runs.status gains 'rate_limited' for the continuation workflow
+  0009_fix_delete_cascades.sql            # repairs DELETE /me: twelve FKs that never had ON DELETE CASCADE
+  0010_entitlement_artwork_and_fidelity.sql  # three artwork URLs, platform_ids, is_game; raw/sku_id/active_date fixes
+  0011_collection_definition_items.sql    # collection membership as a stored, ordered list
+  0012_library_entry_active_state.sql     # library_entries.is_active + collection_definitions.include_inactive
+  0013_collection_definitions_min_percent_completed.sql  # the trophy-completion floor as an authoring filter
+  0014_library_entries_trophy_match.sql   # np_communication_id + match method/attempted-at
+  0015_library_entries_trophy_progress.sql  # trophy_percent_completed + fetched-at
   run_migrations.py       # idempotent runner, applied automatically by the deploy job
 tests/                     # offline pytest suite, plus the gated tests/test_schema.py
 .github/workflows/
   main.yml                # CI: offline unit tests only, on push/PR/workflow_dispatch
 ```
 
-## Known gaps / outstanding work
+## Current scope
 
-- ~~Library refresh queue not configured in production.~~ **Fixed.** `curator-library-refresh` and
-  `curator-enrichment` queues exist on the shared `crgolden` Service Bus namespace; `crgolden-curator`'s
-  system-assigned managed identity holds Data Sender + Data Receiver on that namespace; the App Service has
-  a `ServiceBusNamespace` setting. `POST /library/refresh` and `POST /enrichment/runs` now publish for real,
-  and the in-process `QueueConsumer` (started from `create_app()`'s lifespan — no separate Functions
-  deployable) drains both queues, matching Identity/Directory/Functions' production convention of
-  managed-identity-only access (the shared namespace has `DisableLocalAuth` enabled, so a connection string
-  was never going to work there). `service_bus_connection_string` remains only as a local-dev/CI fallback.
-- ~~Every library refresh 401s because no shared RAWG/OpenCritic key is configured.~~ **Fixed by design,
-  not by provisioning a shared key.** Enrichment is bring-your-own-key — a user with no key configured for
-  a provider simply gets no signal from that provider (not an error); RAWG/OpenCritic are cache-first
-  against the shared `rawg_cache`/`opencritic_cache` tables regardless, so many titles enrich for free even
-  with zero keys configured.
-- ~~No endpoint returns the finished library.~~ **Fixed.** `GET /library` returns the caller's own library
-  with per-provider (`rawg_enriched`/`opencritic_enriched`) checkmarks per game; `GET /library/refresh/{run_id}`
-  additionally now returns a `result_summary` (newly-enriched titles per provider, whether the OpenCritic
-  top-up stopped early) once a run succeeds.
-- **No console list/create endpoints.** Only `PUT /consoles/{id}/installs/{gameId}` exists. Librarian's
-  UI accepts a manually-typed `console_id` as a stopgap (an explicit, agreed-on decision, not a bug) — a
-  404 from an unrecognized console is the expected path, not an error to chase.
-- **`POST /enrichment/runs` has no UI.** It's an admin-only global operation, not a per-user feature, and
-  intentionally out of scope for Librarian so far.
-- **Only the trophy summary is wired into Librarian's UI, not the title-level endpoints.** Librarian's
-  `/psn` preferences panel surfaces `GET /trophies/summary` as a compact, opt-in card (level/tier/progress/
-  earned counts). `GET /trophies/titles`, `/trophies/titles/{id}`, and `/trophies/titles/{id}/groups` exist
-  but have no UI yet — no drilldown was requested.
-- **Production catalog is unseeded.** `games`/`game_enrichment` are empty in the production database, so
-  Catalog/Collections pages correctly show "no results" rather than any real content — there is no
-  catalog-ingestion run against production yet.
-- **Elasticsearch structured logging had two separate live bugs, both now fixed but worth re-verifying
-  end-to-end after the next deploy:** (1) the ES client's own transport logger re-shipping its own HTTP
-  calls forever (a self-sustaining feedback loop that filled `logs-dotnet-curator` with 1M+ docs before
-  dying); (2) unhandled-exception logs never reaching the root logger's Elasticsearch handler at all,
-  because uvicorn's default logging config sets `propagate=False` on the `uvicorn` logger, silently
-  breaking the chain from `uvicorn.error` up to root. Confirm a real production 500 now actually produces
-  a document in `logs-app-curator`.
-- **Production schema had drifted from `db/migrations/` before this was caught** (missing `genres` table
-  and others) because nothing ever applied migrations to the live database. Now fixed by
-  `db/run_migrations.py` running in the deploy job — but any other repo with a similar "migrations exist
-  in source but nothing runs them" gap should be checked.
+Some capability exists in the API ahead of any UI for it, deliberately: `POST /enrichment/runs` is an
+admin-wide operation rather than a per-user feature, and the title-level trophy endpoints
+(`GET /trophies/titles` and friends) are available but only the summary is surfaced today. Consoles have
+an install-toggle route but no list/create route yet, so a console id is supplied directly.

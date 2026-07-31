@@ -45,12 +45,22 @@ class CollectionOrchestrator:
         spec: CollectionSpec,
         *,
         size_estimates: list[SizeEstimate],
+        completion_map: dict[str, int] | None = None,
+        completion_available: bool = False,
     ) -> CollectionResult:
         """Generate a collection for one user from a spec.
 
         :param identity_sub: The Curator user id (Identity's ``sub``).
         :param spec: The collection spec (saved definition or inline preview).
         :param size_estimates: Every install-size estimate row, used when a game has no measured actual.
+        :param completion_map: ``{game_id: percent_completed}``, precomputed by the caller (see
+            ``curator.psn.trophy_completion.get_completion_result``) -- attached to each
+            :class:`~curator.collections.game_candidate.GameCandidate` for display; ``None``/missing
+            entries leave ``percent_completed`` as ``None``.
+        :param completion_available: Whether ``completion_map`` reflects a real fetch attempt (as opposed
+            to trophy data being unavailable for this user right now) -- see
+            ``curator.collections.filter_list_strategy.apply_filter_list``'s ``completion_available``
+            parameter, which this is passed straight through to.
         :returns: The :class:`CollectionResult`.
         :raises ValueError: If ``spec.kind == "capacity_fill"`` and ``console_id`` is missing or unknown.
         """
@@ -69,8 +79,25 @@ class CollectionOrchestrator:
             capacity_gb = console.effective_capacity_gb
             routing_genres = console.routing_genres
 
-        raw_rows = await self._repository.list_candidates(identity_sub, platform=platform)
-        candidates = [self._score(row, size_estimates, is_ps5=(platform == "PS5")) for row in raw_rows]
+        raw_rows = await self._repository.list_candidates(
+            identity_sub,
+            platform=platform,
+            include_inactive=spec.include_inactive,
+            min_percent_completed=spec.min_percent_completed,
+        )
+        # Each row already carries its stored trophy percentage, and the completion floor was applied in
+        # SQL above. completion_map is only an override for a caller that resolved fresher numbers than
+        # the persisted ones; absent it, the row's own value stands.
+        completion_map = completion_map or {}
+        candidates = [
+            self._score(
+                row,
+                size_estimates,
+                is_ps5=(platform == "PS5"),
+                percent_completed=completion_map.get(row.game_id, row.percent_completed),
+            )
+            for row in raw_rows
+        ]
 
         if spec.kind == "capacity_fill":
             assert capacity_gb is not None  # guaranteed by the branch above
@@ -79,13 +106,19 @@ class CollectionOrchestrator:
                 included=fill_result.installed, excluded=fill_result.overflow, used_gb=fill_result.used_gb
             )
 
-        filtered = apply_filter_list(candidates, spec)
+        filtered = apply_filter_list(candidates, spec, completion_available=completion_available)
         included_ids = {candidate.game_id for candidate in filtered}
         excluded = tuple(candidate for candidate in candidates if candidate.game_id not in included_ids)
         return CollectionResult(included=tuple(filtered), excluded=excluded, used_gb=None)
 
     @staticmethod
-    def _score(row: RawCandidateRow, size_estimates: list[SizeEstimate], *, is_ps5: bool) -> GameCandidate:
+    def _score(
+        row: RawCandidateRow,
+        size_estimates: list[SizeEstimate],
+        *,
+        is_ps5: bool,
+        percent_completed: int | None = None,
+    ) -> GameCandidate:
         comp = composite_score(row.critical_score, row.oc_score, row.psn_rating)
         # game_enrichment.is_free_to_play is a clean boolean (the schema fix that replaced the legacy
         # pipeline's free-text Multiplayer keyword-match smell) -- rank_score()'s signature still takes a
@@ -109,4 +142,5 @@ class CollectionOrchestrator:
             composite_score=comp,
             rank_score=points,
             size_gb=float(size_gb),
+            percent_completed=percent_completed,
         )

@@ -219,3 +219,11 @@ __marimo__/
 
 # playwright-cli local state
 .playwright-cli/
+
+# Scratch output from local tooling. Playwright CLI page snapshots in particular are accessibility-tree
+# dumps of whatever was on screen, so they routinely capture a real email address and a live session id --
+# this repo is public, and three such files were committed to main before this rule existed.
+*.log
+*-live.yml
+*-snapshot.yml
+action-history.yml

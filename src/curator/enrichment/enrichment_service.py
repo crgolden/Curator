@@ -12,6 +12,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+import httpx
+
 from curator.enrichment.genre_reconciliation_service import reconcile_genres
 from curator.enrichment.opencritic_client import OpenCriticApiError, OpenCriticClient
 from curator.enrichment.opencritic_matcher import OpenCriticGame, build_name_index
@@ -27,6 +29,21 @@ _MULTIPLAYER_KEYWORDS = ("multiplayer", "co-op", "online", "pvp", "cooperative")
 _OPENCRITIC_TOPUP_PLATFORMS = ("ps4", "ps5")
 _OPENCRITIC_TOPUP_MAX_PAGES = 5
 _AUTH_FAILURE_STATUS_CODES = (401, 403)
+_RATE_LIMIT_STATUS_CODE = 429
+_DEFAULT_RATE_LIMIT_RETRY_SECONDS = 3600.0
+_MAX_RATE_LIMIT_RETRY_SECONDS = 86400.0
+
+
+def next_rate_limit_backoff_seconds(previous_retry_after_seconds: float) -> float:
+    """Double a previous rate-limit wait, capped at 24h.
+
+    The same escalation :class:`EnrichmentService` applies internally (via
+    :meth:`EnrichmentService._rate_limit_retry_after`) across ``enrich_game`` calls within one instance --
+    exposed here so ``curator.app._library_refresh_continuation_handler`` can seed a *fresh* instance (one
+    per continuation queue message) with where the backoff left off, rather than resetting to the 1h
+    default on every resume.
+    """
+    return min(previous_retry_after_seconds * 2, _MAX_RATE_LIMIT_RETRY_SECONDS)
 
 
 class EnrichmentAuthError(Exception):
@@ -43,6 +60,27 @@ class EnrichmentAuthError(Exception):
     def __init__(self, provider: str, message: str) -> None:
         super().__init__(message)
         self.provider = provider
+
+
+class EnrichmentRateLimitError(Exception):
+    """Raised when a provider returns 429 -- distinct from :class:`EnrichmentAuthError` (a bad key, not a
+    quota) and from any other transient failure (5xx, which is still swallowed per-game -- see
+    :meth:`EnrichmentService._resolve_rawg`/:meth:`EnrichmentService._run_opencritic_topup`).
+
+    Callers (``curator.library.library_build_orchestrator.LibraryBuildOrchestrator.enrich_delta``) stop
+    enrichment immediately on this rather than continuing to burn through every remaining game against a
+    provider that's already exhausted for the window -- each subsequent call would fail identically.
+
+    :param provider: ``"rawg"`` or ``"opencritic"``.
+    :param retry_after_seconds: When enrichment should be safe to resume -- from the provider's own
+        ``Retry-After`` response header when present, otherwise a heuristic default (see
+        :data:`_DEFAULT_RATE_LIMIT_RETRY_SECONDS`).
+    """
+
+    def __init__(self, provider: str, retry_after_seconds: float) -> None:
+        super().__init__(f"{provider} rate limit hit; retry after {retry_after_seconds:.0f}s")
+        self.provider = provider
+        self.retry_after_seconds = retry_after_seconds
 
 
 @dataclass(frozen=True, slots=True)
@@ -101,6 +139,14 @@ class EnrichmentService:
         :meth:`refresh_opencritic_cache` (no PSN signal involved) may omit it; :meth:`enrich_game` then
         skips the PSN-genre signal entirely rather than failing.
     :param repository: The enrichment repository (caches + ``game_enrichment`` writes).
+    :param rate_limit_backoff_seconds: Per-provider starting point for the doubling backoff (see
+        :meth:`_rate_limit_retry_after`), keyed by ``"rawg"``/``"opencritic"``. A fresh
+        :class:`EnrichmentService` is built per library-refresh-continuation queue message (one run's retry
+        chain spans many messages, each with its own instance) -- passing the previous message's
+        ``retry_after_seconds`` (already doubled -- see :func:`next_rate_limit_backoff_seconds`) here is
+        what makes the backoff escalate across the whole chain instead of resetting to the 1h default on
+        every resume. Defaults to empty (every provider starts from the default) for a normal, non-resumed
+        refresh.
     """
 
     def __init__(
@@ -110,6 +156,7 @@ class EnrichmentService:
         opencritic_client: OpenCriticClient | None,
         catalog_client: CatalogClient | None = None,
         repository: EnrichmentRepository,
+        rate_limit_backoff_seconds: dict[str, float] | None = None,
     ) -> None:
         self._rawg_client = rawg_client
         self._opencritic_client = opencritic_client
@@ -117,6 +164,23 @@ class EnrichmentService:
         self._repository = repository
         self._opencritic_topup_attempted = False
         self.opencritic_topup_incomplete = False
+        self._next_rate_limit_backoff_seconds: dict[str, float] = dict(rate_limit_backoff_seconds or {})
+
+    def _rate_limit_retry_after(self, provider: str, hinted_seconds: float | None) -> float:
+        """Resolve how long to wait before retrying ``provider``, on a 429.
+
+        Prefers the provider's own ``Retry-After`` hint when given (clamped to the same cap the fallback
+        heuristic respects, so a bogus/huge header value can't schedule a continuation message past the
+        Service Bus queue's message TTL and get silently dropped instead of delayed). Otherwise falls back
+        to a doubling heuristic (1h, 2h, 4h, ... capped at 24h) per provider, per :class:`EnrichmentService`
+        instance -- neither RAWG nor OpenCritic reliably documents a reset header for quota exhaustion, so
+        repeated 429s within the same run back off rather than retrying at a fixed interval indefinitely.
+        """
+        if hinted_seconds is not None:
+            return min(hinted_seconds, _MAX_RATE_LIMIT_RETRY_SECONDS)
+        current = self._next_rate_limit_backoff_seconds.get(provider, _DEFAULT_RATE_LIMIT_RETRY_SECONDS)
+        self._next_rate_limit_backoff_seconds[provider] = next_rate_limit_backoff_seconds(current)
+        return current
 
     async def refresh_opencritic_cache(self, platforms: tuple[str, ...] = ("ps4", "ps5")) -> int:
         """Paginate OpenCritic's PS4/PS5 catalog into ``opencritic_cache``, resuming from the shared
@@ -235,7 +299,12 @@ class EnrichmentService:
         except RawgApiError as exc:
             if exc.status_code in _AUTH_FAILURE_STATUS_CODES:
                 raise EnrichmentAuthError("rawg", str(exc)) from None
-            return None  # transient (429/5xx) -- skip this game's RAWG signal, don't cache a false negative
+            if exc.status_code == _RATE_LIMIT_STATUS_CODE:
+                retry_after = self._rate_limit_retry_after("rawg", exc.retry_after_seconds)
+                raise EnrichmentRateLimitError("rawg", retry_after) from None
+            return None  # transient (5xx) -- skip this game's RAWG signal, don't cache a false negative
+        except httpx.HTTPError:
+            return None  # network error/timeout reaching RAWG -- same as a transient 5xx, skip this game
 
         match = find_rawg_match(title, candidates)
         if match is None:
@@ -247,7 +316,12 @@ class EnrichmentService:
         except RawgApiError as exc:
             if exc.status_code in _AUTH_FAILURE_STATUS_CODES:
                 raise EnrichmentAuthError("rawg", str(exc)) from None
+            if exc.status_code == _RATE_LIMIT_STATUS_CODE:
+                retry_after = self._rate_limit_retry_after("rawg", exc.retry_after_seconds)
+                raise EnrichmentRateLimitError("rawg", retry_after) from None
             return None
+        except httpx.HTTPError:
+            return None  # network error/timeout reaching RAWG -- same as a transient 5xx, skip this game
 
         await self._repository.save_rawg_cache(title, rawg_game_id=match.rawg_game_id, raw=detail)
         return detail
@@ -285,7 +359,14 @@ class EnrichmentService:
             except OpenCriticApiError as exc:
                 if exc.status_code in _AUTH_FAILURE_STATUS_CODES:
                     raise EnrichmentAuthError("opencritic", str(exc)) from None
-                self.opencritic_topup_incomplete = True  # transient -- stop the top-up, don't fail the run
+                if exc.status_code == _RATE_LIMIT_STATUS_CODE:
+                    retry_after = self._rate_limit_retry_after("opencritic", exc.retry_after_seconds)
+                    raise EnrichmentRateLimitError("opencritic", retry_after) from None
+                self.opencritic_topup_incomplete = True  # transient (5xx) -- stop the top-up, don't fail the run
+                return
+            except httpx.HTTPError:
+                # network error/timeout reaching OpenCritic -- same as a transient 5xx, stop the top-up
+                self.opencritic_topup_incomplete = True
                 return
 
             await self._repository.save_opencritic_games(result.games)

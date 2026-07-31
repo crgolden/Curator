@@ -67,6 +67,7 @@ EXPECTED_TABLES = {
     "user_consoles",
     "measured_sizes",
     "collection_definitions",
+    "collection_definition_items",
     "collection_runs",
     "collection_items",
     "console_installs",
@@ -225,6 +226,224 @@ def test_user_profiles_cascade_deletes_when_user_is_deleted(db_connection, seede
         cur.execute("SELECT count(*) FROM user_profiles WHERE identity_sub = %s", (user_sub,))
         (count,) = cur.fetchone()
     assert count == 0
+
+
+def test_deleting_a_user_cascades_every_per_user_table(db_connection, seeded_user_and_game):
+    """DELETE /me must wipe every per-user table via cascade -- the contract delete_user relies on.
+
+    Eight of these foreign keys were declared without ON DELETE CASCADE in 0001_initial.sql, so this
+    delete raised a ForeignKeyViolation for any user who had ingested entitlements or saved a
+    collection. 0009_fix_delete_cascades.sql added them, plus the four child-chain cascades
+    (entitlement_snapshots, collection_items, console_installs, collection_runs.definition_id) that
+    would otherwise have failed one level down.
+    """
+    user_sub, game_id = seeded_user_and_game
+    pull_id = str(uuid.uuid4())
+    console_id = str(uuid.uuid4())
+    definition_id = str(uuid.uuid4())
+    run_id = str(uuid.uuid4())
+    job_run_id = str(uuid.uuid4())
+
+    with db_connection.cursor() as cur:
+        cur.execute(
+            "INSERT INTO entitlement_pulls (pull_id, identity_sub, source, entry_count) VALUES (%s, %s, %s, %s)",
+            (pull_id, user_sub, "curator-live", 1),
+        )
+        cur.execute(
+            "INSERT INTO entitlement_snapshots (pull_id, entitlement_id, raw) VALUES (%s, %s, %s)",
+            (pull_id, "ent-1", "{}"),
+        )
+        cur.execute("INSERT INTO library_entries (identity_sub, game_id) VALUES (%s, %s)", (user_sub, game_id))
+        cur.execute(
+            "INSERT INTO library_exclusions (identity_sub, game_id, reason) VALUES (%s, %s, %s)",
+            (user_sub, game_id, "not interested"),
+        )
+        cur.execute(
+            "INSERT INTO user_consoles (console_id, identity_sub, name, platform, raw_capacity_gb) "
+            "VALUES (%s, %s, %s, %s, %s)",
+            (console_id, user_sub, "Living room PS5", "PS5", 800.0),
+        )
+        cur.execute("INSERT INTO console_installs (console_id, game_id) VALUES (%s, %s)", (console_id, game_id))
+        cur.execute(
+            "INSERT INTO measured_sizes (identity_sub, game_id, platform, size_gb) VALUES (%s, %s, %s, %s)",
+            (user_sub, game_id, "PS5", 50.0),
+        )
+        cur.execute(
+            "INSERT INTO collection_definitions (definition_id, identity_sub, name, kind) VALUES (%s, %s, %s, %s)",
+            (definition_id, user_sub, "My RPGs", "filter_list"),
+        )
+        cur.execute(
+            "INSERT INTO collection_definition_items (definition_id, game_id, rank) VALUES (%s, %s, %s)",
+            (definition_id, game_id, 1),
+        )
+        cur.execute(
+            "INSERT INTO collection_runs (run_id, identity_sub, definition_id, spec_snapshot) VALUES (%s, %s, %s, %s)",
+            (run_id, user_sub, definition_id, "{}"),
+        )
+        cur.execute(
+            "INSERT INTO collection_items (run_id, game_id, included) VALUES (%s, %s, %s)",
+            (run_id, game_id, True),
+        )
+        cur.execute(
+            "INSERT INTO job_runs (run_id, kind, identity_sub) VALUES (%s, %s, %s)",
+            (job_run_id, "library_refresh", user_sub),
+        )
+        cur.execute(
+            "INSERT INTO account_action_log (identity_sub, action) VALUES (%s, %s)",
+            (user_sub, "account_deleted"),
+        )
+
+        # The delete under test. Before 0009 this raised psycopg.errors.ForeignKeyViolation.
+        cur.execute("DELETE FROM app_users WHERE identity_sub = %s", (user_sub,))
+
+        for table in (
+            "entitlement_pulls",
+            "library_entries",
+            "library_exclusions",
+            "user_consoles",
+            "measured_sizes",
+            "collection_definitions",
+            "collection_runs",
+            "job_runs",
+        ):
+            cur.execute(f"SELECT count(*) FROM {table} WHERE identity_sub = %s", (user_sub,))
+            (count,) = cur.fetchone()
+            assert count == 0, f"{table} still has rows for the deleted user"
+
+        cur.execute("SELECT count(*) FROM entitlement_snapshots WHERE pull_id = %s", (pull_id,))
+        assert cur.fetchone()[0] == 0
+        cur.execute("SELECT count(*) FROM collection_items WHERE run_id = %s", (run_id,))
+        assert cur.fetchone()[0] == 0
+        # 0011's child table joins the same chain: app_users -> collection_definitions -> here.
+        cur.execute("SELECT count(*) FROM collection_definition_items WHERE definition_id = %s", (definition_id,))
+        assert cur.fetchone()[0] == 0
+        cur.execute("SELECT count(*) FROM console_installs WHERE console_id = %s", (console_id,))
+        assert cur.fetchone()[0] == 0
+
+        # account_action_log deliberately has NO foreign key to app_users -- it must survive deletion
+        # for its retention window (GDPR Art. 17(3)(e)). See 0003_account_action_log.sql.
+        cur.execute("SELECT count(*) FROM account_action_log WHERE identity_sub = %s", (user_sub,))
+        assert cur.fetchone()[0] == 1
+
+
+def test_library_exclusions_cascade_but_shared_catalog_survives(db_connection, seeded_user_and_game):
+    """A user delete must never touch the shared, identity_sub-free catalog tables."""
+    user_sub, game_id = seeded_user_and_game
+    with db_connection.cursor() as cur:
+        cur.execute(
+            "INSERT INTO library_exclusions (identity_sub, game_id, reason) VALUES (%s, %s, %s)",
+            (user_sub, game_id, "not interested"),
+        )
+        cur.execute("DELETE FROM app_users WHERE identity_sub = %s", (user_sub,))
+        cur.execute("SELECT count(*) FROM games WHERE game_id = %s", (game_id,))
+        assert cur.fetchone()[0] == 1
+
+
+def test_is_active_is_per_user_and_defaults_to_true(db_connection, seeded_user_and_game):
+    """One user's lapsed entitlement must never change another user's view of the same game.
+
+    This is the layering ``0012_library_entry_active_state.sql`` exists to enforce: is_active lives on
+    library_entries, so the same shared ``games`` row is simultaneously active for one user and inactive
+    for another. A column on ``games`` or ``game_enrichment`` would make one person's expired PS Plus
+    subscription reclassify the title for everybody.
+    """
+    user_a, game_id = seeded_user_and_game
+    user_b = str(uuid.uuid4())
+    with db_connection.cursor() as cur:
+        cur.execute("INSERT INTO app_users (identity_sub) VALUES (%s)", (user_b,))
+        cur.execute(
+            "INSERT INTO library_entries (identity_sub, game_id, is_active) VALUES (%s, %s, false)",
+            (user_a, game_id),
+        )
+        # Omits is_active entirely -- the default must be "playable", so a pre-0012 row stays owned.
+        cur.execute("INSERT INTO library_entries (identity_sub, game_id) VALUES (%s, %s)", (user_b, game_id))
+
+        cur.execute(
+            "SELECT identity_sub, is_active FROM library_entries WHERE game_id = %s ORDER BY is_active",
+            (game_id,),
+        )
+        rows = cur.fetchall()
+
+    assert [(str(row[0]), row[1]) for row in rows] == [(user_a, False), (user_b, True)]
+
+
+def test_set_trophy_match_accepts_a_no_match_result(db_connection, seeded_user_and_game):
+    """``curator.library.repository.LibraryRepository.set_trophy_match`` must accept ``percent_completed=None``.
+
+    Regression test for a bug only a real Postgres connection can catch: this method's query has a
+    ``CASE WHEN %s IS NULL THEN ... ELSE now() END`` on ``trophy_progress_fetched_at``, referencing the
+    same ``percent_completed`` value a second time. That second parameter occurrence is never assigned to
+    or compared against a typed column, so with no cast Postgres cannot infer its type and psycopg raises
+    ``IndeterminateDatatype: could not determine data type of parameter $4`` -- but only when the value
+    actually sent is NULL, so unit tests against a hand-written fake (which never sends SQL anywhere) pass
+    regardless, and this class of bug reaches a real database undetected. It reached this one: this exact
+    call, from a real local library refresh, is what surfaced it -- the "no confident trophy match" path
+    (``np_communication_id=None``) is the common case on a first pull, so it was also the first path hit.
+
+    The query text here intentionally mirrors ``set_trophy_match`` rather than calling it, since that
+    method is async (``psycopg_pool.AsyncConnectionPool``) and this module's fixtures are synchronous --
+    keep the two in sync if either changes.
+    """
+    user_sub, game_id = seeded_user_and_game
+    with db_connection.cursor() as cur:
+        cur.execute("INSERT INTO library_entries (identity_sub, game_id) VALUES (%s, %s)", (user_sub, game_id))
+
+        cur.execute(
+            """
+            UPDATE library_entries
+            SET np_communication_id = %s,
+                trophy_match_method = %s,
+                trophy_match_attempted_at = now(),
+                trophy_percent_completed = %s,
+                trophy_progress_fetched_at = CASE WHEN %s::smallint IS NULL
+                    THEN trophy_progress_fetched_at ELSE now() END
+            WHERE identity_sub = %s AND game_id = %s
+            """,
+            (None, None, None, None, user_sub, game_id),
+        )
+
+        cur.execute(
+            "SELECT np_communication_id, trophy_percent_completed, trophy_progress_fetched_at, "
+            "trophy_match_attempted_at IS NOT NULL FROM library_entries WHERE identity_sub = %s AND game_id = %s",
+            (user_sub, game_id),
+        )
+        row = cur.fetchone()
+
+    assert row == (None, None, None, True)
+
+
+def test_set_trophy_match_accepts_a_confident_match_with_progress(db_connection, seeded_user_and_game):
+    """Same query as above, the other branch: a real match with a known completion percentage.
+
+    Covers the ``CASE`` taking its ELSE arm (stamping ``trophy_progress_fetched_at``) so the fix for the
+    NULL branch above cannot have broken this one.
+    """
+    user_sub, game_id = seeded_user_and_game
+    with db_connection.cursor() as cur:
+        cur.execute("INSERT INTO library_entries (identity_sub, game_id) VALUES (%s, %s)", (user_sub, game_id))
+
+        cur.execute(
+            """
+            UPDATE library_entries
+            SET np_communication_id = %s,
+                trophy_match_method = %s,
+                trophy_match_attempted_at = now(),
+                trophy_percent_completed = %s,
+                trophy_progress_fetched_at = CASE WHEN %s::smallint IS NULL
+                    THEN trophy_progress_fetched_at ELSE now() END
+            WHERE identity_sub = %s AND game_id = %s
+            """,
+            ("NPWR12345_00", "fuzzy", 42, 42, user_sub, game_id),
+        )
+
+        cur.execute(
+            "SELECT np_communication_id, trophy_match_method, trophy_percent_completed, "
+            "trophy_progress_fetched_at IS NOT NULL FROM library_entries WHERE identity_sub = %s AND game_id = %s",
+            (user_sub, game_id),
+        )
+        row = cur.fetchone()
+
+    assert row == ("NPWR12345_00", "fuzzy", 42, True)
 
 
 def test_account_action_log_accepts_followed_and_unfollowed_actions(db_connection, seeded_user_and_game):

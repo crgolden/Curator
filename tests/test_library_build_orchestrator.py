@@ -8,7 +8,7 @@ suite) end-to-end against fake repositories/clients, rather than faking canonica
 from __future__ import annotations
 
 from curator.catalog.canonicalization_service import EntitlementSnapshot
-from curator.enrichment.enrichment_service import EnrichmentResult
+from curator.enrichment.enrichment_service import EnrichmentRateLimitError, EnrichmentResult
 from curator.library.library_build_orchestrator import LibraryBuildOrchestrator
 
 
@@ -73,9 +73,18 @@ class FakeEnrichmentService:
         self._size = size
         self.enrich_calls: list[str] = []
         self.opencritic_topup_incomplete = False
+        self._rate_limit_on_title: str | None = None
+        self._rate_limit_error: EnrichmentRateLimitError | None = None
+
+    def rate_limit_on(self, title: str, error: EnrichmentRateLimitError) -> None:
+        self._rate_limit_on_title = title
+        self._rate_limit_error = error
 
     async def enrich_game(self, title, *, product_id, is_ps5, genre_priorities, publisher_tier_rules, size_estimates):
         self.enrich_calls.append(title)
+        if title == self._rate_limit_on_title:
+            assert self._rate_limit_error is not None
+            raise self._rate_limit_error
         return self._result, self._size
 
 
@@ -98,16 +107,58 @@ class FakeEnrichmentRepository:
 
 
 class FakeLibraryRepository:
-    def __init__(self):
+    def __init__(self, unmatched_override=None):
         self.upsert_calls = []
+        self._unmatched_override = unmatched_override
+        self.set_trophy_match_calls: list[tuple] = []
+        self.refresh_trophy_progress_calls: list[tuple] = []
 
     async def upsert_entry(
-        self, identity_sub, game_id, *, native_ps5, ps4_eligible, owned_edition, winning_entitlement_id, product_id
+        self,
+        identity_sub,
+        game_id,
+        *,
+        native_ps5,
+        ps4_eligible,
+        owned_edition,
+        winning_entitlement_id,
+        product_id,
+        is_active=True,
     ):
-        self.upsert_calls.append((identity_sub, game_id, native_ps5, ps4_eligible))
+        self.upsert_calls.append((identity_sub, game_id, native_ps5, ps4_eligible, is_active))
+
+    async def get_unmatched_game_ids(self, identity_sub, game_ids):
+        if self._unmatched_override is not None:
+            return self._unmatched_override
+        return list(game_ids)
+
+    async def set_trophy_match(self, identity_sub, game_id, *, np_communication_id, method, percent_completed=None):
+        self.set_trophy_match_calls.append((identity_sub, game_id, np_communication_id, method, percent_completed))
+
+    async def refresh_trophy_progress(self, identity_sub, progress_by_np_id):
+        self.refresh_trophy_progress_calls.append((identity_sub, progress_by_np_id))
+        return len(progress_by_np_id)
 
 
-def _snapshot(title="God of War", concept_id="c1", entitlement_id="e1", package_type="PS4GD"):
+class FakeTrophyClient:
+    """Stands in for TrophyClient/CachedTrophyClient -- only the two methods match_trophies calls."""
+
+    def __init__(self, *, exact_matches=None, fuzzy_titles=None):
+        self._exact_matches = exact_matches or {}
+        self._fuzzy_titles = fuzzy_titles or []
+        self.trophy_titles_for_title_calls: list[list[str]] = []
+        self.trophy_titles_call_count = 0
+
+    async def trophy_titles_for_title(self, title_ids, online_id=None, account_id=None):
+        self.trophy_titles_for_title_calls.append(title_ids)
+        return self._exact_matches.get(title_ids[0], [])
+
+    async def trophy_titles(self, online_id=None, account_id=None, limit=100):
+        self.trophy_titles_call_count += 1
+        return self._fuzzy_titles
+
+
+def _snapshot(title="God of War", concept_id="c1", entitlement_id="e1", package_type="PS4GD", active=None):
     return EntitlementSnapshot(
         entitlement_id=entitlement_id,
         concept_id=concept_id,
@@ -117,7 +168,7 @@ def _snapshot(title="God of War", concept_id="c1", entitlement_id="e1", package_
         concept_meta_name=None,
         title_meta_name=title,
         package_type=package_type,
-        active=None,
+        active=active,
     )
 
 
@@ -173,7 +224,29 @@ async def test_persist_and_link_upserts_game_and_library_entry():
 
     assert game_ids == ["game-1"]
     assert catalog_repository.upsert_calls[0][0] == "game-1"
-    assert library_repository.upsert_calls == [("sub-1", "game-1", games[0].native_ps5, games[0].ps4_eligible)]
+    assert library_repository.upsert_calls == [
+        ("sub-1", "game-1", games[0].native_ps5, games[0].ps4_eligible, games[0].active)
+    ]
+
+
+async def test_persist_and_link_carries_inactive_state_onto_the_library_entry():
+    # The whole point of keeping inactive entitlements through canonicalization: without this hand-off
+    # a lapsed title is either invisible (old behavior, and stranded in library_entries forever) or
+    # indistinguishable from one the user can still play.
+    catalog_repository = FakeCatalogRepository()
+    library_repository = FakeLibraryRepository()
+    orchestrator = LibraryBuildOrchestrator(
+        ingestion_service=FakeIngestionService(snapshots=[_snapshot(active=False)]),
+        enrichment_service=FakeEnrichmentService(),
+        enrichment_repository=FakeEnrichmentRepository(),
+        catalog_repository=catalog_repository,
+        library_repository=library_repository,
+    )
+    games = await orchestrator.canonicalize_current_entitlements("sub-1")
+
+    await orchestrator.persist_and_link("sub-1", games)
+
+    assert library_repository.upsert_calls[0][4] is False
 
 
 async def test_enrich_delta_only_enriches_unenriched_games():
@@ -233,6 +306,36 @@ async def test_enrich_delta_resolves_genre_id_from_active_genres():
     assert subgenre_id is None
 
 
+async def test_enrich_delta_stops_early_on_rate_limit_and_reports_remaining_game_ids_in_order():
+    enrichment_service = FakeEnrichmentService()
+    enrichment_service.rate_limit_on("Game B", EnrichmentRateLimitError("rawg", 120.0))
+    orchestrator = _orchestrator(enrichment_service=enrichment_service)
+    games = [_fake_canonical("Game A"), _fake_canonical("Game B"), _fake_canonical("Game C")]
+
+    result = await orchestrator.enrich_delta(
+        games, ["game-1", "game-2", "game-3"], publisher_tier_rules=[], size_estimates=[]
+    )
+
+    assert result.enriched_count == 1  # Game A succeeded before the rate limit hit
+    assert result.rate_limited_provider == "rawg"
+    assert result.retry_after_seconds == 120.0
+    # game-2 (the one that hit the limit) is retried first on resume, followed by whatever's left.
+    assert result.remaining_game_ids == ["game-2", "game-3"]
+    assert enrichment_service.enrich_calls == ["Game A", "Game B"]  # never reached Game C
+
+
+async def test_enrich_delta_no_rate_limit_leaves_new_fields_at_their_defaults():
+    enrichment_service = FakeEnrichmentService()
+    orchestrator = _orchestrator(enrichment_service=enrichment_service)
+    games = [_fake_canonical("Game A")]
+
+    result = await orchestrator.enrich_delta(games, ["game-1"], publisher_tier_rules=[], size_estimates=[])
+
+    assert result.rate_limited_provider is None
+    assert result.retry_after_seconds is None
+    assert result.remaining_game_ids == []
+
+
 async def test_build_runs_full_pipeline_end_to_end():
     ingestion_service = FakeIngestionService(pull_id="pull-1", snapshots=[_snapshot()])
     orchestrator = _orchestrator(ingestion_service=ingestion_service)
@@ -249,7 +352,20 @@ async def test_build_runs_full_pipeline_end_to_end():
     assert ingestion_service.ingest_calls == [("sub-1", None)]
 
 
-def _fake_canonical(title):
+async def test_build_threads_rate_limit_fields_through_from_enrich_delta():
+    enrichment_service = FakeEnrichmentService()
+    enrichment_service.rate_limit_on("God of War", EnrichmentRateLimitError("opencritic", 45.0))
+    ingestion_service = FakeIngestionService(pull_id="pull-1", snapshots=[_snapshot()])
+    orchestrator = _orchestrator(ingestion_service=ingestion_service, enrichment_service=enrichment_service)
+
+    result = await orchestrator.build("sub-1", publisher_tier_rules=[], size_estimates=[])
+
+    assert result.rate_limited_provider == "opencritic"
+    assert result.retry_after_seconds == 45.0
+    assert result.remaining_game_ids == ["game-1"]
+
+
+def _fake_canonical(title, winning_title_id=None):
     from curator.catalog.canonicalization_service import CanonicalGame
 
     return CanonicalGame(
@@ -260,4 +376,132 @@ def _fake_canonical(title):
         product_id="p1",
         concept_ids=("c1",),
         winning_entitlement_id="e1",
+        winning_title_id=winning_title_id,
     )
+
+
+def _trophy_title(name, np_communication_id, progress=50):
+    from curator.psn.models import TrophyCounts, TrophyTitle
+
+    return TrophyTitle(
+        name=name,
+        np_communication_id=np_communication_id,
+        platforms=("PS4",),
+        progress=progress,
+        earned=TrophyCounts(gold=1),
+        defined=TrophyCounts(gold=2),
+    )
+
+
+async def test_match_trophies_skipped_when_trophy_client_is_none():
+    library_repository = FakeLibraryRepository()
+    orchestrator = _orchestrator(library_repository=library_repository)
+    games = [_fake_canonical("Game A")]
+
+    result = await orchestrator.match_trophies("sub-1", games, ["game-1"], trophy_client=None)
+
+    assert result.exact_matched_count == 0
+    assert result.fuzzy_matched_count == 0
+    assert result.attempted_count == 0
+    assert library_repository.set_trophy_match_calls == []
+
+
+async def test_match_trophies_attempts_no_new_matches_when_nothing_unmatched():
+    """Identity matching is skipped, but progress is still refreshed.
+
+    A settled library has nothing left to *match* -- that is what trophy_match_attempted_at protects --
+    but percentages move every time the user plays, so the run still fetches titles once to refresh them.
+    Skipping that entirely would freeze an established library's completion at whatever each game read on
+    the day it was first seen.
+    """
+    library_repository = FakeLibraryRepository(unmatched_override=[])
+    trophy_client = FakeTrophyClient(fuzzy_titles=[_trophy_title("Game A", "NPWR00001_00", progress=55)])
+    orchestrator = _orchestrator(library_repository=library_repository)
+    games = [_fake_canonical("Game A")]
+
+    result = await orchestrator.match_trophies("sub-1", games, ["game-1"], trophy_client=trophy_client)
+
+    assert result.attempted_count == 0
+    assert library_repository.set_trophy_match_calls == []
+    assert trophy_client.trophy_titles_for_title_calls == []
+    assert trophy_client.trophy_titles_call_count == 1
+    assert library_repository.refresh_trophy_progress_calls == [("sub-1", {"NPWR00001_00": 55})]
+
+
+async def test_match_trophies_exact_match_for_ps4_title_id():
+    library_repository = FakeLibraryRepository()
+    trophy_client = FakeTrophyClient(
+        exact_matches={"CUSA00001_00": [_trophy_title("God of War", "NPWR00001_00", progress=75)]}
+    )
+    orchestrator = _orchestrator(library_repository=library_repository)
+    games = [_fake_canonical("God of War", winning_title_id="CUSA00001_00")]
+
+    result = await orchestrator.match_trophies("sub-1", games, ["game-1"], trophy_client=trophy_client)
+
+    assert result.exact_matched_count == 1
+    assert result.fuzzy_matched_count == 0
+    assert result.attempted_count == 1
+    assert library_repository.set_trophy_match_calls == [("sub-1", "game-1", "NPWR00001_00", "exact", 75)]
+    # No *fuzzy* pass is needed once every candidate matches exactly, but titles are still fetched once
+    # for the library-wide progress refresh.
+    assert trophy_client.trophy_titles_call_count == 1
+
+
+async def test_match_trophies_ps5_title_id_skips_exact_lookup_entirely():
+    library_repository = FakeLibraryRepository()
+    trophy_client = FakeTrophyClient(fuzzy_titles=[_trophy_title("Returnal", "NPWR00002_00", progress=42)])
+    orchestrator = _orchestrator(library_repository=library_repository)
+    games = [_fake_canonical("Returnal", winning_title_id="PPSA00001_00")]
+
+    result = await orchestrator.match_trophies("sub-1", games, ["game-1"], trophy_client=trophy_client)
+
+    assert trophy_client.trophy_titles_for_title_calls == []
+    assert result.fuzzy_matched_count == 1
+    assert library_repository.set_trophy_match_calls == [("sub-1", "game-1", "NPWR00002_00", "fuzzy", 42)]
+
+
+async def test_match_trophies_exact_lookup_miss_falls_back_to_fuzzy():
+    library_repository = FakeLibraryRepository()
+    trophy_client = FakeTrophyClient(
+        exact_matches={"CUSA00001_00": []},  # PSN has nothing for this title id
+        fuzzy_titles=[_trophy_title("God of War", "NPWR00001_00", progress=75)],
+    )
+    orchestrator = _orchestrator(library_repository=library_repository)
+    games = [_fake_canonical("God of War", winning_title_id="CUSA00001_00")]
+
+    result = await orchestrator.match_trophies("sub-1", games, ["game-1"], trophy_client=trophy_client)
+
+    assert trophy_client.trophy_titles_for_title_calls == [["CUSA00001_00"]]
+    assert result.exact_matched_count == 0
+    assert result.fuzzy_matched_count == 1
+    assert library_repository.set_trophy_match_calls == [("sub-1", "game-1", "NPWR00001_00", "fuzzy", 75)]
+
+
+async def test_match_trophies_no_confident_match_still_stamps_the_attempt():
+    library_repository = FakeLibraryRepository()
+    trophy_client = FakeTrophyClient(fuzzy_titles=[_trophy_title("Completely Unrelated", "NPWR99999_00")])
+    orchestrator = _orchestrator(library_repository=library_repository)
+    games = [_fake_canonical("God of War", winning_title_id="PPSA00001_00")]
+
+    result = await orchestrator.match_trophies("sub-1", games, ["game-1"], trophy_client=trophy_client)
+
+    assert result.exact_matched_count == 0
+    assert result.fuzzy_matched_count == 0
+    assert result.attempted_count == 1
+    # np_communication_id/method both None -- still persisted, so this game isn't re-attempted forever.
+    assert library_repository.set_trophy_match_calls == [("sub-1", "game-1", None, None, None)]
+
+
+async def test_match_trophies_only_processes_games_with_no_persisted_match_yet():
+    library_repository = FakeLibraryRepository(unmatched_override=["game-2"])
+    trophy_client = FakeTrophyClient(fuzzy_titles=[_trophy_title("Game B", "NPWR2", progress=10)])
+    orchestrator = _orchestrator(library_repository=library_repository)
+    games = [
+        _fake_canonical("Game A", winning_title_id="PPSA00001_00"),
+        _fake_canonical("Game B", winning_title_id="PPSA00002_00"),
+    ]
+
+    result = await orchestrator.match_trophies("sub-1", games, ["game-1", "game-2"], trophy_client=trophy_client)
+
+    assert result.attempted_count == 1
+    assert [call[1] for call in library_repository.set_trophy_match_calls] == ["game-2"]

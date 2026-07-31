@@ -71,6 +71,24 @@ class JobRunsRepository:
         """Transition a run to ``failed``, recording ``error``."""
         await self._set_status(run_id, "failed", error=error)
 
+    async def mark_rate_limited(self, run_id: str, result_summary: dict[str, Any]) -> None:
+        """Transition a run to ``rate_limited``: it stopped early on a provider rate limit and has been
+        (or is about to be) republished to resume once the limit lifts.
+
+        Distinct from ``failed`` -- this isn't an error, it's an expected, self-resolving pause -- and from
+        ``succeeded`` -- the run isn't actually done yet. ``GET /library/refresh/{run_id}`` surfaces
+        ``result_summary`` (titles enriched so far, which provider limited, when it'll resume, how many
+        games remain) exactly the same way it already does for a succeeded run.
+
+        :param result_summary: The same shape :meth:`mark_succeeded` accepts, plus
+            ``rate_limited_provider``, ``retry_after_seconds``, and ``remaining_count``.
+        """
+        async with self._pool.connection() as conn, conn.cursor() as cur:
+            await cur.execute(
+                "UPDATE job_runs SET status = %s, result_summary = %s, updated_at = now() WHERE run_id = %s",
+                ("rate_limited", json.dumps(result_summary), run_id),
+            )
+
     async def _set_status(self, run_id: str, status: str, *, error: str | None = None) -> None:
         async with self._pool.connection() as conn, conn.cursor() as cur:
             await cur.execute(

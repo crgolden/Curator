@@ -4,6 +4,8 @@ FakeEnrichmentKeysRepository, same DI-seam style as test_preferences_routes.py.
 
 from __future__ import annotations
 
+import logging
+
 import httpx
 from cryptography.fernet import Fernet
 from fastapi.testclient import TestClient
@@ -179,6 +181,25 @@ def test_put_rawg_key_rejected_by_provider_is_400_and_not_persisted():
     assert repo.upsert_rawg_calls == []
     status = client.get("/me/enrichment-keys", headers=_bearer("valid-token")).json()
     assert status["rawg_configured"] is False
+
+
+def test_provider_rejection_logs_the_providers_own_explanation_never_the_key(caplog):
+    # The 400 body has to say the same thing for every rejection reason, so the log is the only place the
+    # real cause survives -- and it must survive without dragging the caller's key along with it.
+    def _handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(401, json={"error": "The monthly limit has been reached for secret-key"})
+
+    client, _, _ = _build(http_client=httpx.AsyncClient(transport=httpx.MockTransport(_handler)))
+
+    with caplog.at_level(logging.WARNING, logger="curator"):
+        response = client.put(
+            "/me/enrichment-keys/rawg", json={"api_key": "secret-key"}, headers=_bearer("valid-token")
+        )
+
+    assert response.status_code == 400
+    assert "The monthly limit has been reached" in caplog.text
+    assert "secret-key" not in caplog.text
+    assert "[redacted]" in caplog.text
 
 
 def test_put_opencritic_key_rejected_by_provider_is_400_and_not_persisted():

@@ -65,10 +65,23 @@ class LibraryClient:
             documented rate limit, so there is no reason to truncate by default.
         :returns: A list of :class:`~curator.psn.models.Entitlement`.
         """
+        return [entitlement for entitlement, _raw in await self.entitlements_with_raw(limit=limit)]
+
+    async def entitlements_with_raw(self, limit: int | None = None) -> list[tuple[Entitlement, dict[str, Any]]]:
+        """As :meth:`entitlements`, but pairs each mapped entitlement with PSN's verbatim JSON entry.
+
+        Ingestion persists the raw entry alongside the extracted columns (``entitlement_snapshots.raw``)
+        so a mapping bug here can never permanently lose a field PSN sent -- the payload carries roughly
+        three times what we extract. Callers that only want the mapped view should use
+        :meth:`entitlements`.
+
+        :param limit: As :meth:`entitlements`.
+        :returns: ``(entitlement, raw_entry)`` pairs, in PSN's order.
+        """
         return await self._session.run_with_reauth(lambda: self._entitlements(limit))
 
-    async def _entitlements(self, limit: int | None) -> list[Entitlement]:
-        entitlements: list[Entitlement] = []
+    async def _entitlements(self, limit: int | None) -> list[tuple[Entitlement, dict[str, Any]]]:
+        entitlements: list[tuple[Entitlement, dict[str, Any]]] = []
         offset = 0
         page_size = 20
         while limit is None or len(entitlements) < limit:
@@ -94,21 +107,36 @@ class LibraryClient:
                 game_meta = entry.get("gameMeta") or {}
                 title_meta = entry.get("titleMeta") or {}
                 concept_meta = entry.get("conceptMeta") or {}
+                attributes = entry.get("entitlementAttributes") or []
+                platform_ids = tuple(
+                    attribute["platformId"]
+                    for attribute in attributes
+                    if isinstance(attribute, dict) and attribute.get("platformId")
+                )
                 entitlements.append(
-                    Entitlement(
-                        entitlement_id=entry.get("id"),
-                        name=game_meta.get("name") or title_meta.get("name"),
-                        title_id=title_meta.get("titleId"),
-                        concept_id=concept_meta.get("conceptId"),
-                        product_id=entry.get("productId"),
-                        package_type=game_meta.get("packageType"),
-                        game_type=game_meta.get("type"),
-                        active=entry.get("activeFlag"),
-                        active_date=entry.get("activeDate"),
-                        image_url=title_meta.get("imageUrl") or game_meta.get("iconUrl"),
-                        game_meta_name=game_meta.get("name"),
-                        concept_meta_name=concept_meta.get("name"),
-                        title_meta_name=title_meta.get("name"),
+                    (
+                        Entitlement(
+                            entitlement_id=entry.get("id"),
+                            name=game_meta.get("name") or title_meta.get("name"),
+                            title_id=title_meta.get("titleId"),
+                            concept_id=concept_meta.get("conceptId"),
+                            product_id=entry.get("productId"),
+                            sku_id=entry.get("skuId"),
+                            package_type=game_meta.get("packageType"),
+                            game_type=game_meta.get("type"),
+                            active=entry.get("activeFlag"),
+                            active_date=entry.get("activeDate"),
+                            image_url=title_meta.get("imageUrl") or game_meta.get("iconUrl"),
+                            title_image_url=title_meta.get("imageUrl"),
+                            game_icon_url=game_meta.get("iconUrl"),
+                            concept_icon_url=concept_meta.get("iconUrl"),
+                            is_game=entry.get("isGame"),
+                            platform_ids=platform_ids,
+                            game_meta_name=game_meta.get("name"),
+                            concept_meta_name=concept_meta.get("name"),
+                            title_meta_name=title_meta.get("name"),
+                        ),
+                        entry,
                     )
                 )
             offset += len(entries)

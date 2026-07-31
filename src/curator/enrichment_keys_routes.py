@@ -133,6 +133,12 @@ async def _validate_key(provider: Provider, api_key: str, http_client: httpx.Asy
     :raises fastapi.HTTPException: 400, if the provider rejected the key (401/403). 503, if the provider
         couldn't be reached at all (network error, timeout, 5xx) -- in this case Curator genuinely doesn't
         know whether the key is good, so it declines to guess and lets the caller retry.
+
+    The provider's own explanation is logged before the response is narrowed down to one of those two
+    messages. A 401 from RAWG can mean a wrong key, an unverified account, or an exhausted monthly quota,
+    and the user-facing text has to pick one wording for all of them -- so the body is the only way to
+    tell a genuinely bad key from a correct key that can't be used right now. It is truncated and has the
+    key redacted out of it by the clients; it is never echoed back to the caller.
     """
     provider_name = _PROVIDER_NAMES[provider]
     try:
@@ -141,6 +147,12 @@ async def _validate_key(provider: Provider, api_key: str, http_client: httpx.Asy
         else:
             await OpenCriticClient(http_client, api_key).validate_key()
     except (RawgApiError, OpenCriticApiError) as exc:
+        logger.warning(
+            "%s key validation failed with status %s: %s",
+            provider_name,
+            exc.status_code,
+            exc.provider_detail or "<no response body>",
+        )
         if exc.status_code in (401, 403):
             raise HTTPException(
                 status_code=400, detail=f"{provider_name} rejected this API key. Check that it's correct and try again."

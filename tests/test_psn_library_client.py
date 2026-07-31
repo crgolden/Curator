@@ -68,6 +68,8 @@ async def test_entitlements_maps_fields_and_stops_on_short_page():
             active=True,
             active_date="2021-01-01T00:00:00Z",
             image_url="title.png",
+            title_image_url="title.png",
+            game_icon_url="icon.png",
             game_meta_name="Bloodborne",
             concept_meta_name=None,
             title_meta_name="Bloodborne (title)",

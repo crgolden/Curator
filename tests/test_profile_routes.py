@@ -177,6 +177,8 @@ class FakeLibraryGameView:
         psn_product_id=None,
         rawg_enriched=False,
         opencritic_enriched=False,
+        is_active=True,
+        percent_completed=None,
     ) -> None:
         self.game_id = game_id
         self.title = title
@@ -187,6 +189,8 @@ class FakeLibraryGameView:
         self.psn_product_id = psn_product_id
         self.rawg_enriched = rawg_enriched
         self.opencritic_enriched = opencritic_enriched
+        self.is_active = is_active
+        self.percent_completed = percent_completed
 
 
 class FakeCollectionsRepository:
@@ -644,6 +648,11 @@ def test_library_200_with_data_when_public_and_show_library_true():
                 "psn_product_id": None,
                 "rawg_enriched": True,
                 "opencritic_enriched": False,
+                # The profile owner's access, not the viewer's -- like every other field here.
+                "is_active": True,
+                # Always None in this pass -- viewer-mode trophy completion isn't built yet (would need
+                # the viewer's own PSN client called against the target's account id).
+                "percent_completed": None,
             }
         ],
         "total": 1,

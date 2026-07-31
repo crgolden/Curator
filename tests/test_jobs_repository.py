@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+
 from curator.jobs.repository import JobRunsRepository
 
 
@@ -113,6 +115,28 @@ async def test_mark_failed_records_error():
 
     _sql, params = pool.connections[0].executed[0]
     assert params == ("failed", "boom", "run-1")
+
+
+async def test_mark_rate_limited_serializes_result_summary_and_sets_status():
+    pool = FakePool()
+    repo = JobRunsRepository(pool)
+    summary = {
+        "rawg_enriched_titles": ["Elden Ring"],
+        "opencritic_enriched_titles": [],
+        "opencritic_topup_incomplete": False,
+        "rate_limited_provider": "rawg",
+        "retry_after_seconds": 3600.0,
+        "remaining_count": 4,
+    }
+
+    await repo.mark_rate_limited("run-1", summary)
+
+    sql, params = pool.connections[0].executed[0]
+    assert "UPDATE job_runs" in sql
+    assert params is not None
+    assert params[0] == "rate_limited"
+    assert json.loads(params[1]) == summary
+    assert params[2] == "run-1"
 
 
 async def test_get_returns_run():

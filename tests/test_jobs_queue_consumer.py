@@ -5,7 +5,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from curator.jobs.queue_consumer import QueueConsumer
+from curator.jobs.queue_consumer import QueueConsumer, RateLimitRetryScheduled
 
 
 class FakeMessage:
@@ -76,15 +76,19 @@ class FakeJobRunsRepository:
 
 def _consumer(
     library_messages=(),
+    continuation_messages=(),
     enrichment_messages=(),
     on_library_refresh=None,
+    on_library_refresh_continuation=None,
     on_enrichment_run=None,
     job_runs_repository=None,
 ):
     return QueueConsumer(
         library_refresh_receiver=FakeReceiver(library_messages),
+        library_refresh_continuation_receiver=FakeReceiver(continuation_messages),
         enrichment_receiver=FakeReceiver(enrichment_messages),
         on_library_refresh=on_library_refresh or RecordingHandler(),
+        on_library_refresh_continuation=on_library_refresh_continuation or RecordingHandler(),
         on_enrichment_run=on_enrichment_run or RecordingHandler(),
         job_runs_repository=job_runs_repository or FakeJobRunsRepository(),
     )
@@ -96,15 +100,17 @@ async def test_library_refresh_dispatches_identity_sub_and_completes():
     job_runs_repository = FakeJobRunsRepository()
     consumer = QueueConsumer(
         library_refresh_receiver=receiver,
+        library_refresh_continuation_receiver=FakeReceiver([]),
         enrichment_receiver=FakeReceiver([]),
         on_library_refresh=handler,
+        on_library_refresh_continuation=RecordingHandler(),
         on_enrichment_run=RecordingHandler(),
         job_runs_repository=job_runs_repository,
     )
 
     await consumer.drain_library_refresh()
 
-    assert handler.calls == [("sub-1",)]
+    assert handler.calls == [("r1", "sub-1")]
     assert len(receiver.completed) == 1
     assert receiver.dead_lettered == []
     assert job_runs_repository.running == ["r1"]
@@ -116,8 +122,10 @@ async def test_enrichment_run_dispatches_with_no_args_and_completes():
     receiver = FakeReceiver([FakeMessage('{"run_id": "r1"}')])
     consumer = QueueConsumer(
         library_refresh_receiver=FakeReceiver([]),
+        library_refresh_continuation_receiver=FakeReceiver([]),
         enrichment_receiver=receiver,
         on_library_refresh=RecordingHandler(),
+        on_library_refresh_continuation=RecordingHandler(),
         on_enrichment_run=handler,
         job_runs_repository=FakeJobRunsRepository(),
     )
@@ -132,8 +140,10 @@ async def test_invalid_json_dead_letters_as_malformed_payload():
     receiver = FakeReceiver([FakeMessage("not json")])
     consumer = QueueConsumer(
         library_refresh_receiver=receiver,
+        library_refresh_continuation_receiver=FakeReceiver([]),
         enrichment_receiver=FakeReceiver([]),
         on_library_refresh=RecordingHandler(),
+        on_library_refresh_continuation=RecordingHandler(),
         on_enrichment_run=RecordingHandler(),
         job_runs_repository=FakeJobRunsRepository(),
     )
@@ -150,8 +160,10 @@ async def test_non_object_json_dead_letters_as_malformed_payload():
     receiver = FakeReceiver([FakeMessage("[1, 2, 3]")])
     consumer = QueueConsumer(
         library_refresh_receiver=receiver,
+        library_refresh_continuation_receiver=FakeReceiver([]),
         enrichment_receiver=FakeReceiver([]),
         on_library_refresh=RecordingHandler(),
+        on_library_refresh_continuation=RecordingHandler(),
         on_enrichment_run=RecordingHandler(),
         job_runs_repository=FakeJobRunsRepository(),
     )
@@ -166,8 +178,10 @@ async def test_missing_run_id_dead_letters_as_malformed_payload():
     receiver = FakeReceiver([FakeMessage('{"identity_sub": "sub-1"}')])
     consumer = QueueConsumer(
         library_refresh_receiver=receiver,
+        library_refresh_continuation_receiver=FakeReceiver([]),
         enrichment_receiver=FakeReceiver([]),
         on_library_refresh=handler,
+        on_library_refresh_continuation=RecordingHandler(),
         on_enrichment_run=RecordingHandler(),
         job_runs_repository=FakeJobRunsRepository(),
     )
@@ -184,8 +198,10 @@ async def test_missing_identity_sub_dead_letters_as_malformed_payload():
     receiver = FakeReceiver([FakeMessage('{"run_id": "r1"}')])
     consumer = QueueConsumer(
         library_refresh_receiver=receiver,
+        library_refresh_continuation_receiver=FakeReceiver([]),
         enrichment_receiver=FakeReceiver([]),
         on_library_refresh=handler,
+        on_library_refresh_continuation=RecordingHandler(),
         on_enrichment_run=RecordingHandler(),
         job_runs_repository=FakeJobRunsRepository(),
     )
@@ -203,8 +219,10 @@ async def test_processing_exception_dead_letters_as_processing_failed_and_marks_
     job_runs_repository = FakeJobRunsRepository()
     consumer = QueueConsumer(
         library_refresh_receiver=receiver,
+        library_refresh_continuation_receiver=FakeReceiver([]),
         enrichment_receiver=FakeReceiver([]),
         on_library_refresh=handler,
+        on_library_refresh_continuation=RecordingHandler(),
         on_enrichment_run=RecordingHandler(),
         job_runs_repository=job_runs_repository,
     )
@@ -229,8 +247,10 @@ async def test_processing_exception_uses_friendly_message_for_known_exception_ty
     job_runs_repository = FakeJobRunsRepository()
     consumer = QueueConsumer(
         library_refresh_receiver=receiver,
+        library_refresh_continuation_receiver=FakeReceiver([]),
         enrichment_receiver=FakeReceiver([]),
         on_library_refresh=handler,
+        on_library_refresh_continuation=RecordingHandler(),
         on_enrichment_run=RecordingHandler(),
         job_runs_repository=job_runs_repository,
     )
@@ -253,15 +273,17 @@ async def test_multiple_messages_processed_independently():
     receiver = FakeReceiver(messages)
     consumer = QueueConsumer(
         library_refresh_receiver=receiver,
+        library_refresh_continuation_receiver=FakeReceiver([]),
         enrichment_receiver=FakeReceiver([]),
         on_library_refresh=handler,
+        on_library_refresh_continuation=RecordingHandler(),
         on_enrichment_run=RecordingHandler(),
         job_runs_repository=FakeJobRunsRepository(),
     )
 
     await consumer.drain_library_refresh()
 
-    assert handler.calls == [("sub-1",), ("sub-2",)]
+    assert handler.calls == [("r1", "sub-1"), ("r2", "sub-2")]
     assert len(receiver.completed) == 2
     assert len(receiver.dead_lettered) == 1
 
@@ -279,15 +301,17 @@ async def test_dead_letter_message_failure_does_not_stop_the_drain_loop():
     job_runs_repository = FakeJobRunsRepository()
     consumer = QueueConsumer(
         library_refresh_receiver=receiver,
+        library_refresh_continuation_receiver=FakeReceiver([]),
         enrichment_receiver=FakeReceiver([]),
         on_library_refresh=handler,
+        on_library_refresh_continuation=RecordingHandler(),
         on_enrichment_run=RecordingHandler(),
         job_runs_repository=job_runs_repository,
     )
 
     await consumer.drain_library_refresh()
 
-    assert handler.calls == [("sub-1",), ("sub-2",)]
+    assert handler.calls == [("r1", "sub-1"), ("r2", "sub-2")]
     friendly = "The job failed unexpectedly. If this keeps happening, contact support."
     assert job_runs_repository.failed == [("r1", friendly), ("r2", friendly)]
 
@@ -304,15 +328,17 @@ async def test_complete_message_failure_does_not_stop_the_drain_loop():
     job_runs_repository = FakeJobRunsRepository()
     consumer = QueueConsumer(
         library_refresh_receiver=receiver,
+        library_refresh_continuation_receiver=FakeReceiver([]),
         enrichment_receiver=FakeReceiver([]),
         on_library_refresh=handler,
+        on_library_refresh_continuation=RecordingHandler(),
         on_enrichment_run=RecordingHandler(),
         job_runs_repository=job_runs_repository,
     )
 
     await consumer.drain_library_refresh()
 
-    assert handler.calls == [("sub-1",), ("sub-2",)]
+    assert handler.calls == [("r1", "sub-1"), ("r2", "sub-2")]
     assert job_runs_repository.succeeded == ["r1", "r2"]
 
 
@@ -334,15 +360,17 @@ async def test_default_lock_renewer_is_a_noop():
     receiver = FakeReceiver([FakeMessage('{"run_id": "r1", "identity_sub": "sub-1"}')])
     consumer = QueueConsumer(
         library_refresh_receiver=receiver,
+        library_refresh_continuation_receiver=FakeReceiver([]),
         enrichment_receiver=FakeReceiver([]),
         on_library_refresh=handler,
+        on_library_refresh_continuation=RecordingHandler(),
         on_enrichment_run=RecordingHandler(),
         job_runs_repository=FakeJobRunsRepository(),
     )
 
     await consumer.drain_library_refresh()  # must not raise
 
-    assert handler.calls == [("sub-1",)]
+    assert handler.calls == [("r1", "sub-1")]
     assert len(receiver.completed) == 1
 
 
@@ -355,8 +383,10 @@ async def test_lock_renewer_registered_once_per_message():
     receiver = FakeReceiver(messages)
     consumer = QueueConsumer(
         library_refresh_receiver=receiver,
+        library_refresh_continuation_receiver=FakeReceiver([]),
         enrichment_receiver=FakeReceiver([]),
         on_library_refresh=RecordingHandler(),
+        on_library_refresh_continuation=RecordingHandler(),
         on_enrichment_run=RecordingHandler(),
         job_runs_repository=FakeJobRunsRepository(),
         lock_renewer=lock_renewer,
@@ -373,7 +403,88 @@ async def test_start_and_stop_manage_background_tasks():
     consumer = _consumer()
 
     consumer.start()
-    assert len(consumer._tasks) == 2
+    assert len(consumer._tasks) == 3
 
     await consumer.stop()
     assert consumer._tasks == []
+
+
+_CONTINUATION_PAYLOAD = (
+    '{"run_id": "r1", "identity_sub": "sub-1", "remaining_game_ids": ["g1", "g2"], '
+    '"provider": "rawg", "retry_after_seconds": 3600}'
+)
+
+
+async def test_library_refresh_continuation_dispatches_full_payload_and_completes():
+    handler = RecordingHandler()
+    receiver = FakeReceiver([FakeMessage(_CONTINUATION_PAYLOAD)])
+    job_runs_repository = FakeJobRunsRepository()
+    consumer = QueueConsumer(
+        library_refresh_receiver=FakeReceiver([]),
+        library_refresh_continuation_receiver=receiver,
+        enrichment_receiver=FakeReceiver([]),
+        on_library_refresh=RecordingHandler(),
+        on_library_refresh_continuation=handler,
+        on_enrichment_run=RecordingHandler(),
+        job_runs_repository=job_runs_repository,
+    )
+
+    await consumer.drain_library_refresh_continuation()
+
+    assert handler.calls == [
+        (
+            {
+                "run_id": "r1",
+                "identity_sub": "sub-1",
+                "remaining_game_ids": ["g1", "g2"],
+                "provider": "rawg",
+                "retry_after_seconds": 3600,
+            },
+        )
+    ]
+    assert len(receiver.completed) == 1
+    assert job_runs_repository.running == ["r1"]
+    assert job_runs_repository.succeeded == ["r1"]
+
+
+async def test_library_refresh_continuation_missing_field_dead_letters_as_malformed_payload():
+    receiver = FakeReceiver([FakeMessage('{"run_id": "r1", "identity_sub": "sub-1"}')])
+    consumer = QueueConsumer(
+        library_refresh_receiver=FakeReceiver([]),
+        library_refresh_continuation_receiver=receiver,
+        enrichment_receiver=FakeReceiver([]),
+        on_library_refresh=RecordingHandler(),
+        on_library_refresh_continuation=RecordingHandler(),
+        on_enrichment_run=RecordingHandler(),
+        job_runs_repository=FakeJobRunsRepository(),
+    )
+
+    await consumer.drain_library_refresh_continuation()
+
+    assert receiver.completed == []
+    assert receiver.dead_lettered[0][1] == "malformed-payload"
+    assert "remaining_game_ids" in receiver.dead_lettered[0][2]
+
+
+async def test_rate_limit_retry_scheduled_completes_message_without_status_write_or_dead_letter():
+    """The handler already ran mark_rate_limited + republished itself before raising -- the consumer must
+    not also mark_succeeded/mark_failed or dead-letter."""
+    handler = RecordingHandler(raises=RateLimitRetryScheduled())
+    receiver = FakeReceiver([FakeMessage(_CONTINUATION_PAYLOAD)])
+    job_runs_repository = FakeJobRunsRepository()
+    consumer = QueueConsumer(
+        library_refresh_receiver=FakeReceiver([]),
+        library_refresh_continuation_receiver=receiver,
+        enrichment_receiver=FakeReceiver([]),
+        on_library_refresh=RecordingHandler(),
+        on_library_refresh_continuation=handler,
+        on_enrichment_run=RecordingHandler(),
+        job_runs_repository=job_runs_repository,
+    )
+
+    await consumer.drain_library_refresh_continuation()
+
+    assert len(receiver.completed) == 1
+    assert receiver.dead_lettered == []
+    assert job_runs_repository.succeeded == []
+    assert job_runs_repository.failed == []

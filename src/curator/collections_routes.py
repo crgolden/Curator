@@ -1,22 +1,34 @@
-"""``/collections`` -- generate collections on demand, and save/list/re-run named definitions.
+"""``/collections`` -- create, read, edit, delete and re-run a user's named collections.
+
+A collection is an **explicit, ordered list of games the owner chose**, stored in
+``collection_definition_items``. It is not a live predicate. The owner can edit that list whenever they
+like via ``PATCH``; what it never does is change on its own. The filter fields on a definition
+(``genre_filter``/``min_score``/``aaa_tier_filter``) are provenance and an authoring aid -- they say how
+the list was first assembled and let the owner ask for a fresh proposal -- but membership only ever
+changes when the owner asks for it.
+
+That distinction is what makes a collection shareable: a viewer who is not the owner sees exactly the
+titles the owner put in it, rather than whatever re-running a filter against somebody's library would
+produce.
 
 ``POST /collections/preview`` is the "try before you save" entry point to :mod:`curator.collections` --
-the same on-demand pipeline a saved ``collection_definitions`` row uses, run against a spec the caller
-supplies directly in the request body, without persisting anything. ``POST /collections`` saves a named
-definition; ``GET /collections`` lists a caller's saved definitions; ``POST /collections/{id}/runs``
-generates (and persists, via ``collection_runs``/``collection_items``) a run against a saved definition.
+the same on-demand pipeline, run against a spec supplied inline, persisting nothing. ``POST /collections``
+saves a collection; ``GET``/``PATCH``/``DELETE /collections/{id}`` read one (with its items), edit it, and
+remove it; ``POST /collections/{id}/runs`` generates and persists a run against the saved spec, and is the
+one path that deliberately does *not* touch membership.
 """
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+import psycopg
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import BaseModel
 
 from curator.catalog.repository import CatalogRepository
 from curator.collections.collection_orchestrator import CollectionOrchestrator
 from curator.collections.collection_spec import CollectionSpec
 from curator.collections.game_candidate import GameCandidate
-from curator.collections.repository import CollectionDefinition, CollectionsRepository
+from curator.collections.repository import CollectionDefinition, CollectionItem, CollectionsRepository
 from curator.deps import require_bearer
 from curator.token_validation import TokenClaims
 
@@ -31,6 +43,8 @@ class CollectionSpecRequest(BaseModel):
     genre_filter: list[str] = []
     min_score: float | None = None
     aaa_tier_filter: str | None = None
+    include_inactive: bool = False
+    min_percent_completed: int | None = None
 
 
 class CollectionGameResponse(BaseModel):
@@ -44,6 +58,9 @@ class CollectionGameResponse(BaseModel):
     composite_score: float | None
     rank_score: int
     size_gb: float
+    #: Percentage of this game's trophies the owner has earned, or ``None`` if unavailable (no PSN link,
+    #: trophy harvesting disabled, or no confident title match -- see ``curator.psn.trophy_completion``).
+    percent_completed: int | None
 
 
 class CollectionPreviewResponse(BaseModel):
@@ -80,6 +97,8 @@ async def preview_collection(
                 genre_filter=tuple(spec.genre_filter),
                 min_score=spec.min_score,
                 aaa_tier_filter=spec.aaa_tier_filter,
+                include_inactive=spec.include_inactive,
+                min_percent_completed=spec.min_percent_completed,
             ),
             size_estimates=size_estimates,
         )
@@ -103,18 +122,36 @@ def _to_response(candidate: GameCandidate) -> CollectionGameResponse:
         composite_score=candidate.composite_score,
         rank_score=candidate.rank_score,
         size_gb=candidate.size_gb,
+        percent_completed=candidate.percent_completed,
     )
 
 
 class SaveDefinitionRequest(BaseModel):
-    """The ``POST /collections`` request body: a name plus the spec to save under it."""
+    """The ``POST /collections`` request body: a name, the games to put in it, and its provenance.
+
+    ``game_ids`` is the collection's membership. ``kind`` and the filter fields describe how the caller
+    arrived at that list and default to a plain hand-assembled ``filter_list`` -- a user who picked titles
+    by browsing needs to supply neither.
+    """
 
     name: str
-    kind: str
+    kind: str = "filter_list"
+    description: str | None = None
+    game_ids: list[str] = []
     console_id: str | None = None
     genre_filter: list[str] = []
     min_score: float | None = None
     aaa_tier_filter: str | None = None
+    include_inactive: bool = False
+    min_percent_completed: int | None = None
+
+
+class UpdateDefinitionRequest(BaseModel):
+    """The ``PATCH /collections/{id}`` request body. Omitted fields are left as they are."""
+
+    name: str | None = None
+    description: str | None = None
+    game_ids: list[str] | None = None
 
 
 class DefinitionResponse(BaseModel):
@@ -122,11 +159,38 @@ class DefinitionResponse(BaseModel):
 
     definition_id: str
     name: str
+    description: str | None
     kind: str
     console_id: str | None
     genre_filter: list[str]
     min_score: float | None
     aaa_tier_filter: str | None
+    include_inactive: bool
+    min_percent_completed: int | None
+
+
+class CollectionItemResponse(BaseModel):
+    """One member of a collection, as returned by ``GET /collections/{id}``."""
+
+    game_id: str
+    rank: int
+    title: str
+    franchise: str | None
+    genre: str | None
+    aaa_tier: str | None
+    critical_score: float | None
+    oc_score: float | None
+    psn_rating: float | None
+    cover_image_url: str | None
+    #: Whether the collection's owner can still play this -- the owner's access, identical for every
+    #: viewer. A title the owner has since lost stays listed and is shown as unavailable.
+    owner_has_access: bool
+
+
+class DefinitionDetailResponse(DefinitionResponse):
+    """One collection *and its contents* -- the ``GET /collections/{id}`` response body."""
+
+    items: list[CollectionItemResponse]
 
 
 class CollectionRunResponse(BaseModel):
@@ -142,26 +206,49 @@ class CollectionRunResponse(BaseModel):
 async def save_definition(
     request: Request, body: SaveDefinitionRequest, claims: TokenClaims = Depends(require_bearer)
 ) -> DefinitionResponse:
-    """Save a named, reusable collection definition for the caller.
+    """Save a named collection for the caller, freezing ``game_ids`` as its membership.
+
+    ``console_id`` is validated against the caller's own consoles here rather than only at run time --
+    otherwise a definition naming someone else's (or a nonexistent) console saves cleanly and fails much
+    later, on the first run, with a confusing 400.
 
     :returns: The saved :class:`DefinitionResponse`.
-    :raises fastapi.HTTPException: 400, if ``kind`` is invalid.
+    :raises fastapi.HTTPException: 400, if ``kind`` is invalid, ``console_id`` is not the caller's, or a
+        game id is unknown; 409, if the caller already has a collection with this name.
     """
     if body.kind not in ("capacity_fill", "filter_list"):
         raise HTTPException(status_code=400, detail="kind must be 'capacity_fill' or 'filter_list'.")
 
     collections_repository: CollectionsRepository = request.app.state.collections_repository
-    definition_id = await collections_repository.save_definition(
-        claims.sub,
-        body.name,
-        CollectionSpec(
-            kind=body.kind,
-            console_id=body.console_id,
-            genre_filter=tuple(body.genre_filter),
-            min_score=body.min_score,
-            aaa_tier_filter=body.aaa_tier_filter,
-        ),
-    )
+
+    if body.console_id is not None:
+        consoles = await collections_repository.list_user_consoles(claims.sub)
+        if not any(console.console_id == body.console_id for console in consoles):
+            raise HTTPException(status_code=400, detail=f"Unknown console_id {body.console_id!r} for this user.")
+
+    game_ids = _normalize_game_ids(body.game_ids)
+    await _reject_unknown_games(collections_repository, game_ids)
+
+    try:
+        definition_id = await collections_repository.save_definition(
+            claims.sub,
+            body.name,
+            CollectionSpec(
+                kind=body.kind,
+                console_id=body.console_id,
+                genre_filter=tuple(body.genre_filter),
+                min_score=body.min_score,
+                aaa_tier_filter=body.aaa_tier_filter,
+                include_inactive=body.include_inactive,
+                min_percent_completed=body.min_percent_completed,
+            ),
+            description=body.description,
+            game_ids=game_ids,
+        )
+    except psycopg.errors.UniqueViolation as exc:
+        # collection_definitions has UNIQUE (identity_sub, name); without this the constraint error
+        # surfaces to the caller as an opaque 500.
+        raise HTTPException(status_code=409, detail=f"You already have a collection named {body.name!r}.") from exc
     return _definition_to_response(
         CollectionDefinition(
             definition_id=definition_id,
@@ -173,8 +260,43 @@ async def save_definition(
             min_score=body.min_score,
             aaa_tier_filter=body.aaa_tier_filter,
             sort_order=None,
+            description=body.description,
+            include_inactive=body.include_inactive,
+            min_percent_completed=body.min_percent_completed,
         )
     )
+
+
+def _normalize_game_ids(game_ids: list[str]) -> tuple[str, ...]:
+    """Lower-case every id so client casing can't defeat validation or de-duplication.
+
+    Postgres stores and returns UUIDs in canonical lower case. An uppercase-but-valid id would therefore
+    match in SQL, come back lower-cased, and then fail the membership check in
+    :func:`_reject_unknown_games` -- a 400 on a game the caller genuinely owns. Worse, ``"550E..."`` and
+    ``"550e..."`` survive de-duplication as two distinct strings and then collide on
+    ``collection_definition_items``' primary key, which is the exact 500 de-duplication exists to prevent.
+    """
+    return tuple(game_id.strip().lower() for game_id in game_ids)
+
+
+async def _reject_unknown_games(collections_repository: CollectionsRepository, game_ids: tuple[str, ...]) -> None:
+    """Verify every id names a real game before it can be stored as a collection member.
+
+    Catches the malformed-UUID case explicitly: without it, ``game_ids: ["not-a-uuid"]`` reaches Postgres
+    and comes back as a 500 rather than the 400 it plainly is.
+
+    :raises fastapi.HTTPException: 400, if an id is not a UUID or names no game in the shared catalog.
+    """
+    if not game_ids:
+        return
+    try:
+        known = await collections_repository.existing_game_ids(game_ids)
+    except psycopg.errors.InvalidTextRepresentation as exc:
+        raise HTTPException(status_code=400, detail="game_ids must be UUIDs.") from exc
+
+    unknown = [game_id for game_id in game_ids if game_id not in known]
+    if unknown:
+        raise HTTPException(status_code=400, detail=f"Unknown game_ids: {', '.join(sorted(set(unknown)))}.")
 
 
 @router.get("", response_model=list[DefinitionResponse])
@@ -188,11 +310,90 @@ async def list_definitions(request: Request, claims: TokenClaims = Depends(requi
     return [_definition_to_response(definition) for definition in definitions]
 
 
+@router.get("/{definition_id}", response_model=DefinitionDetailResponse)
+async def get_definition(
+    request: Request, definition_id: str, claims: TokenClaims = Depends(require_bearer)
+) -> DefinitionDetailResponse:
+    """Return one of the caller's collections together with its stored membership.
+
+    :returns: The :class:`DefinitionDetailResponse`, items in rank order.
+    :raises fastapi.HTTPException: 404, if the collection doesn't exist or isn't the caller's own.
+    """
+    collections_repository: CollectionsRepository = request.app.state.collections_repository
+    definition = await collections_repository.get_definition(claims.sub, definition_id)
+    if definition is None:
+        raise HTTPException(status_code=404, detail="Collection definition not found.")
+
+    items = await collections_repository.list_definition_items(definition_id)
+    return DefinitionDetailResponse(
+        **_definition_to_response(definition).model_dump(),
+        items=[_to_item_response(item) for item in items],
+    )
+
+
+@router.patch("/{definition_id}", response_model=DefinitionDetailResponse)
+async def update_definition(
+    request: Request, definition_id: str, body: UpdateDefinitionRequest, claims: TokenClaims = Depends(require_bearer)
+) -> DefinitionDetailResponse:
+    """Rename a collection, change its description, and/or replace its membership.
+
+    Which fields were actually supplied is read from ``model_fields_set`` rather than by testing for
+    ``None`` -- otherwise there would be no way to clear a description, since an explicit ``null`` and an
+    omitted field would look identical.
+
+    :returns: The updated :class:`DefinitionDetailResponse`.
+    :raises fastapi.HTTPException: 404, if the collection doesn't exist or isn't the caller's own; 400, if
+        a game id is unknown; 409, if the new name collides with another of the caller's collections.
+    """
+    collections_repository: CollectionsRepository = request.app.state.collections_repository
+    definition = await collections_repository.get_definition(claims.sub, definition_id)
+    if definition is None:
+        raise HTTPException(status_code=404, detail="Collection definition not found.")
+
+    supplied = body.model_fields_set
+    name = body.name if "name" in supplied and body.name is not None else definition.name
+    description = body.description if "description" in supplied else definition.description
+
+    game_ids = None if body.game_ids is None else _normalize_game_ids(body.game_ids)
+    if game_ids is not None:
+        await _reject_unknown_games(collections_repository, game_ids)
+
+    try:
+        await collections_repository.update_definition(
+            definition_id, name=name, description=description, game_ids=game_ids
+        )
+    except psycopg.errors.UniqueViolation as exc:
+        raise HTTPException(status_code=409, detail=f"You already have a collection named {name!r}.") from exc
+
+    updated = _definition_to_response(definition).model_dump() | {"name": name, "description": description}
+    items = await collections_repository.list_definition_items(definition_id)
+    return DefinitionDetailResponse(**updated, items=[_to_item_response(item) for item in items])
+
+
+@router.delete("/{definition_id}", status_code=204)
+async def delete_definition(
+    request: Request, definition_id: str, claims: TokenClaims = Depends(require_bearer)
+) -> Response:
+    """Delete one of the caller's collections, along with its items and run history.
+
+    :returns: 204.
+    :raises fastapi.HTTPException: 404, if the collection doesn't exist or isn't the caller's own.
+    """
+    collections_repository: CollectionsRepository = request.app.state.collections_repository
+    if not await collections_repository.delete_definition(claims.sub, definition_id):
+        raise HTTPException(status_code=404, detail="Collection definition not found.")
+    return Response(status_code=204)
+
+
 @router.post("/{definition_id}/runs", response_model=CollectionRunResponse, status_code=201)
 async def run_definition(
     request: Request, definition_id: str, claims: TokenClaims = Depends(require_bearer)
 ) -> CollectionRunResponse:
     """Generate and persist a run against one of the caller's saved definitions.
+
+    This is a *proposal*, not an edit: it re-evaluates the saved spec against the caller's current library
+    and records the outcome as run history, leaving the collection's stored membership untouched. Adopting
+    a proposal is an explicit ``PATCH /collections/{id}`` with the game ids the caller wants to keep.
 
     :returns: The persisted :class:`CollectionRunResponse`.
     :raises fastapi.HTTPException: 404, if ``definition_id`` doesn't exist or isn't the caller's own; 400,
@@ -208,7 +409,11 @@ async def run_definition(
     size_estimates = await catalog_repository.get_size_estimates()
 
     try:
-        result = await orchestrator.generate(claims.sub, definition.to_spec(), size_estimates=size_estimates)
+        result = await orchestrator.generate(
+            claims.sub,
+            definition.to_spec(),
+            size_estimates=size_estimates,
+        )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -221,6 +426,8 @@ async def run_definition(
             "genre_filter": list(definition.genre_filter),
             "min_score": definition.min_score,
             "aaa_tier_filter": definition.aaa_tier_filter,
+            "include_inactive": definition.include_inactive,
+            "min_percent_completed": definition.min_percent_completed,
         },
         list(result.included),
         list(result.excluded),
@@ -238,9 +445,28 @@ def _definition_to_response(definition: CollectionDefinition) -> DefinitionRespo
     return DefinitionResponse(
         definition_id=definition.definition_id,
         name=definition.name,
+        description=definition.description,
         kind=definition.kind,
         console_id=definition.console_id,
         genre_filter=list(definition.genre_filter),
         min_score=definition.min_score,
         aaa_tier_filter=definition.aaa_tier_filter,
+        include_inactive=definition.include_inactive,
+        min_percent_completed=definition.min_percent_completed,
+    )
+
+
+def _to_item_response(item: CollectionItem) -> CollectionItemResponse:
+    return CollectionItemResponse(
+        game_id=item.game_id,
+        rank=item.rank,
+        title=item.title,
+        franchise=item.franchise,
+        genre=item.genre,
+        aaa_tier=item.aaa_tier,
+        critical_score=item.critical_score,
+        oc_score=item.oc_score,
+        psn_rating=item.psn_rating,
+        cover_image_url=item.cover_image_url,
+        owner_has_access=item.owner_has_access,
     )

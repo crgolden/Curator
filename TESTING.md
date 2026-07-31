@@ -75,9 +75,13 @@ no `unittest.mock`.
 `tests/test_schema.py` is the one place in this suite that touches a real PostgreSQL instance. It is
 gated on the `CURATOR_TEST_DATABASE_URL` environment variable via a module-level `pytest.mark.skipif`:
 unset (the default — nothing to configure for a plain `python -m pytest` run, and CI never sets it), every
-test in the module is skipped rather than run against a fake. When set, it applies the full
-`db/migrations/0001_initial.sql` migration and every insert inside one transaction per test, then rolls
-that transaction back in teardown — so a correctly-configured database is left exactly as it started.
+test in the module is skipped rather than run against a fake. When set, it applies **every**
+`db/migrations/*.sql` file in filename order plus each test's inserts inside one transaction per test,
+then rolls that transaction back in teardown — so a correctly-configured database is left exactly as it
+started.
+
+Because the fixture issues plain `CREATE TABLE`, the target has to be **empty**; it cannot run against a
+database that already holds the schema.
 
 **Only ever point `CURATOR_TEST_DATABASE_URL` at a disposable, throwaway database created solely for this
 purpose — never a shared or production database.** The rollback-per-test discipline above is what makes
@@ -100,6 +104,44 @@ python -m pytest tests/test_schema.py -q
 # Tear down when done
 psql -h <host> -U postgres -d postgres -c "DROP DATABASE curator_schema_test_scratch"
 ```
+
+`CREATE DATABASE` needs a role with `CREATEDB`, which the application role deliberately does not have. If
+all you have is the app role against a local dev database you are willing to lose, reset that database's
+schema instead and use it as the target — same effect, no elevated privilege:
+
+```sql
+DROP SCHEMA public CASCADE;
+CREATE SCHEMA public;
+```
+
+Then point `CURATOR_TEST_DATABASE_URL` at it, run the tests (they roll back, leaving it empty), and run
+`python db/run_migrations.py <url>` afterwards to leave it migrated and usable.
+
+## Testing a migration before it reaches CI
+
+**A migration is not done when the `.sql` file is written. It is done when it has run against the local
+dev database.** Nothing else in this repo's pipeline will catch a broken one first: CI never runs
+`test_schema.py` (there is no PostgreSQL service in that job), so an untested migration's first real
+execution is the deploy job, against the production database. Do not commit a migration that has not been
+applied locally.
+
+Test both paths — they catch different things:
+
+| Path | How | Catches |
+|---|---|---|
+| **Fresh apply** | Reset the schema as above, then `test_schema.py` | The schema still builds from empty; new tables/constraints are asserted |
+| **Incremental apply** | `python db/run_migrations.py <url>` against an already-migrated dev database | What the deploy job actually does — an `ALTER`/`DROP CONSTRAINT` naming an object that must already exist under an exact auto-generated name |
+
+The incremental path is the one that matters most for a migration that modifies existing objects rather
+than adding new ones: a `DROP CONSTRAINT <name>` can pass a fresh apply (where the constraint was created
+seconds earlier by the same run) and still fail against a database built by an older migration.
+
+Run the incremental path **first** — it is the realistic one, and it preserves whatever data the local
+database holds. The fresh path destroys it.
+
+Keeping the local database current is part of this: if it has drifted several migrations behind, the
+incremental path stops resembling the deploy job it is supposed to imitate, and each new migration lands
+on a base nobody has exercised.
 
 ## CI
 

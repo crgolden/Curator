@@ -136,6 +136,14 @@ class ProfileLibraryGameResponse(BaseModel):
     psn_product_id: str | None
     rawg_enriched: bool
     opencritic_enriched: bool
+    #: Whether the profile's owner can still play this -- their access, not the viewer's, consistent with
+    #: every other field here describing the target rather than whoever is looking.
+    is_active: bool
+    #: Always ``None`` for now -- showing the profile owner's own trophy completion here would need the
+    #: viewer's PSN client called against the *target's* account id (the cross-user pattern
+    #: ``GET /users/{sub}/profile`` already uses for its PSN-derived sections), not built in this pass. See
+    #: ``curator.psn.trophy_completion``.
+    percent_completed: int | None
 
 
 class ProfileLibraryPageResponse(BaseModel):
@@ -469,6 +477,8 @@ async def get_user_library(
                 psn_product_id=game.psn_product_id,
                 rawg_enriched=game.rawg_enriched,
                 opencritic_enriched=game.opencritic_enriched,
+                is_active=game.is_active,
+                percent_completed=None,
             )
             for game in games
         ],

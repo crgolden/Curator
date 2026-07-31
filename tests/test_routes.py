@@ -251,6 +251,22 @@ class FakeAgentFactory:
         )
 
 
+class FakeLibraryRepository:
+    """Stands in for the real ``LibraryRepository`` on ``app.state``.
+
+    Only ``clear_trophy_progress`` is needed, and only its call log is asserted -- what the SQL does is
+    :mod:`test_library_repository`'s job. Hand-written rather than auto-mocked so renaming the method fails
+    loudly here instead of silently recording a call that no longer happens.
+    """
+
+    def __init__(self):
+        self.clear_trophy_progress_calls: list[str] = []
+
+    async def clear_trophy_progress(self, identity_sub: str) -> int:
+        self.clear_trophy_progress_calls.append(identity_sub)
+        return 0
+
+
 class FakeTokenValidator:
     """Stands in for JwtValidator: maps known token strings to canned TokenClaims; anything else raises
     TokenError, exactly like a real signature/issuer/expiry failure would."""
@@ -299,6 +315,9 @@ def _build(repository=None, token_crypto=None, agent_factory=None, token_validat
         token_validator=token_validator,
         audit_repository=audit_repository,
     )
+    # DELETE /psn/link clears stored trophy progress, so every build needs a library repository that
+    # doesn't reach for a real connection pool. Read it back off app.state to assert against it.
+    app.state.library_repository = FakeLibraryRepository()
     client = TestClient(app)
     return client, repository, token_crypto, agent_factory, token_validator, audit_repository
 
@@ -719,6 +738,27 @@ def test_psn_unlink_then_me_shows_unlinked():
 
     me_response = client.get("/me", headers=_bearer("valid-token"))
     assert me_response.json()["linked"] is False
+
+
+def test_psn_unlink_clears_stored_trophy_progress():
+    """Unlinking deletes the ``psn_links`` row, and with it ``harvest_trophies`` -- the only preference
+    governing stored trophy percentages. Left behind, they would outlive every control over them and keep
+    being served by ``GET /library``, which no longer does any read-time PSN gating at all. /privacy
+    promises this erasure by name; this is what holds the route to it.
+    """
+    repo = FakeRepository()
+    crypto = TokenCrypto(Fernet.generate_key())
+    agent_factory = FakeAgentFactory(repo, crypto)
+    agent_factory.email_info = (EMAIL, True)
+    _seed_link(repo, crypto, SUB, harvest_trophies=True)
+    validator = FakeTokenValidator()
+    validator.register("valid-token", _claims())
+    client, *_ = _build(repository=repo, token_crypto=crypto, agent_factory=agent_factory, token_validator=validator)
+
+    response = client.delete("/psn/link", headers=_bearer("valid-token"))
+
+    assert response.status_code == 204
+    assert client.app.state.library_repository.clear_trophy_progress_calls == [SUB]
 
 
 def test_psn_unlink_without_bearer_token_is_401():

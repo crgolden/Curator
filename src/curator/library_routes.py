@@ -40,6 +40,14 @@ class LibraryGameResponse(BaseModel):
     psn_product_id: str | None
     rawg_enriched: bool
     opencritic_enriched: bool
+    #: Whether the caller can still play this. ``False`` is a lapsed entitlement (a PS Plus title that
+    #: left the catalog, an expired subscription): the game stays listed, flagged, instead of silently
+    #: vanishing -- and it is excluded from new collections unless the author opts into ``include_inactive``.
+    is_active: bool
+    #: Percentage of this game's trophies the caller has earned on their linked PSN account, or ``None`` if
+    #: unavailable (no PSN link, trophy harvesting disabled, or no confident title match -- see
+    #: ``curator.psn.trophy_completion``).
+    percent_completed: int | None
 
 
 class LibraryPageResponse(BaseModel):
@@ -111,6 +119,9 @@ async def get_library(
     games, total = await library_repository.list_entries_with_enrichment(
         claims.sub, search=q, category=category, sort=sort, sort_dir=sort_dir, limit=limit, offset=offset
     )
+    # No trophy resolution on this path. Each row carries its stored percentage
+    # (0015_library_entries_trophy_progress.sql), refreshed by the library-refresh job, so rendering the
+    # library never depends on PSN being reachable or on a warm Redis.
     return LibraryPageResponse(
         games=[
             LibraryGameResponse(
@@ -123,6 +134,8 @@ async def get_library(
                 psn_product_id=game.psn_product_id,
                 rawg_enriched=game.rawg_enriched,
                 opencritic_enriched=game.opencritic_enriched,
+                is_active=game.is_active,
+                percent_completed=game.percent_completed,
             )
             for game in games
         ],

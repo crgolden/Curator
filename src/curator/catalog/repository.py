@@ -228,22 +228,31 @@ class CatalogRepository:
                 await cur.execute(
                     """
                     INSERT INTO entitlement_snapshots (
-                        pull_id, entitlement_id, concept_id, product_id, title_id,
-                        game_meta_name, concept_meta_name, title_meta_name, package_type, active, raw
+                        pull_id, entitlement_id, concept_id, product_id, sku_id, title_id,
+                        game_meta_name, concept_meta_name, title_meta_name, package_type, active,
+                        active_date, title_image_url, game_icon_url, concept_icon_url, is_game,
+                        platform_ids, raw
                     )
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     """,
                     (
                         pull_id,
                         snapshot.entitlement_id,
                         snapshot.concept_id,
                         snapshot.product_id,
+                        snapshot.sku_id,
                         snapshot.title_id,
                         snapshot.game_meta_name,
                         snapshot.concept_meta_name,
                         snapshot.title_meta_name,
                         snapshot.package_type,
                         snapshot.active,
+                        snapshot.active_date,
+                        snapshot.title_image_url,
+                        snapshot.game_icon_url,
+                        snapshot.concept_icon_url,
+                        snapshot.is_game,
+                        list(snapshot.platform_ids),
                         json.dumps(raw.get(snapshot.entitlement_id, {})),
                     ),
                 )

@@ -2,15 +2,27 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
+
+import psycopg
 from cryptography.fernet import Fernet
 from fastapi.testclient import TestClient
 
 from curator.app import create_app
 from curator.collections.collection_orchestrator import CollectionResult
 from curator.collections.game_candidate import GameCandidate
-from curator.collections.repository import CollectionDefinition
+from curator.collections.repository import CollectionDefinition, CollectionItem, UserConsole
 from curator.persistence.crypto import TokenCrypto
-from test_routes import FakeAgentFactory, FakeRepository, FakeTokenValidator, _bearer, _claims, _make_settings
+from test_routes import (
+    FakeAgentFactory,
+    FakeRepository,
+    FakeTokenValidator,
+    _bearer,
+    _claims,
+    _make_settings,
+    _seed_link,
+)
+from test_trophy_routes import FakeTrophyClient, FakeTrophyClientFactory
 
 
 class FakeCatalogRepository:
@@ -24,20 +36,49 @@ class FakeOrchestrator:
         self._raises = raises
         self.generate_calls = []
 
-    async def generate(self, identity_sub, spec, *, size_estimates):
-        self.generate_calls.append((identity_sub, spec))
+    async def generate(self, identity_sub, spec, *, size_estimates, completion_map=None, completion_available=False):
+        self.generate_calls.append((identity_sub, spec, completion_map, completion_available))
         if self._raises:
             raise self._raises
         return self._result
 
 
 class FakeCollectionsRepository:
-    def __init__(self, definitions=None):
+    def __init__(
+        self, definitions=None, consoles=None, duplicate_names=(), known_games=(), malformed_game_ids=(), candidates=()
+    ):
         self.definitions: dict[str, CollectionDefinition] = {d.definition_id: d for d in (definitions or [])}
+        self.items: dict[str, tuple[str, ...]] = {}
         self.saved_runs: list[tuple] = []
+        self.consoles: list[UserConsole] = list(consoles or [])
+        self.duplicate_names = set(duplicate_names)
+        self.known_games = set(known_games)
+        # Ids the real ::uuid[] cast would reject before it ever got to compare them.
+        self.malformed_game_ids = set(malformed_game_ids)
+        self._candidates = list(candidates)
         self._next_id = 1
 
-    async def save_definition(self, identity_sub, name, spec):
+    async def list_user_consoles(self, identity_sub):
+        # The real query is scoped by identity_sub in SQL, so it only ever returns the caller's own
+        # consoles -- self.consoles is therefore already "this user's consoles".
+        return self.consoles
+
+    async def list_candidates(self, identity_sub, *, platform=None, include_inactive=False, min_percent_completed=None):
+        # The routes no longer resolve trophy completion themselves: each candidate row carries its stored
+        # percentage and the completion floor is applied in SQL, so this is only reached via the
+        # orchestrator (faked in this file).
+        return self._candidates
+
+    async def existing_game_ids(self, game_ids):
+        if self.malformed_game_ids & set(game_ids):
+            raise psycopg.errors.InvalidTextRepresentation("invalid input syntax for type uuid")
+        return {game_id for game_id in game_ids if game_id in self.known_games}
+
+    async def save_definition(self, identity_sub, name, spec, *, description=None, game_ids=()):
+        if name in self.duplicate_names:
+            raise psycopg.errors.UniqueViolation(
+                'duplicate key value violates unique constraint "collection_definitions_identity_sub_name_key"'
+            )
         definition_id = f"def-{self._next_id}"
         self._next_id += 1
         self.definitions[definition_id] = CollectionDefinition(
@@ -50,7 +91,10 @@ class FakeCollectionsRepository:
             min_score=spec.min_score,
             aaa_tier_filter=spec.aaa_tier_filter,
             sort_order=spec.sort_order,
+            description=description,
+            min_percent_completed=spec.min_percent_completed,
         )
+        self.items[definition_id] = tuple(game_ids)
         return definition_id
 
     async def list_definitions(self, identity_sub):
@@ -62,13 +106,49 @@ class FakeCollectionsRepository:
             return None
         return definition
 
+    async def list_definition_items(self, definition_id):
+        return [
+            CollectionItem(
+                game_id=game_id,
+                rank=rank,
+                title=f"Game {game_id}",
+                franchise=None,
+                genre=None,
+                aaa_tier=None,
+                critical_score=None,
+                oc_score=None,
+                psn_rating=None,
+                cover_image_url=f"{game_id}.png",
+                owner_has_access=True,
+            )
+            for rank, game_id in enumerate(self.items.get(definition_id, ()), start=1)
+        ]
+
+    async def update_definition(self, definition_id, *, name, description, game_ids=None):
+        if name in self.duplicate_names:
+            raise psycopg.errors.UniqueViolation(
+                'duplicate key value violates unique constraint "collection_definitions_identity_sub_name_key"'
+            )
+        existing = self.definitions[definition_id]
+        self.definitions[definition_id] = replace(existing, name=name, description=description)
+        if game_ids is not None:
+            self.items[definition_id] = tuple(game_ids)
+
+    async def delete_definition(self, identity_sub, definition_id):
+        definition = self.definitions.get(definition_id)
+        if definition is None or definition.identity_sub != identity_sub:
+            return False
+        del self.definitions[definition_id]
+        self.items.pop(definition_id, None)
+        return True
+
     async def save_run(self, identity_sub, definition_id, spec_snapshot, included, excluded):
         self.saved_runs.append((identity_sub, definition_id, spec_snapshot, included, excluded))
         return "run-1"
 
 
-def _build(orchestrator=None, collections_repository=None):
-    repository = FakeRepository()
+def _build(orchestrator=None, collections_repository=None, repository=None, trophy_client_factory=None):
+    repository = repository if repository is not None else FakeRepository()
     token_crypto = TokenCrypto(Fernet.generate_key())
     validator = FakeTokenValidator()
     app = create_app(
@@ -78,6 +158,7 @@ def _build(orchestrator=None, collections_repository=None):
         agent_factory=FakeAgentFactory(repository, token_crypto),
         token_validator=validator,
         catalog_repository=FakeCatalogRepository(),
+        trophy_client_factory=trophy_client_factory,
     )
     app.state.collection_orchestrator = orchestrator or FakeOrchestrator()
     app.state.collections_repository = collections_repository or FakeCollectionsRepository()
@@ -142,6 +223,84 @@ def test_returns_generated_candidates():
     assert orchestrator.generate_calls[0][1].kind == "filter_list"
 
 
+def test_preview_passes_min_percent_completed_through_to_spec():
+    orchestrator = FakeOrchestrator()
+    client, validator = _build(orchestrator)
+    validator.register("token-a", _claims(sub="sub-a"))
+
+    client.post(
+        "/collections/preview",
+        json={"kind": "filter_list", "min_percent_completed": 50},
+        headers=_bearer("token-a"),
+    )
+
+    assert orchestrator.generate_calls[0][1].min_percent_completed == 50
+
+
+def test_preview_response_includes_percent_completed():
+    candidate = GameCandidate(
+        game_id="g1",
+        title="God of War",
+        genre="Action",
+        aaa_tier="AAA",
+        franchise="God of War",
+        composite_score=90.0,
+        rank_score=3,
+        size_gb=50.0,
+        percent_completed=87,
+    )
+    result = CollectionResult(included=(candidate,), excluded=(), used_gb=None)
+    client, validator = _build(FakeOrchestrator(result=result))
+    validator.register("token-a", _claims(sub="sub-a"))
+
+    response = client.post("/collections/preview", json={"kind": "filter_list"}, headers=_bearer("token-a"))
+
+    assert response.json()["included"][0]["percent_completed"] == 87
+
+
+def test_preview_never_resolves_trophy_completion_at_request_time():
+    """A preview must not touch PSN. Completion is read from each candidate row.
+
+    Before ``0015_library_entries_trophy_progress.sql`` this route fetched the caller's whole library and
+    fuzzy-matched every game against their trophy titles on every request -- measured at ~38s for a
+    411-game library, on the event loop. The percentage is now persisted, so the route hands the
+    orchestrator nothing and the row's own value stands.
+    """
+    repository = FakeRepository()
+    crypto = TokenCrypto(Fernet.generate_key())
+    _seed_link(repository, crypto, "sub-a", harvest_trophies=True)
+    factory = FakeTrophyClientFactory()
+    factory.linked["sub-a"] = FakeTrophyClient(titles=[])
+    orchestrator = FakeOrchestrator()
+    client, validator = _build(orchestrator, repository=repository, trophy_client_factory=factory)
+    validator.register("token-a", _claims(sub="sub-a"))
+
+    client.post("/collections/preview", json={"kind": "filter_list"}, headers=_bearer("token-a"))
+
+    _, _, completion_map, completion_available = orchestrator.generate_calls[0]
+    assert completion_map is None
+    assert completion_available is False
+    # The decisive assertion: no trophy client was ever built for this request.
+    assert factory.calls == []
+
+
+def test_preview_threads_the_completion_floor_through_to_the_spec():
+    # The floor is applied in SQL by list_candidates now, so what matters here is that the route puts it
+    # on the spec rather than filtering after the fact.
+    orchestrator = FakeOrchestrator()
+    client, validator = _build(orchestrator)
+    validator.register("token-a", _claims(sub="sub-a"))
+
+    client.post(
+        "/collections/preview",
+        json={"kind": "filter_list", "min_percent_completed": 80},
+        headers=_bearer("token-a"),
+    )
+
+    _, spec, _, _ = orchestrator.generate_calls[0]
+    assert spec.min_percent_completed == 80
+
+
 def test_save_definition_rejects_invalid_kind():
     client, validator = _build()
     validator.register("token-a", _claims())
@@ -167,6 +326,80 @@ def test_save_definition_persists_and_returns_it():
     assert body["name"] == "My RPGs"
     assert body["genre_filter"] == ["RPG"]
     assert len(collections_repository.definitions) == 1
+
+
+def test_save_definition_rejects_a_console_the_caller_does_not_own():
+    # No consoles configured for this caller, so any console_id is foreign to them. Before this was
+    # validated at save time, the definition saved cleanly and only failed on the first run.
+    collections_repository = FakeCollectionsRepository()
+    client, validator = _build(collections_repository=collections_repository)
+    validator.register("token-a", _claims(sub="sub-a"))
+
+    response = client.post(
+        "/collections",
+        json={"name": "Someone else's PS5", "kind": "capacity_fill", "console_id": "console-not-mine"},
+        headers=_bearer("token-a"),
+    )
+
+    assert response.status_code == 400
+    assert "Unknown console_id" in response.json()["detail"]
+    assert collections_repository.definitions == {}
+
+
+def test_save_definition_accepts_a_console_the_caller_owns():
+    console = UserConsole(
+        console_id="console-a",
+        name="Living room PS5",
+        platform="PS5",
+        raw_capacity_gb=800.0,
+        update_buffer_gb=50.0,
+        routing_genres=(),
+        fill_order=0,
+    )
+    collections_repository = FakeCollectionsRepository(consoles=[console])
+    client, validator = _build(collections_repository=collections_repository)
+    validator.register("token-a", _claims(sub="sub-a"))
+
+    response = client.post(
+        "/collections",
+        json={"name": "PS5 fill", "kind": "capacity_fill", "console_id": "console-a"},
+        headers=_bearer("token-a"),
+    )
+
+    assert response.status_code == 201
+    assert response.json()["console_id"] == "console-a"
+
+
+def test_save_definition_persists_min_percent_completed():
+    collections_repository = FakeCollectionsRepository()
+    client, validator = _build(collections_repository=collections_repository)
+    validator.register("token-a", _claims(sub="sub-a"))
+
+    response = client.post(
+        "/collections",
+        json={"name": "Nearly Done", "kind": "filter_list", "min_percent_completed": 75},
+        headers=_bearer("token-a"),
+    )
+
+    assert response.status_code == 201
+    assert response.json()["min_percent_completed"] == 75
+    assert collections_repository.definitions["def-1"].min_percent_completed == 75
+
+
+def test_save_definition_duplicate_name_returns_409():
+    # collection_definitions has UNIQUE (identity_sub, name); unhandled, that surfaced as a raw 500.
+    collections_repository = FakeCollectionsRepository(duplicate_names={"My RPGs"})
+    client, validator = _build(collections_repository=collections_repository)
+    validator.register("token-a", _claims(sub="sub-a"))
+
+    response = client.post(
+        "/collections",
+        json={"name": "My RPGs", "kind": "filter_list"},
+        headers=_bearer("token-a"),
+    )
+
+    assert response.status_code == 409
+    assert "My RPGs" in response.json()["detail"]
 
 
 def test_list_definitions_scopes_to_caller():
@@ -202,6 +435,241 @@ def test_list_definitions_scopes_to_caller():
     body = response.json()
     assert len(body) == 1
     assert body[0]["definition_id"] == "def-a"
+
+
+def _definition(definition_id="def-a", identity_sub="sub-a", name="A's list", description=None):
+    return CollectionDefinition(
+        definition_id=definition_id,
+        identity_sub=identity_sub,
+        name=name,
+        kind="filter_list",
+        console_id=None,
+        genre_filter=(),
+        min_score=None,
+        aaa_tier_filter=None,
+        sort_order=None,
+        description=description,
+    )
+
+
+def test_save_definition_stores_the_supplied_game_ids():
+    collections_repository = FakeCollectionsRepository(known_games={"g1", "g2"})
+    client, validator = _build(collections_repository=collections_repository)
+    validator.register("token-a", _claims(sub="sub-a"))
+
+    response = client.post(
+        "/collections",
+        json={"name": "Handpicked", "game_ids": ["g2", "g1"], "description": "Best of"},
+        headers=_bearer("token-a"),
+    )
+
+    assert response.status_code == 201
+    assert response.json()["description"] == "Best of"
+    # Order is preserved as given -- the owner's ordering is the collection's ordering.
+    assert collections_repository.items["def-1"] == ("g2", "g1")
+
+
+def test_save_definition_defaults_kind_so_a_handpicked_list_needs_no_spec():
+    # A user who assembled a collection by browsing supplies neither a kind nor any filter; requiring
+    # them would make the "pick titles" path impossible to express.
+    collections_repository = FakeCollectionsRepository(known_games={"g1"})
+    client, validator = _build(collections_repository=collections_repository)
+    validator.register("token-a", _claims(sub="sub-a"))
+
+    response = client.post("/collections", json={"name": "Handpicked", "game_ids": ["g1"]}, headers=_bearer("token-a"))
+
+    assert response.status_code == 201
+    assert response.json()["kind"] == "filter_list"
+
+
+def test_save_definition_rejects_an_unknown_game_id():
+    collections_repository = FakeCollectionsRepository(known_games={"g1"})
+    client, validator = _build(collections_repository=collections_repository)
+    validator.register("token-a", _claims(sub="sub-a"))
+
+    response = client.post("/collections", json={"name": "Bad", "game_ids": ["g1", "g9"]}, headers=_bearer("token-a"))
+
+    assert response.status_code == 400
+    assert "g9" in response.json()["detail"]
+    assert collections_repository.definitions == {}
+
+
+def test_save_definition_rejects_a_malformed_game_id_as_400_not_500():
+    # game_id is a uuid column; a non-UUID string reaches Postgres as InvalidTextRepresentation, which
+    # without handling surfaces as an opaque 500 for what is plainly a bad request.
+    collections_repository = FakeCollectionsRepository(malformed_game_ids={"not-a-uuid"})
+    client, validator = _build(collections_repository=collections_repository)
+    validator.register("token-a", _claims(sub="sub-a"))
+
+    response = client.post("/collections", json={"name": "Bad", "game_ids": ["not-a-uuid"]}, headers=_bearer("token-a"))
+
+    assert response.status_code == 400
+    assert "UUID" in response.json()["detail"]
+
+
+def test_save_definition_lower_cases_game_ids_before_validating_them():
+    # Postgres canonicalizes UUIDs to lower case, so an uppercase id matches in SQL but comes back
+    # lower-cased -- without normalization the membership check rejects a game the caller really owns.
+    game_id = "550e8400-e29b-41d4-a716-446655440000"
+    collections_repository = FakeCollectionsRepository(known_games={game_id})
+    client, validator = _build(collections_repository=collections_repository)
+    validator.register("token-a", _claims(sub="sub-a"))
+
+    response = client.post(
+        "/collections", json={"name": "Shouty", "game_ids": [game_id.upper()]}, headers=_bearer("token-a")
+    )
+
+    assert response.status_code == 201
+    assert collections_repository.items["def-1"] == (game_id,)
+
+
+def test_get_definition_returns_its_items():
+    collections_repository = FakeCollectionsRepository([_definition()], known_games={"g1"})
+    collections_repository.items["def-a"] = ("g1",)
+    client, validator = _build(collections_repository=collections_repository)
+    validator.register("token-a", _claims(sub="sub-a"))
+
+    response = client.get("/collections/def-a", headers=_bearer("token-a"))
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["definition_id"] == "def-a"
+    assert [item["game_id"] for item in body["items"]] == ["g1"]
+    assert body["items"][0]["cover_image_url"] == "g1.png"
+
+
+def test_get_definition_not_owned_returns_404():
+    collections_repository = FakeCollectionsRepository([_definition(identity_sub="sub-b")])
+    client, validator = _build(collections_repository=collections_repository)
+    validator.register("token-a", _claims(sub="sub-a"))
+
+    response = client.get("/collections/def-a", headers=_bearer("token-a"))
+
+    assert response.status_code == 404
+
+
+def test_patch_definition_renames_and_replaces_membership():
+    collections_repository = FakeCollectionsRepository([_definition()], known_games={"g1", "g2"})
+    collections_repository.items["def-a"] = ("g1",)
+    client, validator = _build(collections_repository=collections_repository)
+    validator.register("token-a", _claims(sub="sub-a"))
+
+    response = client.patch(
+        "/collections/def-a", json={"name": "Renamed", "game_ids": ["g2"]}, headers=_bearer("token-a")
+    )
+
+    assert response.status_code == 200
+    assert response.json()["name"] == "Renamed"
+    assert [item["game_id"] for item in response.json()["items"]] == ["g2"]
+    assert collections_repository.items["def-a"] == ("g2",)
+
+
+def test_patch_definition_leaves_omitted_fields_alone():
+    collections_repository = FakeCollectionsRepository([_definition(description="Original")], known_games={"g1"})
+    collections_repository.items["def-a"] = ("g1",)
+    client, validator = _build(collections_repository=collections_repository)
+    validator.register("token-a", _claims(sub="sub-a"))
+
+    response = client.patch("/collections/def-a", json={"name": "Renamed"}, headers=_bearer("token-a"))
+
+    assert response.status_code == 200
+    assert response.json()["description"] == "Original"
+    # Membership is untouched by a metadata-only patch.
+    assert collections_repository.items["def-a"] == ("g1",)
+
+
+def test_patch_definition_can_clear_a_description_with_an_explicit_null():
+    # An omitted field and an explicit null must not mean the same thing, or there is no way to clear one.
+    collections_repository = FakeCollectionsRepository([_definition(description="Original")])
+    client, validator = _build(collections_repository=collections_repository)
+    validator.register("token-a", _claims(sub="sub-a"))
+
+    response = client.patch("/collections/def-a", json={"description": None}, headers=_bearer("token-a"))
+
+    assert response.status_code == 200
+    assert response.json()["description"] is None
+
+
+def test_patch_definition_duplicate_name_returns_409():
+    collections_repository = FakeCollectionsRepository([_definition()], duplicate_names={"Taken"})
+    client, validator = _build(collections_repository=collections_repository)
+    validator.register("token-a", _claims(sub="sub-a"))
+
+    response = client.patch("/collections/def-a", json={"name": "Taken"}, headers=_bearer("token-a"))
+
+    assert response.status_code == 409
+
+
+def test_patch_definition_not_owned_returns_404():
+    collections_repository = FakeCollectionsRepository([_definition(identity_sub="sub-b")])
+    client, validator = _build(collections_repository=collections_repository)
+    validator.register("token-a", _claims(sub="sub-a"))
+
+    response = client.patch("/collections/def-a", json={"name": "Mine now"}, headers=_bearer("token-a"))
+
+    assert response.status_code == 404
+    assert collections_repository.definitions["def-a"].name == "A's list"
+
+
+def test_delete_definition_removes_it():
+    collections_repository = FakeCollectionsRepository([_definition()])
+    client, validator = _build(collections_repository=collections_repository)
+    validator.register("token-a", _claims(sub="sub-a"))
+
+    response = client.delete("/collections/def-a", headers=_bearer("token-a"))
+
+    assert response.status_code == 204
+    assert collections_repository.definitions == {}
+
+
+def test_delete_definition_not_owned_returns_404():
+    collections_repository = FakeCollectionsRepository([_definition(identity_sub="sub-b")])
+    client, validator = _build(collections_repository=collections_repository)
+    validator.register("token-a", _claims(sub="sub-a"))
+
+    response = client.delete("/collections/def-a", headers=_bearer("token-a"))
+
+    assert response.status_code == 404
+    assert "def-a" in collections_repository.definitions
+
+
+def test_run_definition_does_not_change_stored_membership():
+    # A run is a proposal against the saved spec, not an edit. If it silently rewrote membership, a
+    # collection would stop being a snapshot the moment its owner asked for a refresh.
+    collections_repository = FakeCollectionsRepository([_definition()])
+    collections_repository.items["def-a"] = ("g1",)
+    candidate = GameCandidate(
+        game_id="g2",
+        title="Different Game",
+        genre="Action",
+        aaa_tier="AAA",
+        franchise="",
+        composite_score=90.0,
+        rank_score=3,
+        size_gb=50.0,
+    )
+    orchestrator = FakeOrchestrator(result=CollectionResult(included=(candidate,), excluded=(), used_gb=None))
+    client, validator = _build(orchestrator, collections_repository)
+    validator.register("token-a", _claims(sub="sub-a"))
+
+    response = client.post("/collections/def-a/runs", headers=_bearer("token-a"))
+
+    assert response.status_code == 201
+    assert collections_repository.items["def-a"] == ("g1",)
+
+
+def test_run_definition_does_not_resolve_completion_at_request_time():
+    # Same contract as preview: a run reads persisted percentages, it does not re-resolve them.
+    collections_repository = FakeCollectionsRepository([_definition()])
+    orchestrator = FakeOrchestrator()
+    client, validator = _build(orchestrator, collections_repository)
+    validator.register("token-a", _claims(sub="sub-a"))
+
+    client.post("/collections/def-a/runs", headers=_bearer("token-a"))
+
+    _, _, completion_map, completion_available = orchestrator.generate_calls[0]
+    assert completion_map is None
+    assert completion_available is False
 
 
 def test_run_definition_not_found_returns_404():

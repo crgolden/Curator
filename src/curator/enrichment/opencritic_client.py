@@ -10,6 +10,8 @@ only against the larger total-requests budget. Matching lives in
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from typing import Any
 
 import httpx
@@ -19,6 +21,10 @@ from curator.enrichment.opencritic_matcher import OpenCriticGame
 OPENCRITIC_BASE_URL = "https://opencritic-api.p.rapidapi.com"
 DEFAULT_PAGE_SIZE = 20
 
+# Enough of an error body to carry RapidAPI's own explanation, short enough that a wall of HTML from a
+# gateway can't flood the log.
+MAX_PROVIDER_DETAIL_CHARS = 300
+
 
 class OpenCriticApiError(Exception):
     """Raised on a non-2xx OpenCritic response.
@@ -26,11 +32,66 @@ class OpenCriticApiError(Exception):
     Wrapped defensively, matching :class:`curator.enrichment.rawg_client.RawgApiError` -- the key here is
     header-based (lower leak risk than RAWG's URL query param) but some RapidAPI error response bodies
     can echo request details, so this is sanitized the same way for consistency.
+
+    :param retry_after_seconds: The response's ``Retry-After`` header, parsed to seconds-from-now, or
+        ``None`` if absent/unparseable -- RapidAPI doesn't reliably document this header either, so callers
+        should fall back to a heuristic default rather than treating its absence as an error.
+    :param provider_detail: A truncated, key-redacted excerpt of the response body, or ``None`` if it was
+        empty or unreadable. RapidAPI answers 401/403 for an unsubscribed plan as readily as for a bad key,
+        and only the body says which -- see the equivalent note on ``RawgApiError``.
     """
 
-    def __init__(self, message: str, *, status_code: int) -> None:
+    def __init__(
+        self,
+        message: str,
+        *,
+        status_code: int,
+        retry_after_seconds: float | None = None,
+        provider_detail: str | None = None,
+    ) -> None:
         super().__init__(message)
         self.status_code = status_code
+        self.retry_after_seconds = retry_after_seconds
+        self.provider_detail = provider_detail
+
+
+def _response_detail(response: httpx.Response, api_key: str) -> str | None:
+    """Return a whitespace-collapsed, truncated, key-redacted excerpt of ``response``'s body.
+
+    Duplicated from :mod:`curator.enrichment.rawg_client` rather than shared, matching how
+    ``_parse_retry_after`` is already carried independently by both provider clients.
+    """
+    try:
+        text = response.text
+    except httpx.ResponseNotRead:
+        return None
+    text = " ".join(text.split())
+    if not text:
+        return None
+    if api_key:
+        text = text.replace(api_key, "[redacted]")
+    if len(text) > MAX_PROVIDER_DETAIL_CHARS:
+        text = text[:MAX_PROVIDER_DETAIL_CHARS] + "..."
+    return text
+
+
+def _parse_retry_after(response: httpx.Response) -> float | None:
+    """Parse a ``Retry-After`` header (RFC 7231: either delay-seconds or an HTTP-date) into seconds from
+    now, or ``None`` if the header is absent or not parseable as either form.
+    """
+    value = response.headers.get("Retry-After")
+    if value is None:
+        return None
+    value = value.strip()
+    if value.isdigit():
+        return float(value)
+    try:
+        retry_at = parsedate_to_datetime(value)
+    except (TypeError, ValueError):
+        return None
+    if retry_at.tzinfo is None:
+        retry_at = retry_at.replace(tzinfo=timezone.utc)
+    return max((retry_at - datetime.now(timezone.utc)).total_seconds(), 0.0)
 
 
 @dataclass(frozen=True, slots=True)
@@ -59,6 +120,7 @@ def _to_game(entry: dict[str, Any]) -> OpenCriticGame:
         top_critic_score=score,
         tier=entry.get("tier") or "",
         percent_recommended=entry.get("percentRecommended"),
+        raw=entry,
     )
 
 
@@ -72,6 +134,19 @@ class OpenCriticClient:
     def __init__(self, client: httpx.AsyncClient, rapidapi_key: str) -> None:
         self._client = client
         self._headers = {"x-rapidapi-host": "opencritic-api.p.rapidapi.com", "x-rapidapi-key": rapidapi_key}
+
+    def _raise_for_status(self, response: httpx.Response) -> None:
+        # An instance method, not a static one, so the caller's own key can be redacted out of the body
+        # excerpt before it goes anywhere.
+        try:
+            response.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            raise OpenCriticApiError(
+                f"OpenCritic request failed with status {exc.response.status_code}",
+                status_code=exc.response.status_code,
+                retry_after_seconds=_parse_retry_after(exc.response),
+                provider_detail=_response_detail(exc.response, self._headers["x-rapidapi-key"]),
+            ) from None
 
     async def validate_key(self) -> None:
         """Confirm ``rapidapi_key`` is accepted by OpenCritic.
@@ -88,13 +163,7 @@ class OpenCriticClient:
             params={"platforms": "ps5", "sort": "name", "order": "asc", "skip": 0},
             headers=self._headers,
         )
-        try:
-            response.raise_for_status()
-        except httpx.HTTPStatusError as exc:
-            raise OpenCriticApiError(
-                f"OpenCritic request failed with status {exc.response.status_code}",
-                status_code=exc.response.status_code,
-            ) from None
+        self._raise_for_status(response)
 
     async def fetch_platform_games(
         self,
@@ -131,13 +200,7 @@ class OpenCriticClient:
                 params={"platforms": platform, "sort": "name", "order": "asc", "skip": skip},
                 headers=self._headers,
             )
-            try:
-                response.raise_for_status()
-            except httpx.HTTPStatusError as exc:
-                raise OpenCriticApiError(
-                    f"OpenCritic request failed with status {exc.response.status_code}",
-                    status_code=exc.response.status_code,
-                ) from None
+            self._raise_for_status(response)
             data = response.json()
             if not isinstance(data, list) or not data:
                 exhausted = True

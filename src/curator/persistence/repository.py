@@ -235,12 +235,21 @@ class Repository:
     async def delete_user(self, sub: str) -> None:
         """Remove the ``app_users`` row for ``sub`` entirely.
 
-        Every other account-scoped table (``psn_links``, ``entitlement_pulls``, ``library_entries``,
-        ``library_exclusions``, ``user_consoles``, ``measured_sizes``, ``collection_definitions``,
-        ``collection_runs``, ...) declares ``REFERENCES app_users (identity_sub) ON DELETE CASCADE`` or a
-        plain FK cleaned up alongside it, so this one delete wipes everything Curator has ever stored about
-        the user. It never touches the shared, identity_sub-free catalog tables (``games``,
-        ``game_concepts``, enrichment/cache tables).
+        Every account-scoped table declares ``REFERENCES app_users (identity_sub) ON DELETE CASCADE``, so
+        this one delete wipes everything Curator has ever stored about the user: ``psn_links``,
+        ``psn_test_accounts``, ``entitlement_pulls``, ``library_entries``, ``library_exclusions``,
+        ``user_consoles``, ``measured_sizes``, ``collection_definitions``, ``collection_runs``,
+        ``job_runs``, ``user_enrichment_keys``, ``user_profiles`` and ``follows``. Their child tables
+        (``entitlement_snapshots``, ``collection_items``, ``console_installs``) cascade in turn from those
+        parents.
+
+        Eight of those cascades were missing from ``0001_initial.sql`` and were added by
+        ``0009_fix_delete_cascades.sql`` -- before it, this method raised a foreign-key violation for any
+        user who had ingested entitlements or saved a collection.
+
+        It never touches the shared, identity_sub-free catalog tables (``games``, ``game_concepts``,
+        enrichment/cache tables), nor ``account_action_log``, which deliberately has no foreign key here so
+        it survives deletion for its retention window (see ``0003_account_action_log.sql``).
 
         :param sub: The Identity ``sub`` claim of the user requesting deletion.
         """

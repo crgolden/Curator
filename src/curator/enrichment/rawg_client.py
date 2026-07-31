@@ -7,6 +7,8 @@ Ported from ``ps_enrich.py``'s ``urllib``-based ``rawg_get()``/``search_rawg()``
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from typing import Any
 
 import httpx
@@ -15,6 +17,10 @@ from curator.enrichment.rawg_matcher import RawgCandidate
 from curator.psn.session import NullRateLimiter, RateLimiter
 
 RAWG_BASE_URL = "https://api.rawg.io/api"
+
+# Enough of an error body to carry RAWG's own sentence-long explanation, short enough that a wall of
+# HTML from a proxy can't flood the log.
+MAX_PROVIDER_DETAIL_CHARS = 300
 
 
 class RawgApiError(Exception):
@@ -27,11 +33,70 @@ class RawgApiError(Exception):
 
     :param status_code: The RAWG response's HTTP status code, for callers branching on auth failure
         (401/403) vs. transient (429/5xx).
+    :param retry_after_seconds: The response's ``Retry-After`` header, parsed to seconds-from-now, or
+        ``None`` if the header was absent or unparseable -- RAWG doesn't reliably document this header for
+        quota exhaustion (it's a monthly quota, not a sliding window), so callers should fall back to a
+        heuristic default rather than treating its absence as an error.
+    :param provider_detail: A truncated, key-redacted excerpt of the response body, or ``None`` if it was
+        empty or unreadable. RAWG answers 401 for several unrelated conditions -- a wrong key, an
+        unverified account, an exhausted monthly quota -- and only the body distinguishes them. Without it
+        the caller can do no better than guess, and telling a user to re-check a key that is in fact
+        correct sends them somewhere the problem isn't.
     """
 
-    def __init__(self, message: str, *, status_code: int) -> None:
+    def __init__(
+        self,
+        message: str,
+        *,
+        status_code: int,
+        retry_after_seconds: float | None = None,
+        provider_detail: str | None = None,
+    ) -> None:
         super().__init__(message)
         self.status_code = status_code
+        self.retry_after_seconds = retry_after_seconds
+        self.provider_detail = provider_detail
+
+
+def _response_detail(response: httpx.Response, api_key: str) -> str | None:
+    """Return a whitespace-collapsed, truncated, key-redacted excerpt of ``response``'s body.
+
+    The redaction is defensive rather than a response to a known leak: RAWG takes the key as a query
+    parameter, and error payloads that echo the request back are common enough across APIs not to bet
+    against. Returns ``None`` for an empty or unread body so callers can say "<no response body>" rather
+    than log an empty string.
+    """
+    try:
+        text = response.text
+    except httpx.ResponseNotRead:
+        return None
+    text = " ".join(text.split())
+    if not text:
+        return None
+    if api_key:
+        text = text.replace(api_key, "[redacted]")
+    if len(text) > MAX_PROVIDER_DETAIL_CHARS:
+        text = text[:MAX_PROVIDER_DETAIL_CHARS] + "..."
+    return text
+
+
+def _parse_retry_after(response: httpx.Response) -> float | None:
+    """Parse a ``Retry-After`` header (RFC 7231: either delay-seconds or an HTTP-date) into seconds from
+    now, or ``None`` if the header is absent or not parseable as either form.
+    """
+    value = response.headers.get("Retry-After")
+    if value is None:
+        return None
+    value = value.strip()
+    if value.isdigit():
+        return float(value)
+    try:
+        retry_at = parsedate_to_datetime(value)
+    except (TypeError, ValueError):
+        return None
+    if retry_at.tzinfo is None:
+        retry_at = retry_at.replace(tzinfo=timezone.utc)
+    return max((retry_at - datetime.now(timezone.utc)).total_seconds(), 0.0)
 
 
 def _to_candidate(result: dict[str, Any]) -> RawgCandidate:
@@ -108,11 +173,15 @@ class RawgClient:
         await self._rate_limiter.acquire()
         return await self._client.get(url, params=params)
 
-    @staticmethod
-    def _raise_for_status(response: httpx.Response) -> None:
+    def _raise_for_status(self, response: httpx.Response) -> None:
+        # An instance method, not a static one, so the caller's own key can be redacted out of the body
+        # excerpt before it goes anywhere.
         try:
             response.raise_for_status()
         except httpx.HTTPStatusError as exc:
             raise RawgApiError(
-                f"RAWG request failed with status {exc.response.status_code}", status_code=exc.response.status_code
+                f"RAWG request failed with status {exc.response.status_code}",
+                status_code=exc.response.status_code,
+                retry_after_seconds=_parse_retry_after(exc.response),
+                provider_detail=_response_detail(exc.response, self._api_key),
             ) from None

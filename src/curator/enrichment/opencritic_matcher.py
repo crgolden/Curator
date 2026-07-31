@@ -19,7 +19,8 @@ from __future__ import annotations
 
 import re
 import unicodedata
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from typing import Any
 
 _ROMAN_TO_ARABIC = [
     (r"\bviii\b", "8"),
@@ -41,6 +42,11 @@ class OpenCriticGame:
     top_critic_score: float | None
     tier: str
     percent_recommended: float | None
+    # PSN's verbatim entry, persisted to opencritic_cache.raw so a mapping change never loses a field
+    # OpenCritic sent. Not selected back out by get_all_opencritic_games -- matching needs only the
+    # extracted columns -- so instances read from cache carry None here. compare=False keeps equality
+    # semantics based on the identifying columns alone.
+    raw: dict[str, Any] | None = field(default=None, compare=False)
 
 
 def normalize(title: str) -> str:

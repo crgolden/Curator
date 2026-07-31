@@ -7,7 +7,16 @@ from fastapi.testclient import TestClient
 
 from curator.app import create_app
 from curator.persistence.crypto import TokenCrypto
-from test_routes import FakeAgentFactory, FakeRepository, FakeTokenValidator, _bearer, _claims, _make_settings
+from test_routes import (
+    FakeAgentFactory,
+    FakeRepository,
+    FakeTokenValidator,
+    _bearer,
+    _claims,
+    _make_settings,
+    _seed_link,
+)
+from test_trophy_routes import FakeTrophyClient, FakeTrophyClientFactory
 
 
 class FakePublisher:
@@ -50,6 +59,9 @@ class FakeLibraryGameView:
         psn_product_id=None,
         rawg_enriched=False,
         opencritic_enriched=False,
+        is_active=True,
+        np_communication_id=None,
+        percent_completed=None,
     ):
         self.game_id = game_id
         self.title = title
@@ -60,6 +72,9 @@ class FakeLibraryGameView:
         self.psn_product_id = psn_product_id
         self.rawg_enriched = rawg_enriched
         self.opencritic_enriched = opencritic_enriched
+        self.is_active = is_active
+        self.np_communication_id = np_communication_id
+        self.percent_completed = percent_completed
 
 
 _SORT_ATTRS = {
@@ -104,8 +119,8 @@ class FakeLibraryRepository:
         return sorted({g.category for g in games if g.category is not None})
 
 
-def _build(job_runs_repository=None, library_repository=None):
-    repository = FakeRepository()
+def _build(job_runs_repository=None, library_repository=None, repository=None, trophy_client_factory=None):
+    repository = repository if repository is not None else FakeRepository()
     token_crypto = TokenCrypto(Fernet.generate_key())
     validator = FakeTokenValidator()
     publisher = FakePublisher()
@@ -115,6 +130,7 @@ def _build(job_runs_repository=None, library_repository=None):
         token_crypto=token_crypto,
         agent_factory=FakeAgentFactory(repository, token_crypto),
         token_validator=validator,
+        trophy_client_factory=trophy_client_factory or FakeTrophyClientFactory(),
     )
     app.state.queue_publisher = publisher
     app.state.job_runs_repository = job_runs_repository or FakeJobRunsRepository()
@@ -241,6 +257,8 @@ def test_get_library_returns_callers_own_games_with_ratings_and_category():
                 "psn_product_id": "UP0700-CUSA23100_00-ELDENRING0000000",
                 "rawg_enriched": True,
                 "opencritic_enriched": True,
+                "is_active": True,
+                "percent_completed": None,
             },
             {
                 "game_id": "game-2",
@@ -252,10 +270,29 @@ def test_get_library_returns_callers_own_games_with_ratings_and_category():
                 "psn_product_id": None,
                 "rawg_enriched": False,
                 "opencritic_enriched": False,
+                "is_active": True,
+                "percent_completed": None,
             },
         ],
         "total": 2,
     }
+
+
+def test_get_library_flags_a_game_the_caller_lost_access_to():
+    # A lapsed PS Plus title stays in the library, marked -- rather than silently disappearing (which is
+    # what dropping inactive entitlements at ingestion appeared to do, while actually stranding the row).
+    games = [
+        FakeLibraryGameView("game-1", "Still Mine"),
+        FakeLibraryGameView("game-2", "Lapsed Plus Title", is_active=False),
+    ]
+    client, validator, _publisher = _build(library_repository=FakeLibraryRepository({"sub-a": games}))
+    validator.register("token-a", _claims(sub="sub-a"))
+
+    response = client.get("/library", headers=_bearer("token-a"))
+
+    assert response.status_code == 200
+    by_title = {game["title"]: game["is_active"] for game in response.json()["games"]}
+    assert by_title == {"Still Mine": True, "Lapsed Plus Title": False}
 
 
 def test_get_library_returns_empty_page_for_a_user_with_no_entries():
@@ -369,3 +406,69 @@ def test_get_library_categories_empty_for_user_with_no_categorized_games():
 
     assert response.status_code == 200
     assert response.json() == {"categories": []}
+
+
+def test_get_library_percent_completed_comes_from_the_stored_column():
+    games = [FakeLibraryGameView("game-1", "Game A", percent_completed=50)]
+    client, validator, _publisher = _build(library_repository=FakeLibraryRepository({"sub-a": games}))
+    validator.register("token-a", _claims(sub="sub-a"))
+
+    response = client.get("/library", headers=_bearer("token-a"))
+
+    assert response.json()["games"][0]["percent_completed"] == 50
+
+
+def test_get_library_percent_completed_blank_for_unlinked_user():
+    games = [FakeLibraryGameView("game-1", "God of War Ragnarök")]
+    client, validator, _publisher = _build(library_repository=FakeLibraryRepository({"sub-a": games}))
+    validator.register("token-a", _claims(sub="sub-a"))
+
+    response = client.get("/library", headers=_bearer("token-a"))
+
+    assert response.json()["games"][0]["percent_completed"] is None
+
+
+def test_get_library_percent_completed_blank_when_harvest_trophies_disabled():
+    games = [FakeLibraryGameView("game-1", "God of War Ragnarök")]
+    repository = FakeRepository()
+    crypto = TokenCrypto(Fernet.generate_key())
+    _seed_link(repository, crypto, "sub-a", harvest_trophies=False)
+    client, validator, _publisher = _build(
+        library_repository=FakeLibraryRepository({"sub-a": games}), repository=repository
+    )
+    validator.register("token-a", _claims(sub="sub-a"))
+
+    response = client.get("/library", headers=_bearer("token-a"))
+
+    assert response.json()["games"][0]["percent_completed"] is None
+
+
+def test_get_library_never_calls_psn_to_resolve_completion():
+    """Rendering the library must not depend on PSN being reachable.
+
+    Every game here has a stored percentage, and the caller is linked with harvesting enabled -- yet no
+    trophy client is built. Before ``0015_library_entries_trophy_progress.sql`` this path fuzzy-matched
+    the page's titles against a live ``trophy_titles()`` fetch on every request, so a stale token or a
+    cold Redis silently blanked the column.
+    """
+    games = [
+        FakeLibraryGameView("game-1", "Game A", percent_completed=63),
+        FakeLibraryGameView("game-2", "Game B", percent_completed=None),
+    ]
+    repository = FakeRepository()
+    crypto = TokenCrypto(Fernet.generate_key())
+    _seed_link(repository, crypto, "sub-a", harvest_trophies=True)
+    factory = FakeTrophyClientFactory()
+    factory.linked["sub-a"] = FakeTrophyClient()
+    client, validator, _publisher = _build(
+        library_repository=FakeLibraryRepository({"sub-a": games}),
+        repository=repository,
+        trophy_client_factory=factory,
+    )
+    validator.register("token-a", _claims(sub="sub-a"))
+
+    response = client.get("/library", headers=_bearer("token-a"))
+
+    by_title = {game["title"]: game["percent_completed"] for game in response.json()["games"]}
+    assert by_title == {"Game A": 63, "Game B": None}
+    assert factory.calls == []

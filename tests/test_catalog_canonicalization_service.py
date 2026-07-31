@@ -29,12 +29,12 @@ _FRANCHISE_RULES = [
 _F2P_RULE = ExclusionRule(rule_id="f1", rule_type="f2p_title", pattern="Fortnite")
 
 
-def _snapshot(gm_name, pkg="PS4GD", tm_name=None, concept_id="", active=None, entitlement_id=None):
+def _snapshot(gm_name, pkg="PS4GD", tm_name=None, concept_id="", active=None, entitlement_id=None, title_id=None):
     return EntitlementSnapshot(
         entitlement_id=entitlement_id or f"ent-{gm_name}-{concept_id}-{pkg}",
         concept_id=concept_id or None,
         product_id="UP0000-TEST_00-0000000000000000",
-        title_id=None,
+        title_id=title_id,
         game_meta_name=gm_name,
         concept_meta_name=None,
         title_meta_name=tm_name if tm_name is not None else gm_name,
@@ -106,40 +106,125 @@ def test_remastered_between_definitive_and_ps5():
 # ── canonicalize: activeFlag ────────────────────────────────────────────────────────────────────────
 
 
-def test_active_false_excluded():
-    # Regression: PS Plus lapsed titles showed a padlock on console and couldn't be downloaded but
-    # appeared in the library.
+def test_active_false_kept_but_flagged_inactive():
+    """Inactive entitlements are kept and flagged, not dropped.
+
+    They used to be filtered out here, which meant a PS Plus title the user had lost stayed in their
+    library forever: ``library_entries`` is written by an upsert with no delete pass, so once the title
+    stopped appearing in the canonicalized set nothing removed or updated the existing row. Carrying the
+    flag through to ``library_entries.is_active`` is what actually hides it -- and it makes
+    "everything I ever had access to" expressible, which dropping never could.
+    """
     data = [_snapshot("Horizon Forbidden West", "PSGD", active=False)]
-    assert _canonicalize(data) == []
+
+    games = _canonicalize(data)
+
+    assert len(games) == 1
+    assert games[0].active is False
 
 
-def test_active_missing_included():
-    # Purchased titles omit activeFlag entirely -- must be treated as active.
+def test_active_missing_treated_as_active():
+    # Purchased titles omit activeFlag entirely -- only an explicit False is an ended entitlement.
     data = [_snapshot("God of War", "PS4GD")]
-    assert len(_canonicalize(data)) == 1
+
+    games = _canonicalize(data)
+
+    assert len(games) == 1
+    assert games[0].active is True
 
 
 def test_active_true_included():
     data = [_snapshot("God of War", "PS4GD", active=True)]
-    assert len(_canonicalize(data)) == 1
+
+    games = _canonicalize(data)
+
+    assert len(games) == 1
+    assert games[0].active is True
 
 
-def test_concept_with_one_active_entry_included():
-    # If a concept has both active and inactive entries (e.g. purchased copy coexisting with a lapsed
-    # PS Plus copy), the concept stays in.
+def test_concept_with_one_active_entry_is_active():
+    # A purchased copy coexisting with a lapsed PS Plus copy: any surviving access keeps the game
+    # playable, so the game is active even though one of its entitlements is not.
     data = [
         _snapshot("Game", "PS4GD", concept_id="123", active=False, entitlement_id="e1"),
         _snapshot("Game", "PS4GD", concept_id="123", active=True, entitlement_id="e2"),
     ]
-    assert len(_canonicalize(data)) == 1
+
+    games = _canonicalize(data)
+
+    assert len(games) == 1
+    assert games[0].active is True
 
 
-def test_concept_all_inactive_excluded():
+def test_concept_with_all_entries_inactive_is_inactive():
     data = [
         _snapshot("Game", "PS4GD", concept_id="456", active=False, entitlement_id="e1"),
         _snapshot("Game", "PSGD", concept_id="456", active=False, entitlement_id="e2"),
     ]
-    assert _canonicalize(data) == []
+
+    games = _canonicalize(data)
+
+    assert len(games) == 1
+    assert games[0].active is False
+
+
+def test_an_active_entry_wins_the_edition_tiebreak_over_an_inactive_ps5_one():
+    """Active-ness outranks the PSGD-beats-PS4GD rule when picking the winning edition.
+
+    While inactive entries were dropped, the winner was active by construction. Now that they survive,
+    an inactive PS5 edition would otherwise beat an active PS4 one on the PSGD term alone -- and
+    ``canonical_title``/``product_id``/``winning_entitlement_id`` would name an edition the user cannot
+    launch. ``product_id`` in particular feeds the collection cover-art lookup.
+    """
+    data = [
+        _snapshot("Game", "PSGD", concept_id="789", active=False, entitlement_id="inactive-ps5"),
+        _snapshot("Game", "PS4GD", concept_id="789", active=True, entitlement_id="active-ps4"),
+    ]
+
+    games = _canonicalize(data)
+
+    assert games[0].winning_entitlement_id == "active-ps4"
+    assert games[0].native_ps5 is False
+    # Platform availability is a fact about the game, so the inactive PS5 edition still counts here.
+    assert games[0].ps4_eligible is True
+
+
+def test_edition_tiebreak_falls_through_to_an_inactive_entry_when_none_are_active():
+    data = [
+        _snapshot("Game", "PS4GD", concept_id="999", active=False, entitlement_id="inactive-ps4"),
+        _snapshot("Game", "PSGD", concept_id="999", active=False, entitlement_id="inactive-ps5"),
+    ]
+
+    games = _canonicalize(data)
+
+    # No active entry to prefer, so the usual PSGD-beats-PS4GD ordering decides.
+    assert games[0].winning_entitlement_id == "inactive-ps5"
+    assert games[0].active is False
+
+
+def test_winning_title_id_follows_the_winning_entry():
+    # winning_title_id exists purely so curator.library.library_build_orchestrator's trophy-match stage
+    # can attempt an exact PS4 trophy lookup within the same build run -- it must track whichever entry
+    # actually wins the edition tiebreak, the same as winning_entitlement_id already does.
+    data = [
+        _snapshot(
+            "Game", "PSGD", concept_id="789", active=False, entitlement_id="inactive-ps5", title_id="PPSA00001_00"
+        ),
+        _snapshot("Game", "PS4GD", concept_id="789", active=True, entitlement_id="active-ps4", title_id="CUSA00001_00"),
+    ]
+
+    games = _canonicalize(data)
+
+    assert games[0].winning_entitlement_id == "active-ps4"
+    assert games[0].winning_title_id == "CUSA00001_00"
+
+
+def test_winning_title_id_is_none_when_the_winning_entry_has_no_title_id():
+    data = [_snapshot("Game", "PS4GD", concept_id="1", entitlement_id="e1", title_id=None)]
+
+    games = _canonicalize(data)
+
+    assert games[0].winning_title_id is None
 
 
 # ── canonicalize: PSGD/PS4GD + edition tiebreak ────────────────────────────────────────────────────

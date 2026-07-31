@@ -22,6 +22,31 @@ def _client(recorder: RequestRecorder) -> OpenCriticClient:
     return OpenCriticClient(httpx.AsyncClient(transport=httpx.MockTransport(recorder)), rapidapi_key="test-key")
 
 
+async def test_error_carries_the_response_body_as_provider_detail():
+    # RapidAPI answers 403 for an unsubscribed plan as readily as for a bad key; only the body says which.
+    body = {"message": "You are not subscribed to this API."}
+    recorder = RequestRecorder([httpx.Response(403, json=body)])
+    client = _client(recorder)
+
+    with pytest.raises(OpenCriticApiError) as exc_info:
+        await client.validate_key()
+
+    assert exc_info.value.provider_detail is not None
+    assert "not subscribed" in exc_info.value.provider_detail
+
+
+async def test_provider_detail_redacts_the_api_key_if_the_body_echoes_it():
+    recorder = RequestRecorder([httpx.Response(401, json={"message": "Invalid key test-key"})])
+    client = _client(recorder)
+
+    with pytest.raises(OpenCriticApiError) as exc_info:
+        await client.validate_key()
+
+    assert exc_info.value.provider_detail is not None
+    assert "test-key" not in exc_info.value.provider_detail
+    assert "[redacted]" in exc_info.value.provider_detail
+
+
 async def test_fetch_platform_games_stops_on_short_page():
     page = [{"id": 1, "name": "Game A", "topCriticScore": 85, "tier": "Strong", "percentRecommended": 90}]
     recorder = RequestRecorder([httpx.Response(200, json=page)])
@@ -143,3 +168,24 @@ async def test_fetch_platform_games_raises_sanitized_error_on_non_2xx():
     assert exc_info.value.status_code == 401
     assert "invalid key" not in str(exc_info.value)
     assert exc_info.value.__cause__ is None
+
+
+async def test_fetch_platform_games_parses_retry_after_seconds_header():
+    recorder = RequestRecorder([httpx.Response(429, headers={"Retry-After": "60"})])
+    client = _client(recorder)
+
+    with pytest.raises(OpenCriticApiError) as exc_info:
+        await client.fetch_platform_games("ps5")
+
+    assert exc_info.value.status_code == 429
+    assert exc_info.value.retry_after_seconds == 60.0
+
+
+async def test_fetch_platform_games_retry_after_seconds_none_when_header_absent():
+    recorder = RequestRecorder([httpx.Response(500)])
+    client = _client(recorder)
+
+    with pytest.raises(OpenCriticApiError) as exc_info:
+        await client.fetch_platform_games("ps5")
+
+    assert exc_info.value.retry_after_seconds is None

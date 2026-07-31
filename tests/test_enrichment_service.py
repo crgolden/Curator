@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import httpx
 import pytest
 
-from curator.enrichment.enrichment_service import EnrichmentAuthError, EnrichmentService
+from curator.enrichment.enrichment_service import EnrichmentAuthError, EnrichmentRateLimitError, EnrichmentService
 from curator.enrichment.opencritic_client import OpenCriticApiError, PaginationResult
 from curator.enrichment.opencritic_matcher import OpenCriticGame
 from curator.enrichment.publisher_tier import PublisherTierRule
@@ -404,7 +405,7 @@ async def test_enrich_game_rawg_auth_failure_raises_enrichment_auth_error():
 
 
 async def test_enrich_game_rawg_transient_failure_skips_that_games_rawg_signal():
-    rawg_client = FakeRawgClient(search_raises=RawgApiError("rate limited", status_code=429))
+    rawg_client = FakeRawgClient(search_raises=RawgApiError("server error", status_code=500))
     service = _service(rawg_client=rawg_client)
 
     result, _ = await service.enrich_game(
@@ -417,6 +418,124 @@ async def test_enrich_game_rawg_transient_failure_skips_that_games_rawg_signal()
     )
 
     assert result.rawg_enriched is False
+
+
+async def test_enrich_game_rawg_search_timeout_skips_that_games_rawg_signal():
+    # httpx.ReadTimeout is not a RawgApiError -- RawgClient never wraps it, so this exercises the
+    # separate except httpx.HTTPError branch, not the RawgApiError one above.
+    rawg_client = FakeRawgClient(search_raises=httpx.ReadTimeout("timed out"))
+    service = _service(rawg_client=rawg_client)
+
+    result, _ = await service.enrich_game(
+        "Some Game",
+        product_id=None,
+        is_ps5=True,
+        genre_priorities=_GENRE_PRIORITIES,
+        publisher_tier_rules=_PUBLISHER_RULES,
+        size_estimates=_SIZE_ESTIMATES,
+    )
+
+    assert result.rawg_enriched is False
+
+
+async def test_enrich_game_rawg_detail_timeout_skips_that_games_rawg_signal():
+    from curator.enrichment.rawg_matcher import RawgCandidate
+
+    candidate = RawgCandidate(rawg_game_id=1, name="Some Game", platform_ids=frozenset({187}))
+    rawg_client = FakeRawgClient(search_results=[candidate], detail_raises=httpx.ConnectError("refused"))
+    service = _service(rawg_client=rawg_client)
+
+    result, _ = await service.enrich_game(
+        "Some Game",
+        product_id=None,
+        is_ps5=True,
+        genre_priorities=_GENRE_PRIORITIES,
+        publisher_tier_rules=_PUBLISHER_RULES,
+        size_estimates=_SIZE_ESTIMATES,
+    )
+
+    assert result.rawg_enriched is False
+
+
+async def test_enrich_game_rawg_rate_limit_raises_enrichment_rate_limit_error_with_header_hint():
+    rawg_client = FakeRawgClient(search_raises=RawgApiError("rate limited", status_code=429, retry_after_seconds=120.0))
+    service = _service(rawg_client=rawg_client)
+
+    with pytest.raises(EnrichmentRateLimitError) as exc_info:
+        await service.enrich_game(
+            "Some Game",
+            product_id=None,
+            is_ps5=True,
+            genre_priorities=_GENRE_PRIORITIES,
+            publisher_tier_rules=_PUBLISHER_RULES,
+            size_estimates=_SIZE_ESTIMATES,
+        )
+
+    assert exc_info.value.provider == "rawg"
+    assert exc_info.value.retry_after_seconds == 120.0
+
+
+async def test_enrich_game_rawg_rate_limit_falls_back_to_default_and_doubles_on_repeat():
+    rawg_client = FakeRawgClient(search_raises=RawgApiError("rate limited", status_code=429))
+    service = _service(rawg_client=rawg_client)
+
+    with pytest.raises(EnrichmentRateLimitError) as first:
+        await service.enrich_game(
+            "Game A",
+            product_id=None,
+            is_ps5=True,
+            genre_priorities=_GENRE_PRIORITIES,
+            publisher_tier_rules=_PUBLISHER_RULES,
+            size_estimates=_SIZE_ESTIMATES,
+        )
+    with pytest.raises(EnrichmentRateLimitError) as second:
+        await service.enrich_game(
+            "Game B",
+            product_id=None,
+            is_ps5=True,
+            genre_priorities=_GENRE_PRIORITIES,
+            publisher_tier_rules=_PUBLISHER_RULES,
+            size_estimates=_SIZE_ESTIMATES,
+        )
+
+    assert first.value.retry_after_seconds == 3600.0
+    assert second.value.retry_after_seconds == 7200.0
+
+
+async def test_enrich_game_opencritic_topup_timeout_sets_incomplete_flag_not_a_raised_error():
+    # httpx.ReadTimeout is not an OpenCriticApiError -- OpenCriticClient never wraps it, so this exercises
+    # the separate except httpx.HTTPError branch alongside the existing 5xx one.
+    opencritic_client = FakeOpenCriticClient(raises=httpx.ReadTimeout("timed out"))
+    service = _service(opencritic_client=opencritic_client)
+
+    result, _ = await service.enrich_game(
+        "Some Game",
+        product_id=None,
+        is_ps5=True,
+        genre_priorities=_GENRE_PRIORITIES,
+        publisher_tier_rules=_PUBLISHER_RULES,
+        size_estimates=_SIZE_ESTIMATES,
+    )
+
+    assert result.opencritic_enriched is False
+    assert service.opencritic_topup_incomplete is True
+
+
+async def test_enrich_game_opencritic_rate_limit_raises_enrichment_rate_limit_error():
+    opencritic_client = FakeOpenCriticClient(raises=OpenCriticApiError("rate limited", status_code=429))
+    service = _service(opencritic_client=opencritic_client)
+
+    with pytest.raises(EnrichmentRateLimitError) as exc_info:
+        await service.enrich_game(
+            "Some Game",
+            product_id=None,
+            is_ps5=True,
+            genre_priorities=_GENRE_PRIORITIES,
+            publisher_tier_rules=_PUBLISHER_RULES,
+            size_estimates=_SIZE_ESTIMATES,
+        )
+
+    assert exc_info.value.provider == "opencritic"
 
 
 async def test_enrich_game_rawg_match_sets_rawg_enriched_true_even_without_a_score():

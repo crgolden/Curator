@@ -14,6 +14,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 
 from curator.deps import require_bearer
+from curator.library.repository import LibraryRepository
 from curator.persistence.repository import LinkRecord, Repository
 from curator.token_validation import TokenClaims
 
@@ -66,6 +67,16 @@ async def set_psn_preferences(
         harvest_presence=body.harvest_presence,
         harvest_devices=body.harvest_devices,
     )
+
+    if link.harvest_trophies and not body.harvest_trophies:
+        # Switching trophy harvesting off has to remove what's already stored, not just stop refreshing
+        # it. Trophy percentages are the only harvested category with a durable home
+        # (``library_entries.trophy_percent_completed``, 0015) -- identity/presence/devices are live-proxy
+        # only and so have nothing to erase. Leaving rows behind would mean opting out of collection
+        # silently kept the collected data, which is not what the toggle says.
+        library_repository: LibraryRepository = request.app.state.library_repository
+        await library_repository.clear_trophy_progress(claims.sub)
+
     return body
 
 

@@ -17,8 +17,9 @@ from test_routes import EMAIL, SUB, FakeRepository, FakeTokenValidator, _bearer,
 class FakeTrophyClient:
     """Stands in for TrophyClient/CachedTrophyClient: canned results, or raises PsnAuthError when armed."""
 
-    def __init__(self, *, raise_auth_error=False):
+    def __init__(self, *, raise_auth_error=False, titles=None):
         self.raise_auth_error = raise_auth_error
+        self._titles = titles
         self.title_trophies_calls = []
         self.trophy_groups_calls = []
 
@@ -30,6 +31,8 @@ class FakeTrophyClient:
     async def trophy_titles(self, online_id=None, account_id=None, limit=100):
         if self.raise_auth_error:
             raise PsnAuthError("boom")
+        if self._titles is not None:
+            return self._titles
         return [
             TrophyTitle(
                 name="Game A",

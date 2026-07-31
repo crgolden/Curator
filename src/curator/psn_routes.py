@@ -20,6 +20,7 @@ from curator.audit.repository import (
     AccountActionLogRepository,
 )
 from curator.deps import require_verified_caller
+from curator.library.repository import LibraryRepository
 from curator.link_service import AgentFactory, LinkError
 from curator.link_service import link as link_account
 from curator.link_service import unlink as unlink_account
@@ -112,17 +113,30 @@ async def psn_unlink(
     request: Request,
     claims: TokenClaims = Depends(require_verified_caller),
 ) -> Response:
-    """Re-verify (see :func:`curator.reverify.reverify_link`), then unlink the caller's PSN account."""
+    """Re-verify (see :func:`curator.reverify.reverify_link`), then unlink the caller's PSN account.
+
+    Unlinking also clears any stored trophy progress. That data is PSN-derived and governed by
+    ``psn_links.harvest_trophies`` -- but unlinking deletes the ``psn_links`` row, taking the preference
+    that governs it with it, so anything left on ``library_entries`` would outlive every control over it
+    and keep being served by ``GET /library`` with no way to refresh or verify it. Turning the weaker
+    ``harvest_trophies`` toggle off already erases it (see :mod:`curator.preferences_routes`); it would be
+    incoherent for the stronger action to preserve it.
+
+    The rest of the library deliberately survives: entitlements and the curated catalog are the user's own
+    collection, not PSN telemetry, and unlinking is not account deletion (that is ``DELETE /me``).
+    """
     repository: Repository = request.app.state.repository
     token_crypto: TokenCrypto = request.app.state.token_crypto
     agent_factory: AgentFactory = request.app.state.agent_factory
     redis_adapter = request.app.state.redis_adapter
     audit_repository: AccountActionLogRepository = request.app.state.audit_repository
+    library_repository: LibraryRepository = request.app.state.library_repository
 
     await reverify_link(
         claims, repository=repository, token_crypto=token_crypto, agent_factory=agent_factory, redis=redis_adapter
     )
     await unlink_account(claims.sub, repository=repository, token_crypto=token_crypto, redis=redis_adapter)
+    await library_repository.clear_trophy_progress(claims.sub)
     await _log(audit_repository, claims.sub, ACTION_UNLINKED)
     return Response(status_code=204)
 

@@ -10,25 +10,70 @@ applied live at collection-generation time (:mod:`curator.collections`), not per
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
 
 from curator.catalog.canonicalization_service import CanonicalGame, canonicalize
 from curator.catalog.repository import CatalogRepository
-from curator.enrichment.enrichment_service import EnrichmentService
+from curator.enrichment.enrichment_service import EnrichmentRateLimitError, EnrichmentService
 from curator.enrichment.publisher_tier import PublisherTierRule
 from curator.enrichment.repository import EnrichmentRepository
 from curator.library.ingestion_service import IngestionService
 from curator.library.repository import LibraryRepository
+from curator.psn.trophy_completion import match_titles
 from curator.scoring.size_estimation_service import SizeEstimate
+
+if TYPE_CHECKING:
+    from curator.psn.models import TrophyTitle
+    from curator.psn.trophy_cache import CachedTrophyClient
+    from curator.psn.trophy_client import TrophyClient
+
+#: PSN's PS4 store/content title ids start with this prefix (PS5's start with "PPSA" instead). Real PSN
+#: API tooling confirms the app-level "resolve a store title id to its trophy npCommunicationId" lookup
+#: (``TrophyClient.trophy_titles_for_title``) only works for this prefix -- there is no known public
+#: equivalent for PS5 title ids, so those always fall back to fuzzy name matching.
+_PS4_TITLE_ID_PREFIX = "CUSA"
 
 
 @dataclass(frozen=True, slots=True)
 class EnrichDeltaResult:
-    """Summary of one :meth:`LibraryBuildOrchestrator.enrich_delta` call."""
+    """Summary of one :meth:`LibraryBuildOrchestrator.enrich_delta` call.
+
+    :param rate_limited_provider: ``"rawg"``/``"opencritic"`` if a provider's rate limit stopped
+        enrichment early this call, else ``None``.
+    :param retry_after_seconds: When it should be safe to resume, if ``rate_limited_provider`` is set.
+    :param remaining_game_ids: Every game id not yet attempted this call, including the one that hit the
+        rate limit (so it's retried first on resume) -- empty unless ``rate_limited_provider`` is set.
+    """
 
     enriched_count: int
     rawg_enriched_titles: list[str]
     opencritic_enriched_titles: list[str]
+    rate_limited_provider: str | None = None
+    retry_after_seconds: float | None = None
+    remaining_game_ids: list[str] = field(default_factory=list)
+
+
+@dataclass(frozen=True, slots=True)
+class TrophyMatchResult:
+    """Summary of one :meth:`LibraryBuildOrchestrator.match_trophies` call.
+
+    :param exact_matched_count: Games matched via the exact PS4 title-id lookup
+        (``TrophyClient.trophy_titles_for_title``).
+    :param fuzzy_matched_count: Games matched via fuzzy name similarity (``curator.psn.trophy_completion
+        .match_titles``) -- everything the exact lookup didn't resolve, including every PS5 title.
+    :param attempted_count: Every game a match was attempted for this call, matched or not -- what
+        ``curator.psn.trophy_completion`` stops re-attempting on the next refresh (see
+        ``0014_library_entries_trophy_match.sql``'s ``trophy_match_attempted_at``).
+    :param progress_updated_count: Library entries whose stored completion percentage was refreshed
+        (``0015_library_entries_trophy_progress.sql``). Covers the whole matched library, not just this
+        run's new matches, so it is routinely larger than the counts above.
+    """
+
+    exact_matched_count: int
+    fuzzy_matched_count: int
+    attempted_count: int
+    progress_updated_count: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -42,6 +87,13 @@ class LibraryBuildResult:
         ``curator.enrichment.enrichment_service.EnrichmentService._resolve_opencritic``) stopped early
         rather than exhausting the catalog -- a future refresh (by this user or any other, since the
         cache/cursor are shared) picks up where it left off.
+    :param rate_limited_provider: ``"rawg"``/``"opencritic"`` if a provider's rate limit stopped
+        enrichment early this run, else ``None`` -- see :class:`EnrichDeltaResult`.
+    :param retry_after_seconds: When it should be safe to resume, if ``rate_limited_provider`` is set.
+    :param remaining_game_ids: Every game id not yet enriched this run, if ``rate_limited_provider`` is
+        set -- what the continuation job (``curator.app._library_refresh_continuation_handler``) resumes.
+    :param trophy_match: Summary of stage 5 (:meth:`LibraryBuildOrchestrator.match_trophies`) -- all-zero
+        if ``build()`` was called with no ``trophy_client`` (``harvest_trophies`` disabled).
     """
 
     pull_id: str
@@ -50,6 +102,78 @@ class LibraryBuildResult:
     rawg_enriched_titles: list[str]
     opencritic_enriched_titles: list[str]
     opencritic_topup_incomplete: bool
+    rate_limited_provider: str | None = None
+    retry_after_seconds: float | None = None
+    remaining_game_ids: list[str] = field(default_factory=list)
+    trophy_match: TrophyMatchResult = field(
+        default_factory=lambda: TrophyMatchResult(exact_matched_count=0, fuzzy_matched_count=0, attempted_count=0)
+    )
+
+
+async def enrich_games(
+    enrichment_service: EnrichmentService,
+    enrichment_repository: EnrichmentRepository,
+    games: list[tuple[str, str, str | None, bool]],
+    *,
+    publisher_tier_rules: list[PublisherTierRule],
+    size_estimates: list[SizeEstimate],
+) -> EnrichDeltaResult:
+    """Enrich each ``(game_id, title, product_id, is_ps5)`` tuple in order, stopping early on a provider
+    rate limit.
+
+    A module-level function (not a :class:`LibraryBuildOrchestrator` method) so it's callable without
+    building a full orchestrator -- shared by :meth:`LibraryBuildOrchestrator.enrich_delta` (freshly
+    canonicalized games from a normal refresh) and ``curator.app._library_refresh_continuation_handler``
+    (a DB-looked-up subset resumed after a rate limit, with no re-canonicalization/re-ingestion needed, and
+    thus no need for the ingestion/catalog/library repositories an orchestrator would otherwise require).
+
+    :param games: Every game to attempt, in the order they should be enriched -- the order that ends up in
+        ``remaining_game_ids`` if a rate limit stops iteration early.
+    :param publisher_tier_rules: Every publisher-tier classification rule.
+    :param size_estimates: Every install-size estimate row.
+    :returns: The :class:`EnrichDeltaResult` summary.
+    """
+    genre_rows = await enrichment_repository.get_active_genres()
+    genre_priorities = {name.lower(): priority for _, name, priority in genre_rows}
+    genre_ids_by_name = {name.lower(): genre_id for genre_id, name, _ in genre_rows}
+
+    enriched_count = 0
+    rawg_enriched_titles: list[str] = []
+    opencritic_enriched_titles: list[str] = []
+    for index, (game_id, title, product_id, is_ps5) in enumerate(games):
+        try:
+            result, _size = await enrichment_service.enrich_game(
+                title,
+                product_id=product_id,
+                is_ps5=is_ps5,
+                genre_priorities=genre_priorities,
+                publisher_tier_rules=publisher_tier_rules,
+                size_estimates=size_estimates,
+            )
+        except EnrichmentRateLimitError as exc:
+            return EnrichDeltaResult(
+                enriched_count=enriched_count,
+                rawg_enriched_titles=rawg_enriched_titles,
+                opencritic_enriched_titles=opencritic_enriched_titles,
+                rate_limited_provider=exc.provider,
+                retry_after_seconds=exc.retry_after_seconds,
+                remaining_game_ids=[remaining_game_id for remaining_game_id, *_ in games[index:]],
+            )
+
+        genre_id = genre_ids_by_name.get(result.genre.lower())
+        subgenre_id = genre_ids_by_name.get(result.subgenre.lower())
+        await enrichment_repository.save_game_enrichment(game_id, genre_id, subgenre_id, result)
+        enriched_count += 1
+        if result.rawg_enriched:
+            rawg_enriched_titles.append(title)
+        if result.opencritic_enriched:
+            opencritic_enriched_titles.append(title)
+
+    return EnrichDeltaResult(
+        enriched_count=enriched_count,
+        rawg_enriched_titles=rawg_enriched_titles,
+        opencritic_enriched_titles=opencritic_enriched_titles,
+    )
 
 
 class LibraryBuildOrchestrator:
@@ -127,6 +251,7 @@ class LibraryBuildOrchestrator:
                 owned_edition=game.canonical_title,
                 winning_entitlement_id=game.winning_entitlement_id,
                 product_id=game.product_id,
+                is_active=game.active,
             )
             game_ids.append(game_id)
         return game_ids
@@ -149,36 +274,129 @@ class LibraryBuildOrchestrator:
         :returns: The :class:`EnrichDeltaResult` summary.
         """
         unenriched = set(await self._enrichment_repository.get_unenriched_game_ids(game_ids))
-        genre_rows = await self._enrichment_repository.get_active_genres()
-        genre_priorities = {name.lower(): priority for _, name, priority in genre_rows}
-        genre_ids_by_name = {name.lower(): genre_id for genre_id, name, _ in genre_rows}
+        games = [
+            (game_id, game.canonical_title, game.product_id, game.native_ps5)
+            for game, game_id in zip(canonical_games, game_ids, strict=True)
+            if game_id in unenriched
+        ]
+        return await enrich_games(
+            self._enrichment_service,
+            self._enrichment_repository,
+            games,
+            publisher_tier_rules=publisher_tier_rules,
+            size_estimates=size_estimates,
+        )
 
-        enriched_count = 0
-        rawg_enriched_titles: list[str] = []
-        opencritic_enriched_titles: list[str] = []
-        for game, game_id in zip(canonical_games, game_ids, strict=True):
-            if game_id not in unenriched:
-                continue
-            result, _size = await self._enrichment_service.enrich_game(
-                game.canonical_title,
-                product_id=game.product_id,
-                is_ps5=game.native_ps5,
-                genre_priorities=genre_priorities,
-                publisher_tier_rules=publisher_tier_rules,
-                size_estimates=size_estimates,
-            )
-            genre_id = genre_ids_by_name.get(result.genre.lower())
-            subgenre_id = genre_ids_by_name.get(result.subgenre.lower())
-            await self._enrichment_repository.save_game_enrichment(game_id, genre_id, subgenre_id, result)
-            enriched_count += 1
-            if result.rawg_enriched:
-                rawg_enriched_titles.append(game.canonical_title)
-            if result.opencritic_enriched:
-                opencritic_enriched_titles.append(game.canonical_title)
-        return EnrichDeltaResult(
-            enriched_count=enriched_count,
-            rawg_enriched_titles=rawg_enriched_titles,
-            opencritic_enriched_titles=opencritic_enriched_titles,
+    async def match_trophies(
+        self,
+        identity_sub: str,
+        canonical_games: list[CanonicalGame],
+        game_ids: list[str],
+        *,
+        trophy_client: TrophyClient | CachedTrophyClient | None,
+    ) -> TrophyMatchResult:
+        """Stage 5: persist each not-yet-matched game's PSN trophy-title identity.
+
+        Moves the expensive part of ``curator.psn.trophy_completion``'s job from every future read (a
+        full fuzzy name-match over the whole library, on every ``GET /library``/collection request) to
+        this one ingestion-time pass: match once, persist ``np_communication_id``, and let reads become a
+        cheap lookup by that column instead.
+
+        Only attempts games with no persisted match yet (``LibraryRepository.get_unmatched_game_ids``) --
+        a game once matched (successfully or not; see ``0014_library_entries_trophy_match.sql``'s
+        ``trophy_match_attempted_at``) is never re-matched by a later refresh.
+
+        For a PS4 title (a store title id starting with ``CUSA``), tries the exact PSN lookup first
+        (``TrophyClient.trophy_titles_for_title``) -- real PSN API tooling confirms this only resolves for
+        PS4 ids, so PS5 titles (``PPSA...``) and any PS4 title the exact lookup didn't resolve fall back to
+        fuzzy name matching against one shared ``trophy_titles()`` fetch for the whole batch.
+
+        :param identity_sub: The Curator user id (Identity's ``sub``).
+        :param canonical_games: The same list :meth:`persist_and_link` was called with (same order as
+            ``game_ids``).
+        :param game_ids: The resolved game ids from :meth:`persist_and_link`.
+        :param trophy_client: The user's trophy client, or ``None`` to skip this stage entirely -- the
+            caller's responsibility to pass ``None`` when the user hasn't opted into ``harvest_trophies``
+            (mirrors how a route checks that preference before touching any other trophy endpoint).
+        :returns: The :class:`TrophyMatchResult` summary.
+        """
+        if trophy_client is None:
+            return TrophyMatchResult(exact_matched_count=0, fuzzy_matched_count=0, attempted_count=0)
+
+        unmatched_ids = set(await self._library_repository.get_unmatched_game_ids(identity_sub, game_ids))
+
+        candidates = [
+            (game_id, game) for game, game_id in zip(canonical_games, game_ids, strict=True) if game_id in unmatched_ids
+        ]
+
+        exact_matched_count = 0
+        still_unmatched: list[tuple[str, str]] = []  # (game_id, canonical_title)
+        for game_id, game in candidates:
+            title_id = game.winning_title_id
+            if title_id and title_id.startswith(_PS4_TITLE_ID_PREFIX):
+                # One call per game (not batched across games): trophy_titles_for_title()'s response
+                # groups results by title id internally but the client doesn't currently surface which
+                # input id each result came back for, so batching would make results ambiguous. Bounded
+                # by the delta check above -- a steady-state library only pays this for new PS4 titles.
+                matches = await trophy_client.trophy_titles_for_title([title_id])
+                exact = next(
+                    (title for title in matches if title.np_communication_id and title.progress is not None), None
+                )
+                if exact is not None:
+                    assert exact.np_communication_id is not None  # filtered above
+                    await self._library_repository.set_trophy_match(
+                        identity_sub,
+                        game_id,
+                        np_communication_id=exact.np_communication_id,
+                        method="exact",
+                        percent_completed=exact.progress,
+                    )
+                    exact_matched_count += 1
+                    continue
+            still_unmatched.append((game_id, game.canonical_title))
+
+        fuzzy_matched_count = 0
+        titles: list[TrophyTitle] = []
+        if still_unmatched:
+            titles = await trophy_client.trophy_titles(limit=500)
+            fuzzy_matches = match_titles(titles, still_unmatched)
+            for game_id, _title in still_unmatched:
+                matched_title = fuzzy_matches.get(game_id)
+                if matched_title is not None and matched_title.np_communication_id is not None:
+                    await self._library_repository.set_trophy_match(
+                        identity_sub,
+                        game_id,
+                        np_communication_id=matched_title.np_communication_id,
+                        method="fuzzy",
+                        percent_completed=matched_title.progress,
+                    )
+                    fuzzy_matched_count += 1
+                else:
+                    # No confident match -- still stamp trophy_match_attempted_at so a genuinely
+                    # trophy-less title isn't re-attempted on every future refresh forever.
+                    await self._library_repository.set_trophy_match(
+                        identity_sub, game_id, np_communication_id=None, method=None
+                    )
+
+        # Progress refresh for the whole library, not just this run's new matches. Identity is resolved
+        # once and never revisited, but percentages move every time the user plays, so a refresh that only
+        # covered newly-matched games would leave an established library permanently frozen at whatever
+        # each game read the day it was first matched. Reuses the titles already fetched above when the
+        # fuzzy pass ran; only pays for its own fetch when every game was already matched.
+        if not titles:
+            titles = await trophy_client.trophy_titles(limit=500)
+        progress_by_np_id = {
+            title.np_communication_id: title.progress
+            for title in titles
+            if title.np_communication_id and title.progress is not None
+        }
+        progress_updated_count = await self._library_repository.refresh_trophy_progress(identity_sub, progress_by_np_id)
+
+        return TrophyMatchResult(
+            exact_matched_count=exact_matched_count,
+            fuzzy_matched_count=fuzzy_matched_count,
+            attempted_count=len(candidates),
+            progress_updated_count=progress_updated_count,
         )
 
     async def build(
@@ -188,14 +406,18 @@ class LibraryBuildOrchestrator:
         publisher_tier_rules: list[PublisherTierRule],
         size_estimates: list[SizeEstimate],
         limit: int | None = None,
+        trophy_client: TrophyClient | CachedTrophyClient | None = None,
     ) -> LibraryBuildResult:
-        """Run every stage in sequence: ingest, canonicalize, persist, enrich the delta.
+        """Run every stage in sequence: ingest, canonicalize, persist, enrich the delta, match trophies.
 
         :param identity_sub: The Curator user id (Identity's ``sub``) to build a library for.
         :param publisher_tier_rules: Every publisher-tier classification rule.
         :param size_estimates: Every install-size estimate row.
         :param limit: Maximum number of entitlements to fetch, or ``None`` (the default) to fetch every
             entitlement PSN reports -- see :meth:`~curator.psn.library_client.LibraryClient.entitlements`.
+        :param trophy_client: Passed straight through to :meth:`match_trophies` -- ``None`` (the default)
+            skips that stage entirely, which the caller should do whenever the user hasn't opted into
+            ``harvest_trophies``.
         :returns: The :class:`LibraryBuildResult` summary.
         """
         pull_id, snapshots = await self._ingestion_service.ingest(identity_sub, limit=limit)
@@ -217,6 +439,9 @@ class LibraryBuildOrchestrator:
         enrich_result = await self.enrich_delta(
             canonical_games, game_ids, publisher_tier_rules=publisher_tier_rules, size_estimates=size_estimates
         )
+        trophy_match_result = await self.match_trophies(
+            identity_sub, canonical_games, game_ids, trophy_client=trophy_client
+        )
 
         return LibraryBuildResult(
             pull_id=pull_id,
@@ -225,4 +450,8 @@ class LibraryBuildOrchestrator:
             rawg_enriched_titles=enrich_result.rawg_enriched_titles,
             opencritic_enriched_titles=enrich_result.opencritic_enriched_titles,
             opencritic_topup_incomplete=self._enrichment_service.opencritic_topup_incomplete,
+            rate_limited_provider=enrich_result.rate_limited_provider,
+            retry_after_seconds=enrich_result.retry_after_seconds,
+            remaining_game_ids=enrich_result.remaining_game_ids,
+            trophy_match=trophy_match_result,
         )

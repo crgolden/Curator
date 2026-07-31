@@ -156,6 +156,11 @@ class Entitlement:
     ``curator.catalog.canonicalization_service.canonicalize`` needs the distinction between them --
     ``game_meta_name`` carries "Bonus Content"/"Demo" suffixes for exclusion checks that
     ``title_meta_name`` (preferred for display) often strips.
+
+    PSN returns *three* distinct artwork URLs per entitlement. ``image_url`` is the resolved
+    display-preference fallback most callers want, but ``title_image_url``/``game_icon_url``/
+    ``concept_icon_url`` are each kept verbatim as well -- collapsing them loses whichever ones lost the
+    fallback, and a shareable collection page needs real artwork to be worth anything.
     """
 
     entitlement_id: str | None
@@ -163,11 +168,17 @@ class Entitlement:
     title_id: str | None = None
     concept_id: str | None = None
     product_id: str | None = None
+    sku_id: str | None = None
     package_type: str | None = None
     game_type: str | None = None
     active: bool | None = None
     active_date: str | None = None
     image_url: str | None = None
+    title_image_url: str | None = None
+    game_icon_url: str | None = None
+    concept_icon_url: str | None = None
+    is_game: bool | None = None
+    platform_ids: tuple[str, ...] = ()
     game_meta_name: str | None = None
     concept_meta_name: str | None = None
     title_meta_name: str | None = None

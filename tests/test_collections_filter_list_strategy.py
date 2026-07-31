@@ -8,7 +8,7 @@ from curator.collections.filter_list_strategy import apply_filter_list
 from curator.collections.game_candidate import GameCandidate
 
 
-def _candidate(game_id, genre="RPG", aaa_tier="AAA", composite_score=80.0, rank_score=1):
+def _candidate(game_id, genre="RPG", aaa_tier="AAA", composite_score=80.0, rank_score=1, percent_completed=None):
     return GameCandidate(
         game_id=game_id,
         title=game_id,
@@ -18,6 +18,7 @@ def _candidate(game_id, genre="RPG", aaa_tier="AAA", composite_score=80.0, rank_
         composite_score=composite_score,
         rank_score=rank_score,
         size_gb=10,
+        percent_completed=percent_completed,
     )
 
 
@@ -102,3 +103,31 @@ def test_no_capacity_limit_returns_all_matching():
     spec = CollectionSpec(kind="filter_list")
 
     assert len(apply_filter_list(candidates, spec)) == 50
+
+
+def test_min_percent_completed_excludes_below_threshold_when_available():
+    candidates = [_candidate("low", percent_completed=20), _candidate("high", percent_completed=80)]
+    spec = CollectionSpec(kind="filter_list", min_percent_completed=50)
+
+    result = apply_filter_list(candidates, spec, completion_available=True)
+
+    assert [c.game_id for c in result] == ["high"]
+
+
+def test_min_percent_completed_excludes_unmatched_games_when_available():
+    candidates = [_candidate("unmatched", percent_completed=None)]
+    spec = CollectionSpec(kind="filter_list", min_percent_completed=1)
+
+    assert apply_filter_list(candidates, spec, completion_available=True) == []
+
+
+def test_min_percent_completed_skipped_when_completion_unavailable():
+    """A PSN outage / disabled harvest_trophies / broken link must never turn a saved collection empty --
+    every candidate legitimately has percent_completed=None in that case, so the predicate is skipped
+    entirely rather than excluding everything."""
+    candidates = [_candidate("a", percent_completed=None), _candidate("b", percent_completed=None)]
+    spec = CollectionSpec(kind="filter_list", min_percent_completed=50)
+
+    result = apply_filter_list(candidates, spec, completion_available=False)
+
+    assert {c.game_id for c in result} == {"a", "b"}

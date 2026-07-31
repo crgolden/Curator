@@ -20,12 +20,16 @@ class FakeCollectionsRepository:
         self._consoles = consoles or []
         self._candidates = candidates or []
         self.list_candidates_calls: list[str | None] = []
+        self.include_inactive_calls: list[bool] = []
+        self.min_percent_completed_calls: list[int | None] = []
 
     async def list_user_consoles(self, identity_sub):
         return self._consoles
 
-    async def list_candidates(self, identity_sub, *, platform=None):
+    async def list_candidates(self, identity_sub, *, platform=None, include_inactive=False, min_percent_completed=None):
         self.list_candidates_calls.append(platform)
+        self.include_inactive_calls.append(include_inactive)
+        self.min_percent_completed_calls.append(min_percent_completed)
         return self._candidates
 
 
@@ -146,6 +150,26 @@ async def test_filter_list_does_not_require_console():
     assert result.used_gb is None
 
 
+async def test_candidate_pool_excludes_inactive_entitlements_by_default():
+    # A collection is normally built from what its owner can actually launch. The filter lives in
+    # list_candidates -- the single chokepoint -- so every strategy inherits it.
+    repository = FakeCollectionsRepository(candidates=[_row("g1")])
+    orchestrator = CollectionOrchestrator(repository)
+
+    await orchestrator.generate("sub-1", CollectionSpec(kind="filter_list"), size_estimates=[])
+
+    assert repository.include_inactive_calls == [False]
+
+
+async def test_include_inactive_reaches_the_candidate_query():
+    repository = FakeCollectionsRepository(candidates=[_row("g1")])
+    orchestrator = CollectionOrchestrator(repository)
+
+    await orchestrator.generate("sub-1", CollectionSpec(kind="filter_list", include_inactive=True), size_estimates=[])
+
+    assert repository.include_inactive_calls == [True]
+
+
 async def test_filter_list_excludes_non_matching_from_included_but_reports_excluded():
     repository = FakeCollectionsRepository(candidates=[_row("g1", genre="RPG"), _row("g2", genre="Sports")])
     orchestrator = CollectionOrchestrator(repository)
@@ -180,3 +204,46 @@ async def test_composite_score_averages_available_sources():
     result = await orchestrator.generate("sub-1", CollectionSpec(kind="filter_list"), size_estimates=[])
 
     assert result.included[0].composite_score == pytest.approx((80 + 90 + 100) / 3, rel=1e-3)
+
+
+async def test_completion_map_attaches_percent_completed_to_candidates():
+    repository = FakeCollectionsRepository(candidates=[_row("g1"), _row("g2")])
+    orchestrator = CollectionOrchestrator(repository)
+
+    result = await orchestrator.generate(
+        "sub-1", CollectionSpec(kind="filter_list"), size_estimates=[], completion_map={"g1": 75}
+    )
+
+    by_id = {c.game_id: c for c in result.included}
+    assert by_id["g1"].percent_completed == 75
+    assert by_id["g2"].percent_completed is None
+
+
+async def test_min_percent_completed_applied_when_completion_available():
+    repository = FakeCollectionsRepository(candidates=[_row("low"), _row("high")])
+    orchestrator = CollectionOrchestrator(repository)
+
+    result = await orchestrator.generate(
+        "sub-1",
+        CollectionSpec(kind="filter_list", min_percent_completed=50),
+        size_estimates=[],
+        completion_map={"low": 10, "high": 90},
+        completion_available=True,
+    )
+
+    assert [c.game_id for c in result.included] == ["high"]
+
+
+async def test_min_percent_completed_skipped_when_completion_unavailable():
+    repository = FakeCollectionsRepository(candidates=[_row("g1"), _row("g2")])
+    orchestrator = CollectionOrchestrator(repository)
+
+    result = await orchestrator.generate(
+        "sub-1",
+        CollectionSpec(kind="filter_list", min_percent_completed=50),
+        size_estimates=[],
+        completion_map=None,
+        completion_available=False,
+    )
+
+    assert {c.game_id for c in result.included} == {"g1", "g2"}

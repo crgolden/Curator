@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import uuid
+from datetime import datetime, timedelta, timezone
 from typing import Any, Protocol
 
 from azure.servicebus import ServiceBusMessage
@@ -26,11 +27,17 @@ class MessageSender(Protocol):
         """Send one message (or a batch) to the sender's queue."""
         ...
 
+    async def schedule_messages(self, messages: Any, schedule_time_utc: datetime) -> list[int]:
+        """Send one message (or a batch), deferring visibility until ``schedule_time_utc``."""
+        ...
+
 
 class QueuePublisher:
     """Publishes library-refresh and enrichment-run job messages.
 
     :param library_refresh_sender: A sender bound to the ``curator-library-refresh`` queue.
+    :param library_refresh_continuation_sender: A sender bound to the
+        ``curator-library-refresh-continuation`` queue.
     :param enrichment_sender: A sender bound to the ``curator-enrichment`` queue.
     :param job_runs_repository: Records each published run's ``queued`` status.
     """
@@ -39,10 +46,12 @@ class QueuePublisher:
         self,
         *,
         library_refresh_sender: MessageSender,
+        library_refresh_continuation_sender: MessageSender,
         enrichment_sender: MessageSender,
         job_runs_repository: JobRunsRepository,
     ) -> None:
         self._library_refresh_sender = library_refresh_sender
+        self._library_refresh_continuation_sender = library_refresh_continuation_sender
         self._enrichment_sender = enrichment_sender
         self._job_runs_repository = job_runs_repository
 
@@ -57,6 +66,42 @@ class QueuePublisher:
         body = json.dumps({"run_id": run_id, "identity_sub": identity_sub})
         await self._library_refresh_sender.send_messages(ServiceBusMessage(body))
         return run_id
+
+    async def publish_library_refresh_continuation(
+        self,
+        run_id: str,
+        identity_sub: str,
+        remaining_game_ids: list[str],
+        provider: str,
+        retry_after_seconds: float,
+    ) -> None:
+        """Reschedule the remaining games of an in-progress library refresh that just hit a provider rate
+        limit, to resume automatically once it lifts.
+
+        Reuses ``run_id`` (never mints a new one) so ``GET /library/refresh/{run_id}`` keeps working across
+        the whole retry chain. Sent via Service Bus's native scheduled-message feature -- the message stays
+        invisible to :class:`~curator.jobs.queue_consumer.QueueConsumer`'s continuation drain loop until
+        ``retry_after_seconds`` from now, so no separate polling/cron infrastructure is needed.
+
+        :param run_id: The same run id the original ``curator-library-refresh`` message carried.
+        :param identity_sub: The Curator user id (Identity's ``sub``) being refreshed.
+        :param remaining_game_ids: Every game id not yet enriched (see
+            ``curator.library.library_build_orchestrator.EnrichDeltaResult.remaining_game_ids``).
+        :param provider: Which provider rate-limited (``"rawg"``/``"opencritic"``) -- carried in the body
+            for observability even though ``retry_after_seconds`` already drives the scheduled time.
+        :param retry_after_seconds: Seconds from now the limit should have lifted.
+        """
+        body = json.dumps(
+            {
+                "run_id": run_id,
+                "identity_sub": identity_sub,
+                "remaining_game_ids": remaining_game_ids,
+                "provider": provider,
+                "retry_after_seconds": retry_after_seconds,
+            }
+        )
+        schedule_time_utc = datetime.now(timezone.utc) + timedelta(seconds=retry_after_seconds)
+        await self._library_refresh_continuation_sender.schedule_messages(ServiceBusMessage(body), schedule_time_utc)
 
     async def publish_enrichment_run(self) -> str:
         """Publish a global enrichment-catalog re-scrape job.

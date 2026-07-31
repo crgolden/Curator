@@ -114,7 +114,9 @@ async def test_save_opencritic_games_upserts_each():
 
     conn = pool.connections[0]
     assert len(conn.executed) == 2
-    assert conn.executed[0][1] == (1, "Game A", 85, "Strong", 90)
+    # Trailing None is opencritic_cache.raw -- these fixtures carry no raw payload. The column was
+    # declared in 0001_initial.sql but omitted from the INSERT until now, so it was NULL on every row.
+    assert conn.executed[0][1] == (1, "Game A", 85, "Strong", 90, None)
 
 
 async def test_get_opencritic_cursor_returns_zero_when_no_row():

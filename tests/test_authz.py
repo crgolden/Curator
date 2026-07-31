@@ -22,6 +22,7 @@ from curator.persistence.crypto import TokenCrypto
 from curator.persistence.repository import LinkRecord
 from test_routes import (
     FakeAgentFactory,
+    FakeLibraryRepository,
     FakeRepository,
     FakeTokenValidator,
     _bearer,
@@ -186,6 +187,9 @@ def test_cross_user_isolation_between_two_established_callers():
         agent_factory=agent_factory,
         token_validator=validator,
     )
+    # DELETE /psn/link clears stored trophy progress, and this test unlinks A -- without a stand-in the
+    # route reaches for a connection pool that doesn't exist in an offline test.
+    app.state.library_repository = FakeLibraryRepository()
     client = TestClient(app)
 
     # Establish A's identity. (Reverify-on-token matches emails, so A's pre-seeded link survives.)

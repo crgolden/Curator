@@ -183,16 +183,24 @@ class EnrichmentRepository:
             for game in games:
                 await cur.execute(
                     """
-                    INSERT INTO opencritic_cache (oc_game_id, name, top_critic_score, tier, percent_recommended)
-                    VALUES (%s, %s, %s, %s, %s)
+                    INSERT INTO opencritic_cache (oc_game_id, name, top_critic_score, tier, percent_recommended, raw)
+                    VALUES (%s, %s, %s, %s, %s, %s)
                     ON CONFLICT (oc_game_id) DO UPDATE SET
                         name = EXCLUDED.name,
                         top_critic_score = EXCLUDED.top_critic_score,
                         tier = EXCLUDED.tier,
                         percent_recommended = EXCLUDED.percent_recommended,
+                        raw = COALESCE(EXCLUDED.raw, opencritic_cache.raw),
                         fetched_at = now()
                     """,
-                    (game.oc_game_id, game.name, game.top_critic_score, game.tier, game.percent_recommended),
+                    (
+                        game.oc_game_id,
+                        game.name,
+                        game.top_critic_score,
+                        game.tier,
+                        game.percent_recommended,
+                        json.dumps(game.raw) if game.raw is not None else None,
+                    ),
                 )
 
     async def get_opencritic_cursor(self, platform: str) -> int:

@@ -1,4 +1,5 @@
-"""Async consumer draining ``curator-library-refresh``/``curator-enrichment``, dispatching to
+"""Async consumer draining ``curator-library-refresh``/``curator-library-refresh-continuation``/
+``curator-enrichment``, dispatching to
 ``curator.library.library_build_orchestrator``/``curator.enrichment.enrichment_service``.
 
 Started in ``create_app()``'s lifespan, runs inside the same Curator process -- no second deployable
@@ -25,12 +26,32 @@ from curator.jobs.repository import JobRunsRepository
 
 logger = logging.getLogger(__name__)
 
-LibraryRefreshHandler = Callable[[str], Coroutine[Any, Any, dict[str, Any] | None]]
-"""Processes one library-refresh job, given the target user's ``identity_sub``; returns an optional
-result-summary payload for ``JobRunsRepository.mark_succeeded``."""
+LibraryRefreshHandler = Callable[[str, str], Coroutine[Any, Any, dict[str, Any] | None]]
+"""Processes one library-refresh job, given its ``run_id`` and the target user's ``identity_sub`` --
+``run_id`` is needed so a handler that hits a rate limit can perform its own ``mark_rate_limited`` +
+republish and raise :class:`RateLimitRetryScheduled`, rather than only being able to return a result summary
+for the default ``mark_succeeded`` path. Returns an optional result-summary payload for
+``JobRunsRepository.mark_succeeded`` otherwise."""
+
+LibraryRefreshContinuationHandler = Callable[[dict[str, Any]], Coroutine[Any, Any, dict[str, Any] | None]]
+"""Processes one library-refresh continuation job, given the full message payload (``run_id``,
+``identity_sub``, ``remaining_game_ids``, ``provider``, ``retry_after_seconds``); returns an optional
+result-summary payload for ``JobRunsRepository.mark_succeeded`` -- or raises :class:`RateLimitRetryScheduled`
+if it hit the rate limit again and has already republished (see that exception's docstring)."""
 
 EnrichmentRunHandler = Callable[[], Coroutine[Any, Any, None]]
 """Processes one global enrichment-catalog re-scrape job."""
+
+
+class RateLimitRetryScheduled(Exception):
+    """Raised by a library-refresh-continuation handler that hit the rate limit again and has already
+    performed its own ``mark_rate_limited`` + republish (see
+    ``curator.app._library_refresh_continuation_handler``).
+
+    :meth:`QueueConsumer._handle` special-cases this before its generic ``except Exception`` branch: it
+    just completes the message and returns, with no additional status write or dead-letter -- both of the
+    usual post-processing side effects were already performed by the handler itself before raising this.
+    """
 
 
 class MessageReceiver(Protocol):
@@ -82,8 +103,12 @@ class QueueConsumer:
     """Drains both job queues, dispatching each message to its handler.
 
     :param library_refresh_receiver: A receiver bound to the ``curator-library-refresh`` queue.
+    :param library_refresh_continuation_receiver: A receiver bound to the
+        ``curator-library-refresh-continuation`` queue.
     :param enrichment_receiver: A receiver bound to the ``curator-enrichment`` queue.
     :param on_library_refresh: Called with ``identity_sub`` for each library-refresh message.
+    :param on_library_refresh_continuation: Called with the full payload for each library-refresh
+        continuation message.
     :param on_enrichment_run: Called for each enrichment-run message.
     :param job_runs_repository: Advances each message's ``run_id`` through ``running``/``succeeded``/
         ``failed`` around dispatch.
@@ -95,24 +120,29 @@ class QueueConsumer:
         self,
         *,
         library_refresh_receiver: MessageReceiver,
+        library_refresh_continuation_receiver: MessageReceiver,
         enrichment_receiver: MessageReceiver,
         on_library_refresh: LibraryRefreshHandler,
+        on_library_refresh_continuation: LibraryRefreshContinuationHandler,
         on_enrichment_run: EnrichmentRunHandler,
         job_runs_repository: JobRunsRepository,
         lock_renewer: LockRenewer | None = None,
     ) -> None:
         self._library_refresh_receiver = library_refresh_receiver
+        self._library_refresh_continuation_receiver = library_refresh_continuation_receiver
         self._enrichment_receiver = enrichment_receiver
         self._on_library_refresh = on_library_refresh
+        self._on_library_refresh_continuation = on_library_refresh_continuation
         self._on_enrichment_run = on_enrichment_run
         self._job_runs_repository = job_runs_repository
         self._lock_renewer = lock_renewer or NullLockRenewer()
         self._tasks: list[asyncio.Task[None]] = []
 
     def start(self) -> None:
-        """Start draining both queues as background tasks (call once, from the app's lifespan startup)."""
+        """Start draining every queue as background tasks (call once, from the app's lifespan startup)."""
         self._tasks = [
             asyncio.create_task(self.drain_library_refresh()),
+            asyncio.create_task(self.drain_library_refresh_continuation()),
             asyncio.create_task(self.drain_enrichment()),
         ]
 
@@ -144,10 +174,30 @@ class QueueConsumer:
                     message,
                     self._library_refresh_receiver,
                     required_fields=("run_id", "identity_sub"),
-                    process=lambda payload: self._on_library_refresh(payload["identity_sub"]),
+                    process=lambda payload: self._on_library_refresh(payload["run_id"], payload["identity_sub"]),
                 )
             except Exception:
                 logger.exception("Unhandled error draining a library-refresh message; continuing to drain")
+
+    async def drain_library_refresh_continuation(self) -> None:
+        """Process every message on the library-refresh continuation queue until the receiver stops
+        iterating.
+
+        See :meth:`drain_library_refresh` for why every exception here is caught rather than allowed to
+        kill this loop's background task. A message only ever becomes visible here once its scheduled
+        ``retry_after_seconds`` delay has elapsed (see
+        ``curator.jobs.queue_publisher.QueuePublisher.publish_library_refresh_continuation``).
+        """
+        async for message in self._library_refresh_continuation_receiver:
+            try:
+                await self._handle(
+                    message,
+                    self._library_refresh_continuation_receiver,
+                    required_fields=("run_id", "identity_sub", "remaining_game_ids", "provider", "retry_after_seconds"),
+                    process=self._on_library_refresh_continuation,
+                )
+            except Exception:
+                logger.exception("Unhandled error draining a library-refresh-continuation message; continuing to drain")
 
     async def drain_enrichment(self) -> None:
         """Process every message on the enrichment queue until the receiver stops iterating.
@@ -202,6 +252,11 @@ class QueueConsumer:
 
         try:
             result_summary = await process(payload)
+        except RateLimitRetryScheduled:
+            # The handler already ran mark_rate_limited + republished the remaining games itself -- no
+            # further status write, and definitely no dead-letter (this isn't a failure).
+            await receiver.complete_message(message)
+            return
         except Exception as exc:
             # logger.exception still ships a full stack trace to Elasticsearch for operator debugging, but
             # what actually reaches job_runs.error / the browser / the dead-letter reason is always the

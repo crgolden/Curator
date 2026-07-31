@@ -10,7 +10,17 @@ from fastapi.testclient import TestClient
 
 from curator.app import create_app
 from curator.persistence.crypto import TokenCrypto
-from test_routes import EMAIL, SUB, FakeRepository, FakeTokenValidator, _bearer, _claims, _make_settings, _seed_link
+from test_routes import (
+    EMAIL,
+    SUB,
+    FakeLibraryRepository,
+    FakeRepository,
+    FakeTokenValidator,
+    _bearer,
+    _claims,
+    _make_settings,
+    _seed_link,
+)
 
 
 def _build(repository=None):
@@ -19,7 +29,9 @@ def _build(repository=None):
     validator = FakeTokenValidator()
     validator.register("valid-token", _claims(sub=SUB, email=EMAIL))
     app = create_app(settings, repository=repository, token_validator=validator)
-    return TestClient(app), repository
+    library_repository = FakeLibraryRepository()
+    app.state.library_repository = library_repository
+    return TestClient(app), repository, library_repository
 
 
 def _build_linked(**harvest_flags):
@@ -30,13 +42,13 @@ def _build_linked(**harvest_flags):
 
 
 def test_get_psn_preferences_no_link_is_404():
-    client, _ = _build()
+    client, *_ = _build()
     response = client.get("/me/psn-preferences", headers=_bearer("valid-token"))
     assert response.status_code == 404
 
 
 def test_get_psn_preferences_happy_path():
-    client, _ = _build_linked(
+    client, *_ = _build_linked(
         harvest_trophies=True, harvest_identity=False, harvest_presence=True, harvest_devices=False
     )
     response = client.get("/me/psn-preferences", headers=_bearer("valid-token"))
@@ -51,7 +63,7 @@ def test_get_psn_preferences_happy_path():
 
 
 def test_get_psn_preferences_defaults_all_false():
-    client, _ = _build_linked()
+    client, *_ = _build_linked()
     response = client.get("/me/psn-preferences", headers=_bearer("valid-token"))
 
     assert response.status_code == 200
@@ -64,7 +76,7 @@ def test_get_psn_preferences_defaults_all_false():
 
 
 def test_put_psn_preferences_no_link_is_404():
-    client, _ = _build()
+    client, *_ = _build()
     response = client.put(
         "/me/psn-preferences",
         json={
@@ -79,7 +91,7 @@ def test_put_psn_preferences_no_link_is_404():
 
 
 def test_put_psn_preferences_happy_path():
-    client, repository = _build_linked()
+    client, repository, _ = _build_linked()
     body = {
         "harvest_trophies": True,
         "harvest_identity": False,
@@ -96,10 +108,55 @@ def test_put_psn_preferences_happy_path():
 
 
 def test_put_psn_preferences_requires_all_four_fields():
-    client, _ = _build_linked()
+    client, *_ = _build_linked()
     response = client.put(
         "/me/psn-preferences",
         json={"harvest_trophies": True},
         headers=_bearer("valid-token"),
     )
     assert response.status_code == 422
+
+
+def test_put_psn_preferences_turning_trophies_off_clears_stored_progress():
+    """Opting out has to erase what was already collected, not merely stop collecting.
+
+    This is the promise /privacy makes in as many words ("turning trophy harvesting back off erases those
+    numbers, it doesn't just stop refreshing them"), so it needs an assertion holding it in place -- the
+    route can silently lose this branch and every other test here would still pass.
+    """
+    client, _, library_repository = _build_linked(harvest_trophies=True)
+
+    response = client.put(
+        "/me/psn-preferences",
+        json={
+            "harvest_trophies": False,
+            "harvest_identity": False,
+            "harvest_presence": False,
+            "harvest_devices": False,
+        },
+        headers=_bearer("valid-token"),
+    )
+
+    assert response.status_code == 200
+    assert library_repository.clear_trophy_progress_calls == [SUB]
+
+
+def test_put_psn_preferences_leaving_trophies_on_does_not_clear_progress():
+    """Only the on-to-off transition erases. Re-saving preferences with trophies still on must not wipe a
+    user's progress as a side effect of toggling an unrelated flag.
+    """
+    client, _, library_repository = _build_linked(harvest_trophies=True)
+
+    response = client.put(
+        "/me/psn-preferences",
+        json={
+            "harvest_trophies": True,
+            "harvest_identity": True,
+            "harvest_presence": False,
+            "harvest_devices": False,
+        },
+        headers=_bearer("valid-token"),
+    )
+
+    assert response.status_code == 200
+    assert library_repository.clear_trophy_progress_calls == []
