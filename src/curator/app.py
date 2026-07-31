@@ -85,6 +85,7 @@ from curator.psn.trophy_client import TrophyClient, TrophyClientFactory
 from curator.psn_routes import router as psn_router
 from curator.redis_client import RedisAdapter, build_redis_client
 from curator.settings import Settings
+from curator.storage_devices_routes import router as storage_devices_router
 from curator.telemetry import configure_telemetry
 from curator.token_validation import JwtValidator, TokenValidatorLike
 from curator.trophy_routes import router as trophy_router
@@ -417,6 +418,7 @@ def create_app(
     app.include_router(library_router)
     app.include_router(collections_router)
     app.include_router(consoles_router)
+    app.include_router(storage_devices_router)
     app.include_router(trophy_router)
     app.include_router(preferences_router)
     app.include_router(identity_router)

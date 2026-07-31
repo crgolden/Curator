@@ -58,6 +58,26 @@ class UserConsole:
 
 
 @dataclass(frozen=True, slots=True)
+class StorageDevice:
+    """One row from ``storage_devices`` -- a swappable M.2/USB drive, distinct from a console's own
+    built-in capacity (:class:`UserConsole`)."""
+
+    device_id: str
+    identity_sub: str
+    console_id: str | None
+    name: str
+    kind: str  # "m2" | "usb"
+    capacity_gb: float
+    buffer_gb: float
+
+    @property
+    def effective_capacity_gb(self) -> float:
+        """The device's real usable capacity: ``capacity_gb - buffer_gb``. Mirrors
+        :attr:`UserConsole.effective_capacity_gb` -- same computation, same "one place only" rationale."""
+        return self.capacity_gb - self.buffer_gb
+
+
+@dataclass(frozen=True, slots=True)
 class CollectionDefinition:
     """One saved ``collection_definitions`` row -- a named collection.
 
@@ -177,6 +197,301 @@ class CollectionsRepository:
             )
             for row in rows
         ]
+
+    async def create_console(
+        self,
+        identity_sub: str,
+        *,
+        name: str,
+        platform: str,
+        raw_capacity_gb: float,
+        update_buffer_gb: float = 0.0,
+        routing_genres: tuple[str, ...] = (),
+        fill_order: int = 0,
+    ) -> UserConsole:
+        """Create a console. ``platform`` is fixed at creation -- a console's platform never changes, so
+        it is not one of :meth:`update_console`'s editable fields."""
+        async with self._pool.connection() as conn, conn.cursor() as cur:
+            await cur.execute(
+                """
+                INSERT INTO user_consoles
+                    (identity_sub, name, platform, raw_capacity_gb, update_buffer_gb, routing_genres, fill_order)
+                VALUES (%s, %s, %s, %s, %s, %s, %s)
+                RETURNING console_id
+                """,
+                (identity_sub, name, platform, raw_capacity_gb, update_buffer_gb, list(routing_genres), fill_order),
+            )
+            row = await cur.fetchone()
+        assert row is not None
+        return UserConsole(
+            console_id=str(row[0]),
+            name=name,
+            platform=platform,
+            raw_capacity_gb=raw_capacity_gb,
+            update_buffer_gb=update_buffer_gb,
+            routing_genres=routing_genres,
+            fill_order=fill_order,
+        )
+
+    async def get_console(self, identity_sub: str, console_id: str) -> UserConsole | None:
+        """Return one console, scoped to its owner -- ``None`` if it doesn't exist or belongs to someone
+        else, so a route can 404 either case identically rather than leaking which one it was."""
+        async with self._pool.connection() as conn, conn.cursor() as cur:
+            await cur.execute(
+                """
+                SELECT console_id, name, platform, raw_capacity_gb, update_buffer_gb, routing_genres, fill_order
+                FROM user_consoles WHERE identity_sub = %s AND console_id = %s
+                """,
+                (identity_sub, console_id),
+            )
+            row = await cur.fetchone()
+        if row is None:
+            return None
+        return UserConsole(
+            console_id=str(row[0]),
+            name=row[1],
+            platform=row[2],
+            raw_capacity_gb=float(row[3]),
+            update_buffer_gb=float(row[4]),
+            routing_genres=tuple(row[5] or ()),
+            fill_order=row[6],
+        )
+
+    async def update_console(
+        self,
+        identity_sub: str,
+        console_id: str,
+        *,
+        name: str | None = None,
+        raw_capacity_gb: float | None = None,
+        update_buffer_gb: float | None = None,
+        routing_genres: tuple[str, ...] | None = None,
+        fill_order: int | None = None,
+    ) -> UserConsole | None:
+        """Patch a console's editable fields (``None`` leaves a field unchanged). ``platform`` is not
+        editable -- see :meth:`create_console`.
+
+        :returns: The updated console, or ``None`` if it doesn't exist / belong to this user.
+        """
+        existing = await self.get_console(identity_sub, console_id)
+        if existing is None:
+            return None
+        async with self._pool.connection() as conn, conn.cursor() as cur:
+            await cur.execute(
+                """
+                UPDATE user_consoles
+                SET name = %s, raw_capacity_gb = %s, update_buffer_gb = %s, routing_genres = %s,
+                    fill_order = %s, updated_at = now()
+                WHERE identity_sub = %s AND console_id = %s
+                """,
+                (
+                    existing.name if name is None else name,
+                    existing.raw_capacity_gb if raw_capacity_gb is None else raw_capacity_gb,
+                    existing.update_buffer_gb if update_buffer_gb is None else update_buffer_gb,
+                    list(existing.routing_genres if routing_genres is None else routing_genres),
+                    existing.fill_order if fill_order is None else fill_order,
+                    identity_sub,
+                    console_id,
+                ),
+            )
+        return await self.get_console(identity_sub, console_id)
+
+    async def delete_console(self, identity_sub: str, console_id: str) -> bool:
+        """Delete a console. Cascades to its ``console_installs`` rows (``0009``); any attached
+        :class:`StorageDevice` is detached, not deleted -- a swappable drive survives its console going
+        away, matching how a physical drive isn't destroyed by unplugging it.
+
+        :returns: Whether a row was actually deleted (``False`` if it didn't exist / belong to this user).
+        """
+        async with self._pool.connection() as conn, conn.cursor() as cur:
+            await cur.execute(
+                "DELETE FROM user_consoles WHERE identity_sub = %s AND console_id = %s",
+                (identity_sub, console_id),
+            )
+            return cur.rowcount > 0
+
+    async def create_storage_device(
+        self,
+        identity_sub: str,
+        *,
+        name: str,
+        kind: str,
+        capacity_gb: float,
+        buffer_gb: float = 0.0,
+        console_id: str | None = None,
+    ) -> StorageDevice:
+        """Create a storage device, optionally already attached to a console. ``kind`` is fixed at
+        creation, matching :meth:`create_console`'s ``platform``."""
+        async with self._pool.connection() as conn, conn.cursor() as cur:
+            await cur.execute(
+                """
+                INSERT INTO storage_devices (identity_sub, console_id, name, kind, capacity_gb, buffer_gb)
+                VALUES (%s, %s, %s, %s, %s, %s)
+                RETURNING device_id
+                """,
+                (identity_sub, console_id, name, kind, capacity_gb, buffer_gb),
+            )
+            row = await cur.fetchone()
+        assert row is not None
+        return StorageDevice(
+            device_id=str(row[0]),
+            identity_sub=identity_sub,
+            console_id=console_id,
+            name=name,
+            kind=kind,
+            capacity_gb=capacity_gb,
+            buffer_gb=buffer_gb,
+        )
+
+    async def list_storage_devices(self, identity_sub: str) -> list[StorageDevice]:
+        """Return every storage device a user owns, attached or not."""
+        async with self._pool.connection() as conn, conn.cursor() as cur:
+            await cur.execute(
+                """
+                SELECT device_id, console_id, name, kind, capacity_gb, buffer_gb
+                FROM storage_devices WHERE identity_sub = %s ORDER BY name
+                """,
+                (identity_sub,),
+            )
+            rows = await cur.fetchall()
+        return [
+            StorageDevice(
+                device_id=str(row[0]),
+                identity_sub=identity_sub,
+                console_id=str(row[1]) if row[1] is not None else None,
+                name=row[2],
+                kind=row[3],
+                capacity_gb=float(row[4]),
+                buffer_gb=float(row[5]),
+            )
+            for row in rows
+        ]
+
+    async def get_storage_device(self, identity_sub: str, device_id: str) -> StorageDevice | None:
+        """Return one storage device, scoped to its owner -- ``None`` if it doesn't exist or belongs to
+        someone else."""
+        async with self._pool.connection() as conn, conn.cursor() as cur:
+            await cur.execute(
+                """
+                SELECT device_id, console_id, name, kind, capacity_gb, buffer_gb
+                FROM storage_devices WHERE identity_sub = %s AND device_id = %s
+                """,
+                (identity_sub, device_id),
+            )
+            row = await cur.fetchone()
+        if row is None:
+            return None
+        return StorageDevice(
+            device_id=str(row[0]),
+            identity_sub=identity_sub,
+            console_id=str(row[1]) if row[1] is not None else None,
+            name=row[2],
+            kind=row[3],
+            capacity_gb=float(row[4]),
+            buffer_gb=float(row[5]),
+        )
+
+    async def update_storage_device(
+        self,
+        identity_sub: str,
+        device_id: str,
+        *,
+        name: str | None = None,
+        capacity_gb: float | None = None,
+        buffer_gb: float | None = None,
+    ) -> StorageDevice | None:
+        """Patch a device's editable fields (``None`` leaves a field unchanged). Does not touch
+        ``console_id`` -- see :meth:`attach_storage_device`/:meth:`detach_storage_device`, which are the
+        only place attachment changes, so it's never an accidental side effect of an unrelated rename.
+
+        :returns: The updated device, or ``None`` if it doesn't exist / belong to this user.
+        """
+        existing = await self.get_storage_device(identity_sub, device_id)
+        if existing is None:
+            return None
+        async with self._pool.connection() as conn, conn.cursor() as cur:
+            await cur.execute(
+                """
+                UPDATE storage_devices SET name = %s, capacity_gb = %s, buffer_gb = %s, updated_at = now()
+                WHERE identity_sub = %s AND device_id = %s
+                """,
+                (
+                    existing.name if name is None else name,
+                    existing.capacity_gb if capacity_gb is None else capacity_gb,
+                    existing.buffer_gb if buffer_gb is None else buffer_gb,
+                    identity_sub,
+                    device_id,
+                ),
+            )
+        return await self.get_storage_device(identity_sub, device_id)
+
+    async def delete_storage_device(self, identity_sub: str, device_id: str) -> bool:
+        """Delete a storage device (cascades to its ``storage_device_installs`` rows).
+
+        :returns: Whether a row was actually deleted (``False`` if it didn't exist / belong to this user).
+        """
+        async with self._pool.connection() as conn, conn.cursor() as cur:
+            await cur.execute(
+                "DELETE FROM storage_devices WHERE identity_sub = %s AND device_id = %s",
+                (identity_sub, device_id),
+            )
+            return cur.rowcount > 0
+
+    async def set_storage_device_attachment(
+        self, identity_sub: str, device_id: str, console_id: str | None
+    ) -> StorageDevice | None:
+        """Attach a device to ``console_id``, or detach it if ``console_id`` is ``None``. The one and only
+        place a device's ``console_id`` changes -- callers must validate ``console_id`` belongs to this
+        user themselves (this method only scopes the device, matching how ``collections_routes`` already
+        validates a collection's ``console_id`` at its own call site rather than pushing that check into
+        every repository method that touches a console_id).
+
+        :returns: The updated device, or ``None`` if it doesn't exist / belong to this user.
+        """
+        async with self._pool.connection() as conn, conn.cursor() as cur:
+            await cur.execute(
+                """
+                UPDATE storage_devices SET console_id = %s, updated_at = now()
+                WHERE identity_sub = %s AND device_id = %s
+                """,
+                (console_id, identity_sub, device_id),
+            )
+        return await self.get_storage_device(identity_sub, device_id)
+
+    async def set_storage_device_install(self, device_id: str, game_id: str, installed: bool) -> None:
+        """Set a game's install state on a specific storage device. Mirrors :meth:`set_console_install`
+        exactly, including the same never-a-side-effect-of-a-collection-run rule."""
+        async with self._pool.connection() as conn, conn.cursor() as cur:
+            await cur.execute(
+                """
+                INSERT INTO storage_device_installs (device_id, game_id, installed, updated_at)
+                VALUES (%s, %s, %s, now())
+                ON CONFLICT (device_id, game_id) DO UPDATE SET
+                    installed = EXCLUDED.installed,
+                    updated_at = now()
+                """,
+                (device_id, game_id, installed),
+            )
+
+    async def list_installed_game_ids(self, console_id: str) -> set[str]:
+        """Return the game ids currently marked installed on a console's own built-in storage (not any
+        attached device's installs -- see :meth:`list_storage_device_installed_game_ids`)."""
+        async with self._pool.connection() as conn, conn.cursor() as cur:
+            await cur.execute(
+                "SELECT game_id FROM console_installs WHERE console_id = %s AND installed = true", (console_id,)
+            )
+            rows = await cur.fetchall()
+        return {str(row[0]) for row in rows}
+
+    async def list_storage_device_installed_game_ids(self, device_id: str) -> set[str]:
+        """Return the game ids currently marked installed on one storage device."""
+        async with self._pool.connection() as conn, conn.cursor() as cur:
+            await cur.execute(
+                "SELECT game_id FROM storage_device_installs WHERE device_id = %s AND installed = true",
+                (device_id,),
+            )
+            rows = await cur.fetchall()
+        return {str(row[0]) for row in rows}
 
     async def list_candidates(
         self,

@@ -151,6 +151,7 @@ module = [
     "test_scoring_scoring_service",
     "test_scoring_size_estimation_service",
     "test_routes",
+    "test_storage_devices_routes",
     "test_schema",
     "test_settings",
     "test_telemetry",

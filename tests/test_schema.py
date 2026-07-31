@@ -235,11 +235,13 @@ def test_deleting_a_user_cascades_every_per_user_table(db_connection, seeded_use
     delete raised a ForeignKeyViolation for any user who had ingested entitlements or saved a
     collection. 0009_fix_delete_cascades.sql added them, plus the four child-chain cascades
     (entitlement_snapshots, collection_items, console_installs, collection_runs.definition_id) that
-    would otherwise have failed one level down.
+    would otherwise have failed one level down. storage_devices/storage_device_installs (0017) follow
+    the same identity_sub-cascade, device_id-child-cascade shape from the start.
     """
     user_sub, game_id = seeded_user_and_game
     pull_id = str(uuid.uuid4())
     console_id = str(uuid.uuid4())
+    device_id = str(uuid.uuid4())
     definition_id = str(uuid.uuid4())
     run_id = str(uuid.uuid4())
     job_run_id = str(uuid.uuid4())
@@ -264,6 +266,12 @@ def test_deleting_a_user_cascades_every_per_user_table(db_connection, seeded_use
             (console_id, user_sub, "Living room PS5", "PS5", 800.0),
         )
         cur.execute("INSERT INTO console_installs (console_id, game_id) VALUES (%s, %s)", (console_id, game_id))
+        cur.execute(
+            "INSERT INTO storage_devices (device_id, identity_sub, console_id, name, kind, capacity_gb) "
+            "VALUES (%s, %s, %s, %s, %s, %s)",
+            (device_id, user_sub, console_id, "Travel drive", "usb", 500.0),
+        )
+        cur.execute("INSERT INTO storage_device_installs (device_id, game_id) VALUES (%s, %s)", (device_id, game_id))
         cur.execute(
             "INSERT INTO measured_sizes (identity_sub, game_id, platform, size_gb) VALUES (%s, %s, %s, %s)",
             (user_sub, game_id, "PS5", 50.0),
@@ -301,6 +309,7 @@ def test_deleting_a_user_cascades_every_per_user_table(db_connection, seeded_use
             "library_entries",
             "library_exclusions",
             "user_consoles",
+            "storage_devices",
             "measured_sizes",
             "collection_definitions",
             "collection_runs",
@@ -319,11 +328,51 @@ def test_deleting_a_user_cascades_every_per_user_table(db_connection, seeded_use
         assert cur.fetchone()[0] == 0
         cur.execute("SELECT count(*) FROM console_installs WHERE console_id = %s", (console_id,))
         assert cur.fetchone()[0] == 0
+        # storage_devices.identity_sub -> app_users cascades directly; storage_device_installs then
+        # cascades one level further via storage_devices.device_id, same two-hop shape as console_installs.
+        cur.execute("SELECT count(*) FROM storage_device_installs WHERE device_id = %s", (device_id,))
+        assert cur.fetchone()[0] == 0
 
         # account_action_log deliberately has NO foreign key to app_users -- it must survive deletion
         # for its retention window (GDPR Art. 17(3)(e)). See 0003_account_action_log.sql.
         cur.execute("SELECT count(*) FROM account_action_log WHERE identity_sub = %s", (user_sub,))
         assert cur.fetchone()[0] == 1
+
+
+def test_deleting_a_console_detaches_its_storage_device_rather_than_deleting_it(db_connection, seeded_user_and_game):
+    """A swappable drive is not destroyed by unplugging it -- deleting a console must SET NULL on
+    storage_devices.console_id, not cascade-delete the device (0017), matching the physical reality a
+    device outlives whatever it was plugged into.
+    """
+    user_sub, game_id = seeded_user_and_game
+    console_id = str(uuid.uuid4())
+    device_id = str(uuid.uuid4())
+
+    with db_connection.cursor() as cur:
+        cur.execute(
+            "INSERT INTO user_consoles (console_id, identity_sub, name, platform, raw_capacity_gb) "
+            "VALUES (%s, %s, %s, %s, %s)",
+            (console_id, user_sub, "Living room PS5", "PS5", 800.0),
+        )
+        cur.execute(
+            "INSERT INTO storage_devices (device_id, identity_sub, console_id, name, kind, capacity_gb) "
+            "VALUES (%s, %s, %s, %s, %s, %s)",
+            (device_id, user_sub, console_id, "Travel drive", "usb", 500.0),
+        )
+        cur.execute("INSERT INTO storage_device_installs (device_id, game_id) VALUES (%s, %s)", (device_id, game_id))
+
+        cur.execute("DELETE FROM user_consoles WHERE console_id = %s", (console_id,))
+
+        cur.execute("SELECT console_id FROM storage_devices WHERE device_id = %s", (device_id,))
+        row = cur.fetchone()
+        assert row is not None, "the device itself must survive its console being deleted"
+        assert row[0] is None, "the device must become unattached, not still point at the deleted console"
+
+        # Its installs are untouched by the console's deletion -- they belong to the device, not the console.
+        cur.execute(
+            "SELECT installed FROM storage_device_installs WHERE device_id = %s AND game_id = %s", (device_id, game_id)
+        )
+        assert cur.fetchone() is not None
 
 
 def test_library_exclusions_cascade_but_shared_catalog_survives(db_connection, seeded_user_and_game):

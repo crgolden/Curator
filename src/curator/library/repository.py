@@ -412,6 +412,26 @@ class LibraryRepository:
             ContinuationGame(game_id=str(row[0]), title=row[1], product_id=row[2], native_ps5=row[3]) for row in rows
         ]
 
+    async def is_native_ps5(self, identity_sub: str, game_id: str) -> bool | None:
+        """Whether a user's owned edition of a game is PS5-native.
+
+        Used by ``curator.consoles_routes`` to reject marking a PS5 title installed on ``kind="usb"``
+        storage -- a PS5 game physically cannot run from external USB storage; only ``kind="m2"`` and a
+        console's own built-in drive can. ``native_ps5`` lives on ``library_entries`` rather than
+        ``games`` because it depends on which edition *this user* owns, not a catalog-wide fact.
+
+        :returns: ``None`` if the user doesn't own this game at all (not a 400/404 case at the call site
+            -- an unowned game can't be installed anywhere regardless of platform, so the caller's own
+            "isn't in this user's library" handling takes precedence).
+        """
+        async with self._pool.connection() as conn, conn.cursor() as cur:
+            await cur.execute(
+                "SELECT native_ps5 FROM library_entries WHERE identity_sub = %s AND game_id = %s",
+                (identity_sub, game_id),
+            )
+            row = await cur.fetchone()
+        return None if row is None else bool(row[0])
+
     async def list_categories(self, identity_sub: str) -> list[str]:
         """Return the distinct, sorted set of categories (resolved genres) present in a user's
         library -- backs the library page's category filter dropdown.

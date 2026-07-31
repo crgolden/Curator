@@ -1,6 +1,6 @@
-"""Tests for PUT /consoles/{console_id}/installs/{game_id}, using create_app() with a fake
-CollectionsRepository -- including the ownership check that keeps one user from setting install state on
-another user's console.
+"""Tests for POST/GET/PATCH/DELETE /consoles and PUT/GET /consoles/{console_id}/installs, using
+create_app() with a fake CollectionsRepository -- including the ownership checks that keep one user from
+reading/writing another user's console.
 """
 
 from __future__ import annotations
@@ -15,15 +15,81 @@ from test_routes import FakeAgentFactory, FakeRepository, FakeTokenValidator, _b
 
 
 class FakeCollectionsRepository:
-    def __init__(self, consoles=None):
-        self._consoles = consoles or []
-        self.set_install_calls = []
+    """Tracks console ownership separately from ``UserConsole`` itself -- the real dataclass has no
+    ``identity_sub`` field (the real query already scopes by it in SQL), so this fake keeps
+    ``console_id -> identity_sub`` alongside ``console_id -> UserConsole`` rather than smuggling an extra
+    attribute onto a frozen, slotted dataclass."""
 
-    async def list_user_consoles(self, identity_sub):
-        return self._consoles
+    def __init__(self, consoles=None, owners=None):
+        self._consoles: dict[str, UserConsole] = {c.console_id: c for c in (consoles or [])}
+        self._owners: dict[str, str] = dict(owners or {c.console_id: "sub-a" for c in (consoles or [])})
+        self._installs: dict[str, dict[str, bool]] = {}
+        self.set_install_calls = []
+        self._next_id = 1
+
+    async def get_console(self, identity_sub, console_id):
+        if self._owners.get(console_id) != identity_sub:
+            return None
+        return self._consoles.get(console_id)
+
+    async def create_console(
+        self, identity_sub, *, name, platform, raw_capacity_gb, update_buffer_gb=0.0, routing_genres=(), fill_order=0
+    ):
+        console_id = f"c{self._next_id}"
+        self._next_id += 1
+        console = UserConsole(
+            console_id=console_id,
+            name=name,
+            platform=platform,
+            raw_capacity_gb=raw_capacity_gb,
+            update_buffer_gb=update_buffer_gb,
+            routing_genres=routing_genres,
+            fill_order=fill_order,
+        )
+        self._consoles[console_id] = console
+        self._owners[console_id] = identity_sub
+        return console
+
+    async def update_console(
+        self,
+        identity_sub,
+        console_id,
+        *,
+        name=None,
+        raw_capacity_gb=None,
+        update_buffer_gb=None,
+        routing_genres=None,
+        fill_order=None,
+    ):
+        existing = await self.get_console(identity_sub, console_id)
+        if existing is None:
+            return None
+        updated = UserConsole(
+            console_id=existing.console_id,
+            name=existing.name if name is None else name,
+            platform=existing.platform,
+            raw_capacity_gb=existing.raw_capacity_gb if raw_capacity_gb is None else raw_capacity_gb,
+            update_buffer_gb=existing.update_buffer_gb if update_buffer_gb is None else update_buffer_gb,
+            routing_genres=existing.routing_genres if routing_genres is None else routing_genres,
+            fill_order=existing.fill_order if fill_order is None else fill_order,
+        )
+        self._consoles[console_id] = updated
+        return updated
+
+    async def delete_console(self, identity_sub, console_id):
+        existing = await self.get_console(identity_sub, console_id)
+        if existing is None:
+            return False
+        del self._consoles[console_id]
+        del self._owners[console_id]
+        return True
 
     async def set_console_install(self, console_id, game_id, installed):
         self.set_install_calls.append((console_id, game_id, installed))
+        self._installs.setdefault(console_id, {})[game_id] = installed
+
+    async def list_installed_game_ids(self, console_id):
+        return {game_id for game_id, installed in self._installs.get(console_id, {}).items() if installed}
 
 
 def _console(console_id="c1"):
@@ -61,10 +127,106 @@ def test_requires_bearer_token():
     assert response.status_code == 401
 
 
-def test_sets_install_state_for_owned_console():
-    repo = FakeCollectionsRepository(consoles=[_console("c1")])
+def test_creates_a_console():
+    client, validator = _build()
+    validator.register("token-a", _claims(sub="sub-a"))
+
+    response = client.post(
+        "/consoles",
+        json={"name": "Living room PS5", "platform": "PS5", "raw_capacity_gb": 825.0},
+        headers=_bearer("token-a"),
+    )
+
+    assert response.status_code == 201
+    body = response.json()
+    assert body["name"] == "Living room PS5"
+    assert body["platform"] == "PS5"
+    assert body["effective_capacity_gb"] == 825.0
+
+
+def test_create_console_rejects_unknown_platform():
+    client, validator = _build()
+    validator.register("token-a", _claims(sub="sub-a"))
+
+    response = client.post(
+        "/consoles",
+        json={"name": "Odd console", "platform": "Switch", "raw_capacity_gb": 32.0},
+        headers=_bearer("token-a"),
+    )
+
+    assert response.status_code == 400
+
+
+def test_gets_one_owned_console():
+    repo = FakeCollectionsRepository(consoles=[_console("c1")], owners={"c1": "sub-a"})
     client, validator = _build(repo)
-    validator.register("token-a", _claims())
+    validator.register("token-a", _claims(sub="sub-a"))
+
+    response = client.get("/consoles/c1", headers=_bearer("token-a"))
+
+    assert response.status_code == 200
+    assert response.json()["console_id"] == "c1"
+
+
+def test_get_console_404s_for_another_users_console():
+    repo = FakeCollectionsRepository(consoles=[_console("c1")], owners={"c1": "sub-b"})
+    client, validator = _build(repo)
+    validator.register("token-a", _claims(sub="sub-a"))
+
+    response = client.get("/consoles/c1", headers=_bearer("token-a"))
+
+    assert response.status_code == 404
+
+
+def test_patches_a_console():
+    repo = FakeCollectionsRepository(consoles=[_console("c1")], owners={"c1": "sub-a"})
+    client, validator = _build(repo)
+    validator.register("token-a", _claims(sub="sub-a"))
+
+    response = client.patch("/consoles/c1", json={"name": "Renamed"}, headers=_bearer("token-a"))
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["name"] == "Renamed"
+    assert body["platform"] == "PS5"  # untouched -- platform isn't a PATCH field at all
+
+
+def test_patch_console_404s_for_another_users_console():
+    repo = FakeCollectionsRepository(consoles=[_console("c1")], owners={"c1": "sub-b"})
+    client, validator = _build(repo)
+    validator.register("token-a", _claims(sub="sub-a"))
+
+    response = client.patch("/consoles/c1", json={"name": "Renamed"}, headers=_bearer("token-a"))
+
+    assert response.status_code == 404
+
+
+def test_deletes_a_console():
+    repo = FakeCollectionsRepository(consoles=[_console("c1")], owners={"c1": "sub-a"})
+    client, validator = _build(repo)
+    validator.register("token-a", _claims(sub="sub-a"))
+
+    response = client.delete("/consoles/c1", headers=_bearer("token-a"))
+
+    assert response.status_code == 204
+    assert "c1" not in repo._consoles
+
+
+def test_delete_console_404s_for_another_users_console():
+    repo = FakeCollectionsRepository(consoles=[_console("c1")], owners={"c1": "sub-b"})
+    client, validator = _build(repo)
+    validator.register("token-a", _claims(sub="sub-a"))
+
+    response = client.delete("/consoles/c1", headers=_bearer("token-a"))
+
+    assert response.status_code == 404
+    assert "c1" in repo._consoles
+
+
+def test_sets_install_state_for_owned_console():
+    repo = FakeCollectionsRepository(consoles=[_console("c1")], owners={"c1": "sub-a"})
+    client, validator = _build(repo)
+    validator.register("token-a", _claims(sub="sub-a"))
 
     response = client.put("/consoles/c1/installs/g1", json={"installed": True}, headers=_bearer("token-a"))
 
@@ -85,8 +247,9 @@ def test_unknown_console_is_404():
 
 
 def test_cannot_set_install_state_on_another_users_console():
-    # The console belongs to sub-b's library; sub-a authenticates and tries to write to it anyway.
-    repo = FakeCollectionsRepository(consoles=[])  # empty: list_user_consoles is called with sub-a, not sub-b
+    repo = FakeCollectionsRepository(
+        consoles=[_console("other-users-console")], owners={"other-users-console": "sub-b"}
+    )
     client, validator = _build(repo)
     validator.register("token-a", _claims(sub="sub-a"))
 
@@ -96,3 +259,27 @@ def test_cannot_set_install_state_on_another_users_console():
 
     assert response.status_code == 404
     assert repo.set_install_calls == []
+
+
+def test_gets_installed_game_ids_hydrating_from_the_server():
+    repo = FakeCollectionsRepository(consoles=[_console("c1")], owners={"c1": "sub-a"})
+    client, validator = _build(repo)
+    validator.register("token-a", _claims(sub="sub-a"))
+    client.put("/consoles/c1/installs/g1", json={"installed": True}, headers=_bearer("token-a"))
+    client.put("/consoles/c1/installs/g2", json={"installed": True}, headers=_bearer("token-a"))
+    client.put("/consoles/c1/installs/g3", json={"installed": False}, headers=_bearer("token-a"))
+
+    response = client.get("/consoles/c1/installs", headers=_bearer("token-a"))
+
+    assert response.status_code == 200
+    assert sorted(response.json()["game_ids"]) == ["g1", "g2"]
+
+
+def test_get_installs_404s_for_another_users_console():
+    repo = FakeCollectionsRepository(consoles=[_console("c1")], owners={"c1": "sub-b"})
+    client, validator = _build(repo)
+    validator.register("token-a", _claims(sub="sub-a"))
+
+    response = client.get("/consoles/c1/installs", headers=_bearer("token-a"))
+
+    assert response.status_code == 404
