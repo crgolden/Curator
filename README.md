@@ -316,7 +316,11 @@ src/curator/
   catalog_routes.py                           # GET /catalog/games
   collections_routes.py                       # POST /collections/preview, POST/GET /collections,
                                                # GET/PATCH/DELETE /collections/{id}, POST /collections/{id}/runs
-  consoles_routes.py                          # PUT /consoles/{id}/installs/{gameId}
+  consoles_routes.py                          # POST/GET/PATCH/DELETE /consoles,
+                                               # GET/PUT /consoles/{id}/installs[/{gameId}]
+  storage_devices_routes.py                   # POST/GET/PATCH/DELETE /storage-devices,
+                                               # PUT/DELETE /storage-devices/{id}/attach[/{consoleId}],
+                                               # GET/PUT /storage-devices/{id}/installs[/{gameId}]
   enrichment_routes.py                        # POST /enrichment/runs (admin-only)
   profile_routes.py                             # GET/PUT /me/profile-settings, GET /users/{sub}/profile,
                                                  # POST/DELETE /users/{sub}/follow, followers/following,
@@ -371,5 +375,6 @@ tests/                     # offline pytest suite, plus the gated tests/test_sch
 
 Some capability exists in the API ahead of any UI for it, deliberately: `POST /enrichment/runs` is an
 admin-wide operation rather than a per-user feature, and the title-level trophy endpoints
-(`GET /trophies/titles` and friends) are available but only the summary is surfaced today. Consoles have
-an install-toggle route but no list/create route yet, so a console id is supplied directly.
+(`GET /trophies/titles` and friends) are available but only the summary is surfaced today. Console and
+storage-device CRUD exist, including the PS5-cannot-run-from-USB install rejection, but there is no UI
+for any of it yet — a console or device id has to be supplied directly.
