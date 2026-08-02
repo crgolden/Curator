@@ -18,6 +18,7 @@ Example (PowerShell), using a scratch database on a local/dev PostgreSQL instanc
 
 from __future__ import annotations
 
+import json
 import os
 import uuid
 from pathlib import Path
@@ -167,6 +168,29 @@ def test_exclusion_rules_rejects_invalid_rule_type(db_connection):
         )
 
 
+def test_collection_definitions_rejects_invalid_visibility(db_connection, seeded_user_and_game):
+    user_sub, _game_id = seeded_user_and_game
+    with pytest.raises(psycopg_errors.CheckViolation), db_connection.cursor() as cur:
+        cur.execute(
+            "INSERT INTO collection_definitions (identity_sub, name, kind, visibility) VALUES (%s, %s, %s, %s)",
+            (user_sub, "Bad Visibility", "filter_list", "everyone"),
+        )
+
+
+def test_collection_definitions_share_slug_is_unique(db_connection, seeded_user_and_game):
+    user_sub, _game_id = seeded_user_and_game
+    with db_connection.cursor() as cur:
+        cur.execute(
+            "INSERT INTO collection_definitions (identity_sub, name, kind, share_slug) VALUES (%s, %s, %s, %s)",
+            (user_sub, "First", "filter_list", "same-slug"),
+        )
+    with pytest.raises(psycopg_errors.UniqueViolation), db_connection.cursor() as cur:
+        cur.execute(
+            "INSERT INTO collection_definitions (identity_sub, name, kind, share_slug) VALUES (%s, %s, %s, %s)",
+            (user_sub, "Second", "filter_list", "same-slug"),
+        )
+
+
 def test_measured_sizes_retains_history_across_measured_at(db_connection, seeded_user_and_game):
     user_sub, game_id = seeded_user_and_game
     with db_connection.cursor() as cur:
@@ -285,6 +309,10 @@ def test_deleting_a_user_cascades_every_per_user_table(db_connection, seeded_use
             (definition_id, game_id, 1),
         )
         cur.execute(
+            "INSERT INTO collection_follows (follower_sub, definition_id) VALUES (%s, %s)",
+            (user_sub, definition_id),
+        )
+        cur.execute(
             "INSERT INTO collection_runs (run_id, identity_sub, definition_id, spec_snapshot) VALUES (%s, %s, %s, %s)",
             (run_id, user_sub, definition_id, "{}"),
         )
@@ -331,6 +359,10 @@ def test_deleting_a_user_cascades_every_per_user_table(db_connection, seeded_use
         # storage_devices.identity_sub -> app_users cascades directly; storage_device_installs then
         # cascades one level further via storage_devices.device_id, same two-hop shape as console_installs.
         cur.execute("SELECT count(*) FROM storage_device_installs WHERE device_id = %s", (device_id,))
+        assert cur.fetchone()[0] == 0
+        # collection_follows (0019) is another two-hop cascade: identity_sub -> collection_definitions
+        # (0009's existing cascade) -> here, via definition_id.
+        cur.execute("SELECT count(*) FROM collection_follows WHERE definition_id = %s", (definition_id,))
         assert cur.fetchone()[0] == 0
 
         # account_action_log deliberately has NO foreign key to app_users -- it must survive deletion
@@ -511,6 +543,35 @@ def test_account_action_log_accepts_followed_and_unfollowed_actions(db_connectio
     assert count == 2
 
 
+def test_account_action_log_accepts_enrichment_key_rejected_action(db_connection, seeded_user_and_game):
+    user_sub, _game_id = seeded_user_and_game
+    with db_connection.cursor() as cur:
+        cur.execute(
+            "INSERT INTO account_action_log (identity_sub, action, detail) VALUES (%s, %s, %s)",
+            (user_sub, "enrichment_key_rejected", "rawg"),
+        )
+        cur.execute("SELECT count(*) FROM account_action_log WHERE identity_sub = %s", (user_sub,))
+        (count,) = cur.fetchone()
+    assert count == 1
+
+
+def test_user_enrichment_keys_rejected_at_columns_round_trip(db_connection, seeded_user_and_game):
+    user_sub, _game_id = seeded_user_and_game
+    with db_connection.cursor() as cur:
+        cur.execute(
+            "INSERT INTO user_enrichment_keys (identity_sub, rawg_api_key_enc, rawg_added_at) VALUES (%s, %s, now())",
+            (user_sub, b"enc"),
+        )
+        cur.execute("UPDATE user_enrichment_keys SET rawg_key_rejected_at = now() WHERE identity_sub = %s", (user_sub,))
+        cur.execute(
+            "SELECT rawg_key_rejected_at, opencritic_key_rejected_at FROM user_enrichment_keys WHERE identity_sub = %s",
+            (user_sub,),
+        )
+        rawg_rejected_at, opencritic_rejected_at = cur.fetchone()
+    assert rawg_rejected_at is not None
+    assert opencritic_rejected_at is None
+
+
 def test_curation_rule_tables_are_seeded(db_connection):
     with db_connection.cursor() as cur:
         cur.execute("SELECT count(*) FROM franchise_rules")
@@ -536,3 +597,38 @@ def test_no_email_or_npsso_columns_anywhere(db_connection):
         )
         offending = cur.fetchall()
     assert offending == []
+
+
+def test_collection_definitions_filter_predicate_defaults_to_null(db_connection, seeded_user_and_game):
+    user_sub, _game_id = seeded_user_and_game
+    with db_connection.cursor() as cur:
+        cur.execute(
+            "INSERT INTO collection_definitions (identity_sub, name, kind) VALUES (%s, %s, %s)",
+            (user_sub, "Handpicked", "filter_list"),
+        )
+        cur.execute("SELECT filter_predicate FROM collection_definitions WHERE identity_sub = %s", (user_sub,))
+        (filter_predicate,) = cur.fetchone()
+    assert filter_predicate is None
+
+
+def test_collection_definitions_filter_predicate_round_trips_as_jsonb(db_connection, seeded_user_and_game):
+    """WP8: a saved collection's OR-capable predicate tree (curator.collections.filter_predicate) --
+    stored as JSONB, not normalized predicate tables, since genre_filter/min_score/aaa_tier_filter are
+    already provenance-only and never re-evaluated to decide membership (see this table's original
+    migration header comment)."""
+    user_sub, _game_id = seeded_user_and_game
+    predicate = {
+        "op": "or",
+        "nodes": [
+            {"op": "genre_in", "values": ["RPG", "Adventure"]},
+            {"op": "and", "nodes": [{"op": "genre_in", "values": ["Action"]}, {"op": "tier_in", "values": ["Indie"]}]},
+        ],
+    }
+    with db_connection.cursor() as cur:
+        cur.execute(
+            "INSERT INTO collection_definitions (identity_sub, name, kind, filter_predicate) VALUES (%s, %s, %s, %s)",
+            (user_sub, "Criterion-ish", "filter_list", json.dumps(predicate)),
+        )
+        cur.execute("SELECT filter_predicate FROM collection_definitions WHERE identity_sub = %s", (user_sub,))
+        (filter_predicate,) = cur.fetchone()
+    assert filter_predicate == predicate

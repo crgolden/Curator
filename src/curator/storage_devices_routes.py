@@ -15,7 +15,6 @@ from pydantic import BaseModel
 
 from curator.collections.repository import CollectionsRepository, StorageDevice
 from curator.deps import require_bearer
-from curator.library.repository import LibraryRepository
 from curator.token_validation import TokenClaims
 
 router = APIRouter(prefix="/storage-devices", tags=["storage-devices"])
@@ -243,27 +242,21 @@ async def set_storage_device_install(
 ) -> StorageDeviceInstallResponse:
     """Set a game's current install state on a specific storage device.
 
+    Marking a PS5-native game installed on ``kind="usb"`` storage is allowed -- Sony's own Extended
+    Storage feature lets a PS5 title be copied to USB, it just can't *run* from there without first being
+    moved back to the console's own drive or an M.2 expansion. That's exactly the case this endpoint
+    needs to represent: a game parked on USB, taking up that drive's space, not currently playable. The
+    one place this distinction *is* enforced is a ``capacity_fill`` collection run
+    (``curator.collections.collection_orchestrator``), which never proposes a USB bin for a PS5 title in
+    the first place -- a run's job is producing a playable set, not just a storage record.
+
     :returns: The state just recorded.
-    :raises fastapi.HTTPException: 404, if ``device_id`` doesn't belong to the caller. 400, if this would
-        mark a PS5-native game installed on ``kind="usb"`` storage -- a PS5 game physically cannot run
-        from external USB storage; only ``kind="m2"`` and a console's own built-in drive can. Only checked
-        when ``installed=True`` -- marking something not-installed is always allowed, so a stale kind-
-        mismatched row from before this rule (or before a device's kind is discovered to be wrong) can
-        always be cleared.
+    :raises fastapi.HTTPException: 404, if ``device_id`` doesn't belong to the caller.
     """
     collections_repository: CollectionsRepository = request.app.state.collections_repository
     device = await collections_repository.get_storage_device(claims.sub, device_id)
     if device is None:
         raise HTTPException(status_code=404, detail="Storage device not found.")
-
-    if body.installed and device.kind == "usb":
-        library_repository: LibraryRepository = request.app.state.library_repository
-        native_ps5 = await library_repository.is_native_ps5(claims.sub, game_id)
-        if native_ps5:
-            raise HTTPException(
-                status_code=400,
-                detail="PS5 games cannot run from USB storage. Use an M.2 drive or the console's own storage.",
-            )
 
     await collections_repository.set_storage_device_install(device_id, game_id, body.installed)
     return StorageDeviceInstallResponse(device_id=device_id, game_id=game_id, installed=body.installed)

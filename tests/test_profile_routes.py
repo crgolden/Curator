@@ -753,6 +753,8 @@ def test_collections_200_with_data_when_public_and_show_collections_true():
         min_score=None,
         aaa_tier_filter=None,
         sort_order=None,
+        visibility="public",  # a non-owner viewer only ever sees "public" collections (0019)
+        item_count=5,
     )
     collections_repository = FakeCollectionsRepository({SUB_A: [definition]})
     client, *_ = _build(
@@ -762,8 +764,71 @@ def test_collections_200_with_data_when_public_and_show_collections_true():
     response = client.get(f"/users/{SUB_A}/collections", headers=_bearer("token-b"))
     assert response.status_code == 200
     assert response.json() == [
-        {"definition_id": "def-1", "name": "PS5 Fill", "kind": "capacity_fill", "console_id": "console-1"}
+        {
+            "definition_id": "def-1",
+            "name": "PS5 Fill",
+            "kind": "capacity_fill",
+            "console_id": "console-1",
+            "item_count": 5,
+        }
     ]
+
+
+def test_collections_hides_unlisted_and_private_collections_from_a_non_owner():
+    # The account-wide show_collections/is_public gate is open, but per-collection visibility (0019) is
+    # a second, independent gate underneath it -- only "public" collections may appear here for anyone
+    # but the owner, share link or not.
+    repository = FakeRepository()
+    _seed_users(repository, SUB_A, SUB_B)
+    profile_repository = FakeProfileRepository()
+    profile_repository.settings[SUB_A] = ProfileSettings(
+        is_public=True, show_library=False, show_collections=True, show_trophies=False, show_identity=False
+    )
+    public_def = CollectionDefinition(
+        definition_id="def-public",
+        identity_sub=SUB_A,
+        name="Public one",
+        kind="filter_list",
+        console_id=None,
+        genre_filter=(),
+        min_score=None,
+        aaa_tier_filter=None,
+        sort_order=None,
+        visibility="public",
+    )
+    unlisted_def = CollectionDefinition(
+        definition_id="def-unlisted",
+        identity_sub=SUB_A,
+        name="Unlisted one",
+        kind="filter_list",
+        console_id=None,
+        genre_filter=(),
+        min_score=None,
+        aaa_tier_filter=None,
+        sort_order=None,
+        visibility="unlisted",
+    )
+    private_def = CollectionDefinition(
+        definition_id="def-private",
+        identity_sub=SUB_A,
+        name="Private one",
+        kind="filter_list",
+        console_id=None,
+        genre_filter=(),
+        min_score=None,
+        aaa_tier_filter=None,
+        sort_order=None,
+        visibility="private",
+    )
+    collections_repository = FakeCollectionsRepository({SUB_A: [public_def, unlisted_def, private_def]})
+    client, *_ = _build(
+        repository=repository, profile_repository=profile_repository, collections_repository=collections_repository
+    )
+
+    response = client.get(f"/users/{SUB_A}/collections", headers=_bearer("token-b"))
+
+    assert response.status_code == 200
+    assert [d["definition_id"] for d in response.json()] == ["def-public"]
 
 
 def test_collections_200_for_owner_regardless_of_flags():

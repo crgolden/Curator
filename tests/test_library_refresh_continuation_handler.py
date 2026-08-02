@@ -53,9 +53,24 @@ class FakeEnrichmentKeysRepository:
     def __init__(self, rawg_key: bytes | None = None, opencritic_key: bytes | None = None) -> None:
         self._rawg_key = rawg_key
         self._opencritic_key = opencritic_key
+        self.rejected_calls: list[tuple[str, str]] = []
 
     async def get_decrypted_key_material(self, sub):
         return self._rawg_key, self._opencritic_key
+
+    async def mark_rawg_key_rejected(self, sub):
+        self.rejected_calls.append((sub, "rawg"))
+
+    async def mark_opencritic_key_rejected(self, sub):
+        self.rejected_calls.append((sub, "opencritic"))
+
+
+class FakeAuditRepository:
+    def __init__(self):
+        self.log_calls: list[tuple[str, str, str | None]] = []
+
+    async def log(self, identity_sub, action, detail=None):
+        self.log_calls.append((identity_sub, action, detail))
 
 
 class FakeEnrichmentRepository:
@@ -153,6 +168,7 @@ class _Collaborators:
         self.enrichment_repository = FakeEnrichmentRepository()
         self.library_repository = FakeLibraryRepository(games)
         self.enrichment_keys_repository = FakeEnrichmentKeysRepository(rawg_key=rawg_key)
+        self.audit_repository = FakeAuditRepository()
         self.job_runs_repository = FakeJobRunsRepository(existing_result_summary)
         self.queue_publisher = FakeQueuePublisher()
         self.http_client = httpx.AsyncClient(
@@ -172,6 +188,7 @@ class _Collaborators:
             http_client=self.http_client,
             rate_limiter=None,
             redis_adapter=None,
+            audit_repository=self.audit_repository,
         )
 
 
@@ -289,3 +306,25 @@ async def test_rate_limited_again_marks_rate_limited_republishes_and_raises():
     assert remaining_game_ids == ["g1", "g2"]
     assert provider == "rawg"
     assert retry_after_seconds == 7200.0
+
+
+async def test_rejected_key_degrades_the_run_and_records_the_rejection():
+    games = [ContinuationGame(game_id="g1", title="Game A", product_id=None, native_ps5=True)]
+    collaborators = _setup(games=games, rawg_key=b"rawg-key", http_responder=lambda request: httpx.Response(401))
+    handle = collaborators.build_handler()
+
+    result = await handle(
+        {
+            "run_id": "r1",
+            "identity_sub": "sub-1",
+            "remaining_game_ids": ["g1"],
+            "provider": "opencritic",  # this call's own resume reason -- unrelated to the RAWG rejection
+            "retry_after_seconds": 3600.0,
+        }
+    )
+
+    # The run reaches completion (returns a result summary, doesn't raise) despite RAWG rejecting the key.
+    assert result is not None
+    assert result["rejected_providers"] == ["rawg"]
+    assert collaborators.enrichment_keys_repository.rejected_calls == [("sub-1", "rawg")]
+    assert collaborators.audit_repository.log_calls == [("sub-1", "enrichment_key_rejected", "rawg")]

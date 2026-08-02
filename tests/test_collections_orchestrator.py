@@ -6,7 +6,7 @@ import pytest
 
 from curator.collections.collection_orchestrator import CollectionOrchestrator
 from curator.collections.collection_spec import CollectionSpec
-from curator.collections.repository import RawCandidateRow, UserConsole
+from curator.collections.repository import RawCandidateRow, StorageDevice, UserConsole
 from curator.scoring.size_estimation_service import SizeEstimate
 
 _SIZE_ESTIMATES = [
@@ -16,15 +16,19 @@ _SIZE_ESTIMATES = [
 
 
 class FakeCollectionsRepository:
-    def __init__(self, consoles=None, candidates=None):
+    def __init__(self, consoles=None, candidates=None, devices=None):
         self._consoles = consoles or []
         self._candidates = candidates or []
+        self._devices = devices or []
         self.list_candidates_calls: list[str | None] = []
         self.include_inactive_calls: list[bool] = []
         self.min_percent_completed_calls: list[int | None] = []
 
     async def list_user_consoles(self, identity_sub):
         return self._consoles
+
+    async def list_storage_devices(self, identity_sub):
+        return self._devices
 
     async def list_candidates(self, identity_sub, *, platform=None, include_inactive=False, min_percent_completed=None):
         self.list_candidates_calls.append(platform)
@@ -137,6 +141,126 @@ async def test_capacity_fill_falls_back_to_estimate_when_no_measured_size():
     )
 
     assert result.included[0].size_gb == 59.0
+
+
+def _device(device_id, *, identity_sub="sub-1", console_id="c1", kind="m2", capacity_gb=500.0, buffer_gb=0.0):
+    return StorageDevice(
+        device_id=device_id,
+        identity_sub=identity_sub,
+        console_id=console_id,
+        name=device_id,
+        kind=kind,
+        capacity_gb=capacity_gb,
+        buffer_gb=buffer_gb,
+    )
+
+
+async def test_capacity_fill_spills_overflow_onto_an_attached_device():
+    console = UserConsole(
+        console_id="c1",
+        name="PS5",
+        platform="PS5",
+        raw_capacity_gb=60.0,
+        update_buffer_gb=0.0,
+        routing_genres=(),
+        fill_order=0,
+    )
+    repository = FakeCollectionsRepository(
+        consoles=[console],
+        devices=[_device("d1", kind="m2", capacity_gb=60.0)],
+        candidates=[
+            _row("a", measured_size_gb=60.0),
+            _row("b", measured_size_gb=60.0),
+        ],
+    )
+    orchestrator = CollectionOrchestrator(repository)
+
+    result = await orchestrator.generate(
+        "sub-1", CollectionSpec(kind="capacity_fill", console_id="c1"), size_estimates=[]
+    )
+
+    # Both titles fit -- one on the console's own drive, one on the attached M.2 -- because the two
+    # capacities are separate bins rather than pooled into one 120GB number a single-bin fill would use.
+    assert {c.game_id for c in result.included} == {"a", "b"}
+    assert result.excluded == ()
+    assert result.used_gb == 120.0
+
+
+async def test_capacity_fill_never_offers_usb_storage_to_a_ps5_console():
+    console = UserConsole(
+        console_id="c1",
+        name="PS5",
+        platform="PS5",
+        raw_capacity_gb=10.0,
+        update_buffer_gb=0.0,
+        routing_genres=(),
+        fill_order=0,
+    )
+    repository = FakeCollectionsRepository(
+        consoles=[console],
+        devices=[_device("d1", kind="usb", capacity_gb=1000.0)],
+        candidates=[_row("a", measured_size_gb=60.0)],
+    )
+    orchestrator = CollectionOrchestrator(repository)
+
+    result = await orchestrator.generate(
+        "sub-1", CollectionSpec(kind="capacity_fill", console_id="c1"), size_estimates=[]
+    )
+
+    # A PS5 title cannot run from USB storage -- the attached USB device's ample capacity must never
+    # absorb it, so it overflows despite the device having room to spare.
+    assert result.included == ()
+    assert [c.game_id for c in result.excluded] == ["a"]
+
+
+async def test_capacity_fill_offers_usb_storage_to_a_ps4_console():
+    console = UserConsole(
+        console_id="c1",
+        name="PS4",
+        platform="PS4",
+        raw_capacity_gb=10.0,
+        update_buffer_gb=0.0,
+        routing_genres=(),
+        fill_order=0,
+    )
+    repository = FakeCollectionsRepository(
+        consoles=[console],
+        devices=[_device("d1", kind="usb", capacity_gb=1000.0)],
+        candidates=[_row("a", measured_size_gb=60.0)],
+    )
+    orchestrator = CollectionOrchestrator(repository)
+
+    result = await orchestrator.generate(
+        "sub-1", CollectionSpec(kind="capacity_fill", console_id="c1"), size_estimates=[]
+    )
+
+    assert [c.game_id for c in result.included] == ["a"]
+    assert result.excluded == ()
+
+
+async def test_capacity_fill_ignores_devices_attached_to_a_different_console():
+    console = UserConsole(
+        console_id="c1",
+        name="PS5",
+        platform="PS5",
+        raw_capacity_gb=10.0,
+        update_buffer_gb=0.0,
+        routing_genres=(),
+        fill_order=0,
+    )
+    repository = FakeCollectionsRepository(
+        consoles=[console],
+        devices=[_device("d1", console_id="some-other-console", kind="m2", capacity_gb=1000.0)],
+        candidates=[_row("a", measured_size_gb=60.0)],
+    )
+    orchestrator = CollectionOrchestrator(repository)
+
+    result = await orchestrator.generate(
+        "sub-1", CollectionSpec(kind="capacity_fill", console_id="c1"), size_estimates=[]
+    )
+
+    assert result.included == ()
+    assert [c.game_id for c in result.excluded] == ["a"]
 
 
 async def test_filter_list_does_not_require_console():

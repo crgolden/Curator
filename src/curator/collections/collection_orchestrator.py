@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from curator.collections.capacity_fill_strategy import fill_capacity
+from curator.collections.capacity_fill_strategy import StorageBin, fill_capacity_multi_bin
 from curator.collections.collection_spec import CollectionSpec
 from curator.collections.filter_list_strategy import apply_filter_list
 from curator.collections.game_candidate import GameCandidate
@@ -65,7 +65,7 @@ class CollectionOrchestrator:
         :raises ValueError: If ``spec.kind == "capacity_fill"`` and ``console_id`` is missing or unknown.
         """
         platform: str | None = None
-        capacity_gb: float | None = None
+        bins: list[StorageBin] = []
         routing_genres: tuple[str, ...] = ()
 
         if spec.kind == "capacity_fill":
@@ -76,8 +76,23 @@ class CollectionOrchestrator:
             if console is None:
                 raise ValueError(f"Unknown console_id {spec.console_id!r} for this user")
             platform = console.platform
-            capacity_gb = console.effective_capacity_gb
             routing_genres = console.routing_genres
+
+            # Console-internal storage first, then each currently-attached device, in the order
+            # list_storage_devices already returns (by name) -- first-fit tries bins in this order.
+            # A kind="usb" device is never offered to a PS5 run at all: a PS5 title cannot run from
+            # external USB storage (curator.storage_devices_routes enforces the same rule at install
+            # time), and "not in the candidate pool" is a stronger guarantee than "filtered out after".
+            bins = [StorageBin(bin_id=console.console_id, capacity_gb=console.effective_capacity_gb)]
+            attached_devices = [
+                device
+                for device in await self._repository.list_storage_devices(identity_sub)
+                if device.console_id == spec.console_id and (platform != "PS5" or device.kind != "usb")
+            ]
+            bins.extend(
+                StorageBin(bin_id=device.device_id, capacity_gb=device.effective_capacity_gb)
+                for device in attached_devices
+            )
 
         raw_rows = await self._repository.list_candidates(
             identity_sub,
@@ -100,11 +115,16 @@ class CollectionOrchestrator:
         ]
 
         if spec.kind == "capacity_fill":
-            assert capacity_gb is not None  # guaranteed by the branch above
-            fill_result = fill_capacity(candidates, capacity_gb, routing_genres=routing_genres)
-            return CollectionResult(
-                included=fill_result.installed, excluded=fill_result.overflow, used_gb=fill_result.used_gb
+            fill_result = fill_capacity_multi_bin(candidates, bins, routing_genres=routing_genres)
+            # Flattened back into one included/used_gb pair, in bin order (console-internal first, then
+            # each attached device) -- CollectionResult's external shape is unchanged by going multi-bin
+            # internally; which specific bin a recommended game landed on isn't surfaced today (nothing
+            # downstream reads it), so this stays additive rather than a breaking response-shape change.
+            included = tuple(
+                candidate for storage_bin in bins for candidate in fill_result.installed_by_bin[storage_bin.bin_id]
             )
+            used_gb = sum(fill_result.used_gb_by_bin.values())
+            return CollectionResult(included=included, excluded=fill_result.overflow, used_gb=used_gb)
 
         filtered = apply_filter_list(candidates, spec, completion_available=completion_available)
         included_ids = {candidate.game_id for candidate in filtered}

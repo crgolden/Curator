@@ -1,6 +1,5 @@
 """Tests for POST/GET/PATCH/DELETE /storage-devices, attach/detach, and PUT/GET
-/storage-devices/{device_id}/installs, using create_app() with fake CollectionsRepository/
-LibraryRepository -- including the PS5-cannot-run-from-USB playability rejection.
+/storage-devices/{device_id}/installs, using create_app() with a fake CollectionsRepository.
 """
 
 from __future__ import annotations
@@ -103,14 +102,6 @@ class FakeCollectionsRepository:
         return {game_id for game_id, installed in self._installs.get(device_id, {}).items() if installed}
 
 
-class FakeLibraryRepository:
-    def __init__(self, native_ps5_by_game=None):
-        self._native_ps5_by_game = dict(native_ps5_by_game or {})
-
-    async def is_native_ps5(self, identity_sub, game_id):
-        return self._native_ps5_by_game.get(game_id)
-
-
 def _console(console_id="c1"):
     return UserConsole(
         console_id=console_id,
@@ -135,7 +126,7 @@ def _device(device_id="d1", identity_sub="sub-a", kind="usb", console_id=None):
     )
 
 
-def _build(collections_repository=None, library_repository=None):
+def _build(collections_repository=None):
     repository = FakeRepository()
     token_crypto = TokenCrypto(Fernet.generate_key())
     validator = FakeTokenValidator()
@@ -146,7 +137,6 @@ def _build(collections_repository=None, library_repository=None):
         agent_factory=FakeAgentFactory(repository, token_crypto),
         token_validator=validator,
         collections_repository=collections_repository or FakeCollectionsRepository(),
-        library_repository=library_repository or FakeLibraryRepository(),
     )
     return TestClient(app), validator
 
@@ -285,8 +275,7 @@ def test_detaches_a_device():
 
 def test_sets_install_state_on_an_m2_device_for_a_ps5_game():
     repo = FakeCollectionsRepository(devices=[_device("d1", "sub-a", kind="m2")])
-    library = FakeLibraryRepository(native_ps5_by_game={"g1": True})
-    client, validator = _build(repo, library)
+    client, validator = _build(repo)
     validator.register("token-a", _claims(sub="sub-a"))
 
     response = client.put("/storage-devices/d1/installs/g1", json={"installed": True}, headers=_bearer("token-a"))
@@ -295,23 +284,25 @@ def test_sets_install_state_on_an_m2_device_for_a_ps5_game():
     assert repo.set_install_calls == [("d1", "g1", True)]
 
 
-def test_rejects_installing_a_ps5_game_on_usb_storage():
+def test_allows_installing_a_ps5_game_on_usb_storage():
+    # Sony's own Extended Storage lets a PS5 title be copied to USB -- it just can't run from there
+    # until moved back to the console's own drive or an M.2 expansion (see the route's own docstring).
+    # This endpoint tracks "parked here, taking up space," not playability; a capacity_fill collection
+    # run is the one place playability is actually enforced, by never proposing a USB bin for a PS5
+    # title in the first place.
     repo = FakeCollectionsRepository(devices=[_device("d1", "sub-a", kind="usb")])
-    library = FakeLibraryRepository(native_ps5_by_game={"g1": True})
-    client, validator = _build(repo, library)
+    client, validator = _build(repo)
     validator.register("token-a", _claims(sub="sub-a"))
 
     response = client.put("/storage-devices/d1/installs/g1", json={"installed": True}, headers=_bearer("token-a"))
 
-    assert response.status_code == 400
-    assert "USB" in response.json()["detail"]
-    assert repo.set_install_calls == []
+    assert response.status_code == 200
+    assert repo.set_install_calls == [("d1", "g1", True)]
 
 
 def test_allows_installing_a_ps4_game_on_usb_storage():
     repo = FakeCollectionsRepository(devices=[_device("d1", "sub-a", kind="usb")])
-    library = FakeLibraryRepository(native_ps5_by_game={"g1": False})
-    client, validator = _build(repo, library)
+    client, validator = _build(repo)
     validator.register("token-a", _claims(sub="sub-a"))
 
     response = client.put("/storage-devices/d1/installs/g1", json={"installed": True}, headers=_bearer("token-a"))
@@ -320,11 +311,9 @@ def test_allows_installing_a_ps4_game_on_usb_storage():
     assert repo.set_install_calls == [("d1", "g1", True)]
 
 
-def test_allows_uninstalling_a_ps5_game_from_usb_storage_even_though_installing_would_be_rejected():
-    # Clearing a stale/mismatched row must always be possible -- see the route's own docstring.
+def test_allows_uninstalling_a_game_from_usb_storage():
     repo = FakeCollectionsRepository(devices=[_device("d1", "sub-a", kind="usb")])
-    library = FakeLibraryRepository(native_ps5_by_game={"g1": True})
-    client, validator = _build(repo, library)
+    client, validator = _build(repo)
     validator.register("token-a", _claims(sub="sub-a"))
 
     response = client.put("/storage-devices/d1/installs/g1", json={"installed": False}, headers=_bearer("token-a"))

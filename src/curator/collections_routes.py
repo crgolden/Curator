@@ -20,6 +20,8 @@ one path that deliberately does *not* touch membership.
 
 from __future__ import annotations
 
+from typing import Any
+
 import psycopg
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import BaseModel
@@ -27,12 +29,26 @@ from pydantic import BaseModel
 from curator.catalog.repository import CatalogRepository
 from curator.collections.collection_orchestrator import CollectionOrchestrator
 from curator.collections.collection_spec import CollectionSpec
+from curator.collections.filter_predicate import FilterPredicate, parse_predicate, predicate_to_dict
 from curator.collections.game_candidate import GameCandidate
 from curator.collections.repository import CollectionDefinition, CollectionItem, CollectionsRepository
 from curator.deps import require_bearer
 from curator.token_validation import TokenClaims
 
 router = APIRouter(prefix="/collections", tags=["collections"])
+
+
+def _parse_filter_predicate(raw: dict[str, Any] | None) -> FilterPredicate | None:
+    """Parse a request body's ``filter_predicate`` (WP8), or ``None`` if omitted.
+
+    :raises fastapi.HTTPException: 400, if ``raw`` is not a well-formed predicate tree.
+    """
+    if raw is None:
+        return None
+    try:
+        return parse_predicate(raw)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 class CollectionSpecRequest(BaseModel):
@@ -43,6 +59,9 @@ class CollectionSpecRequest(BaseModel):
     genre_filter: list[str] = []
     min_score: float | None = None
     aaa_tier_filter: str | None = None
+    #: An OR-capable predicate tree (WP8) -- see ``curator.collections.filter_predicate``'s module
+    #: docstring. Replaces ``genre_filter``/``min_score``/``aaa_tier_filter`` entirely when set.
+    filter_predicate: dict[str, Any] | None = None
     include_inactive: bool = False
     min_percent_completed: int | None = None
 
@@ -84,6 +103,7 @@ async def preview_collection(
     if spec.kind not in ("capacity_fill", "filter_list"):
         raise HTTPException(status_code=400, detail="kind must be 'capacity_fill' or 'filter_list'.")
 
+    filter_predicate = _parse_filter_predicate(spec.filter_predicate)
     orchestrator: CollectionOrchestrator = request.app.state.collection_orchestrator
     catalog_repository: CatalogRepository = request.app.state.catalog_repository
     size_estimates = await catalog_repository.get_size_estimates()
@@ -97,6 +117,7 @@ async def preview_collection(
                 genre_filter=tuple(spec.genre_filter),
                 min_score=spec.min_score,
                 aaa_tier_filter=spec.aaa_tier_filter,
+                filter_predicate=filter_predicate,
                 include_inactive=spec.include_inactive,
                 min_percent_completed=spec.min_percent_completed,
             ),
@@ -142,6 +163,7 @@ class SaveDefinitionRequest(BaseModel):
     genre_filter: list[str] = []
     min_score: float | None = None
     aaa_tier_filter: str | None = None
+    filter_predicate: dict[str, Any] | None = None
     include_inactive: bool = False
     min_percent_completed: int | None = None
 
@@ -165,8 +187,18 @@ class DefinitionResponse(BaseModel):
     genre_filter: list[str]
     min_score: float | None
     aaa_tier_filter: str | None
+    filter_predicate: dict[str, Any] | None
     include_inactive: bool
     min_percent_completed: int | None
+    visibility: str
+    share_slug: str | None
+    item_count: int
+
+
+class VisibilityUpdateRequest(BaseModel):
+    """The ``PUT /collections/{id}/visibility`` request body."""
+
+    visibility: str
 
 
 class CollectionItemResponse(BaseModel):
@@ -219,6 +251,7 @@ async def save_definition(
     if body.kind not in ("capacity_fill", "filter_list"):
         raise HTTPException(status_code=400, detail="kind must be 'capacity_fill' or 'filter_list'.")
 
+    filter_predicate = _parse_filter_predicate(body.filter_predicate)
     collections_repository: CollectionsRepository = request.app.state.collections_repository
 
     if body.console_id is not None:
@@ -239,6 +272,7 @@ async def save_definition(
                 genre_filter=tuple(body.genre_filter),
                 min_score=body.min_score,
                 aaa_tier_filter=body.aaa_tier_filter,
+                filter_predicate=filter_predicate,
                 include_inactive=body.include_inactive,
                 min_percent_completed=body.min_percent_completed,
             ),
@@ -249,22 +283,13 @@ async def save_definition(
         # collection_definitions has UNIQUE (identity_sub, name); without this the constraint error
         # surfaces to the caller as an opaque 500.
         raise HTTPException(status_code=409, detail=f"You already have a collection named {body.name!r}.") from exc
-    return _definition_to_response(
-        CollectionDefinition(
-            definition_id=definition_id,
-            identity_sub=claims.sub,
-            name=body.name,
-            kind=body.kind,
-            console_id=body.console_id,
-            genre_filter=tuple(body.genre_filter),
-            min_score=body.min_score,
-            aaa_tier_filter=body.aaa_tier_filter,
-            sort_order=None,
-            description=body.description,
-            include_inactive=body.include_inactive,
-            min_percent_completed=body.min_percent_completed,
-        )
-    )
+
+    # Re-fetched rather than built from the request body in memory: share_slug is generated inside
+    # save_definition and never returned any other way, and item_count has to reflect what was actually
+    # stored (post-deduplication), not len(body.game_ids).
+    saved = await collections_repository.get_definition(claims.sub, definition_id)
+    assert saved is not None  # just inserted, in the same identity_sub scope
+    return _definition_to_response(saved)
 
 
 def _normalize_game_ids(game_ids: list[str]) -> tuple[str, ...]:
@@ -307,6 +332,22 @@ async def list_definitions(request: Request, claims: TokenClaims = Depends(requi
     """
     collections_repository: CollectionsRepository = request.app.state.collections_repository
     definitions = await collections_repository.list_definitions(claims.sub)
+    return [_definition_to_response(definition) for definition in definitions]
+
+
+@router.get("/followed", response_model=list[DefinitionResponse])
+async def list_followed_collections(
+    request: Request, claims: TokenClaims = Depends(require_bearer)
+) -> list[DefinitionResponse]:
+    """List every collection the caller follows, most recently followed first.
+
+    Registered here, before ``@router.get("/{definition_id}")`` below, deliberately -- FastAPI/Starlette
+    matches routes in registration order, and ``{definition_id}`` would otherwise swallow a literal
+    request for ``GET /collections/followed`` (matching ``definition_id="followed"``) before this route
+    ever got a chance to run.
+    """
+    collections_repository: CollectionsRepository = request.app.state.collections_repository
+    definitions = await collections_repository.list_followed_collections(claims.sub)
     return [_definition_to_response(definition) for definition in definitions]
 
 
@@ -365,9 +406,38 @@ async def update_definition(
     except psycopg.errors.UniqueViolation as exc:
         raise HTTPException(status_code=409, detail=f"You already have a collection named {name!r}.") from exc
 
-    updated = _definition_to_response(definition).model_dump() | {"name": name, "description": description}
+    # Re-fetched rather than patched in memory: a membership replacement changes item_count, and a
+    # stale-but-plausible count from before the edit would be a worse bug than one extra query.
+    updated_definition = await collections_repository.get_definition(claims.sub, definition_id)
+    assert updated_definition is not None  # confirmed to exist and be ours moments ago
     items = await collections_repository.list_definition_items(definition_id)
-    return DefinitionDetailResponse(**updated, items=[_to_item_response(item) for item in items])
+    return DefinitionDetailResponse(
+        **_definition_to_response(updated_definition).model_dump(), items=[_to_item_response(item) for item in items]
+    )
+
+
+@router.put("/{definition_id}/visibility", response_model=DefinitionResponse)
+async def set_visibility(
+    request: Request,
+    definition_id: str,
+    body: VisibilityUpdateRequest,
+    claims: TokenClaims = Depends(require_bearer),
+) -> DefinitionResponse:
+    """Change a collection's visibility. ``share_slug`` (already assigned at creation regardless of
+    visibility -- see migration 0019) starts working as a public link the moment this leaves
+    ``"private"``, and stops the moment it's set back.
+
+    :raises fastapi.HTTPException: 404, if the collection doesn't exist or isn't the caller's own; 400, if
+        ``visibility`` isn't ``"private"``/``"unlisted"``/``"public"``.
+    """
+    if body.visibility not in ("private", "unlisted", "public"):
+        raise HTTPException(status_code=400, detail='visibility must be "private", "unlisted", or "public".')
+
+    collections_repository: CollectionsRepository = request.app.state.collections_repository
+    updated = await collections_repository.set_definition_visibility(claims.sub, definition_id, body.visibility)
+    if updated is None:
+        raise HTTPException(status_code=404, detail="Collection definition not found.")
+    return _definition_to_response(updated)
 
 
 @router.delete("/{definition_id}", status_code=204)
@@ -382,6 +452,39 @@ async def delete_definition(
     collections_repository: CollectionsRepository = request.app.state.collections_repository
     if not await collections_repository.delete_definition(claims.sub, definition_id):
         raise HTTPException(status_code=404, detail="Collection definition not found.")
+    return Response(status_code=204)
+
+
+@router.post("/{definition_id}/follow", status_code=204)
+async def follow_definition(
+    request: Request, definition_id: str, claims: TokenClaims = Depends(require_bearer)
+) -> Response:
+    """Follow a collection that isn't the caller's own.
+
+    :raises fastapi.HTTPException: 404, if the collection doesn't exist or is currently ``"private"`` --
+        the two are indistinguishable here, matching :meth:`~curator.collections.repository
+        .CollectionsRepository.get_definition_by_share_slug`'s reasoning. 400, if the caller owns it (a
+        collection you own is never something you follow).
+    """
+    collections_repository: CollectionsRepository = request.app.state.collections_repository
+    definition = await collections_repository.get_definition_any_owner(definition_id)
+    if definition is None or definition.visibility == "private":
+        raise HTTPException(status_code=404, detail="Collection definition not found.")
+    if definition.identity_sub == claims.sub:
+        raise HTTPException(status_code=400, detail="Cannot follow your own collection.")
+
+    await collections_repository.follow_collection(claims.sub, definition_id)
+    return Response(status_code=204)
+
+
+@router.delete("/{definition_id}/follow", status_code=204)
+async def unfollow_definition(
+    request: Request, definition_id: str, claims: TokenClaims = Depends(require_bearer)
+) -> Response:
+    """Unfollow a collection. Idempotent -- always 204, even if it wasn't followed, doesn't exist, or has
+    since been made private (unfollowing must always be possible, unlike following)."""
+    collections_repository: CollectionsRepository = request.app.state.collections_repository
+    await collections_repository.unfollow_collection(claims.sub, definition_id)
     return Response(status_code=204)
 
 
@@ -426,6 +529,9 @@ async def run_definition(
             "genre_filter": list(definition.genre_filter),
             "min_score": definition.min_score,
             "aaa_tier_filter": definition.aaa_tier_filter,
+            "filter_predicate": predicate_to_dict(definition.filter_predicate)
+            if definition.filter_predicate is not None
+            else None,
             "include_inactive": definition.include_inactive,
             "min_percent_completed": definition.min_percent_completed,
         },
@@ -451,8 +557,14 @@ def _definition_to_response(definition: CollectionDefinition) -> DefinitionRespo
         genre_filter=list(definition.genre_filter),
         min_score=definition.min_score,
         aaa_tier_filter=definition.aaa_tier_filter,
+        filter_predicate=predicate_to_dict(definition.filter_predicate)
+        if definition.filter_predicate is not None
+        else None,
         include_inactive=definition.include_inactive,
         min_percent_completed=definition.min_percent_completed,
+        visibility=definition.visibility,
+        share_slug=definition.share_slug,
+        item_count=definition.item_count,
     )
 
 

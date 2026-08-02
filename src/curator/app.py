@@ -31,7 +31,7 @@ from fastapi.responses import PlainTextResponse
 from psycopg_pool import AsyncConnectionPool
 from redis.asyncio import Redis
 
-from curator.audit.repository import AccountActionLogRepository
+from curator.audit.repository import ACTION_ENRICHMENT_KEY_REJECTED, AccountActionLogRepository
 from curator.catalog.franchise_assigner import fingerprint_franchise_rules
 from curator.catalog.repository import CatalogRepository
 from curator.catalog_routes import router as catalog_router
@@ -83,6 +83,7 @@ from curator.psn.social_client import SocialClient, SocialClientFactory
 from curator.psn.trophy_cache import CachedTrophyClient
 from curator.psn.trophy_client import TrophyClient, TrophyClientFactory
 from curator.psn_routes import router as psn_router
+from curator.public_collections_routes import router as public_collections_router
 from curator.redis_client import RedisAdapter, build_redis_client
 from curator.settings import Settings
 from curator.storage_devices_routes import router as storage_devices_router
@@ -242,7 +243,12 @@ def create_app(
     follow_repository = follow_repository or FollowRepository(shared_pool)
 
     owns_http_client = http_client is None
-    http_client = http_client or httpx.AsyncClient()
+    # httpx's implicit default (5s across connect/read/write/pool) is what actually killed a real library
+    # refresh in production -- request #12 of ~1045 to RAWG hit it under real load (see WP6/WP7 notes in
+    # AGENTS/Curator.md). An explicit, slightly more generous budget makes that kind of blip survivable
+    # without masking a truly hung connection forever; it does not retry -- see AGENTS/Curator.md's WP7
+    # section for why a retry-with-backoff library was evaluated and not adopted in this same pass.
+    http_client = http_client or httpx.AsyncClient(timeout=httpx.Timeout(10.0, connect=5.0))
     # Admin-only catalog-wide singleton, built from Settings.rawg_api_keys/opencritic_rapidapi_keys -- its
     # ONLY caller is _enrichment_run_handler (POST /enrichment/runs, require_admin-gated), which uses it
     # both for refresh_opencritic_cache() and, for still-unenriched catalog games, enrich_game() itself.
@@ -334,6 +340,7 @@ def create_app(
                 http_client=http_client,
                 rate_limiter=rate_limiter,
                 redis_adapter=redis_adapter,
+                audit_repository=audit_repository,
             ),
             on_library_refresh_continuation=_library_refresh_continuation_handler(
                 repository=repository,
@@ -347,6 +354,7 @@ def create_app(
                 http_client=http_client,
                 rate_limiter=rate_limiter,
                 redis_adapter=redis_adapter,
+                audit_repository=audit_repository,
             ),
             on_enrichment_run=_enrichment_run_handler(enrichment_service, catalog_repository, enrichment_repository),
             job_runs_repository=job_runs_repository,
@@ -426,6 +434,7 @@ def create_app(
     app.include_router(devices_router)
     app.include_router(enrichment_keys_router)
     app.include_router(profile_router)
+    app.include_router(public_collections_router)
 
     @app.get("/health")
     async def health() -> PlainTextResponse:
@@ -660,6 +669,7 @@ def _rate_limited_result_summary(
     rate_limited_provider: str,
     retry_after_seconds: float,
     remaining_count: int,
+    rejected_providers: list[str],
 ) -> dict[str, Any]:
     """Build the ``result_summary`` ``JobRunsRepository.mark_rate_limited`` records -- the same shape
     ``mark_succeeded`` gets, plus the three fields ``GET /library/refresh/{run_id}`` needs to answer "how
@@ -672,7 +682,39 @@ def _rate_limited_result_summary(
         "rate_limited_provider": rate_limited_provider,
         "retry_after_seconds": retry_after_seconds,
         "remaining_count": remaining_count,
+        "rejected_providers": rejected_providers,
     }
+
+
+async def _record_rejected_providers(
+    identity_sub: str,
+    rejected_providers: list[str],
+    *,
+    enrichment_keys_repository: EnrichmentKeysRepository,
+    audit_repository: AccountActionLogRepository,
+) -> None:
+    """Persist and audit-log every provider newly rejected during one enrichment call.
+
+    ``rejected_providers`` must be scoped to the single :func:`~curator.library.library_build_orchestrator
+    .enrich_games` call that just ran (never a merged/cumulative list spanning a rate-limit continuation
+    chain) -- otherwise a provider already known-rejected from an earlier message in the chain would be
+    re-marked and re-logged on every resume, which is both redundant and would pollute the audit trail with
+    one entry per continuation message instead of one per actual rejection event.
+    """
+    for provider in rejected_providers:
+        if provider == "rawg":
+            await enrichment_keys_repository.mark_rawg_key_rejected(identity_sub)
+        elif provider == "opencritic":
+            await enrichment_keys_repository.mark_opencritic_key_rejected(identity_sub)
+        try:
+            await audit_repository.log(identity_sub, ACTION_ENRICHMENT_KEY_REJECTED, provider)
+        except Exception:
+            logger.exception(
+                "Failed to write account_action_log entry (sub=%s, action=%s, provider=%s)",
+                identity_sub,
+                ACTION_ENRICHMENT_KEY_REJECTED,
+                provider,
+            )
 
 
 def _build_per_user_rawg_client(
@@ -731,6 +773,7 @@ def _library_refresh_handler(
     http_client: httpx.AsyncClient,
     rate_limiter: RateLimiter | None,
     redis_adapter: RedisAdapter | None,
+    audit_repository: AccountActionLogRepository,
 ) -> Callable[[str, str], Coroutine[Any, Any, dict[str, Any] | None]]:
     """Build the ``on_library_refresh`` handler the queue consumer dispatches to.
 
@@ -811,6 +854,14 @@ def _library_refresh_handler(
             trophy_client=trophy_client,
         )
 
+        if result.rejected_providers:
+            await _record_rejected_providers(
+                identity_sub,
+                result.rejected_providers,
+                enrichment_keys_repository=enrichment_keys_repository,
+                audit_repository=audit_repository,
+            )
+
         if result.rate_limited_provider is not None:
             assert result.retry_after_seconds is not None
             result_summary = _rate_limited_result_summary(
@@ -820,6 +871,7 @@ def _library_refresh_handler(
                 rate_limited_provider=result.rate_limited_provider,
                 retry_after_seconds=result.retry_after_seconds,
                 remaining_count=len(result.remaining_game_ids),
+                rejected_providers=result.rejected_providers,
             )
             await job_runs_repository.mark_rate_limited(run_id, result_summary)
             await queue_publisher.publish_library_refresh_continuation(
@@ -835,6 +887,7 @@ def _library_refresh_handler(
             "rawg_enriched_titles": result.rawg_enriched_titles,
             "opencritic_enriched_titles": result.opencritic_enriched_titles,
             "opencritic_topup_incomplete": result.opencritic_topup_incomplete,
+            "rejected_providers": result.rejected_providers,
         }
 
     return handle
@@ -853,6 +906,7 @@ def _library_refresh_continuation_handler(
     http_client: httpx.AsyncClient,
     rate_limiter: RateLimiter | None,
     redis_adapter: RedisAdapter | None,
+    audit_repository: AccountActionLogRepository,
 ) -> Callable[[dict[str, Any]], Coroutine[Any, Any, dict[str, Any] | None]]:
     """Build the ``on_library_refresh_continuation`` handler the queue consumer dispatches to.
 
@@ -925,6 +979,17 @@ def _library_refresh_continuation_handler(
             size_estimates=size_estimates,
         )
 
+        if enrich_result.rejected_providers:
+            # Scoped to just this call's own rejections, not the merged/cumulative list below -- see
+            # _record_rejected_providers's docstring for why re-marking an already-known rejection on every
+            # continuation resume would be wrong.
+            await _record_rejected_providers(
+                identity_sub,
+                enrich_result.rejected_providers,
+                enrichment_keys_repository=enrichment_keys_repository,
+                audit_repository=audit_repository,
+            )
+
         existing_run = await job_runs_repository.get(run_id)
         existing_summary = (existing_run.result_summary if existing_run is not None else None) or {}
         merged_rawg_titles = [*existing_summary.get("rawg_enriched_titles", []), *enrich_result.rawg_enriched_titles]
@@ -936,6 +1001,9 @@ def _library_refresh_continuation_handler(
             existing_summary.get("opencritic_topup_incomplete", False)
             or per_user_enrichment_service.opencritic_topup_incomplete
         )
+        merged_rejected_providers = sorted(
+            {*existing_summary.get("rejected_providers", []), *enrich_result.rejected_providers}
+        )
 
         if enrich_result.rate_limited_provider is not None:
             assert enrich_result.retry_after_seconds is not None
@@ -946,6 +1014,7 @@ def _library_refresh_continuation_handler(
                 rate_limited_provider=enrich_result.rate_limited_provider,
                 retry_after_seconds=enrich_result.retry_after_seconds,
                 remaining_count=len(enrich_result.remaining_game_ids),
+                rejected_providers=merged_rejected_providers,
             )
             await job_runs_repository.mark_rate_limited(run_id, result_summary)
             await queue_publisher.publish_library_refresh_continuation(
@@ -961,6 +1030,7 @@ def _library_refresh_continuation_handler(
             "rawg_enriched_titles": merged_rawg_titles,
             "opencritic_enriched_titles": merged_opencritic_titles,
             "opencritic_topup_incomplete": opencritic_topup_incomplete,
+            "rejected_providers": merged_rejected_providers,
         }
 
     return handle

@@ -33,7 +33,16 @@ class FakeCollectionsRepository:
         return self._consoles.get(console_id)
 
     async def create_console(
-        self, identity_sub, *, name, platform, raw_capacity_gb, update_buffer_gb=0.0, routing_genres=(), fill_order=0
+        self,
+        identity_sub,
+        *,
+        name,
+        platform,
+        raw_capacity_gb,
+        update_buffer_gb=0.0,
+        routing_genres=(),
+        fill_order=0,
+        model=None,
     ):
         console_id = f"c{self._next_id}"
         self._next_id += 1
@@ -45,6 +54,7 @@ class FakeCollectionsRepository:
             update_buffer_gb=update_buffer_gb,
             routing_genres=routing_genres,
             fill_order=fill_order,
+            model=model,
         )
         self._consoles[console_id] = console
         self._owners[console_id] = identity_sub
@@ -142,6 +152,61 @@ def test_creates_a_console():
     assert body["name"] == "Living room PS5"
     assert body["platform"] == "PS5"
     assert body["effective_capacity_gb"] == 825.0
+
+
+def test_creates_a_console_with_no_capacity_using_a_known_model_default():
+    client, validator = _build()
+    validator.register("token-a", _claims(sub="sub-a"))
+
+    response = client.post(
+        "/consoles",
+        json={"name": "Living room PS5", "platform": "PS5", "model": "PS5 Digital Edition"},
+        headers=_bearer("token-a"),
+    )
+
+    assert response.status_code == 201
+    body = response.json()
+    assert body["raw_capacity_gb"] == 667.0
+    assert body["capacity_is_default"] is True
+
+
+def test_creates_a_console_with_no_capacity_and_no_model_using_the_platform_fallback():
+    client, validator = _build()
+    validator.register("token-a", _claims(sub="sub-a"))
+
+    response = client.post("/consoles", json={"name": "Mystery PS5", "platform": "PS5"}, headers=_bearer("token-a"))
+
+    assert response.status_code == 201
+    body = response.json()
+    assert body["raw_capacity_gb"] == 667.0
+    assert body["capacity_is_default"] is True
+    assert body["model"] is None
+
+
+def test_creates_a_console_with_explicit_capacity_is_never_flagged_as_default():
+    client, validator = _build()
+    validator.register("token-a", _claims(sub="sub-a"))
+
+    response = client.post(
+        "/consoles",
+        json={"name": "Measured PS5", "platform": "PS5", "raw_capacity_gb": 700.0},
+        headers=_bearer("token-a"),
+    )
+
+    assert response.status_code == 201
+    body = response.json()
+    assert body["raw_capacity_gb"] == 700.0
+    assert body["capacity_is_default"] is False
+
+
+def test_get_console_never_reports_capacity_as_default_even_if_it_was_originally():
+    repo = FakeCollectionsRepository(consoles=[_console("c1")], owners={"c1": "sub-a"})
+    client, validator = _build(repo)
+    validator.register("token-a", _claims(sub="sub-a"))
+
+    response = client.get("/consoles/c1", headers=_bearer("token-a"))
+
+    assert response.json()["capacity_is_default"] is False
 
 
 def test_create_console_rejects_unknown_platform():

@@ -8,7 +8,7 @@ suite) end-to-end against fake repositories/clients, rather than faking canonica
 from __future__ import annotations
 
 from curator.catalog.canonicalization_service import EntitlementSnapshot
-from curator.enrichment.enrichment_service import EnrichmentRateLimitError, EnrichmentResult
+from curator.enrichment.enrichment_service import EnrichmentAuthError, EnrichmentRateLimitError, EnrichmentResult
 from curator.library.library_build_orchestrator import LibraryBuildOrchestrator
 
 
@@ -75,16 +75,41 @@ class FakeEnrichmentService:
         self.opencritic_topup_incomplete = False
         self._rate_limit_on_title: str | None = None
         self._rate_limit_error: EnrichmentRateLimitError | None = None
+        self._auth_reject_on_title: str | None = None
+        self._auth_error: EnrichmentAuthError | None = None
+        self._keep_rejecting_after_disable = False
+        self.disabled_providers: list[str] = []
 
     def rate_limit_on(self, title: str, error: EnrichmentRateLimitError) -> None:
         self._rate_limit_on_title = title
         self._rate_limit_error = error
+
+    def reject_with_auth_error(
+        self, title: str, error: EnrichmentAuthError, *, keep_rejecting_after_disable: bool = False
+    ) -> None:
+        """Simulate a rejected key on ``title``. By default, stops rejecting once ``disable_provider`` is
+        called for the error's provider -- mirroring the real EnrichmentService, whose disabled client can
+        no longer raise the same error. ``keep_rejecting_after_disable=True`` simulates a hypothetical bug
+        where the provider keeps rejecting anyway, to exercise the orchestrator's loop-guard branch.
+        """
+        self._auth_reject_on_title = title
+        self._auth_error = error
+        self._keep_rejecting_after_disable = keep_rejecting_after_disable
+
+    def disable_provider(self, provider: str) -> None:
+        self.disabled_providers.append(provider)
 
     async def enrich_game(self, title, *, product_id, is_ps5, genre_priorities, publisher_tier_rules, size_estimates):
         self.enrich_calls.append(title)
         if title == self._rate_limit_on_title:
             assert self._rate_limit_error is not None
             raise self._rate_limit_error
+        if (
+            title == self._auth_reject_on_title
+            and self._auth_error is not None
+            and (self._keep_rejecting_after_disable or self._auth_error.provider not in self.disabled_providers)
+        ):
+            raise self._auth_error
         return self._result, self._size
 
 
@@ -334,6 +359,47 @@ async def test_enrich_delta_no_rate_limit_leaves_new_fields_at_their_defaults():
     assert result.rate_limited_provider is None
     assert result.retry_after_seconds is None
     assert result.remaining_game_ids == []
+    assert result.rejected_providers == []
+
+
+async def test_enrich_delta_degrades_instead_of_failing_on_a_rejected_key():
+    enrichment_service = FakeEnrichmentService()
+    enrichment_service.reject_with_auth_error("Game B", EnrichmentAuthError("rawg", "key rejected"))
+    orchestrator = _orchestrator(enrichment_service=enrichment_service)
+    games = [_fake_canonical("Game A"), _fake_canonical("Game B"), _fake_canonical("Game C")]
+
+    result = await orchestrator.enrich_delta(
+        games, ["game-1", "game-2", "game-3"], publisher_tier_rules=[], size_estimates=[]
+    )
+
+    # The run reaches completion -- a rejected key degrades the provider, it does not abort the run.
+    assert result.enriched_count == 3
+    assert result.rejected_providers == ["rawg"]
+    assert enrichment_service.disabled_providers == ["rawg"]
+    # Game B is attempted, rejected, then retried once its provider is disabled -- everything after it
+    # (Game C) is still reached, unlike a rate limit which stops iteration entirely.
+    assert enrichment_service.enrich_calls == ["Game A", "Game B", "Game B", "Game C"]
+
+
+async def test_enrich_delta_stops_rather_than_looping_if_the_same_provider_keeps_rejecting():
+    enrichment_service = FakeEnrichmentService()
+    enrichment_service.reject_with_auth_error(
+        "Game B", EnrichmentAuthError("rawg", "key rejected"), keep_rejecting_after_disable=True
+    )
+    orchestrator = _orchestrator(enrichment_service=enrichment_service)
+    games = [_fake_canonical("Game A"), _fake_canonical("Game B"), _fake_canonical("Game C")]
+
+    result = await orchestrator.enrich_delta(
+        games, ["game-1", "game-2", "game-3"], publisher_tier_rules=[], size_estimates=[]
+    )
+
+    # Game A succeeds; Game B's provider is disabled once, then the loop-guard stops retrying it a second
+    # time (a real disable_provider() can never let this recur -- this is insurance against a logic error,
+    # not an expected path) instead of spinning forever. Game C is never reached.
+    assert result.enriched_count == 1
+    assert result.rejected_providers == ["rawg"]
+    assert enrichment_service.disabled_providers == ["rawg"]
+    assert enrichment_service.enrich_calls == ["Game A", "Game B", "Game B"]
 
 
 async def test_build_runs_full_pipeline_end_to_end():
@@ -363,6 +429,20 @@ async def test_build_threads_rate_limit_fields_through_from_enrich_delta():
     assert result.rate_limited_provider == "opencritic"
     assert result.retry_after_seconds == 45.0
     assert result.remaining_game_ids == ["game-1"]
+
+
+async def test_build_threads_rejected_providers_through_from_enrich_delta():
+    enrichment_service = FakeEnrichmentService()
+    enrichment_service.reject_with_auth_error("God of War", EnrichmentAuthError("rawg", "key rejected"))
+    ingestion_service = FakeIngestionService(pull_id="pull-1", snapshots=[_snapshot()])
+    orchestrator = _orchestrator(ingestion_service=ingestion_service, enrichment_service=enrichment_service)
+
+    result = await orchestrator.build("sub-1", publisher_tier_rules=[], size_estimates=[])
+
+    assert result.rejected_providers == ["rawg"]
+    assert result.rate_limited_provider is None
+    # The run still reaches "succeeded" (build() doesn't raise) -- exactly the point of degrading.
+    assert result.games_enriched == 1
 
 
 def _fake_canonical(title, winning_title_id=None):

@@ -5,6 +5,7 @@ FakeEnrichmentKeysRepository, same DI-seam style as test_preferences_routes.py.
 from __future__ import annotations
 
 import logging
+from datetime import datetime, timezone
 
 import httpx
 from cryptography.fernet import Fernet
@@ -24,6 +25,8 @@ from test_routes import (
     _make_settings,
 )
 
+_FIXED_REJECTED_AT = datetime(2026, 3, 1, tzinfo=timezone.utc)
+
 
 class FakeEnrichmentKeysRepository:
     """Stands in for EnrichmentKeysRepository: in-memory dict of sub -> (rawg_enc, oc_enc), with call
@@ -32,6 +35,8 @@ class FakeEnrichmentKeysRepository:
     def __init__(self) -> None:
         self.rawg: dict[str, bytes] = {}
         self.opencritic: dict[str, bytes] = {}
+        self.rawg_rejected_at: dict[str, datetime] = {}
+        self.opencritic_rejected_at: dict[str, datetime] = {}
         self.upsert_rawg_calls: list[tuple[str, bytes]] = []
         self.upsert_opencritic_calls: list[tuple[str, bytes]] = []
         self.delete_rawg_calls: list[str] = []
@@ -43,17 +48,27 @@ class FakeEnrichmentKeysRepository:
             opencritic_configured=sub in self.opencritic,
             rawg_added_at=None,
             opencritic_added_at=None,
+            rawg_key_rejected_at=self.rawg_rejected_at.get(sub),
+            opencritic_key_rejected_at=self.opencritic_rejected_at.get(sub),
         )
+
+    async def mark_rawg_key_rejected(self, sub: str) -> None:
+        self.rawg_rejected_at[sub] = _FIXED_REJECTED_AT
+
+    async def mark_opencritic_key_rejected(self, sub: str) -> None:
+        self.opencritic_rejected_at[sub] = _FIXED_REJECTED_AT
 
     async def get_decrypted_key_material(self, sub: str):
         return self.rawg.get(sub), self.opencritic.get(sub)
 
     async def upsert_rawg_key(self, sub: str, key_enc: bytes) -> None:
         self.rawg[sub] = key_enc
+        self.rawg_rejected_at.pop(sub, None)
         self.upsert_rawg_calls.append((sub, key_enc))
 
     async def upsert_opencritic_key(self, sub: str, key_enc: bytes) -> None:
         self.opencritic[sub] = key_enc
+        self.opencritic_rejected_at.pop(sub, None)
         self.upsert_opencritic_calls.append((sub, key_enc))
 
     async def delete_rawg_key(self, sub: str) -> None:
@@ -105,7 +120,34 @@ def test_get_status_never_404s_with_no_keys():
         "opencritic_configured": False,
         "rawg_added_at": None,
         "opencritic_added_at": None,
+        "rawg_key_rejected_at": None,
+        "opencritic_key_rejected_at": None,
     }
+
+
+def test_get_status_surfaces_a_rejected_rawg_key_even_though_it_is_still_configured():
+    client, repo, _ = _build()
+    client.put("/me/enrichment-keys/rawg", json={"api_key": "my-rawg-key"}, headers=_bearer("valid-token"))
+    repo.rawg_rejected_at[SUB] = _FIXED_REJECTED_AT
+
+    status = client.get("/me/enrichment-keys", headers=_bearer("valid-token")).json()
+
+    # Still configured -- the key exists -- but flagged as no longer working, so /psn can distinguish a
+    # healthy key from one that needs to be re-entered.
+    assert status["rawg_configured"] is True
+    assert status["rawg_key_rejected_at"] == _FIXED_REJECTED_AT.isoformat()
+    assert status["opencritic_key_rejected_at"] is None
+
+
+def test_re_saving_a_rawg_key_clears_a_prior_rejection():
+    client, repo, _ = _build()
+    client.put("/me/enrichment-keys/rawg", json={"api_key": "old-key"}, headers=_bearer("valid-token"))
+    repo.rawg_rejected_at[SUB] = _FIXED_REJECTED_AT
+
+    client.put("/me/enrichment-keys/rawg", json={"api_key": "new-key"}, headers=_bearer("valid-token"))
+
+    status = client.get("/me/enrichment-keys", headers=_bearer("valid-token")).json()
+    assert status["rawg_key_rejected_at"] is None
 
 
 def test_put_rawg_key_encrypts_and_stores_then_status_reflects_it():

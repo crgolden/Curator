@@ -52,7 +52,9 @@ def test_no_rules_matching_indie_for_nonempty_publisher():
 
 
 def test_fingerprint_is_stable_for_the_same_rules():
-    assert fingerprint_publisher_tier_rules(_RULES) == fingerprint_publisher_tier_rules(_RULES)
+    first_call = fingerprint_publisher_tier_rules(_RULES)
+    second_call = fingerprint_publisher_tier_rules(_RULES)
+    assert first_call == second_call
 
 
 def test_fingerprint_is_independent_of_input_list_order():

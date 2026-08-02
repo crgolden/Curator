@@ -284,7 +284,9 @@ def test_rule_order_is_independent_of_input_list_order():
 
 
 def test_fingerprint_is_stable_for_the_same_rules():
-    assert fingerprint_franchise_rules(_RULES) == fingerprint_franchise_rules(_RULES)
+    first_call = fingerprint_franchise_rules(_RULES)
+    second_call = fingerprint_franchise_rules(_RULES)
+    assert first_call == second_call
 
 
 def test_fingerprint_is_independent_of_input_list_order():

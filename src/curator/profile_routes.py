@@ -156,12 +156,18 @@ class ProfileLibraryPageResponse(BaseModel):
 
 class ProfileDefinitionResponse(BaseModel):
     """One entry of ``GET /users/{sub}/collections`` -- same shape as ``curator.collections_routes
-    .DefinitionResponse``, the caller's-own equivalent, minus the fields only the owner needs to re-run it."""
+    .DefinitionResponse``, the caller's-own equivalent, minus the fields only the owner needs to re-run it.
+
+    ``item_count`` (0019) is what this response was missing before: a viewer previously had no way to
+    tell what was even in a listed collection short of opening ``GET /public/collections/{share_slug}``
+    for each one -- name and kind alone don't say whether it holds 3 games or 300.
+    """
 
     definition_id: str
     name: str
     kind: str
     console_id: str | None
+    item_count: int
 
 
 @router.get("/me/profile-settings", response_model=ProfileSettingsResponse)
@@ -492,6 +498,12 @@ async def get_user_collections(
 ) -> list[ProfileDefinitionResponse]:
     """Return ``sub``'s saved collection definitions, read-only.
 
+    A non-owner viewer only ever sees ``visibility == "public"`` collections here (0019) -- this is a
+    *second*, per-collection gate underneath the account-wide ``show_collections``/``is_public`` one
+    ``_require_visible_section`` already enforces; a collection marked ``"private"`` or ``"unlisted"``
+    must never appear in this list for anyone but its owner, share link or not. The owner viewing their
+    own profile still sees everything, matching every other section's owner-always-sees-own-data rule.
+
     :raises fastapi.HTTPException: 404, if ``sub`` has no ``app_users`` row. 403, unless the caller is the
         owner or the target's profile is both public and ``show_collections``.
     """
@@ -499,14 +511,17 @@ async def get_user_collections(
 
     collections_repository: CollectionsRepository = request.app.state.collections_repository
     definitions = await collections_repository.list_definitions(sub)
+    viewer_is_owner = claims.sub == sub
     return [
         ProfileDefinitionResponse(
             definition_id=definition.definition_id,
             name=definition.name,
             kind=definition.kind,
             console_id=definition.console_id,
+            item_count=definition.item_count,
         )
         for definition in definitions
+        if viewer_is_owner or definition.visibility == "public"
     ]
 
 

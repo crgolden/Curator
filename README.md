@@ -6,7 +6,9 @@
 
 A multi-user PlayStation library curation API. Every user authenticates elsewhere — through Duende
 IdentityServer — and identifies themselves to Curator with a bearer access token; Curator itself is a
-pure **JWT Bearer resource server**, matching how the workspace's `Directory` API interacts with Identity.
+**JWT Bearer resource server**, matching how the workspace's `Directory` API interacts with Identity, with
+exactly one deliberate exception: `GET /public/collections/{shareSlug}` is anonymous, so a collection's
+owner can hand out a link that works for someone who has never signed in to Curator at all.
 Once authenticated, a user links their PSN account through Curator's own in-repo `curator.psn` client
 (`curator.psn.session.PsnSession` and friends), and Curator ingests their entitlements, merges them into a
 shared game catalog, enriches that catalog (RAWG, OpenCritic, PS Store), and derives a per-user library,
@@ -315,7 +317,10 @@ src/curator/
   library_routes.py                           # GET /library, GET /library/categories, POST/GET /library/refresh
   catalog_routes.py                           # GET /catalog/games
   collections_routes.py                       # POST /collections/preview, POST/GET /collections,
-                                               # GET/PATCH/DELETE /collections/{id}, POST /collections/{id}/runs
+                                               # GET/PATCH/DELETE /collections/{id}, POST /collections/{id}/runs,
+                                               # PUT /collections/{id}/visibility, POST/DELETE /collections/{id}/follow,
+                                               # GET /collections/followed
+  public_collections_routes.py                # GET /public/collections/{shareSlug} -- anonymous, no bearer token
   consoles_routes.py                          # POST/GET/PATCH/DELETE /consoles,
                                                # GET/PUT /consoles/{id}/installs[/{gameId}]
   storage_devices_routes.py                   # POST/GET/PATCH/DELETE /storage-devices,
@@ -376,5 +381,10 @@ tests/                     # offline pytest suite, plus the gated tests/test_sch
 Some capability exists in the API ahead of any UI for it, deliberately: `POST /enrichment/runs` is an
 admin-wide operation rather than a per-user feature, and the title-level trophy endpoints
 (`GET /trophies/titles` and friends) are available but only the summary is surfaced today. Console and
-storage-device CRUD exist, including the PS5-cannot-run-from-USB install rejection, but there is no UI
-for any of it yet — a console or device id has to be supplied directly.
+storage-device CRUD have a Librarian UI (create/edit/delete, attach/detach); marking a game installed is
+covered for a console's own built-in storage, but a per-storage-device install toggle doesn't have a page
+yet even though the route exists. Marking a PS5 title installed on `kind="usb"` storage is allowed —
+Sony's own Extended Storage lets a PS5 game be copied to USB, it just can't run from there until moved
+back to the console's own drive or an M.2 expansion. A `capacity_fill` collection run is the one place
+that distinction is enforced: it never offers a USB bin to a PS5 run in the first place, since a run's job
+is producing a playable set.

@@ -43,12 +43,20 @@ Provider = Literal["rawg", "opencritic"]
 
 
 class EnrichmentKeyStatusResponse(BaseModel):
-    """The ``GET /me/enrichment-keys`` response body."""
+    """The ``GET /me/enrichment-keys`` response body.
+
+    ``rawg_key_rejected_at``/``opencritic_key_rejected_at`` are set when a library refresh reported that
+    provider's key as rejected (401/403) -- see ``db/migrations/0020_enrichment_key_rejection.sql``. A
+    provider can be both ``*_configured`` and rejected at once: the key still exists, it just no longer
+    works. Cleared automatically by a successful ``PUT`` for that provider.
+    """
 
     rawg_configured: bool
     opencritic_configured: bool
     rawg_added_at: str | None
     opencritic_added_at: str | None
+    rawg_key_rejected_at: str | None = None
+    opencritic_key_rejected_at: str | None = None
 
 
 class SetEnrichmentKeyRequest(BaseModel):
@@ -72,6 +80,12 @@ async def get_enrichment_key_status(
         opencritic_configured=status.opencritic_configured,
         rawg_added_at=status.rawg_added_at.isoformat() if status.rawg_added_at is not None else None,
         opencritic_added_at=status.opencritic_added_at.isoformat() if status.opencritic_added_at is not None else None,
+        rawg_key_rejected_at=(
+            status.rawg_key_rejected_at.isoformat() if status.rawg_key_rejected_at is not None else None
+        ),
+        opencritic_key_rejected_at=(
+            status.opencritic_key_rejected_at.isoformat() if status.opencritic_key_rejected_at is not None else None
+        ),
     )
 
 

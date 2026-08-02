@@ -64,12 +64,15 @@ class FakeOpenCriticClient:
 
 
 class FakeCatalogClient:
-    def __init__(self, concept=None):
+    def __init__(self, concept=None, raises=None):
         self._concept = concept
+        self._raises = raises
         self.title_concept_calls: list[str] = []
 
     async def title_concept(self, title_id, platform="PS5"):
         self.title_concept_calls.append(title_id)
+        if self._raises:
+            raise self._raises
         return self._concept
 
 
@@ -582,6 +585,56 @@ async def test_enrich_game_opencritic_topup_timeout_sets_incomplete_flag_not_a_r
 
     assert result.opencritic_enriched is False
     assert service.opencritic_topup_incomplete is True
+
+
+async def test_enrich_game_psn_catalog_timeout_skips_that_games_psn_signal():
+    # httpx.ReadTimeout is not something CatalogClient wraps into a Curator-specific error -- exercises
+    # the same transient-network except httpx.HTTPError handling already applied to RAWG/OpenCritic above.
+    catalog_client = FakeCatalogClient(raises=httpx.ReadTimeout("timed out"))
+    repository = FakeEnrichmentRepository()
+    service = _service(catalog_client=catalog_client, repository=repository)
+
+    result, _ = await service.enrich_game(
+        "Some Game",
+        product_id="p1",
+        is_ps5=True,
+        genre_priorities=_GENRE_PRIORITIES,
+        publisher_tier_rules=_PUBLISHER_RULES,
+        size_estimates=_SIZE_ESTIMATES,
+    )
+
+    assert result.psn_rating is None
+    assert catalog_client.title_concept_calls == ["p1"]
+    assert repository.psn_cache == {}  # a transient failure is never cached as a false negative
+
+
+async def test_disable_provider_makes_rawg_behave_as_not_configured():
+    rawg_client = FakeRawgClient()
+    service = _service(rawg_client=rawg_client)
+    assert service.has_rawg_client is True
+
+    service.disable_provider("rawg")
+
+    assert service.has_rawg_client is False
+    result, _ = await service.enrich_game(
+        "Some Game",
+        product_id=None,
+        is_ps5=True,
+        genre_priorities=_GENRE_PRIORITIES,
+        publisher_tier_rules=_PUBLISHER_RULES,
+        size_estimates=_SIZE_ESTIMATES,
+    )
+    assert result.rawg_enriched is False
+    assert rawg_client.search_calls == []  # never called at all once disabled
+
+
+async def test_disable_provider_makes_opencritic_behave_as_not_configured():
+    service = _service()
+    assert service.has_opencritic_client is True
+
+    service.disable_provider("opencritic")
+
+    assert service.has_opencritic_client is False
 
 
 async def test_enrich_game_opencritic_rate_limit_raises_enrichment_rate_limit_error():

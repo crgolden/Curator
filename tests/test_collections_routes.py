@@ -10,6 +10,7 @@ from fastapi.testclient import TestClient
 
 from curator.app import create_app
 from curator.collections.collection_orchestrator import CollectionResult
+from curator.collections.filter_predicate import And, GenreIn, Or, ScoreAtLeast, TierIn
 from curator.collections.game_candidate import GameCandidate
 from curator.collections.repository import CollectionDefinition, CollectionItem, UserConsole
 from curator.persistence.crypto import TokenCrypto
@@ -57,6 +58,7 @@ class FakeCollectionsRepository:
         self.malformed_game_ids = set(malformed_game_ids)
         self._candidates = list(candidates)
         self._next_id = 1
+        self.collection_follows: dict[str, set[str]] = {}
 
     async def list_user_consoles(self, identity_sub):
         # The real query is scoped by identity_sub in SQL, so it only ever returns the caller's own
@@ -93,18 +95,60 @@ class FakeCollectionsRepository:
             sort_order=spec.sort_order,
             description=description,
             min_percent_completed=spec.min_percent_completed,
+            filter_predicate=spec.filter_predicate,
+            share_slug=f"slug-{definition_id}",
         )
         self.items[definition_id] = tuple(game_ids)
         return definition_id
 
+    def _with_live_item_count(self, definition):
+        # item_count is a real, derived field (0019) -- computed fresh from self.items rather than trusted
+        # off the stored dataclass, so a membership change via update_definition is reflected immediately,
+        # matching how the real repository always recomputes it from collection_definition_items.
+        return replace(definition, item_count=len(self.items.get(definition.definition_id, ())))
+
     async def list_definitions(self, identity_sub):
-        return [d for d in self.definitions.values() if d.identity_sub == identity_sub]
+        return [self._with_live_item_count(d) for d in self.definitions.values() if d.identity_sub == identity_sub]
 
     async def get_definition(self, identity_sub, definition_id):
         definition = self.definitions.get(definition_id)
         if definition is None or definition.identity_sub != identity_sub:
             return None
-        return definition
+        return self._with_live_item_count(definition)
+
+    async def get_definition_any_owner(self, definition_id):
+        definition = self.definitions.get(definition_id)
+        return None if definition is None else self._with_live_item_count(definition)
+
+    async def get_definition_by_share_slug(self, share_slug):
+        for definition in self.definitions.values():
+            if definition.share_slug == share_slug and definition.visibility != "private":
+                return self._with_live_item_count(definition)
+        return None
+
+    async def set_definition_visibility(self, identity_sub, definition_id, visibility):
+        definition = self.definitions.get(definition_id)
+        if definition is None or definition.identity_sub != identity_sub:
+            return None
+        self.definitions[definition_id] = replace(definition, visibility=visibility)
+        return self._with_live_item_count(self.definitions[definition_id])
+
+    async def follow_collection(self, follower_sub, definition_id):
+        self.collection_follows.setdefault(definition_id, set()).add(follower_sub)
+
+    async def unfollow_collection(self, follower_sub, definition_id):
+        followers = self.collection_follows.get(definition_id, set())
+        if follower_sub in followers:
+            followers.remove(follower_sub)
+            return True
+        return False
+
+    async def list_followed_collections(self, follower_sub):
+        return [
+            self._with_live_item_count(definition)
+            for definition_id, definition in self.definitions.items()
+            if follower_sub in self.collection_follows.get(definition_id, set())
+        ]
 
     async def list_definition_items(self, definition_id):
         return [
@@ -301,6 +345,49 @@ def test_preview_threads_the_completion_floor_through_to_the_spec():
     assert spec.min_percent_completed == 80
 
 
+def test_preview_parses_a_filter_predicate_onto_the_spec():
+    orchestrator = FakeOrchestrator()
+    client, validator = _build(orchestrator)
+    validator.register("token-a", _claims(sub="sub-a"))
+
+    response = client.post(
+        "/collections/preview",
+        json={
+            "kind": "filter_list",
+            "filter_predicate": {
+                "op": "or",
+                "nodes": [
+                    {"op": "genre_in", "values": ["RPG"]},
+                    {
+                        "op": "and",
+                        "nodes": [{"op": "genre_in", "values": ["Action"]}, {"op": "tier_in", "values": ["Indie"]}],
+                    },
+                ],
+            },
+        },
+        headers=_bearer("token-a"),
+    )
+
+    assert response.status_code == 200
+    spec = orchestrator.generate_calls[0][1]
+    assert spec.filter_predicate == Or(
+        nodes=(GenreIn(values=("RPG",)), And(nodes=(GenreIn(values=("Action",)), TierIn(values=("Indie",)))))
+    )
+
+
+def test_preview_rejects_a_malformed_filter_predicate_as_400_not_500():
+    client, validator = _build()
+    validator.register("token-a", _claims(sub="sub-a"))
+
+    response = client.post(
+        "/collections/preview",
+        json={"kind": "filter_list", "filter_predicate": {"op": "bogus"}},
+        headers=_bearer("token-a"),
+    )
+
+    assert response.status_code == 400
+
+
 def test_save_definition_rejects_invalid_kind():
     client, validator = _build()
     validator.register("token-a", _claims())
@@ -482,6 +569,57 @@ def test_save_definition_defaults_kind_so_a_handpicked_list_needs_no_spec():
     assert response.json()["kind"] == "filter_list"
 
 
+def test_save_definition_persists_and_returns_a_filter_predicate():
+    collections_repository = FakeCollectionsRepository()
+    client, validator = _build(collections_repository=collections_repository)
+    validator.register("token-a", _claims(sub="sub-a"))
+
+    response = client.post(
+        "/collections",
+        json={
+            "name": "Criterion-ish",
+            "filter_predicate": {
+                "op": "or",
+                "nodes": [{"op": "genre_in", "values": ["RPG"]}, {"op": "score_at_least", "threshold": 70.0}],
+            },
+        },
+        headers=_bearer("token-a"),
+    )
+
+    assert response.status_code == 201
+    assert response.json()["filter_predicate"] == {
+        "op": "or",
+        "nodes": [{"op": "genre_in", "values": ["RPG"]}, {"op": "score_at_least", "threshold": 70.0}],
+    }
+    saved = collections_repository.definitions["def-1"]
+    assert saved.filter_predicate == Or(nodes=(GenreIn(values=("RPG",)), ScoreAtLeast(threshold=70.0)))
+
+
+def test_save_definition_rejects_a_malformed_filter_predicate_as_400_not_500():
+    collections_repository = FakeCollectionsRepository()
+    client, validator = _build(collections_repository=collections_repository)
+    validator.register("token-a", _claims(sub="sub-a"))
+
+    response = client.post(
+        "/collections",
+        json={"name": "Bad", "filter_predicate": {"op": "and", "nodes": []}},
+        headers=_bearer("token-a"),
+    )
+
+    assert response.status_code == 400
+    assert collections_repository.definitions == {}
+
+
+def test_definition_with_no_filter_predicate_returns_null_not_an_empty_object():
+    collections_repository = FakeCollectionsRepository()
+    client, validator = _build(collections_repository=collections_repository)
+    validator.register("token-a", _claims(sub="sub-a"))
+
+    response = client.post("/collections", json={"name": "Handpicked"}, headers=_bearer("token-a"))
+
+    assert response.json()["filter_predicate"] is None
+
+
 def test_save_definition_rejects_an_unknown_game_id():
     collections_repository = FakeCollectionsRepository(known_games={"g1"})
     client, validator = _build(collections_repository=collections_repository)
@@ -631,6 +769,119 @@ def test_delete_definition_not_owned_returns_404():
 
     assert response.status_code == 404
     assert "def-a" in collections_repository.definitions
+
+
+def test_set_visibility_changes_it_and_returns_the_updated_definition():
+    collections_repository = FakeCollectionsRepository([_definition()])
+    client, validator = _build(collections_repository=collections_repository)
+    validator.register("token-a", _claims(sub="sub-a"))
+
+    response = client.put("/collections/def-a/visibility", json={"visibility": "public"}, headers=_bearer("token-a"))
+
+    assert response.status_code == 200
+    assert response.json()["visibility"] == "public"
+    assert collections_repository.definitions["def-a"].visibility == "public"
+
+
+def test_set_visibility_rejects_an_unknown_value():
+    collections_repository = FakeCollectionsRepository([_definition()])
+    client, validator = _build(collections_repository=collections_repository)
+    validator.register("token-a", _claims(sub="sub-a"))
+
+    response = client.put("/collections/def-a/visibility", json={"visibility": "everyone"}, headers=_bearer("token-a"))
+
+    assert response.status_code == 400
+    assert collections_repository.definitions["def-a"].visibility == "private"
+
+
+def test_set_visibility_not_owned_returns_404():
+    collections_repository = FakeCollectionsRepository([_definition(identity_sub="sub-b")])
+    client, validator = _build(collections_repository=collections_repository)
+    validator.register("token-a", _claims(sub="sub-a"))
+
+    response = client.put("/collections/def-a/visibility", json={"visibility": "public"}, headers=_bearer("token-a"))
+
+    assert response.status_code == 404
+
+
+def test_follow_a_public_collection():
+    other = replace(_definition(identity_sub="sub-b"), visibility="public")
+    collections_repository = FakeCollectionsRepository([other])
+    client, validator = _build(collections_repository=collections_repository)
+    validator.register("token-a", _claims(sub="sub-a"))
+
+    response = client.post("/collections/def-a/follow", headers=_bearer("token-a"))
+
+    assert response.status_code == 204
+    assert collections_repository.collection_follows["def-a"] == {"sub-a"}
+
+
+def test_cannot_follow_your_own_collection():
+    collections_repository = FakeCollectionsRepository([replace(_definition(), visibility="public")])
+    client, validator = _build(collections_repository=collections_repository)
+    validator.register("token-a", _claims(sub="sub-a"))
+
+    response = client.post("/collections/def-a/follow", headers=_bearer("token-a"))
+
+    assert response.status_code == 400
+    assert collections_repository.collection_follows.get("def-a", set()) == set()
+
+
+def test_cannot_follow_a_private_collection():
+    other = _definition(identity_sub="sub-b")  # visibility defaults to "private"
+    collections_repository = FakeCollectionsRepository([other])
+    client, validator = _build(collections_repository=collections_repository)
+    validator.register("token-a", _claims(sub="sub-a"))
+
+    response = client.post("/collections/def-a/follow", headers=_bearer("token-a"))
+
+    assert response.status_code == 404
+    assert collections_repository.collection_follows.get("def-a", set()) == set()
+
+
+def test_follow_unknown_collection_is_404():
+    client, validator = _build()
+    validator.register("token-a", _claims(sub="sub-a"))
+
+    response = client.post("/collections/nonexistent/follow", headers=_bearer("token-a"))
+
+    assert response.status_code == 404
+
+
+def test_unfollow_a_collection():
+    other = replace(_definition(identity_sub="sub-b"), visibility="public")
+    collections_repository = FakeCollectionsRepository([other])
+    collections_repository.collection_follows["def-a"] = {"sub-a"}
+    client, validator = _build(collections_repository=collections_repository)
+    validator.register("token-a", _claims(sub="sub-a"))
+
+    response = client.delete("/collections/def-a/follow", headers=_bearer("token-a"))
+
+    assert response.status_code == 204
+    assert collections_repository.collection_follows["def-a"] == set()
+
+
+def test_unfollow_is_idempotent_even_for_an_unknown_collection():
+    client, validator = _build()
+    validator.register("token-a", _claims(sub="sub-a"))
+
+    response = client.delete("/collections/nonexistent/follow", headers=_bearer("token-a"))
+
+    assert response.status_code == 204
+
+
+def test_lists_followed_collections():
+    followed = replace(_definition(definition_id="def-followed", identity_sub="sub-b"), visibility="public")
+    not_followed = replace(_definition(definition_id="def-not-followed", identity_sub="sub-b"), visibility="public")
+    collections_repository = FakeCollectionsRepository([followed, not_followed])
+    collections_repository.collection_follows["def-followed"] = {"sub-a"}
+    client, validator = _build(collections_repository=collections_repository)
+    validator.register("token-a", _claims(sub="sub-a"))
+
+    response = client.get("/collections/followed", headers=_bearer("token-a"))
+
+    assert response.status_code == 200
+    assert [d["definition_id"] for d in response.json()] == ["def-followed"]
 
 
 def test_run_definition_does_not_change_stored_membership():

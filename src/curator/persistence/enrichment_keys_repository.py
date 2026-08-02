@@ -19,12 +19,22 @@ from psycopg_pool import AsyncConnectionPool
 
 @dataclass(frozen=True, slots=True)
 class EnrichmentKeyStatus:
-    """Boolean/metadata-only view of a user's configured enrichment keys -- never the encrypted bytes."""
+    """Boolean/metadata-only view of a user's configured enrichment keys -- never the encrypted bytes.
+
+    :param rawg_key_rejected_at: When a library refresh last had RAWG reject this user's key (401/403),
+        or ``None`` if it hasn't happened since the key was last (re)saved -- see
+        ``db/migrations/0020_enrichment_key_rejection.sql``. A key can be both ``rawg_configured`` (a row
+        exists) and rejected at the same time; that combination is exactly what ``/psn`` needs to render
+        "this key stopped working, re-enter it" instead of a plain healthy-looking configured state.
+    :param opencritic_key_rejected_at: Same as ``rawg_key_rejected_at``, for OpenCritic.
+    """
 
     rawg_configured: bool
     opencritic_configured: bool
     rawg_added_at: datetime | None
     opencritic_added_at: datetime | None
+    rawg_key_rejected_at: datetime | None = None
+    opencritic_key_rejected_at: datetime | None = None
 
 
 class EnrichmentKeysRepository:
@@ -45,7 +55,8 @@ class EnrichmentKeysRepository:
         :param sub: The Identity ``sub`` claim.
         """
         sql = (
-            "SELECT rawg_api_key_enc, opencritic_api_key_enc, rawg_added_at, opencritic_added_at "
+            "SELECT rawg_api_key_enc, opencritic_api_key_enc, rawg_added_at, opencritic_added_at, "
+            "rawg_key_rejected_at, opencritic_key_rejected_at "
             "FROM user_enrichment_keys WHERE identity_sub = %s"
         )
         async with self._pool.connection() as conn, conn.cursor() as cur:
@@ -61,6 +72,8 @@ class EnrichmentKeysRepository:
             opencritic_configured=row[1] is not None,
             rawg_added_at=row[2],
             opencritic_added_at=row[3],
+            rawg_key_rejected_at=row[4],
+            opencritic_key_rejected_at=row[5],
         )
 
     async def get_decrypted_key_material(self, sub: str) -> tuple[bytes | None, bytes | None]:
@@ -83,6 +96,10 @@ class EnrichmentKeysRepository:
     async def upsert_rawg_key(self, sub: str, key_enc: bytes) -> None:
         """Create or update ``sub``'s RAWG key, leaving any OpenCritic key untouched.
 
+        Also clears ``rawg_key_rejected_at`` -- ``PUT /me/enrichment-keys/rawg`` already validates the key
+        live before calling this (see ``curator.enrichment_keys_routes._validate_key``), so reaching here
+        at all is proof any prior rejection no longer applies.
+
         :param sub: The Identity ``sub`` claim.
         :param key_enc: The Fernet-encrypted API key.
         """
@@ -90,13 +107,16 @@ class EnrichmentKeysRepository:
             "INSERT INTO user_enrichment_keys (identity_sub, rawg_api_key_enc, rawg_added_at) "
             "VALUES (%s, %s, now()) "
             "ON CONFLICT (identity_sub) DO UPDATE SET "
-            "rawg_api_key_enc = EXCLUDED.rawg_api_key_enc, rawg_added_at = now(), updated_at = now()"
+            "rawg_api_key_enc = EXCLUDED.rawg_api_key_enc, rawg_added_at = now(), "
+            "rawg_key_rejected_at = NULL, updated_at = now()"
         )
         async with self._pool.connection() as conn, conn.cursor() as cur:
             await cur.execute(sql, (sub, key_enc))
 
     async def upsert_opencritic_key(self, sub: str, key_enc: bytes) -> None:
         """Create or update ``sub``'s OpenCritic key, leaving any RAWG key untouched.
+
+        Also clears ``opencritic_key_rejected_at`` -- see :meth:`upsert_rawg_key`.
 
         :param sub: The Identity ``sub`` claim.
         :param key_enc: The Fernet-encrypted API key.
@@ -106,10 +126,33 @@ class EnrichmentKeysRepository:
             "VALUES (%s, %s, now()) "
             "ON CONFLICT (identity_sub) DO UPDATE SET "
             "opencritic_api_key_enc = EXCLUDED.opencritic_api_key_enc, opencritic_added_at = now(), "
-            "updated_at = now()"
+            "opencritic_key_rejected_at = NULL, updated_at = now()"
         )
         async with self._pool.connection() as conn, conn.cursor() as cur:
             await cur.execute(sql, (sub, key_enc))
+
+    async def mark_rawg_key_rejected(self, sub: str) -> None:
+        """Record that ``sub``'s configured RAWG key was just rejected (401/403) during a library refresh.
+
+        A no-op (silently matches zero rows) if ``sub`` has no ``user_enrichment_keys`` row at all --
+        can't happen via the real call path (a refresh only builds a RAWG client, and so can only hit this,
+        for a key that's actually configured), but this method doesn't need to assume that to stay correct.
+
+        :param sub: The Identity ``sub`` claim.
+        """
+        sql = "UPDATE user_enrichment_keys SET rawg_key_rejected_at = now() WHERE identity_sub = %s"
+        async with self._pool.connection() as conn, conn.cursor() as cur:
+            await cur.execute(sql, (sub,))
+
+    async def mark_opencritic_key_rejected(self, sub: str) -> None:
+        """Record that ``sub``'s configured OpenCritic key was just rejected (401/403). See
+        :meth:`mark_rawg_key_rejected`.
+
+        :param sub: The Identity ``sub`` claim.
+        """
+        sql = "UPDATE user_enrichment_keys SET opencritic_key_rejected_at = now() WHERE identity_sub = %s"
+        async with self._pool.connection() as conn, conn.cursor() as cur:
+            await cur.execute(sql, (sub,))
 
     async def delete_rawg_key(self, sub: str) -> None:
         """Clear ``sub``'s RAWG key, leaving any OpenCritic key (and the row itself) intact.

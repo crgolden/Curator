@@ -16,6 +16,7 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 
+from curator.collections.console_model_defaults import default_capacity_gb
 from curator.collections.repository import CollectionsRepository, UserConsole
 from curator.deps import require_bearer
 from curator.token_validation import TokenClaims
@@ -24,11 +25,18 @@ router = APIRouter(prefix="/consoles", tags=["consoles"])
 
 
 class ConsoleRequest(BaseModel):
-    """The ``POST /consoles`` request body."""
+    """The ``POST /consoles`` request body.
+
+    ``raw_capacity_gb`` is optional -- see :func:`~curator.collections.console_model_defaults
+    .default_capacity_gb`. ``model`` is purely informational (drives that default lookup at creation
+    time only) and is never validated against a known list; an unrecognized or absent model just means a
+    coarser, platform-level default rather than a rejected request.
+    """
 
     name: str
     platform: str
-    raw_capacity_gb: float
+    raw_capacity_gb: float | None = None
+    model: str | None = None
     update_buffer_gb: float = 0.0
     routing_genres: list[str] = []
     fill_order: int = 0
@@ -46,16 +54,26 @@ class ConsoleUpdateRequest(BaseModel):
 
 
 class ConsoleResponse(BaseModel):
-    """One console, including its derived usable capacity."""
+    """One console, including its derived usable capacity.
+
+    :param capacity_is_default: ``True`` only in the response to the ``POST`` that created this console,
+        when ``raw_capacity_gb`` was omitted and this capacity was auto-assigned rather than supplied --
+        never persisted, never present on ``GET``/``PATCH``/``LIST`` (by then the number is just the
+        console's real recorded capacity, defaulted or not, with no distinction left to flag). A client
+        uses this one-time signal to show "we guessed this, please correct it if wrong" rather than
+        presenting a guess as a confirmed fact.
+    """
 
     console_id: str
     name: str
     platform: str
     raw_capacity_gb: float
+    model: str | None
     update_buffer_gb: float
     effective_capacity_gb: float
     routing_genres: list[str]
     fill_order: int
+    capacity_is_default: bool = False
 
 
 class ConsoleInstallRequest(BaseModel):
@@ -80,16 +98,18 @@ class ConsoleInstallsResponse(BaseModel):
     game_ids: list[str]
 
 
-def _to_response(console: UserConsole) -> ConsoleResponse:
+def _to_response(console: UserConsole, *, capacity_is_default: bool = False) -> ConsoleResponse:
     return ConsoleResponse(
         console_id=console.console_id,
         name=console.name,
         platform=console.platform,
         raw_capacity_gb=console.raw_capacity_gb,
+        model=console.model,
         update_buffer_gb=console.update_buffer_gb,
         effective_capacity_gb=console.effective_capacity_gb,
         routing_genres=list(console.routing_genres),
         fill_order=console.fill_order,
+        capacity_is_default=capacity_is_default,
     )
 
 
@@ -99,23 +119,35 @@ async def create_console(
 ) -> ConsoleResponse:
     """Create a console for the caller.
 
+    If ``raw_capacity_gb`` is omitted, it's auto-assigned from ``model`` (or a coarser platform-level
+    default if ``model`` is absent/unrecognized) -- never refused for missing capacity, only flagged via
+    ``capacity_is_default`` in the response so the caller can prompt for a correction rather than silently
+    trusting a guess.
+
     :raises fastapi.HTTPException: 400, if ``platform`` isn't ``"PS5"``/``"PS4"`` (the schema's own CHECK
         constraint would reject it anyway; validating here first gives a clearer message than a raw
         constraint-violation 500).
     """
     if body.platform not in ("PS5", "PS4"):
         raise HTTPException(status_code=400, detail='platform must be "PS5" or "PS4".')
+
+    capacity_is_default = body.raw_capacity_gb is None
+    raw_capacity_gb = body.raw_capacity_gb
+    if raw_capacity_gb is None:
+        raw_capacity_gb, _matched_model = default_capacity_gb(body.platform, body.model)
+
     repository: CollectionsRepository = request.app.state.collections_repository
     console = await repository.create_console(
         claims.sub,
         name=body.name,
         platform=body.platform,
-        raw_capacity_gb=body.raw_capacity_gb,
+        raw_capacity_gb=raw_capacity_gb,
         update_buffer_gb=body.update_buffer_gb,
         routing_genres=tuple(body.routing_genres),
         fill_order=body.fill_order,
+        model=body.model,
     )
-    return _to_response(console)
+    return _to_response(console, capacity_is_default=capacity_is_default)
 
 
 @router.get("", response_model=list[ConsoleResponse])

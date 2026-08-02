@@ -51,6 +51,9 @@ coverage.xml
 .pytest_cache/
 cover/
 
+# SonarScanner CLI working directory (local ad-hoc scans)
+.scannerwork/
+
 # Translations
 *.mo
 *.pot

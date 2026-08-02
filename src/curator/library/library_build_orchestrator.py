@@ -15,7 +15,7 @@ from typing import TYPE_CHECKING
 
 from curator.catalog.canonicalization_service import CanonicalGame, canonicalize
 from curator.catalog.repository import CatalogRepository
-from curator.enrichment.enrichment_service import EnrichmentRateLimitError, EnrichmentService
+from curator.enrichment.enrichment_service import EnrichmentAuthError, EnrichmentRateLimitError, EnrichmentService
 from curator.enrichment.publisher_tier import PublisherTierRule
 from curator.enrichment.repository import EnrichmentRepository
 from curator.library.ingestion_service import IngestionService
@@ -44,6 +44,10 @@ class EnrichDeltaResult:
     :param retry_after_seconds: When it should be safe to resume, if ``rate_limited_provider`` is set.
     :param remaining_game_ids: Every game id not yet attempted this call, including the one that hit the
         rate limit (so it's retried first on resume) -- empty unless ``rate_limited_provider`` is set.
+    :param rejected_providers: ``"rawg"``/``"opencritic"`` for every provider whose key was rejected
+        (401/403) during this call -- the run still reaches ``succeeded``; this is how the caller reports
+        "finished, RAWG skipped" instead of failing the whole refresh. See :meth:`EnrichmentService
+        .disable_provider`.
     """
 
     enriched_count: int
@@ -52,6 +56,7 @@ class EnrichDeltaResult:
     rate_limited_provider: str | None = None
     retry_after_seconds: float | None = None
     remaining_game_ids: list[str] = field(default_factory=list)
+    rejected_providers: list[str] = field(default_factory=list)
 
 
 @dataclass(frozen=True, slots=True)
@@ -94,6 +99,7 @@ class LibraryBuildResult:
         set -- what the continuation job (``curator.app._library_refresh_continuation_handler``) resumes.
     :param trophy_match: Summary of stage 5 (:meth:`LibraryBuildOrchestrator.match_trophies`) -- all-zero
         if ``build()`` was called with no ``trophy_client`` (``harvest_trophies`` disabled).
+    :param rejected_providers: See :class:`EnrichDeltaResult`.
     """
 
     pull_id: str
@@ -105,6 +111,7 @@ class LibraryBuildResult:
     rate_limited_provider: str | None = None
     retry_after_seconds: float | None = None
     remaining_game_ids: list[str] = field(default_factory=list)
+    rejected_providers: list[str] = field(default_factory=list)
     trophy_match: TrophyMatchResult = field(
         default_factory=lambda: TrophyMatchResult(exact_matched_count=0, fuzzy_matched_count=0, attempted_count=0)
     )
@@ -119,13 +126,23 @@ async def enrich_games(
     size_estimates: list[SizeEstimate],
 ) -> EnrichDeltaResult:
     """Enrich each ``(game_id, title, product_id, is_ps5)`` tuple in order, stopping early on a provider
-    rate limit.
+    rate limit -- but degrading, not stopping, on a rejected provider key.
 
     A module-level function (not a :class:`LibraryBuildOrchestrator` method) so it's callable without
     building a full orchestrator -- shared by :meth:`LibraryBuildOrchestrator.enrich_delta` (freshly
     canonicalized games from a normal refresh) and ``curator.app._library_refresh_continuation_handler``
     (a DB-looked-up subset resumed after a rate limit, with no re-canonicalization/re-ingestion needed, and
     thus no need for the ingestion/catalog/library repositories an orchestrator would otherwise require).
+
+    A rejected key (:class:`~curator.enrichment.enrichment_service.EnrichmentAuthError`) is fundamentally
+    different from a rate limit: a rate-limited provider will work again later, so the whole call stops and
+    reports what's left to resume. A rejected key will never work again until the user re-saves it, so
+    aborting the run would also throw away every other provider's signal, and PSN ingestion/trophy-matching
+    downstream of enrichment, for every remaining game -- an optional signal taking down mandatory work.
+    Instead, :meth:`~curator.enrichment.enrichment_service.EnrichmentService.disable_provider` makes that
+    one provider behave like "not configured" for the rest of this call, and the *same* game is retried
+    once so it still gets a chance at its other signals, rather than being skipped along with everything
+    after it.
 
     :param games: Every game to attempt, in the order they should be enriched -- the order that ends up in
         ``remaining_game_ids`` if a rate limit stops iteration early.
@@ -140,7 +157,10 @@ async def enrich_games(
     enriched_count = 0
     rawg_enriched_titles: list[str] = []
     opencritic_enriched_titles: list[str] = []
-    for index, (game_id, title, product_id, is_ps5) in enumerate(games):
+    rejected_providers: list[str] = []
+    index = 0
+    while index < len(games):
+        game_id, title, product_id, is_ps5 = games[index]
         try:
             result, _size = await enrichment_service.enrich_game(
                 title,
@@ -158,7 +178,16 @@ async def enrich_games(
                 rate_limited_provider=exc.provider,
                 retry_after_seconds=exc.retry_after_seconds,
                 remaining_game_ids=[remaining_game_id for remaining_game_id, *_ in games[index:]],
+                rejected_providers=rejected_providers,
             )
+        except EnrichmentAuthError as exc:
+            if exc.provider in rejected_providers:
+                # disable_provider() already made this provider inert -- the same exception recurring for
+                # it would mean a logic error, not a real retry opportunity. Stop rather than spin.
+                break
+            rejected_providers.append(exc.provider)
+            enrichment_service.disable_provider(exc.provider)
+            continue  # retry this same game now that the provider is disabled, don't advance index
 
         genre_id = genre_ids_by_name.get(result.genre.lower())
         subgenre_id = genre_ids_by_name.get(result.subgenre.lower())
@@ -168,11 +197,13 @@ async def enrich_games(
             rawg_enriched_titles.append(title)
         if result.opencritic_enriched:
             opencritic_enriched_titles.append(title)
+        index += 1
 
     return EnrichDeltaResult(
         enriched_count=enriched_count,
         rawg_enriched_titles=rawg_enriched_titles,
         opencritic_enriched_titles=opencritic_enriched_titles,
+        rejected_providers=rejected_providers,
     )
 
 
@@ -454,4 +485,5 @@ class LibraryBuildOrchestrator:
             retry_after_seconds=enrich_result.retry_after_seconds,
             remaining_game_ids=enrich_result.remaining_game_ids,
             trophy_match=trophy_match_result,
+            rejected_providers=enrich_result.rejected_providers,
         )

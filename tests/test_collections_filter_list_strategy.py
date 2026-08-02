@@ -5,6 +5,7 @@ from __future__ import annotations
 
 from curator.collections.collection_spec import CollectionSpec
 from curator.collections.filter_list_strategy import apply_filter_list
+from curator.collections.filter_predicate import And, GenreIn, Or, TierIn
 from curator.collections.game_candidate import GameCandidate
 
 
@@ -119,6 +120,49 @@ def test_min_percent_completed_excludes_unmatched_games_when_available():
     spec = CollectionSpec(kind="filter_list", min_percent_completed=1)
 
     assert apply_filter_list(candidates, spec, completion_available=True) == []
+
+
+def test_filter_predicate_expresses_the_criterion_or_shape_the_flat_fields_cannot():
+    """genre in SET or (genre == action and tier == indie) -- structurally inexpressible with
+    genre_filter/aaa_tier_filter's pure-AND flat fields, the reason WP8's predicate tree exists."""
+    candidates = [
+        _candidate("rpg", genre="RPG", aaa_tier="AAA"),
+        _candidate("action_indie", genre="Action", aaa_tier="Indie"),
+        _candidate("action_aaa", genre="Action", aaa_tier="AAA"),
+        _candidate("sports", genre="Sports", aaa_tier="Indie"),
+    ]
+    predicate = Or(
+        nodes=(GenreIn(values=("RPG",)), And(nodes=(GenreIn(values=("Action",)), TierIn(values=("Indie",)))))
+    )
+    spec = CollectionSpec(kind="filter_list", filter_predicate=predicate)
+
+    result = apply_filter_list(candidates, spec)
+
+    assert {c.game_id for c in result} == {"rpg", "action_indie"}
+
+
+def test_filter_predicate_replaces_the_flat_fields_rather_than_combining_with_them():
+    """When both are supplied, the tree wins outright -- genre_filter/min_score/aaa_tier_filter are simply
+    not consulted, per apply_filter_list's docstring."""
+    candidates = [_candidate("a", genre="Sports", aaa_tier="Indie")]
+    spec = CollectionSpec(
+        kind="filter_list",
+        genre_filter=("RPG",),  # would exclude "a" under the flat path
+        filter_predicate=GenreIn(values=("Sports",)),
+    )
+
+    result = apply_filter_list(candidates, spec)
+
+    assert [c.game_id for c in result] == ["a"]
+
+
+def test_filter_predicate_still_respects_the_completion_availability_gate():
+    candidates = [_candidate("a", genre="RPG", percent_completed=None)]
+    spec = CollectionSpec(kind="filter_list", filter_predicate=GenreIn(values=("RPG",)), min_percent_completed=50)
+
+    result = apply_filter_list(candidates, spec, completion_available=False)
+
+    assert [c.game_id for c in result] == ["a"]
 
 
 def test_min_percent_completed_skipped_when_completion_unavailable():

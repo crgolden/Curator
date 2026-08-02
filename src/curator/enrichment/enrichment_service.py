@@ -184,6 +184,21 @@ class EnrichmentService:
         that signal needs a per-user authenticated ``PsnSession``."""
         return self._catalog_client is not None
 
+    def disable_provider(self, provider: str) -> None:
+        """Stop using ``provider`` for the remainder of this instance's lifetime.
+
+        Called by :func:`curator.library.library_build_orchestrator.enrich_games` when
+        :class:`EnrichmentAuthError` is raised for ``provider`` -- the key that produced it is already
+        known bad, so every subsequent call is made to behave exactly like "not configured" (skipped
+        silently) instead of raising the same error again for every remaining game in the run.
+
+        :param provider: ``"rawg"`` or ``"opencritic"``.
+        """
+        if provider == "rawg":
+            self._rawg_client = None
+        elif provider == "opencritic":
+            self._opencritic_client = None
+
     def _rate_limit_retry_after(self, provider: str, hinted_seconds: float | None) -> float:
         """Resolve how long to wait before retrying ``provider``, on a 429.
 
@@ -415,7 +430,16 @@ class EnrichmentService:
         if cached is not None:
             return PsnCatalogLookup(genres=list(cached.genres), star_rating=cached.star_rating)
 
-        concept = await self._catalog_client.title_concept(product_id)
+        try:
+            concept = await self._catalog_client.title_concept(product_id)
+        except httpx.HTTPError:
+            # Network error/timeout reaching PSN's catalog endpoint -- same transient-failure handling as
+            # _resolve_rawg/_run_opencritic_topup: skip this game's PSN-catalog signal, don't cache a false
+            # negative. PsnAuthError is deliberately NOT caught here -- unlike a rejected RAWG/OpenCritic
+            # key, it means this user's own PSN link/session is dead, which is a materially different,
+            # instance-wide condition than one BYOK provider going bad, and is left to propagate and abort
+            # the run rather than being silently swallowed per-game.
+            return PsnCatalogLookup(genres=[], star_rating=None)
         await self._repository.save_psn_catalog_cache(
             PsnCatalogCacheEntry(
                 product_id=product_id,

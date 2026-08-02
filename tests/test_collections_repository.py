@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from curator.collections.collection_spec import CollectionSpec
+from curator.collections.filter_predicate import GenreIn
 from curator.collections.game_candidate import GameCandidate
 from curator.collections.repository import CollectionsRepository
 
@@ -69,7 +70,9 @@ class FakePool:
 
 
 async def test_list_user_consoles_maps_rows_and_computes_effective_capacity():
-    pool = FakePool(fetchall_results=[[("console-1", "My PS5", "PS5", 3997.0, 200.0, ["RPG"], 0)]])
+    pool = FakePool(
+        fetchall_results=[[("console-1", "My PS5", "PS5", 3997.0, 200.0, ["RPG"], 0, "PS5 Digital Edition")]]
+    )
     repo = CollectionsRepository(pool)
 
     consoles = await repo.list_user_consoles("sub-1")
@@ -78,6 +81,7 @@ async def test_list_user_consoles_maps_rows_and_computes_effective_capacity():
     assert consoles[0].console_id == "console-1"
     assert consoles[0].effective_capacity_gb == 3797.0
     assert consoles[0].routing_genres == ("RPG",)
+    assert consoles[0].model == "PS5 Digital Edition"
 
 
 async def test_list_candidates_no_platform_filter():
@@ -207,7 +211,25 @@ async def test_save_definition_returns_new_id_and_serializes_genre_filter():
     assert definition_id == "def-1"
     sql, params = pool.connections[0].executed[0]
     assert "INSERT INTO collection_definitions" in sql
-    assert params == ("sub-1", "My RPGs", None, "filter_list", None, ["RPG", "Action"], 80.0, None, None, False, None)
+    assert params is not None
+    # The trailing element is share_slug -- generated fresh (secrets.token_urlsafe) on every call, so it
+    # can only be asserted structurally, not as a literal value.
+    assert params[:-1] == (
+        "sub-1",
+        "My RPGs",
+        None,
+        "filter_list",
+        None,
+        ["RPG", "Action"],
+        80.0,
+        None,
+        None,
+        False,
+        None,
+        None,
+    )
+    assert isinstance(params[-1], str)
+    assert len(params[-1]) > 0
 
 
 async def test_save_definition_persists_min_percent_completed():
@@ -218,7 +240,33 @@ async def test_save_definition_persists_min_percent_completed():
     await repo.save_definition("sub-1", "Nearly Done", spec)
 
     _sql, params = pool.connections[0].executed[0]
-    assert params == ("sub-1", "Nearly Done", None, "filter_list", None, [], None, None, None, False, 75)
+    assert params is not None
+    assert params[:-1] == ("sub-1", "Nearly Done", None, "filter_list", None, [], None, None, None, False, 75, None)
+    assert isinstance(params[-1], str)
+    assert len(params[-1]) > 0
+
+
+async def test_save_definition_serializes_filter_predicate_as_json():
+    pool = FakePool(fetchone_results=[("def-1",)])
+    repo = CollectionsRepository(pool)
+    spec = CollectionSpec(kind="filter_list", filter_predicate=GenreIn(values=("RPG", "Action")))
+
+    await repo.save_definition("sub-1", "My RPGs", spec)
+
+    _sql, params = pool.connections[0].executed[0]
+    assert params is not None
+    assert params[-2] == '{"op": "genre_in", "values": ["RPG", "Action"]}'
+
+
+async def test_save_definition_leaves_filter_predicate_null_when_not_supplied():
+    pool = FakePool(fetchone_results=[("def-1",)])
+    repo = CollectionsRepository(pool)
+
+    await repo.save_definition("sub-1", "My RPGs", CollectionSpec(kind="filter_list"))
+
+    _sql, params = pool.connections[0].executed[0]
+    assert params is not None
+    assert params[-2] is None
 
 
 async def test_save_definition_stores_membership_ranked_by_position():
@@ -252,7 +300,26 @@ async def test_save_definition_drops_duplicate_game_ids():
 async def test_list_definitions_maps_rows():
     pool = FakePool(
         fetchall_results=[
-            [("def-1", "sub-1", "My RPGs", "filter_list", None, ["RPG"], 80.0, None, None, "Best of", True, 60)],
+            [
+                (
+                    "def-1",
+                    "sub-1",
+                    "My RPGs",
+                    "filter_list",
+                    None,
+                    ["RPG"],
+                    80.0,
+                    None,
+                    None,
+                    "Best of",
+                    True,
+                    60,
+                    None,
+                    "unlisted",
+                    "abc123",
+                    3,
+                )
+            ],
         ]
     )
     repo = CollectionsRepository(pool)
@@ -262,20 +329,77 @@ async def test_list_definitions_maps_rows():
     assert len(definitions) == 1
     assert definitions[0].definition_id == "def-1"
     assert definitions[0].genre_filter == ("RPG",)
+    assert definitions[0].visibility == "unlisted"
+    assert definitions[0].share_slug == "abc123"
+    assert definitions[0].item_count == 3
     assert definitions[0].min_score == 80.0
     assert definitions[0].description == "Best of"
     assert definitions[0].include_inactive is True
     assert definitions[0].min_percent_completed == 60
+    assert definitions[0].filter_predicate is None
     # to_spec() must carry it, or a saved "include everything I ever had" collection silently reverts to
     # active-only the next time it is re-run.
     assert definitions[0].to_spec().include_inactive is True
     assert definitions[0].to_spec().min_percent_completed == 60
 
 
+async def test_list_definitions_parses_a_stored_filter_predicate():
+    # psycopg auto-deserializes JSONB columns to a plain dict -- same as job_runs.result_summary's
+    # existing pattern (curator.jobs.repository), so the row value here is already a dict, not a str.
+    pool = FakePool(
+        fetchall_results=[
+            [
+                (
+                    "def-1",
+                    "sub-1",
+                    "Criterion-ish",
+                    "filter_list",
+                    None,
+                    [],
+                    None,
+                    None,
+                    None,
+                    None,
+                    False,
+                    None,
+                    {"op": "genre_in", "values": ["RPG"]},
+                    "private",
+                    None,
+                    0,
+                )
+            ],
+        ]
+    )
+    repo = CollectionsRepository(pool)
+
+    definitions = await repo.list_definitions("sub-1")
+
+    assert definitions[0].filter_predicate == GenreIn(values=("RPG",))
+    # to_spec() must carry it, or a saved OR-predicate collection reverts to no filter at all on re-run.
+    assert definitions[0].to_spec().filter_predicate == GenreIn(values=("RPG",))
+
+
 async def test_get_definition_scopes_to_identity_sub():
     pool = FakePool(
         fetchone_results=[
-            ("def-1", "sub-1", "My RPGs", "filter_list", None, ["RPG"], 80.0, None, None, None, False, None)
+            (
+                "def-1",
+                "sub-1",
+                "My RPGs",
+                "filter_list",
+                None,
+                ["RPG"],
+                80.0,
+                None,
+                None,
+                None,
+                False,
+                None,
+                None,
+                "private",
+                "xyz789",
+                0,
+            )
         ]
     )
     repo = CollectionsRepository(pool)

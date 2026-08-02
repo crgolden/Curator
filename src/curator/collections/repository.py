@@ -14,12 +14,14 @@ Same shape as :class:`curator.persistence.repository.Repository`: backed by a sh
 from __future__ import annotations
 
 import json
+import secrets
 from dataclasses import dataclass
 from typing import Any
 
 from psycopg_pool import AsyncConnectionPool
 
 from curator.collections.collection_spec import CollectionSpec
+from curator.collections.filter_predicate import FilterPredicate, parse_predicate, predicate_to_dict
 from curator.collections.game_candidate import GameCandidate
 
 
@@ -45,6 +47,9 @@ class UserConsole:
     update_buffer_gb: float
     routing_genres: tuple[str, ...]
     fill_order: int
+    #: Purely informational (0018) -- drives consoles_routes.py's default-capacity lookup at creation
+    #: time only. raw_capacity_gb is always independently editable regardless of what's recorded here.
+    model: str | None = None
 
     @property
     def effective_capacity_gb(self) -> float:
@@ -99,6 +104,20 @@ class CollectionDefinition:
     description: str | None = None
     include_inactive: bool = False
     min_percent_completed: int | None = None
+    #: An OR-capable predicate tree (WP8), replacing the flat genre/score/tier fields above when set. See
+    #: :mod:`curator.collections.filter_predicate`'s module docstring for why it's a separate field rather
+    #: than folded into them.
+    filter_predicate: FilterPredicate | None = None
+    #: ``"private"``/``"unlisted"``/``"public"`` (0019) -- a per-collection gate underneath the existing
+    #: account-wide ``user_profiles.show_collections``/``is_public`` gate, not a replacement for it.
+    visibility: str = "private"
+    #: Generated client-side at creation for every collection regardless of visibility (0019) -- inert
+    #: unless ``visibility != "private"``. See migration 0019's header for why it's never lazy.
+    share_slug: str | None = None
+    #: How many games this collection currently holds. Cheap (one JOIN/subquery), so it's included on
+    #: every read rather than requiring a second ``list_definition_items`` call just to answer "how big
+    #: is this" -- what ``ProfileDefinitionResponse`` was missing before 0019.
+    item_count: int = 0
 
     def to_spec(self) -> CollectionSpec:
         """Build the :class:`CollectionSpec` this definition represents, ready for
@@ -112,6 +131,7 @@ class CollectionDefinition:
             sort_order=self.sort_order,
             include_inactive=self.include_inactive,
             min_percent_completed=self.min_percent_completed,
+            filter_predicate=self.filter_predicate,
         )
 
 
@@ -179,7 +199,8 @@ class CollectionsRepository:
         async with self._pool.connection() as conn, conn.cursor() as cur:
             await cur.execute(
                 """
-                SELECT console_id, name, platform, raw_capacity_gb, update_buffer_gb, routing_genres, fill_order
+                SELECT console_id, name, platform, raw_capacity_gb, update_buffer_gb, routing_genres,
+                       fill_order, model
                 FROM user_consoles WHERE identity_sub = %s ORDER BY fill_order
                 """,
                 (identity_sub,),
@@ -194,6 +215,7 @@ class CollectionsRepository:
                 update_buffer_gb=float(row[4]),
                 routing_genres=tuple(row[5] or ()),
                 fill_order=row[6],
+                model=row[7],
             )
             for row in rows
         ]
@@ -208,18 +230,29 @@ class CollectionsRepository:
         update_buffer_gb: float = 0.0,
         routing_genres: tuple[str, ...] = (),
         fill_order: int = 0,
+        model: str | None = None,
     ) -> UserConsole:
         """Create a console. ``platform`` is fixed at creation -- a console's platform never changes, so
-        it is not one of :meth:`update_console`'s editable fields."""
+        it is not one of :meth:`update_console`'s editable fields. ``model`` is purely informational
+        (0018) -- see :class:`UserConsole`."""
         async with self._pool.connection() as conn, conn.cursor() as cur:
             await cur.execute(
                 """
                 INSERT INTO user_consoles
-                    (identity_sub, name, platform, raw_capacity_gb, update_buffer_gb, routing_genres, fill_order)
-                VALUES (%s, %s, %s, %s, %s, %s, %s)
+                    (identity_sub, name, platform, raw_capacity_gb, update_buffer_gb, routing_genres, fill_order, model)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
                 RETURNING console_id
                 """,
-                (identity_sub, name, platform, raw_capacity_gb, update_buffer_gb, list(routing_genres), fill_order),
+                (
+                    identity_sub,
+                    name,
+                    platform,
+                    raw_capacity_gb,
+                    update_buffer_gb,
+                    list(routing_genres),
+                    fill_order,
+                    model,
+                ),
             )
             row = await cur.fetchone()
         assert row is not None
@@ -231,6 +264,7 @@ class CollectionsRepository:
             update_buffer_gb=update_buffer_gb,
             routing_genres=routing_genres,
             fill_order=fill_order,
+            model=model,
         )
 
     async def get_console(self, identity_sub: str, console_id: str) -> UserConsole | None:
@@ -239,7 +273,8 @@ class CollectionsRepository:
         async with self._pool.connection() as conn, conn.cursor() as cur:
             await cur.execute(
                 """
-                SELECT console_id, name, platform, raw_capacity_gb, update_buffer_gb, routing_genres, fill_order
+                SELECT console_id, name, platform, raw_capacity_gb, update_buffer_gb, routing_genres,
+                       fill_order, model
                 FROM user_consoles WHERE identity_sub = %s AND console_id = %s
                 """,
                 (identity_sub, console_id),
@@ -255,6 +290,7 @@ class CollectionsRepository:
             update_buffer_gb=float(row[4]),
             routing_genres=tuple(row[5] or ()),
             fill_order=row[6],
+            model=row[7],
         )
 
     async def update_console(
@@ -636,13 +672,17 @@ class CollectionsRepository:
             (first occurrence wins) rather than colliding on ``collection_definition_items``' primary key.
         :returns: The new definition's id.
         """
+        # Generated for every collection regardless of visibility -- see migration 0019's header for why
+        # this is unconditional rather than lazy (only assigned when sharing is first turned on).
+        share_slug = secrets.token_urlsafe(9)
         async with self._pool.connection() as conn, conn.cursor() as cur:
             await cur.execute(
                 """
                 INSERT INTO collection_definitions
                     (identity_sub, name, description, kind, console_id, genre_filter, min_score,
-                     aaa_tier_filter, sort_order, include_inactive, min_percent_completed)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                     aaa_tier_filter, sort_order, include_inactive, min_percent_completed, filter_predicate,
+                     share_slug)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 RETURNING definition_id
                 """,
                 (
@@ -657,6 +697,8 @@ class CollectionsRepository:
                     spec.sort_order,
                     spec.include_inactive,
                     spec.min_percent_completed,
+                    json.dumps(predicate_to_dict(spec.filter_predicate)) if spec.filter_predicate is not None else None,
+                    share_slug,
                 ),
             )
             row = await cur.fetchone()
@@ -694,14 +736,23 @@ class CollectionsRepository:
             rows = await cur.fetchall()
         return {str(row[0]) for row in rows}
 
+    #: Shared by every read of collection_definitions -- item_count is one subquery, computed here rather
+    #: than making every caller (owner listing, profile listing, public share route) issue a second query
+    #: just to answer "how big is this" (what ProfileDefinitionResponse was missing before 0019).
+    _DEFINITION_COLUMNS = """
+        cd.definition_id, cd.identity_sub, cd.name, cd.kind, cd.console_id, cd.genre_filter, cd.min_score,
+        cd.aaa_tier_filter, cd.sort_order, cd.description, cd.include_inactive, cd.min_percent_completed,
+        cd.filter_predicate, cd.visibility, cd.share_slug,
+        (SELECT count(*) FROM collection_definition_items cdi WHERE cdi.definition_id = cd.definition_id)
+    """
+
     async def list_definitions(self, identity_sub: str) -> list[CollectionDefinition]:
         """Return a user's saved collection definitions, newest first."""
         async with self._pool.connection() as conn, conn.cursor() as cur:
             await cur.execute(
-                """
-                SELECT definition_id, identity_sub, name, kind, console_id, genre_filter, min_score,
-                       aaa_tier_filter, sort_order, description, include_inactive, min_percent_completed
-                FROM collection_definitions WHERE identity_sub = %s ORDER BY created_at DESC
+                f"""
+                SELECT {self._DEFINITION_COLUMNS}
+                FROM collection_definitions cd WHERE cd.identity_sub = %s ORDER BY cd.created_at DESC
                 """,
                 (identity_sub,),
             )
@@ -716,15 +767,62 @@ class CollectionsRepository:
         """
         async with self._pool.connection() as conn, conn.cursor() as cur:
             await cur.execute(
-                """
-                SELECT definition_id, identity_sub, name, kind, console_id, genre_filter, min_score,
-                       aaa_tier_filter, sort_order, description, include_inactive, min_percent_completed
-                FROM collection_definitions WHERE identity_sub = %s AND definition_id = %s
+                f"""
+                SELECT {self._DEFINITION_COLUMNS}
+                FROM collection_definitions cd WHERE cd.identity_sub = %s AND cd.definition_id = %s
                 """,
                 (identity_sub, definition_id),
             )
             row = await cur.fetchone()
         return self._to_definition(row) if row is not None else None
+
+    async def get_definition_any_owner(self, definition_id: str) -> CollectionDefinition | None:
+        """Return a definition regardless of whose it is -- unlike :meth:`get_definition`, not scoped to
+        a caller. For the follow routes: a caller following a collection isn't its owner, so the
+        ownership-scoped lookup would always miss. Callers here must still apply their own visibility
+        check (a non-owner may only ever act on a non-``"private"`` result) -- this method does not do
+        that filtering itself, unlike :meth:`get_definition_by_share_slug`, since an owner-facing caller
+        (e.g. an admin/debug path) might legitimately need the private row too.
+        """
+        async with self._pool.connection() as conn, conn.cursor() as cur:
+            await cur.execute(
+                f"SELECT {self._DEFINITION_COLUMNS} FROM collection_definitions cd WHERE cd.definition_id = %s",
+                (definition_id,),
+            )
+            row = await cur.fetchone()
+        return self._to_definition(row) if row is not None else None
+
+    async def get_definition_by_share_slug(self, share_slug: str) -> CollectionDefinition | None:
+        """Return a shared collection by its public link, or ``None`` if the slug is unknown *or* the
+        collection is currently ``"private"`` -- the two are indistinguishable to an anonymous caller by
+        design (see ``curator.public_collections_routes``), so a link that was shared and later made
+        private stops working exactly like one that never existed.
+        """
+        async with self._pool.connection() as conn, conn.cursor() as cur:
+            await cur.execute(
+                f"""
+                SELECT {self._DEFINITION_COLUMNS}
+                FROM collection_definitions cd WHERE cd.share_slug = %s AND cd.visibility != 'private'
+                """,
+                (share_slug,),
+            )
+            row = await cur.fetchone()
+        return self._to_definition(row) if row is not None else None
+
+    async def set_definition_visibility(
+        self, identity_sub: str, definition_id: str, visibility: str
+    ) -> CollectionDefinition | None:
+        """Change a collection's visibility (``"private"``/``"unlisted"``/``"public"``).
+
+        :returns: The updated definition, or ``None`` if it doesn't exist / belong to this user.
+        """
+        async with self._pool.connection() as conn, conn.cursor() as cur:
+            await cur.execute(
+                "UPDATE collection_definitions SET visibility = %s, updated_at = now() "
+                "WHERE identity_sub = %s AND definition_id = %s",
+                (visibility, identity_sub, definition_id),
+            )
+        return await self.get_definition(identity_sub, definition_id)
 
     async def list_definition_items(self, definition_id: str) -> list[CollectionItem]:
         """Return a collection's stored membership, in rank order, joined with the shared catalog.
@@ -847,6 +945,70 @@ class CollectionsRepository:
             )
             return cur.rowcount > 0
 
+    async def follow_collection(self, follower_sub: str, definition_id: str) -> None:
+        """Follow a collection. Idempotent -- following one already followed is a no-op, matching
+        ``curator.persistence.follow_repository.FollowRepository.follow``'s precedent."""
+        async with self._pool.connection() as conn, conn.cursor() as cur:
+            await cur.execute(
+                """
+                INSERT INTO collection_follows (follower_sub, definition_id) VALUES (%s, %s)
+                ON CONFLICT (follower_sub, definition_id) DO NOTHING
+                """,
+                (follower_sub, definition_id),
+            )
+
+    async def unfollow_collection(self, follower_sub: str, definition_id: str) -> bool:
+        """Unfollow a collection.
+
+        :returns: ``True`` if a row was actually removed -- callers use this to decide whether to write an
+            audit-log entry, matching the account-follow precedent (no noise from a repeat no-op unfollow).
+        """
+        async with self._pool.connection() as conn, conn.cursor() as cur:
+            await cur.execute(
+                "DELETE FROM collection_follows WHERE follower_sub = %s AND definition_id = %s",
+                (follower_sub, definition_id),
+            )
+            return cur.rowcount > 0
+
+    async def is_following_collection(self, follower_sub: str, definition_id: str) -> bool:
+        """Whether ``follower_sub`` currently follows this collection."""
+        async with self._pool.connection() as conn, conn.cursor() as cur:
+            await cur.execute(
+                "SELECT 1 FROM collection_follows WHERE follower_sub = %s AND definition_id = %s",
+                (follower_sub, definition_id),
+            )
+            row = await cur.fetchone()
+        return row is not None
+
+    async def collection_follower_count(self, definition_id: str) -> int:
+        """How many users currently follow this collection."""
+        async with self._pool.connection() as conn, conn.cursor() as cur:
+            await cur.execute("SELECT count(*) FROM collection_follows WHERE definition_id = %s", (definition_id,))
+            row = await cur.fetchone()
+        assert row is not None
+        return int(row[0])
+
+    async def list_followed_collections(self, follower_sub: str) -> list[CollectionDefinition]:
+        """Return every collection ``follower_sub`` follows, most recently followed first -- the
+        "Collections I follow" view. Deliberately not filtered by the target's current visibility here:
+        unfollowing is always available even if a collection was made private after the follow, so a
+        stale-but-still-followed private collection would need its own explicit "no longer shared" state
+        in the UI rather than silently vanishing from this list.
+        """
+        async with self._pool.connection() as conn, conn.cursor() as cur:
+            await cur.execute(
+                f"""
+                SELECT {self._DEFINITION_COLUMNS}
+                FROM collection_definitions cd
+                JOIN collection_follows cf ON cf.definition_id = cd.definition_id
+                WHERE cf.follower_sub = %s
+                ORDER BY cf.created_at DESC
+                """,
+                (follower_sub,),
+            )
+            rows = await cur.fetchall()
+        return [self._to_definition(row) for row in rows]
+
     @staticmethod
     def _to_definition(row: Any) -> CollectionDefinition:
         return CollectionDefinition(
@@ -862,6 +1024,10 @@ class CollectionsRepository:
             description=row[9],
             include_inactive=bool(row[10]),
             min_percent_completed=row[11],
+            filter_predicate=parse_predicate(row[12]) if row[12] is not None else None,
+            visibility=row[13],
+            share_slug=row[14],
+            item_count=row[15],
         )
 
     async def save_run(
