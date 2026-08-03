@@ -12,7 +12,7 @@ dependencies = [
     "uvicorn",
     "joserfc",
     "cryptography",
-    "psycopg[binary]>=3.1.0,<4.0.0",
+    "psycopg[binary]>=3.3.4,<4.0.0",
     "psycopg-pool>=3.3.1,<4.0.0",
     "httpx>=0.27.0",
     "redis>=8.0.1,<9.0.0",
