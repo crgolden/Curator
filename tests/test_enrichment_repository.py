@@ -155,7 +155,7 @@ async def test_get_psn_catalog_cache_maps_row():
     entry = await repo.get_psn_catalog_cache("p1")
 
     assert entry == PsnCatalogCacheEntry(
-        product_id="p1",
+        title_id="p1",
         concept_id="c1",
         genres=("Action", "RPG"),
         star_rating=4.5,
@@ -175,7 +175,7 @@ async def test_save_psn_catalog_cache_executes_upsert():
     pool = FakePool()
     repo = EnrichmentRepository(pool)
     entry = PsnCatalogCacheEntry(
-        product_id="p1",
+        title_id="p1",
         concept_id="c1",
         genres=("Action",),
         star_rating=4.0,

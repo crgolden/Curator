@@ -59,6 +59,7 @@ class ContinuationGame:
     game_id: str
     title: str
     product_id: str | None
+    title_id: str | None
     native_ps5: bool
 
 
@@ -73,6 +74,7 @@ class LibraryEntry:
     owned_edition: str | None
     winning_entitlement_id: str | None
     product_id: str | None
+    title_id: str | None
 
 
 class LibraryRepository:
@@ -94,6 +96,7 @@ class LibraryRepository:
         owned_edition: str | None,
         winning_entitlement_id: str | None,
         product_id: str | None,
+        title_id: str | None,
         is_active: bool = True,
     ) -> None:
         """Record (or refresh) a user's ownership of one game.
@@ -106,6 +109,8 @@ class LibraryRepository:
             game's canonical title.
         :param winning_entitlement_id: The entitlement id that won the edition tiebreak.
         :param product_id: The winning edition's PSN product id.
+        :param title_id: The winning edition's PSN store/content title id (npTitleId), used for
+            official-PSN-catalog enrichment lookups.
         :param is_active: Whether this user can still play the game. Refreshed on every build, so a
             lapsed PS Plus title flips to ``False`` here instead of being stranded as permanently owned
             (which is what happened while canonicalization dropped inactive entitlements outright).
@@ -115,15 +120,16 @@ class LibraryRepository:
                 """
                 INSERT INTO library_entries (
                     identity_sub, game_id, native_ps5, ps4_eligible, owned_edition,
-                    winning_entitlement_id, product_id, is_active, last_seen_at
+                    winning_entitlement_id, product_id, title_id, is_active, last_seen_at
                 )
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, now())
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, now())
                 ON CONFLICT (identity_sub, game_id) DO UPDATE SET
                     native_ps5 = EXCLUDED.native_ps5,
                     ps4_eligible = EXCLUDED.ps4_eligible,
                     owned_edition = EXCLUDED.owned_edition,
                     winning_entitlement_id = EXCLUDED.winning_entitlement_id,
                     product_id = EXCLUDED.product_id,
+                    title_id = EXCLUDED.title_id,
                     is_active = EXCLUDED.is_active,
                     last_seen_at = now()
                 """,
@@ -135,6 +141,7 @@ class LibraryRepository:
                     owned_edition,
                     winning_entitlement_id,
                     product_id,
+                    title_id,
                     is_active,
                 ),
             )
@@ -273,7 +280,7 @@ class LibraryRepository:
             await cur.execute(
                 """
                 SELECT identity_sub, game_id, native_ps5, ps4_eligible, owned_edition,
-                       winning_entitlement_id, product_id
+                       winning_entitlement_id, product_id, title_id
                 FROM library_entries WHERE identity_sub = %s
                 """,
                 (identity_sub,),
@@ -288,6 +295,7 @@ class LibraryRepository:
                 owned_edition=row[4],
                 winning_entitlement_id=row[5],
                 product_id=row[6],
+                title_id=row[7],
             )
             for row in rows
         ]
@@ -400,7 +408,7 @@ class LibraryRepository:
         async with self._pool.connection() as conn, conn.cursor() as cur:
             await cur.execute(
                 """
-                SELECT le.game_id, g.canonical_title, le.product_id, le.native_ps5
+                SELECT le.game_id, g.canonical_title, le.product_id, le.title_id, le.native_ps5
                 FROM library_entries le
                 JOIN games g ON g.game_id = le.game_id
                 WHERE le.identity_sub = %s AND le.game_id = ANY(%s)
@@ -409,7 +417,8 @@ class LibraryRepository:
             )
             rows = await cur.fetchall()
         return [
-            ContinuationGame(game_id=str(row[0]), title=row[1], product_id=row[2], native_ps5=row[3]) for row in rows
+            ContinuationGame(game_id=str(row[0]), title=row[1], product_id=row[2], title_id=row[3], native_ps5=row[4])
+            for row in rows
         ]
 
     async def list_categories(self, identity_sub: str) -> list[str]:

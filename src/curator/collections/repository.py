@@ -837,9 +837,11 @@ class CollectionsRepository:
         Cover art has two sources, tried in that order. ``psn_catalog_cache`` is the better one (a real
         store cover) but only has a row once PSN catalog enrichment has run for that game, which is not
         guaranteed. The entitlement artwork ingestion now captures is the fallback, so a collection made
-        of freshly-imported games still renders. Reading a snapshot row belonging to some other user is
-        deliberate and safe: artwork is a property of the game, and ``entitlement_snapshots`` is joined
-        through ``game_concepts`` by concept id alone, never by whose pull it came from.
+        of freshly-imported games still renders. Reading a snapshot/library row belonging to some other
+        user is deliberate and safe: artwork is a property of the game, not of any one owner's access to
+        it -- the first subquery resolves ``title_id`` via any user's ``library_entries`` row for this
+        game, and the second joins ``entitlement_snapshots`` through ``game_concepts`` by concept id
+        alone, neither scoped to whose pull it came from.
         """
         async with self._pool.connection() as conn, conn.cursor() as cur:
             await cur.execute(
@@ -849,9 +851,9 @@ class CollectionsRepository:
                        COALESCE(
                            (
                                SELECT pcc.cover_image_url
-                               FROM game_concepts gc
-                               JOIN psn_catalog_cache pcc ON pcc.product_id = gc.product_id
-                               WHERE gc.game_id = g.game_id AND pcc.cover_image_url IS NOT NULL
+                               FROM library_entries any_le
+                               JOIN psn_catalog_cache pcc ON pcc.title_id = any_le.title_id
+                               WHERE any_le.game_id = g.game_id AND pcc.cover_image_url IS NOT NULL
                                LIMIT 1
                            ),
                            (

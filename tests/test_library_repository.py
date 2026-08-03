@@ -78,12 +78,13 @@ async def test_upsert_entry_executes_upsert():
         owned_edition="God of War",
         winning_entitlement_id="e1",
         product_id="p1",
+        title_id="t1",
     )
 
     sql, params = pool.connections[0].executed[0]
     assert "INSERT INTO library_entries" in sql
     assert "ON CONFLICT (identity_sub, game_id) DO UPDATE" in sql
-    assert params == ("sub-1", "game-1", True, False, "God of War", "e1", "p1", True)
+    assert params == ("sub-1", "game-1", True, False, "God of War", "e1", "p1", "t1", True)
 
 
 async def test_upsert_entry_refreshes_is_active_on_conflict():
@@ -104,17 +105,18 @@ async def test_upsert_entry_refreshes_is_active_on_conflict():
         owned_edition="Lapsed Title",
         winning_entitlement_id="e1",
         product_id="p1",
+        title_id="t1",
         is_active=False,
     )
 
     sql, params = pool.connections[0].executed[0]
     assert "is_active = EXCLUDED.is_active" in sql
     assert params is not None
-    assert params[7] is False
+    assert params[8] is False
 
 
 async def test_list_entries_maps_rows():
-    pool = FakePool(fetchall_results=[[("sub-1", "game-1", True, False, "God of War", "e1", "p1")]])
+    pool = FakePool(fetchall_results=[[("sub-1", "game-1", True, False, "God of War", "e1", "p1", "t1")]])
     repo = LibraryRepository(pool)
 
     entries = await repo.list_entries("sub-1")
@@ -124,6 +126,8 @@ async def test_list_entries_maps_rows():
     assert entries[0].native_ps5 is True
     assert entries[0].ps4_eligible is False
     assert entries[0].owned_edition == "God of War"
+    assert entries[0].product_id == "p1"
+    assert entries[0].title_id == "t1"
 
 
 async def test_list_entries_empty_when_no_rows():
@@ -246,7 +250,7 @@ async def test_list_categories_empty_when_no_rows():
 
 
 async def test_get_games_for_continuation_maps_rows():
-    pool = FakePool(fetchall_results=[[("game-1", "Elden Ring", "product-1", True)]])
+    pool = FakePool(fetchall_results=[[("game-1", "Elden Ring", "product-1", "title-1", True)]])
     repo = LibraryRepository(pool)
 
     games = await repo.get_games_for_continuation("sub-1", ["game-1"])
@@ -255,6 +259,7 @@ async def test_get_games_for_continuation_maps_rows():
     assert games[0].game_id == "game-1"
     assert games[0].title == "Elden Ring"
     assert games[0].product_id == "product-1"
+    assert games[0].title_id == "title-1"
     assert games[0].native_ps5 is True
     sql, params = pool.connections[0].executed[0]
     assert "library_entries" in sql

@@ -106,11 +106,11 @@ class FakeEnrichmentRepository:
         self.saved_opencritic_batches.append(games)
         self.opencritic_games = [*self.opencritic_games, *games]
 
-    async def get_psn_catalog_cache(self, product_id):
-        return self.psn_cache.get(product_id)
+    async def get_psn_catalog_cache(self, title_id):
+        return self.psn_cache.get(title_id)
 
     async def save_psn_catalog_cache(self, entry):
-        self.psn_cache[entry.product_id] = entry
+        self.psn_cache[entry.title_id] = entry
 
     async def get_opencritic_cursor(self, platform):
         return self.opencritic_cursors.get(platform, 0)
@@ -153,7 +153,7 @@ async def test_enrich_game_resolves_rawg_genre_publisher_and_size():
 
     result, size = await service.enrich_game(
         "God of War",
-        product_id=None,
+        title_id=None,
         is_ps5=True,
         genre_priorities=_GENRE_PRIORITIES,
         publisher_tier_rules=_PUBLISHER_RULES,
@@ -182,7 +182,7 @@ async def test_enrich_game_uses_cached_rawg_result_without_calling_client_again(
 
     result, _ = await service.enrich_game(
         "God of War",
-        product_id=None,
+        title_id=None,
         is_ps5=True,
         genre_priorities=_GENRE_PRIORITIES,
         publisher_tier_rules=_PUBLISHER_RULES,
@@ -200,7 +200,7 @@ async def test_enrich_game_no_rawg_match_caches_none_and_defaults_indie():
 
     result, size = await service.enrich_game(
         "Unknown Game",
-        product_id=None,
+        title_id=None,
         is_ps5=True,
         genre_priorities=_GENRE_PRIORITIES,
         publisher_tier_rules=_PUBLISHER_RULES,
@@ -227,7 +227,7 @@ async def test_enrich_game_psn_genres_override_rawg_genres():
 
     result, _ = await service.enrich_game(
         "Some Game",
-        product_id="p1",
+        title_id="p1",
         is_ps5=True,
         genre_priorities=_GENRE_PRIORITIES,
         publisher_tier_rules=_PUBLISHER_RULES,
@@ -239,6 +239,31 @@ async def test_enrich_game_psn_genres_override_rawg_genres():
     assert catalog_client.title_concept_calls == ["p1"]
 
 
+async def test_enrich_game_calls_catalog_client_with_title_id_not_product_id():
+    """Regression test for the product_id/title_id mix-up (0023_library_entries_title_id.sql): PSN's
+    catalog "concepts" endpoint requires an npTitleId (e.g. "CUSA13505_00"), not a PSN product id (e.g.
+    "UP0700-CUSA13505_00-ELEVENELEVEN1111"). Passing the wrong identifier doesn't error -- it silently
+    resolves nothing -- so a passing suite that never asserts on the exact value reaching the catalog
+    client would not have caught this. This asserts the real npTitleId-shaped id is what the catalog
+    client actually receives.
+    """
+    concept = TitleConcept(concept_id="c1", genres=("Action",), star_rating=4.5)
+    catalog_client = FakeCatalogClient(concept=concept)
+    service = _service(catalog_client=catalog_client)
+
+    result, _ = await service.enrich_game(
+        "Eleven Eleven",
+        title_id="CUSA13505_00",
+        is_ps5=False,
+        genre_priorities=_GENRE_PRIORITIES,
+        publisher_tier_rules=_PUBLISHER_RULES,
+        size_estimates=_SIZE_ESTIMATES,
+    )
+
+    assert catalog_client.title_concept_calls == ["CUSA13505_00"]
+    assert result.psn_rating == 4.5
+
+
 async def test_enrich_game_psn_catalog_cache_avoids_second_lookup():
     concept = TitleConcept(concept_id="c1", genres=("Action",))
     catalog_client = FakeCatalogClient(concept=concept)
@@ -247,7 +272,7 @@ async def test_enrich_game_psn_catalog_cache_avoids_second_lookup():
 
     await service.enrich_game(
         "Game A",
-        product_id="p1",
+        title_id="p1",
         is_ps5=True,
         genre_priorities=_GENRE_PRIORITIES,
         publisher_tier_rules=_PUBLISHER_RULES,
@@ -255,7 +280,7 @@ async def test_enrich_game_psn_catalog_cache_avoids_second_lookup():
     )
     await service.enrich_game(
         "Game A",
-        product_id="p1",
+        title_id="p1",
         is_ps5=True,
         genre_priorities=_GENRE_PRIORITIES,
         publisher_tier_rules=_PUBLISHER_RULES,
@@ -275,7 +300,7 @@ async def test_enrich_game_detects_multiplayer_from_tags():
 
     result, _ = await service.enrich_game(
         "Multiplayer Game",
-        product_id=None,
+        title_id=None,
         is_ps5=True,
         genre_priorities=_GENRE_PRIORITIES,
         publisher_tier_rules=_PUBLISHER_RULES,
@@ -298,7 +323,7 @@ async def test_enrich_game_resolves_opencritic_score_and_source():
 
     result, _ = await service.enrich_game(
         "Combo Game",
-        product_id=None,
+        title_id=None,
         is_ps5=True,
         genre_priorities=_GENRE_PRIORITIES,
         publisher_tier_rules=_PUBLISHER_RULES,
@@ -321,7 +346,7 @@ async def test_enrich_game_without_catalog_client_skips_psn_genre_resolution():
 
     result, _ = await service.enrich_game(
         "Some Game",
-        product_id="p1",
+        title_id="p1",
         is_ps5=True,
         genre_priorities=_GENRE_PRIORITIES,
         publisher_tier_rules=_PUBLISHER_RULES,
@@ -442,7 +467,7 @@ async def test_enrich_game_with_no_rawg_client_skips_rawg_signal_silently():
 
     result, _ = await service.enrich_game(
         "Some Game",
-        product_id=None,
+        title_id=None,
         is_ps5=True,
         genre_priorities=_GENRE_PRIORITIES,
         publisher_tier_rules=_PUBLISHER_RULES,
@@ -460,7 +485,7 @@ async def test_enrich_game_rawg_auth_failure_raises_enrichment_auth_error():
     with pytest.raises(EnrichmentAuthError) as exc_info:
         await service.enrich_game(
             "Some Game",
-            product_id=None,
+            title_id=None,
             is_ps5=True,
             genre_priorities=_GENRE_PRIORITIES,
             publisher_tier_rules=_PUBLISHER_RULES,
@@ -476,7 +501,7 @@ async def test_enrich_game_rawg_transient_failure_skips_that_games_rawg_signal()
 
     result, _ = await service.enrich_game(
         "Some Game",
-        product_id=None,
+        title_id=None,
         is_ps5=True,
         genre_priorities=_GENRE_PRIORITIES,
         publisher_tier_rules=_PUBLISHER_RULES,
@@ -494,7 +519,7 @@ async def test_enrich_game_rawg_search_timeout_skips_that_games_rawg_signal():
 
     result, _ = await service.enrich_game(
         "Some Game",
-        product_id=None,
+        title_id=None,
         is_ps5=True,
         genre_priorities=_GENRE_PRIORITIES,
         publisher_tier_rules=_PUBLISHER_RULES,
@@ -513,7 +538,7 @@ async def test_enrich_game_rawg_detail_timeout_skips_that_games_rawg_signal():
 
     result, _ = await service.enrich_game(
         "Some Game",
-        product_id=None,
+        title_id=None,
         is_ps5=True,
         genre_priorities=_GENRE_PRIORITIES,
         publisher_tier_rules=_PUBLISHER_RULES,
@@ -530,7 +555,7 @@ async def test_enrich_game_rawg_rate_limit_raises_enrichment_rate_limit_error_wi
     with pytest.raises(EnrichmentRateLimitError) as exc_info:
         await service.enrich_game(
             "Some Game",
-            product_id=None,
+            title_id=None,
             is_ps5=True,
             genre_priorities=_GENRE_PRIORITIES,
             publisher_tier_rules=_PUBLISHER_RULES,
@@ -548,7 +573,7 @@ async def test_enrich_game_rawg_rate_limit_falls_back_to_default_and_doubles_on_
     with pytest.raises(EnrichmentRateLimitError) as first:
         await service.enrich_game(
             "Game A",
-            product_id=None,
+            title_id=None,
             is_ps5=True,
             genre_priorities=_GENRE_PRIORITIES,
             publisher_tier_rules=_PUBLISHER_RULES,
@@ -557,7 +582,7 @@ async def test_enrich_game_rawg_rate_limit_falls_back_to_default_and_doubles_on_
     with pytest.raises(EnrichmentRateLimitError) as second:
         await service.enrich_game(
             "Game B",
-            product_id=None,
+            title_id=None,
             is_ps5=True,
             genre_priorities=_GENRE_PRIORITIES,
             publisher_tier_rules=_PUBLISHER_RULES,
@@ -576,7 +601,7 @@ async def test_enrich_game_opencritic_topup_timeout_sets_incomplete_flag_not_a_r
 
     result, _ = await service.enrich_game(
         "Some Game",
-        product_id=None,
+        title_id=None,
         is_ps5=True,
         genre_priorities=_GENRE_PRIORITIES,
         publisher_tier_rules=_PUBLISHER_RULES,
@@ -596,7 +621,7 @@ async def test_enrich_game_psn_catalog_timeout_skips_that_games_psn_signal():
 
     result, _ = await service.enrich_game(
         "Some Game",
-        product_id="p1",
+        title_id="p1",
         is_ps5=True,
         genre_priorities=_GENRE_PRIORITIES,
         publisher_tier_rules=_PUBLISHER_RULES,
@@ -618,7 +643,7 @@ async def test_disable_provider_makes_rawg_behave_as_not_configured():
     assert service.has_rawg_client is False
     result, _ = await service.enrich_game(
         "Some Game",
-        product_id=None,
+        title_id=None,
         is_ps5=True,
         genre_priorities=_GENRE_PRIORITIES,
         publisher_tier_rules=_PUBLISHER_RULES,
@@ -644,7 +669,7 @@ async def test_enrich_game_opencritic_rate_limit_raises_enrichment_rate_limit_er
     with pytest.raises(EnrichmentRateLimitError) as exc_info:
         await service.enrich_game(
             "Some Game",
-            product_id=None,
+            title_id=None,
             is_ps5=True,
             genre_priorities=_GENRE_PRIORITIES,
             publisher_tier_rules=_PUBLISHER_RULES,
@@ -664,7 +689,7 @@ async def test_enrich_game_rawg_match_sets_rawg_enriched_true_even_without_a_sco
 
     result, _ = await service.enrich_game(
         "Some Game",
-        product_id=None,
+        title_id=None,
         is_ps5=True,
         genre_priorities=_GENRE_PRIORITIES,
         publisher_tier_rules=_PUBLISHER_RULES,
@@ -680,7 +705,7 @@ async def test_enrich_game_with_no_opencritic_client_skips_opencritic_signal_sil
 
     result, _ = await service.enrich_game(
         "Some Game",
-        product_id=None,
+        title_id=None,
         is_ps5=True,
         genre_priorities=_GENRE_PRIORITIES,
         publisher_tier_rules=_PUBLISHER_RULES,
@@ -698,7 +723,7 @@ async def test_enrich_game_opencritic_cache_miss_triggers_one_topup_and_then_mat
 
     result, _ = await service.enrich_game(
         "Some Game",
-        product_id=None,
+        title_id=None,
         is_ps5=True,
         genre_priorities=_GENRE_PRIORITIES,
         publisher_tier_rules=_PUBLISHER_RULES,
@@ -717,7 +742,7 @@ async def test_enrich_game_opencritic_topup_only_attempted_once_per_service_inst
     for _ in range(2):
         await service.enrich_game(
             "Some Game",
-            product_id=None,
+            title_id=None,
             is_ps5=True,
             genre_priorities=_GENRE_PRIORITIES,
             publisher_tier_rules=_PUBLISHER_RULES,
@@ -739,7 +764,7 @@ async def test_enrich_game_opencritic_topup_incomplete_flag_set_when_not_exhaust
 
     await service.enrich_game(
         "Some Game",
-        product_id=None,
+        title_id=None,
         is_ps5=True,
         genre_priorities=_GENRE_PRIORITIES,
         publisher_tier_rules=_PUBLISHER_RULES,
@@ -756,7 +781,7 @@ async def test_enrich_game_opencritic_topup_auth_failure_raises_enrichment_auth_
     with pytest.raises(EnrichmentAuthError) as exc_info:
         await service.enrich_game(
             "Some Game",
-            product_id=None,
+            title_id=None,
             is_ps5=True,
             genre_priorities=_GENRE_PRIORITIES,
             publisher_tier_rules=_PUBLISHER_RULES,

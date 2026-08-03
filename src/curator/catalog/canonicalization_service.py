@@ -55,11 +55,11 @@ class GroupedEntry:
     product_id: str | None
     entitlement_id: str
     active: bool | None = None
-    #: PSN's store/content title id (e.g. ``"CUSA00419_00"``), carried through purely so a downstream
-    #: stage (``curator.library.library_build_orchestrator.LibraryBuildOrchestrator.match_trophies``) can
-    #: attempt an exact PS4 trophy-title lookup (``TrophyClient.trophy_titles_for_title``) within the same
-    #: build run -- never persisted to ``games``/``library_entries`` itself. See ``CanonicalGame
-    #: .winning_title_id``.
+    #: PSN's store/content title id (e.g. ``"CUSA00419_00"``). Used within the same build run by a
+    #: downstream stage (``curator.library.library_build_orchestrator.LibraryBuildOrchestrator
+    #: .match_trophies``) for an exact PS4 trophy-title lookup (``TrophyClient.trophy_titles_for_title``),
+    #: and persisted to ``library_entries.title_id`` (see ``0023_library_entries_title_id.sql``) for the
+    #: PSN catalog enrichment continuation-resume path. See ``CanonicalGame.winning_title_id``.
     title_id: str | None = None
 
 
@@ -80,8 +80,10 @@ class CanonicalGame:
     concept_ids: tuple[str, ...]
     winning_entitlement_id: str | None
     active: bool = True
-    #: The winning edition's PSN store/content title id, if known -- transient, not persisted. See
-    #: ``GroupedEntry.title_id``.
+    #: The winning edition's PSN store/content title id, if known. Used transiently within the same build
+    #: pass for :meth:`~curator.library.library_build_orchestrator.LibraryBuildOrchestrator.match_trophies`'s
+    #: exact lookup, and persisted to ``library_entries.title_id`` for PSN catalog enrichment's
+    #: continuation-resume path (``0023_library_entries_title_id.sql``). See ``GroupedEntry.title_id``.
     winning_title_id: str | None = None
 
 

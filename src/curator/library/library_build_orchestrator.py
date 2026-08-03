@@ -120,13 +120,13 @@ class LibraryBuildResult:
 async def enrich_games(
     enrichment_service: EnrichmentService,
     enrichment_repository: EnrichmentRepository,
-    games: list[tuple[str, str, str | None, bool]],
+    games: list[tuple[str, str, str | None, str | None, bool]],
     *,
     publisher_tier_rules: list[PublisherTierRule],
     size_estimates: list[SizeEstimate],
 ) -> EnrichDeltaResult:
-    """Enrich each ``(game_id, title, product_id, is_ps5)`` tuple in order, stopping early on a provider
-    rate limit -- but degrading, not stopping, on a rejected provider key.
+    """Enrich each ``(game_id, title, product_id, title_id, is_ps5)`` tuple in order, stopping early on a
+    provider rate limit -- but degrading, not stopping, on a rejected provider key.
 
     A module-level function (not a :class:`LibraryBuildOrchestrator` method) so it's callable without
     building a full orchestrator -- shared by :meth:`LibraryBuildOrchestrator.enrich_delta` (freshly
@@ -160,11 +160,11 @@ async def enrich_games(
     rejected_providers: list[str] = []
     index = 0
     while index < len(games):
-        game_id, title, product_id, is_ps5 = games[index]
+        game_id, title, _product_id, title_id, is_ps5 = games[index]
         try:
             result, _size = await enrichment_service.enrich_game(
                 title,
-                product_id=product_id,
+                title_id=title_id,
                 is_ps5=is_ps5,
                 genre_priorities=genre_priorities,
                 publisher_tier_rules=publisher_tier_rules,
@@ -282,6 +282,7 @@ class LibraryBuildOrchestrator:
                 owned_edition=game.canonical_title,
                 winning_entitlement_id=game.winning_entitlement_id,
                 product_id=game.product_id,
+                title_id=game.winning_title_id,
                 is_active=game.active,
             )
             game_ids.append(game_id)
@@ -306,7 +307,7 @@ class LibraryBuildOrchestrator:
         """
         unenriched = set(await self._enrichment_repository.get_unenriched_game_ids(game_ids))
         games = [
-            (game_id, game.canonical_title, game.product_id, game.native_ps5)
+            (game_id, game.canonical_title, game.product_id, game.winning_title_id, game.native_ps5)
             for game, game_id in zip(canonical_games, game_ids, strict=True)
             if game_id in unenriched
         ]

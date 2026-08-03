@@ -3,7 +3,10 @@ Azure connection, no real database)."""
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from typing import Any
+
+from azure.servicebus.exceptions import MessageLockLostError, ServiceBusConnectionError
 
 from curator.jobs.queue_consumer import QueueConsumer, RateLimitRetryScheduled
 
@@ -17,7 +20,13 @@ class FakeMessage:
 
 
 class FakeReceiver:
-    """Stands in for an async Service Bus receiver: iterates a fixed list of messages once, then stops."""
+    """Stands in for an async Service Bus receiver: iterates a fixed list of messages once, then stops.
+
+    ``dead_letter_raises``/``complete_raises`` accept either a single exception (raised on every call --
+    what every pre-existing test in this file uses) or a list of "next exception to raise, or ``None`` for
+    a call that should succeed" consumed in call order (for exercising a settle call that fails once then
+    succeeds, or that raises a lock-loss error tenacity must not retry).
+    """
 
     def __init__(self, messages, *, dead_letter_raises=None, complete_raises=None):
         self._messages = list(messages)
@@ -25,6 +34,8 @@ class FakeReceiver:
         self.dead_lettered = []
         self._dead_letter_raises = dead_letter_raises
         self._complete_raises = complete_raises
+        self.complete_call_count = 0
+        self.dead_letter_call_count = 0
 
     def __aiter__(self):
         return self
@@ -35,14 +46,26 @@ class FakeReceiver:
         return self._messages.pop(0)
 
     async def complete_message(self, message):
-        if self._complete_raises:
-            raise self._complete_raises
+        self.complete_call_count += 1
+        exc = self._next_exception(self._complete_raises)
+        if exc is not None:
+            raise exc
         self.completed.append(message)
 
     async def dead_letter_message(self, message, *, reason, error_description=None):
-        if self._dead_letter_raises:
-            raise self._dead_letter_raises
+        self.dead_letter_call_count += 1
+        exc = self._next_exception(self._dead_letter_raises)
+        if exc is not None:
+            raise exc
         self.dead_lettered.append((message, reason, error_description))
+
+    @staticmethod
+    def _next_exception(raises):
+        if raises is None:
+            return None
+        if isinstance(raises, list):
+            return raises.pop(0) if raises else None
+        return raises
 
 
 class RecordingHandler:
@@ -57,21 +80,60 @@ class RecordingHandler:
 
 
 class FakeJobRunsRepository:
-    def __init__(self):
-        self.running: list[str] = []
+    """A real (if simplified) in-memory implementation of the compare-and-swap ``try_begin_delivery``
+    performs against real Postgres, keyed by ``run_id`` -- not a stub that always returns ``True`` --
+    since the whole point of these tests is exercising the guard itself."""
+
+    def __init__(self, runs: dict[str, dict[str, Any]] | None = None):
+        self._runs: dict[str, dict[str, Any]] = {run_id: dict(state) for run_id, state in (runs or {}).items()}
+        self.began: list[str] = []
         self.succeeded: list[str] = []
         self.succeeded_summaries: dict[str, dict | None] = {}
         self.failed: list[tuple[str, str]] = []
+        self.rate_limited_calls: list[tuple[str, dict]] = []
 
-    async def mark_running(self, run_id):
-        self.running.append(run_id)
+    def seed(self, run_id: str, *, status: str = "queued", seq: int = 0, error: str | None = None) -> None:
+        """Pre-populate a run's state before delivering a message, for tests exercising a stale
+        redelivery (a seq already superseded, or a run already in a terminal status)."""
+        self._runs[run_id] = {"status": status, "seq": seq, "error": error}
+
+    def _run(self, run_id: str) -> dict[str, Any]:
+        return self._runs.setdefault(run_id, {"status": "queued", "seq": 0, "error": None})
+
+    async def try_begin_delivery(self, run_id, expected_seq):
+        run = self._run(run_id)
+        if run["seq"] != expected_seq or run["status"] in ("succeeded", "failed"):
+            return False
+        run["status"] = "running"
+        self.began.append(run_id)
+        return True
+
+    async def get(self, run_id):
+        """Satisfies ``_handle``'s ``get(run_id)`` lookup on a stale redelivery, to decide whether it's a
+        silently-completable no-op (succeeded / superseded checkpoint) or an already-failed run that
+        needs to dead-letter instead."""
+        run = self._runs.get(run_id)
+        if run is None:
+            return None
+        return SimpleNamespace(status=run["status"], error=run["error"])
 
     async def mark_succeeded(self, run_id, result_summary=None):
         self.succeeded.append(run_id)
         self.succeeded_summaries[run_id] = result_summary
+        self._run(run_id)["status"] = "succeeded"
 
     async def mark_failed(self, run_id, error):
         self.failed.append((run_id, error))
+        run = self._run(run_id)
+        run["status"] = "failed"
+        run["error"] = error
+
+    async def mark_rate_limited(self, run_id, result_summary):
+        self.rate_limited_calls.append((run_id, result_summary))
+        run = self._run(run_id)
+        run["seq"] += 1
+        run["status"] = "rate_limited"
+        return run["seq"]
 
 
 def _consumer(
@@ -113,7 +175,7 @@ async def test_library_refresh_dispatches_identity_sub_and_completes():
     assert handler.calls == [("r1", "sub-1")]
     assert len(receiver.completed) == 1
     assert receiver.dead_lettered == []
-    assert job_runs_repository.running == ["r1"]
+    assert job_runs_repository.began == ["r1"]
     assert job_runs_repository.succeeded == ["r1"]
 
 
@@ -443,7 +505,7 @@ async def test_library_refresh_continuation_dispatches_full_payload_and_complete
         )
     ]
     assert len(receiver.completed) == 1
-    assert job_runs_repository.running == ["r1"]
+    assert job_runs_repository.began == ["r1"]
     assert job_runs_repository.succeeded == ["r1"]
 
 
@@ -488,3 +550,174 @@ async def test_rate_limit_retry_scheduled_completes_message_without_status_write
     assert receiver.dead_lettered == []
     assert job_runs_repository.succeeded == []
     assert job_runs_repository.failed == []
+
+
+async def test_lock_loss_completing_a_message_is_swallowed_not_propagated():
+    """Reproduces the actual production bug this WP fixes: ``complete_message`` raising
+    ``MessageLockLostError`` inside the ``except RateLimitRetryScheduled`` branch used to propagate all
+    the way out of ``_handle``, get logged-and-swallowed by the *drain loop's* own broad ``except``, and
+    leave the message unsettled at the broker -- which is what let Service Bus redeliver it and reprocess
+    the whole batch from scratch. Now ``_settle`` itself swallows the lock loss: no exception escapes
+    ``_handle`` at all, this is never treated as a processing failure (``mark_failed`` is never called --
+    it wasn't a failure, the handler already did its own bookkeeping before raising
+    ``RateLimitRetryScheduled``), and the drain loop naturally continues to the next message."""
+    handler = RecordingHandler(raises=RateLimitRetryScheduled())
+    second_payload = _CONTINUATION_PAYLOAD.replace('"run_id": "r1"', '"run_id": "r2"')
+    messages = [FakeMessage(_CONTINUATION_PAYLOAD), FakeMessage(second_payload)]
+    receiver = FakeReceiver(messages, complete_raises=MessageLockLostError())
+    job_runs_repository = FakeJobRunsRepository()
+    consumer = QueueConsumer(
+        library_refresh_receiver=FakeReceiver([]),
+        library_refresh_continuation_receiver=receiver,
+        enrichment_receiver=FakeReceiver([]),
+        on_library_refresh=RecordingHandler(),
+        on_library_refresh_continuation=handler,
+        on_enrichment_run=RecordingHandler(),
+        job_runs_repository=job_runs_repository,
+    )
+
+    await consumer.drain_library_refresh_continuation()  # must not raise
+
+    assert len(handler.calls) == 2  # both messages were processed -- the loop kept draining
+    assert receiver.completed == []  # the lock was lost on every attempt, so nothing was ever appended
+    assert receiver.complete_call_count == 2  # one settle attempt per message, no retries (not transient)
+    assert job_runs_repository.failed == []
+    assert job_runs_repository.succeeded == []
+
+
+async def test_transient_service_bus_error_completing_a_message_retries_and_succeeds():
+    """A real connectivity blip -- unlike a lock loss -- is worth retrying, since the exact same call can
+    succeed a moment later. ``_settle_with_retry``'s tenacity wrapper is what makes that retry happen."""
+    handler = RecordingHandler()
+    receiver = FakeReceiver(
+        [FakeMessage('{"run_id": "r1", "identity_sub": "sub-1"}')],
+        complete_raises=[ServiceBusConnectionError(), None],
+    )
+    job_runs_repository = FakeJobRunsRepository()
+    consumer = QueueConsumer(
+        library_refresh_receiver=receiver,
+        library_refresh_continuation_receiver=FakeReceiver([]),
+        enrichment_receiver=FakeReceiver([]),
+        on_library_refresh=handler,
+        on_library_refresh_continuation=RecordingHandler(),
+        on_enrichment_run=RecordingHandler(),
+        job_runs_repository=job_runs_repository,
+    )
+
+    await consumer.drain_library_refresh()  # must not raise
+
+    assert receiver.complete_call_count == 2  # failed once, retried, succeeded on the second attempt
+    assert len(receiver.completed) == 1
+    assert job_runs_repository.succeeded == ["r1"]
+    assert job_runs_repository.failed == []
+
+
+async def test_stale_redelivery_with_superseded_seq_settles_without_reprocessing():
+    """A redelivered continuation message whose ``seq`` no longer matches the run's current checkpoint
+    (a later ``mark_rate_limited`` call has already superseded it) must not restart the batch -- this is
+    the actual fix for the lock-loss/redelivery race: ``process()`` is never called, and the message is
+    still settled so it doesn't sit around for yet another redelivery."""
+    handler = RecordingHandler()
+    job_runs_repository = FakeJobRunsRepository()
+    job_runs_repository.seed("r1", status="running", seq=2)  # a later checkpoint already superseded seq 0
+    receiver = FakeReceiver([FakeMessage(_CONTINUATION_PAYLOAD)])  # payload carries no "seq" field -> 0
+    consumer = QueueConsumer(
+        library_refresh_receiver=FakeReceiver([]),
+        library_refresh_continuation_receiver=receiver,
+        enrichment_receiver=FakeReceiver([]),
+        on_library_refresh=RecordingHandler(),
+        on_library_refresh_continuation=handler,
+        on_enrichment_run=RecordingHandler(),
+        job_runs_repository=job_runs_repository,
+    )
+
+    await consumer.drain_library_refresh_continuation()
+
+    assert handler.calls == []  # process() never called -- the whole point of the guard
+    assert len(receiver.completed) == 1  # still settled, not left stuck for another redelivery
+    assert receiver.dead_lettered == []
+    assert job_runs_repository.began == []
+    assert job_runs_repository.succeeded == []
+    assert job_runs_repository.failed == []
+
+
+async def test_stale_redelivery_of_an_already_succeeded_run_settles_without_reprocessing():
+    """Same guard, the other benign trigger: the run already reached ``succeeded`` by the time this
+    redelivery arrives (e.g. a second in-flight copy of the same message after the first was already
+    processed to completion). Nothing went wrong here, so this stays a silent complete -- contrast with
+    the already-``failed`` case below, which must dead-letter instead."""
+    handler = RecordingHandler()
+    job_runs_repository = FakeJobRunsRepository()
+    job_runs_repository.seed("r1", status="succeeded", seq=0)
+    receiver = FakeReceiver([FakeMessage(_CONTINUATION_PAYLOAD)])
+    consumer = QueueConsumer(
+        library_refresh_receiver=FakeReceiver([]),
+        library_refresh_continuation_receiver=receiver,
+        enrichment_receiver=FakeReceiver([]),
+        on_library_refresh=RecordingHandler(),
+        on_library_refresh_continuation=handler,
+        on_enrichment_run=RecordingHandler(),
+        job_runs_repository=job_runs_repository,
+    )
+
+    await consumer.drain_library_refresh_continuation()
+
+    assert handler.calls == []
+    assert len(receiver.completed) == 1
+    assert receiver.dead_lettered == []
+    assert job_runs_repository.began == []
+
+
+async def test_stale_redelivery_of_an_already_failed_run_dead_letters_with_stored_error():
+    """The one case where a stale redelivery must NOT be silently completed: the run already failed --
+    most likely because the original ``dead_letter_message`` attempt for it also failed and Service Bus
+    redelivered the message. Silently completing here would make it vanish from both the active queue and
+    the DLQ with zero operator visibility that anything ever failed. This must dead-letter instead, using
+    the error already recorded on the run, and must still never reprocess (``process()`` is not called)."""
+    handler = RecordingHandler()
+    job_runs_repository = FakeJobRunsRepository()
+    job_runs_repository.seed("r1", status="failed", seq=0, error="RAWG request failed with status 401")
+    receiver = FakeReceiver([FakeMessage(_CONTINUATION_PAYLOAD)])
+    consumer = QueueConsumer(
+        library_refresh_receiver=FakeReceiver([]),
+        library_refresh_continuation_receiver=receiver,
+        enrichment_receiver=FakeReceiver([]),
+        on_library_refresh=RecordingHandler(),
+        on_library_refresh_continuation=handler,
+        on_enrichment_run=RecordingHandler(),
+        job_runs_repository=job_runs_repository,
+    )
+
+    await consumer.drain_library_refresh_continuation()
+
+    assert handler.calls == []  # no reprocessing
+    assert receiver.completed == []
+    assert len(receiver.dead_lettered) == 1
+    _message, reason, description = receiver.dead_lettered[0]
+    assert reason == "processing-failed"
+    assert description == "RAWG request failed with status 401"
+    assert job_runs_repository.began == []
+
+
+async def test_stale_redelivery_of_an_already_failed_run_with_no_stored_error_uses_fallback_description():
+    handler = RecordingHandler()
+    job_runs_repository = FakeJobRunsRepository()
+    job_runs_repository.seed("r1", status="failed", seq=0, error=None)
+    receiver = FakeReceiver([FakeMessage(_CONTINUATION_PAYLOAD)])
+    consumer = QueueConsumer(
+        library_refresh_receiver=FakeReceiver([]),
+        library_refresh_continuation_receiver=receiver,
+        enrichment_receiver=FakeReceiver([]),
+        on_library_refresh=RecordingHandler(),
+        on_library_refresh_continuation=handler,
+        on_enrichment_run=RecordingHandler(),
+        job_runs_repository=job_runs_repository,
+    )
+
+    await consumer.drain_library_refresh_continuation()
+
+    assert handler.calls == []
+    assert len(receiver.dead_lettered) == 1
+    _message, reason, description = receiver.dead_lettered[0]
+    assert reason == "processing-failed"
+    assert description == "run already failed"

@@ -92,7 +92,7 @@ async def test_publish_library_refresh_continuation_schedules_a_message_with_the
     before = datetime.now(timezone.utc)
 
     await publisher.publish_library_refresh_continuation(
-        "run-1", "sub-1", ["g1", "g2"], "rawg", retry_after_seconds=3600.0
+        "run-1", "sub-1", ["g1", "g2"], "rawg", retry_after_seconds=3600.0, seq=1
     )
 
     assert len(continuation_sender.scheduled) == 1
@@ -104,6 +104,7 @@ async def test_publish_library_refresh_continuation_schedules_a_message_with_the
         "remaining_game_ids": ["g1", "g2"],
         "provider": "rawg",
         "retry_after_seconds": 3600.0,
+        "seq": 1,
     }
     assert schedule_time_utc >= before
     # No job_runs row is created -- this reuses an existing run_id, it doesn't mint a new run.

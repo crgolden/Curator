@@ -50,9 +50,43 @@ class JobRunsRepository:
                 (run_id, kind, identity_sub),
             )
 
-    async def mark_running(self, run_id: str) -> None:
-        """Transition a run to ``running``."""
-        await self._set_status(run_id, "running")
+    async def try_begin_delivery(self, run_id: str, expected_seq: int) -> bool:
+        """Atomically claim a delivery of ``run_id`` at checkpoint ``expected_seq``, transitioning it to
+        ``running`` if -- and only if -- that checkpoint is still current.
+
+        This is a compare-and-swap: ``run_id``'s ``seq`` column only advances when
+        :meth:`mark_rate_limited` records a real checkpoint, and gets stamped into the payload of the
+        continuation message published for that checkpoint (see
+        ``curator.jobs.queue_publisher.QueuePublisher.publish_library_refresh_continuation``'s ``seq``
+        parameter). A caller uses the return value to distinguish two cases that look identical at the
+        message-delivery level but are not: ``True`` means this delivery's checkpoint is still current --
+        proceed with processing. ``False`` means this delivery is stale -- either a redelivered copy of a
+        message whose checkpoint has already been superseded by a later :meth:`mark_rate_limited` call (a
+        newer continuation message for the same run has already been published and is what should be
+        processed instead), or the run has already reached a terminal status (``succeeded``/``failed``) and
+        has nothing left to do. Either way the caller should settle the message without reprocessing rather
+        than restarting the run's whole batch from scratch.
+
+        Replaces the old unconditional ``mark_running`` as ``queue_consumer.py``'s entry point into this
+        repository -- ``mark_running`` stomped every run back to ``running`` on every delivery attempt with
+        no guard, which is exactly what let a stale redelivery silently erase an already-recorded
+        ``rate_limited`` checkpoint before reprocessing started.
+
+        :param run_id: The run id carried in the delivered message's payload.
+        :param expected_seq: The ``seq`` carried in the delivered message's payload (``0`` for a message
+            with no ``seq`` field at all, matching this column's default for a freshly created run).
+        :returns: ``True`` if the claim succeeded and the run is now ``running``; ``False`` if it was
+            stale and nothing was changed.
+        """
+        async with self._pool.connection() as conn, conn.cursor() as cur:
+            await cur.execute(
+                "UPDATE job_runs SET status = 'running', error = NULL, updated_at = now() "
+                "WHERE run_id = %s AND seq = %s AND status NOT IN ('succeeded', 'failed') "
+                "RETURNING run_id",
+                (run_id, expected_seq),
+            )
+            row = await cur.fetchone()
+        return row is not None
 
     async def mark_succeeded(self, run_id: str, result_summary: dict[str, Any] | None = None) -> None:
         """Transition a run to ``succeeded``, optionally recording a JSON summary of what it did.
@@ -71,7 +105,7 @@ class JobRunsRepository:
         """Transition a run to ``failed``, recording ``error``."""
         await self._set_status(run_id, "failed", error=error)
 
-    async def mark_rate_limited(self, run_id: str, result_summary: dict[str, Any]) -> None:
+    async def mark_rate_limited(self, run_id: str, result_summary: dict[str, Any]) -> int:
         """Transition a run to ``rate_limited``: it stopped early on a provider rate limit and has been
         (or is about to be) republished to resume once the limit lifts.
 
@@ -80,14 +114,23 @@ class JobRunsRepository:
         ``result_summary`` (titles enriched so far, which provider limited, when it'll resume, how many
         games remain) exactly the same way it already does for a succeeded run.
 
+        Also bumps ``seq``, this run's checkpoint counter, and returns the new value.
+
         :param result_summary: The same shape :meth:`mark_succeeded` accepts, plus
             ``rate_limited_provider``, ``retry_after_seconds``, and ``remaining_count``.
+        :returns: The run's new checkpoint sequence number, to be stamped into the continuation message's
+            payload via ``QueuePublisher.publish_library_refresh_continuation``'s ``seq`` parameter -- this
+            is the value :meth:`try_begin_delivery` later checks a redelivery's own ``seq`` against.
         """
         async with self._pool.connection() as conn, conn.cursor() as cur:
             await cur.execute(
-                "UPDATE job_runs SET status = %s, result_summary = %s, updated_at = now() WHERE run_id = %s",
-                ("rate_limited", json.dumps(result_summary), run_id),
+                "UPDATE job_runs SET status = 'rate_limited', result_summary = %s, seq = seq + 1, "
+                "updated_at = now() WHERE run_id = %s RETURNING seq",
+                (json.dumps(result_summary), run_id),
             )
+            row = await cur.fetchone()
+        assert row is not None, f"mark_rate_limited called with unknown run_id {run_id!r}"
+        return int(row[0])
 
     async def _set_status(self, run_id: str, status: str, *, error: str | None = None) -> None:
         async with self._pool.connection() as conn, conn.cursor() as cur:

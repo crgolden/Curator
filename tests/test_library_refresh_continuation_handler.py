@@ -2,7 +2,7 @@
 collaborator except the real :class:`~curator.enrichment.enrichment_service.EnrichmentService` and
 :class:`~curator.psn.session.PsnSession` -- those are real so the rate-limit control flow
 (``RawgApiError`` 429 -> ``EnrichmentRateLimitError`` -> ``RateLimitRetryScheduled``) is exercised end to
-end, not re-mocked at the seam that actually raises it. Every game in these tests has ``product_id=None``,
+end, not re-mocked at the seam that actually raises it. Every game in these tests has ``title_id=None``,
 so the real PSN-catalog signal is never attempted and no real PSN network call ever happens; RAWG calls
 (when a key is configured) go through ``httpx.MockTransport``.
 
@@ -93,7 +93,7 @@ class FakeEnrichmentRepository:
     async def save_opencritic_games(self, games):
         return None
 
-    async def get_psn_catalog_cache(self, product_id):
+    async def get_psn_catalog_cache(self, title_id):
         return None
 
     async def save_psn_catalog_cache(self, entry):
@@ -132,6 +132,7 @@ class FakeJobRunsRepository:
     def __init__(self, existing_result_summary: dict | None = None):
         self._existing_result_summary = existing_result_summary
         self.rate_limited_calls: list[tuple[str, dict]] = []
+        self._next_seq = 0
 
     async def get(self, run_id):
         if self._existing_result_summary is None:
@@ -144,6 +145,8 @@ class FakeJobRunsRepository:
 
     async def mark_rate_limited(self, run_id, result_summary):
         self.rate_limited_calls.append((run_id, result_summary))
+        self._next_seq += 1
+        return self._next_seq
 
 
 class FakeQueuePublisher:
@@ -151,9 +154,9 @@ class FakeQueuePublisher:
         self.continuation_calls: list[tuple] = []
 
     async def publish_library_refresh_continuation(
-        self, run_id, identity_sub, remaining_game_ids, provider, retry_after_seconds
+        self, run_id, identity_sub, remaining_game_ids, provider, retry_after_seconds, *, seq
     ):
-        self.continuation_calls.append((run_id, identity_sub, remaining_game_ids, provider, retry_after_seconds))
+        self.continuation_calls.append((run_id, identity_sub, remaining_game_ids, provider, retry_after_seconds, seq))
 
 
 def _saved_token_bytes() -> bytes:
@@ -219,7 +222,7 @@ async def test_no_psn_link_raises_runtime_error():
 
 
 async def test_success_merges_new_titles_into_existing_result_summary():
-    games = [ContinuationGame(game_id="g1", title="Game A", product_id=None, native_ps5=True)]
+    games = [ContinuationGame(game_id="g1", title="Game A", product_id=None, title_id=None, native_ps5=True)]
     existing_summary = {
         "rawg_enriched_titles": ["Old Game"],
         "opencritic_enriched_titles": [],
@@ -248,8 +251,8 @@ async def test_success_merges_new_titles_into_existing_result_summary():
 
 async def test_success_enriches_every_remaining_game():
     games = [
-        ContinuationGame(game_id="g1", title="Game A", product_id=None, native_ps5=True),
-        ContinuationGame(game_id="g2", title="Game B", product_id=None, native_ps5=False),
+        ContinuationGame(game_id="g1", title="Game A", product_id=None, title_id=None, native_ps5=True),
+        ContinuationGame(game_id="g2", title="Game B", product_id=None, title_id=None, native_ps5=False),
     ]
     collaborators = _setup(games=games)
     handle = collaborators.build_handler()
@@ -273,8 +276,8 @@ async def test_rate_limited_again_marks_rate_limited_republishes_and_raises():
     reset to the default -- each continuation message builds a fresh EnrichmentService, so this only
     happens because the handler seeds it from the inbound payload's own ``retry_after_seconds``."""
     games = [
-        ContinuationGame(game_id="g1", title="Game A", product_id=None, native_ps5=True),
-        ContinuationGame(game_id="g2", title="Game B", product_id=None, native_ps5=False),
+        ContinuationGame(game_id="g1", title="Game A", product_id=None, title_id=None, native_ps5=True),
+        ContinuationGame(game_id="g2", title="Game B", product_id=None, title_id=None, native_ps5=False),
     ]
     collaborators = _setup(games=games, rawg_key=b"rawg-key", http_responder=lambda request: httpx.Response(429))
     handle = collaborators.build_handler()
@@ -298,7 +301,7 @@ async def test_rate_limited_again_marks_rate_limited_republishes_and_raises():
     assert summary["remaining_count"] == 2  # g1 (the one that hit the limit) + g2, neither yet attempted
 
     assert len(collaborators.queue_publisher.continuation_calls) == 1
-    republish_run_id, republish_sub, remaining_game_ids, provider, retry_after_seconds = (
+    republish_run_id, republish_sub, remaining_game_ids, provider, retry_after_seconds, seq = (
         collaborators.queue_publisher.continuation_calls[0]
     )
     assert republish_run_id == "r1"
@@ -306,10 +309,11 @@ async def test_rate_limited_again_marks_rate_limited_republishes_and_raises():
     assert remaining_game_ids == ["g1", "g2"]
     assert provider == "rawg"
     assert retry_after_seconds == 7200.0
+    assert seq == 1  # mark_rate_limited's first call for this run in this fake's lifetime
 
 
 async def test_rejected_key_degrades_the_run_and_records_the_rejection():
-    games = [ContinuationGame(game_id="g1", title="Game A", product_id=None, native_ps5=True)]
+    games = [ContinuationGame(game_id="g1", title="Game A", product_id=None, title_id=None, native_ps5=True)]
     collaborators = _setup(games=games, rawg_key=b"rawg-key", http_responder=lambda request: httpx.Response(401))
     handle = collaborators.build_handler()
 

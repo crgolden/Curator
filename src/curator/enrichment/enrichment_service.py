@@ -258,7 +258,7 @@ class EnrichmentService:
         self,
         title: str,
         *,
-        product_id: str | None,
+        title_id: str | None,
         is_ps5: bool,
         genre_priorities: dict[str, int],
         publisher_tier_rules: list[PublisherTierRule],
@@ -267,7 +267,9 @@ class EnrichmentService:
         """Resolve every enrichment signal for one game.
 
         :param title: The game's canonical title.
-        :param product_id: The game's PSN product id, if known (enables the official-catalog lookup).
+        :param title_id: The game's PSN store/content title id (npTitleId), if known -- enables the
+            official-catalog lookup (:meth:`_resolve_psn_catalog`), which requires this identifier, not a
+            PSN product id.
         :param is_ps5: Whether to estimate install size for the PS5 edition.
         :param genre_priorities: ``name.lower() -> priority``, from
             :meth:`~curator.enrichment.repository.EnrichmentRepository.get_active_genres`.
@@ -278,7 +280,7 @@ class EnrichmentService:
             per-user/per-console install-size tracking lives).
         """
         rawg_detail = await self._resolve_rawg(title)
-        psn_catalog = await self._resolve_psn_catalog(product_id)
+        psn_catalog = await self._resolve_psn_catalog(title_id)
         psn_genres = psn_catalog.genres
 
         rawg_genres = [genre["name"] for genre in (rawg_detail or {}).get("genres", [])]
@@ -419,19 +421,22 @@ class EnrichmentService:
             if not result.exhausted:
                 self.opencritic_topup_incomplete = True
 
-    async def _resolve_psn_catalog(self, product_id: str | None) -> PsnCatalogLookup:
-        """Resolve a product id's official-PSN-catalog genres and star rating, cache-first.
+    async def _resolve_psn_catalog(self, title_id: str | None) -> PsnCatalogLookup:
+        """Resolve a title id's official-PSN-catalog genres and star rating, cache-first.
 
-        :param product_id: The game's PSN product id, or ``None`` if unknown.
+        :param title_id: The game's PSN store/content title id (npTitleId), or ``None`` if unknown. PSN's
+            catalog "concepts" endpoint (:meth:`~curator.psn.catalog_client.CatalogClient.title_concept`)
+            requires this identifier specifically -- a PSN product id is a different id PSN's own data
+            model treats as distinct, and passing one here silently resolves nothing.
         """
-        if product_id is None or self._catalog_client is None:
+        if title_id is None or self._catalog_client is None:
             return PsnCatalogLookup(genres=[], star_rating=None)
-        cached = await self._repository.get_psn_catalog_cache(product_id)
+        cached = await self._repository.get_psn_catalog_cache(title_id)
         if cached is not None:
             return PsnCatalogLookup(genres=list(cached.genres), star_rating=cached.star_rating)
 
         try:
-            concept = await self._catalog_client.title_concept(product_id)
+            concept = await self._catalog_client.title_concept(title_id)
         except httpx.HTTPError:
             # Network error/timeout reaching PSN's catalog endpoint -- same transient-failure handling as
             # _resolve_rawg/_run_opencritic_topup: skip this game's PSN-catalog signal, don't cache a false
@@ -442,7 +447,7 @@ class EnrichmentService:
             return PsnCatalogLookup(genres=[], star_rating=None)
         await self._repository.save_psn_catalog_cache(
             PsnCatalogCacheEntry(
-                product_id=product_id,
+                title_id=title_id,
                 concept_id=concept.concept_id,
                 genres=concept.genres,
                 star_rating=concept.star_rating,

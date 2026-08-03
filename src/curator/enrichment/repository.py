@@ -34,7 +34,7 @@ class RawgCacheEntry:
 class PsnCatalogCacheEntry:
     """One row from ``psn_catalog_cache``."""
 
-    product_id: str
+    title_id: str
     concept_id: str | None
     genres: tuple[str, ...]
     star_rating: float | None
@@ -256,21 +256,21 @@ class EnrichmentRepository:
         async with self._pool.connection() as conn, conn.cursor() as cur:
             await cur.execute(sql, (platform, next_skip))
 
-    async def get_psn_catalog_cache(self, product_id: str) -> PsnCatalogCacheEntry | None:
-        """Return the cached official-PSN-catalog lookup for a product id, or ``None`` if never looked up."""
+    async def get_psn_catalog_cache(self, title_id: str) -> PsnCatalogCacheEntry | None:
+        """Return the cached official-PSN-catalog lookup for a title id, or ``None`` if never looked up."""
         async with self._pool.connection() as conn, conn.cursor() as cur:
             await cur.execute(
                 """
-                SELECT product_id, concept_id, genres, star_rating, publisher, release_date, cover_image_url
-                FROM psn_catalog_cache WHERE product_id = %s
+                SELECT title_id, concept_id, genres, star_rating, publisher, release_date, cover_image_url
+                FROM psn_catalog_cache WHERE title_id = %s
                 """,
-                (product_id,),
+                (title_id,),
             )
             row = await cur.fetchone()
         if row is None:
             return None
         return PsnCatalogCacheEntry(
-            product_id=row[0],
+            title_id=row[0],
             concept_id=row[1],
             genres=tuple(row[2] or ()),
             star_rating=row[3],
@@ -284,10 +284,10 @@ class EnrichmentRepository:
         async with self._pool.connection() as conn, conn.cursor() as cur:
             await cur.execute(
                 """
-                INSERT INTO psn_catalog_cache (product_id, concept_id, genres, star_rating, publisher,
+                INSERT INTO psn_catalog_cache (title_id, concept_id, genres, star_rating, publisher,
                                                 release_date, cover_image_url)
                 VALUES (%s, %s, %s, %s, %s, %s, %s)
-                ON CONFLICT (product_id) DO UPDATE SET
+                ON CONFLICT (title_id) DO UPDATE SET
                     concept_id = EXCLUDED.concept_id,
                     genres = EXCLUDED.genres,
                     star_rating = EXCLUDED.star_rating,
@@ -297,7 +297,7 @@ class EnrichmentRepository:
                     fetched_at = now()
                 """,
                 (
-                    entry.product_id,
+                    entry.title_id,
                     entry.concept_id,
                     list(entry.genres),
                     entry.star_rating,

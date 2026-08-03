@@ -257,7 +257,7 @@ def create_app(
     # per-user clients from that user's own stored keys instead, via enrichment_keys_repository. No
     # catalog_client here either: the official PSN-catalog signal needs a per-user authenticated
     # PsnSession, unlike RAWG/OpenCritic, so this singleton's enrich_game() calls always pass
-    # product_id=None and skip the PSN-native genre/rating supplement.
+    # title_id=None and skip the PSN-native genre/rating supplement.
     #
     # More than one configured key per provider wraps in a rotating client (advances to the next key on a
     # 401/403/429 from the current one) so a full-catalog run isn't capped at a single key's daily quota --
@@ -565,7 +565,7 @@ async def _run_enrichment_pass(
         try:
             result, _size = await enrichment_service.enrich_game(
                 title,
-                product_id=None,
+                title_id=None,
                 is_ps5=False,
                 genre_priorities=genre_priorities,
                 publisher_tier_rules=publisher_tier_rules,
@@ -873,13 +873,14 @@ def _library_refresh_handler(
                 remaining_count=len(result.remaining_game_ids),
                 rejected_providers=result.rejected_providers,
             )
-            await job_runs_repository.mark_rate_limited(run_id, result_summary)
+            new_seq = await job_runs_repository.mark_rate_limited(run_id, result_summary)
             await queue_publisher.publish_library_refresh_continuation(
                 run_id,
                 identity_sub,
                 result.remaining_game_ids,
                 result.rate_limited_provider,
                 result.retry_after_seconds,
+                seq=new_seq,
             )
             raise RateLimitRetryScheduled
 
@@ -964,7 +965,13 @@ def _library_refresh_continuation_handler(
         continuation_games = await library_repository.get_games_for_continuation(identity_sub, remaining_game_ids)
         games_by_id = {game.game_id: game for game in continuation_games}
         games = [
-            (game_id, games_by_id[game_id].title, games_by_id[game_id].product_id, games_by_id[game_id].native_ps5)
+            (
+                game_id,
+                games_by_id[game_id].title,
+                games_by_id[game_id].product_id,
+                games_by_id[game_id].title_id,
+                games_by_id[game_id].native_ps5,
+            )
             for game_id in remaining_game_ids
             if game_id in games_by_id
         ]
@@ -1016,13 +1023,14 @@ def _library_refresh_continuation_handler(
                 remaining_count=len(enrich_result.remaining_game_ids),
                 rejected_providers=merged_rejected_providers,
             )
-            await job_runs_repository.mark_rate_limited(run_id, result_summary)
+            new_seq = await job_runs_repository.mark_rate_limited(run_id, result_summary)
             await queue_publisher.publish_library_refresh_continuation(
                 run_id,
                 identity_sub,
                 enrich_result.remaining_game_ids,
                 enrich_result.rate_limited_provider,
                 enrich_result.retry_after_seconds,
+                seq=new_seq,
             )
             raise RateLimitRetryScheduled
 

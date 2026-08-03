@@ -491,6 +491,23 @@ async def test_list_definition_items_falls_back_to_entitlement_artwork():
     )
 
 
+async def test_list_definition_items_joins_psn_catalog_cache_by_title_id_not_product_id():
+    """Regression test: psn_catalog_cache is keyed by title_id (migration 0023 renamed it from
+    product_id), but this query joins it through library_entries -- a different table from
+    game_concepts.product_id, which still exists and is a different identifier. A stale `pcc.product_id`
+    reference here 500s at runtime (UndefinedColumn) without ever failing this FakePool-based test suite,
+    since nothing here executes against a real schema -- this only locks in the known-correct SQL text."""
+    row = ("g1", 1, "God of War", "God of War", "Action", "AAA", 94.0, 92.0, 4.5, "a.png", True)
+    pool = FakePool(fetchall_results=[[row]])
+    repo = CollectionsRepository(pool)
+
+    await repo.list_definition_items("def-1")
+
+    sql, _params = pool.connections[0].executed[0]
+    assert "pcc.title_id" in sql
+    assert "pcc.product_id" not in sql
+
+
 async def test_update_definition_sets_updated_at_explicitly():
     # collection_definitions.updated_at has DEFAULT now() but no trigger, so an UPDATE that omits it
     # leaves the creation timestamp in place forever.

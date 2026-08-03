@@ -74,6 +74,8 @@ class QueuePublisher:
         remaining_game_ids: list[str],
         provider: str,
         retry_after_seconds: float,
+        *,
+        seq: int,
     ) -> None:
         """Reschedule the remaining games of an in-progress library refresh that just hit a provider rate
         limit, to resume automatically once it lifts.
@@ -90,6 +92,10 @@ class QueuePublisher:
         :param provider: Which provider rate-limited (``"rawg"``/``"opencritic"``) -- carried in the body
             for observability even though ``retry_after_seconds`` already drives the scheduled time.
         :param retry_after_seconds: Seconds from now the limit should have lifted.
+        :param seq: The run's new checkpoint sequence number (from
+            ``JobRunsRepository.mark_rate_limited``'s return value). The receiving
+            ``QueueConsumer._handle()`` uses this, via ``JobRunsRepository.try_begin_delivery``, to detect
+            a stale redelivery of an earlier, already-superseded checkpoint.
         """
         body = json.dumps(
             {
@@ -98,6 +104,7 @@ class QueuePublisher:
                 "remaining_game_ids": remaining_game_ids,
                 "provider": provider,
                 "retry_after_seconds": retry_after_seconds,
+                "seq": seq,
             }
         )
         schedule_time_utc = datetime.now(timezone.utc) + timedelta(seconds=retry_after_seconds)

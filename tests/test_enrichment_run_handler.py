@@ -42,8 +42,8 @@ class FakeEnrichmentService:
             raise self._refresh_opencritic_cache_error
         return 0
 
-    async def enrich_game(self, title, *, product_id, is_ps5, genre_priorities, publisher_tier_rules, size_estimates):
-        assert product_id is None
+    async def enrich_game(self, title, *, title_id, is_ps5, genre_priorities, publisher_tier_rules, size_estimates):
+        assert title_id is None
         call_index = len(self.enrich_calls)
         self.enrich_calls.append(title)
         if self._enrich_game_error is not None and call_index == self._enrich_game_error_at_call:

@@ -99,7 +99,7 @@ class FakeEnrichmentService:
     def disable_provider(self, provider: str) -> None:
         self.disabled_providers.append(provider)
 
-    async def enrich_game(self, title, *, product_id, is_ps5, genre_priorities, publisher_tier_rules, size_estimates):
+    async def enrich_game(self, title, *, title_id, is_ps5, genre_priorities, publisher_tier_rules, size_estimates):
         self.enrich_calls.append(title)
         if title == self._rate_limit_on_title:
             assert self._rate_limit_error is not None
@@ -137,6 +137,7 @@ class FakeLibraryRepository:
         self._unmatched_override = unmatched_override
         self.set_trophy_match_calls: list[tuple] = []
         self.refresh_trophy_progress_calls: list[tuple] = []
+        self.last_title_id: str | None = None
 
     async def upsert_entry(
         self,
@@ -148,9 +149,11 @@ class FakeLibraryRepository:
         owned_edition,
         winning_entitlement_id,
         product_id,
+        title_id,
         is_active=True,
     ):
         self.upsert_calls.append((identity_sub, game_id, native_ps5, ps4_eligible, is_active))
+        self.last_title_id = title_id
 
     async def get_unmatched_game_ids(self, identity_sub, game_ids):
         if self._unmatched_override is not None:
@@ -252,6 +255,11 @@ async def test_persist_and_link_upserts_game_and_library_entry():
     assert library_repository.upsert_calls == [
         ("sub-1", "game-1", games[0].native_ps5, games[0].ps4_eligible, games[0].active)
     ]
+    # Regression coverage for the product_id/title_id mix-up (0023_library_entries_title_id.sql): the
+    # canonicalized game's winning_title_id (resolved from _snapshot()'s title_id="t1") must reach
+    # upsert_entry's title_id kwarg, not be dropped on the way to library_entries.
+    assert games[0].winning_title_id == "t1"
+    assert library_repository.last_title_id == "t1"
 
 
 async def test_persist_and_link_carries_inactive_state_onto_the_library_entry():

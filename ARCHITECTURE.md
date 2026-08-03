@@ -86,7 +86,7 @@ sequenceDiagram
     Curator-->>Librarian: 202 {run_id}
 
     Queue->>Worker: deliver message
-    Worker->>DB: mark_running(run_id)
+    Worker->>DB: try_begin_delivery(run_id, seq) (skips stale redeliveries -- see below)
     Worker->>PSN: fetch entitlements
     Worker->>DB: canonicalize + upsert library_entries/games (commits before enrichment)
     loop each game
@@ -110,6 +110,12 @@ sequenceDiagram
 Entitlement ingestion commits before enrichment runs, so a rejected key, a rate limit, or a transient
 network error during enrichment costs a user enrichment signal and trophy-match data for that pass — never
 the underlying library import itself.
+
+`job_runs.seq` is a checkpoint counter, bumped every time `mark_rate_limited` records a pause and stamped
+into that pause's continuation message. `try_begin_delivery` is a compare-and-swap on `(run_id, seq)`: a
+message redelivered after its own settlement failed (e.g. a Service Bus lock lapsing mid-run) carries a
+`seq` that a later checkpoint has already superseded, so the guard settles it without reprocessing instead
+of restarting the whole batch.
 
 ## Collection sharing
 
