@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import secrets
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -118,6 +119,10 @@ class CollectionDefinition:
     #: every read rather than requiring a second ``list_definition_items`` call just to answer "how big
     #: is this" -- what ``ProfileDefinitionResponse`` was missing before 0019.
     item_count: int = 0
+    #: See :attr:`~curator.collections.collection_spec.CollectionSpec.exclude_installed_on`. Persisted
+    #: (0024) the same way ``sort_order``/``genre_filter``/etc. already are -- provenance for
+    #: :meth:`to_spec`'s fresh-proposal re-run, not something re-derived from stored membership.
+    exclude_installed_on: tuple[str, ...] = ()
 
     def to_spec(self) -> CollectionSpec:
         """Build the :class:`CollectionSpec` this definition represents, ready for
@@ -132,6 +137,7 @@ class CollectionDefinition:
             include_inactive=self.include_inactive,
             min_percent_completed=self.min_percent_completed,
             filter_predicate=self.filter_predicate,
+            exclude_installed_on=self.exclude_installed_on,
         )
 
 
@@ -536,13 +542,21 @@ class CollectionsRepository:
         platform: str | None = None,
         include_inactive: bool = False,
         min_percent_completed: int | None = None,
+        exclude_installed_on: Sequence[str] | None = None,
     ) -> list[RawCandidateRow]:
         """Return a user's library, joined with enrichment and the latest measured size (if any).
 
         Games the user has explicitly excluded (``library_exclusions``), games they can no longer play
-        (``is_active = false``), and -- when asked -- games below a trophy-completion floor are filtered
-        out here, so every collection strategy inherits all three without having to re-apply them. This is
-        the single chokepoint every candidate pool flows through.
+        (``is_active = false``), games already installed on another of their consoles (when asked), and
+        -- when asked -- games below a trophy-completion floor are filtered out here, so every collection
+        strategy inherits all four without having to re-apply them. This is the single chokepoint every
+        candidate pool flows through.
+
+        Row order is deterministic (``ORDER BY g.canonical_title, g.game_id``) so that a caller sorting
+        this list by a tied score (``curator.collections.sort_order``'s ``"composite_desc"``, matching
+        the legacy PS4 Criterion/Blockbuster rule's stable-order tie-break) gets the same result every run
+        -- Python's ``sorted()`` is stable, but only as good as the order it starts from, and without this
+        an unordered ``SELECT`` leaves ties at the mercy of Postgres's arbitrary row order.
 
         :param platform: If given (``"PS5"``/``"PS4"``), only games eligible for that platform
             (``native_ps5`` for PS5, ``ps4_eligible`` for PS4).
@@ -553,6 +567,10 @@ class CollectionsRepository:
             the percentage: while it lived exclusively in Redis this had to be applied in Python *after*
             fetching every game's trophy data, which is what made a narrow collection spec cost a
             full-library PSN resolution.
+        :param exclude_installed_on: Console ids whose currently-installed games should be excluded.
+            Scoped to ``identity_sub``'s own consoles regardless of what's passed in -- an id that isn't
+            this caller's own is silently ignored rather than trusted, since ``console_installs`` itself
+            carries no ``identity_sub`` to check against directly.
         """
         platform_clause = ""
         if platform == "PS5":
@@ -563,6 +581,19 @@ class CollectionsRepository:
         active_clause = "" if include_inactive else "AND le.is_active = true"
 
         params: list[Any] = [identity_sub]
+        installed_elsewhere_clause = ""
+        if exclude_installed_on:
+            installed_elsewhere_clause = """
+                AND NOT EXISTS (
+                    SELECT 1 FROM console_installs ci
+                    JOIN user_consoles uc ON uc.console_id = ci.console_id
+                    WHERE ci.game_id = g.game_id AND ci.installed = true
+                      AND uc.identity_sub = %s AND ci.console_id = ANY(%s)
+                )
+            """
+            params.append(identity_sub)
+            params.append(list(exclude_installed_on))
+
         completion_clause = ""
         if min_percent_completed is not None:
             # A game with no stored percentage can't satisfy a floor, so this excludes NULLs -- but only
@@ -599,11 +630,13 @@ class CollectionsRepository:
                 JOIN games g ON g.game_id = le.game_id
                 LEFT JOIN game_enrichment ge ON ge.game_id = g.game_id
                 LEFT JOIN genres gen ON gen.genre_id = ge.genre_id
-                WHERE le.identity_sub = %s {platform_clause} {active_clause} {completion_clause}
+                WHERE le.identity_sub = %s {platform_clause} {active_clause}
+                  {installed_elsewhere_clause} {completion_clause}
                   AND NOT EXISTS (
                       SELECT 1 FROM library_exclusions lx
                       WHERE lx.identity_sub = le.identity_sub AND lx.game_id = g.game_id
                   )
+                ORDER BY g.canonical_title, g.game_id
                 """,
                 tuple(params),
             )
@@ -681,8 +714,8 @@ class CollectionsRepository:
                 INSERT INTO collection_definitions
                     (identity_sub, name, description, kind, console_id, genre_filter, min_score,
                      aaa_tier_filter, sort_order, include_inactive, min_percent_completed, filter_predicate,
-                     share_slug)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                     share_slug, exclude_installed_on)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 RETURNING definition_id
                 """,
                 (
@@ -699,6 +732,7 @@ class CollectionsRepository:
                     spec.min_percent_completed,
                     json.dumps(predicate_to_dict(spec.filter_predicate)) if spec.filter_predicate is not None else None,
                     share_slug,
+                    list(spec.exclude_installed_on),
                 ),
             )
             row = await cur.fetchone()
@@ -743,7 +777,8 @@ class CollectionsRepository:
         cd.definition_id, cd.identity_sub, cd.name, cd.kind, cd.console_id, cd.genre_filter, cd.min_score,
         cd.aaa_tier_filter, cd.sort_order, cd.description, cd.include_inactive, cd.min_percent_completed,
         cd.filter_predicate, cd.visibility, cd.share_slug,
-        (SELECT count(*) FROM collection_definition_items cdi WHERE cdi.definition_id = cd.definition_id)
+        (SELECT count(*) FROM collection_definition_items cdi WHERE cdi.definition_id = cd.definition_id),
+        cd.exclude_installed_on
     """
 
     async def list_definitions(self, identity_sub: str) -> list[CollectionDefinition]:
@@ -1030,6 +1065,7 @@ class CollectionsRepository:
             visibility=row[13],
             share_slug=row[14],
             item_count=row[15],
+            exclude_installed_on=tuple(row[16] or ()),
         )
 
     async def save_run(

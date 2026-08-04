@@ -201,6 +201,46 @@ async def test_list_candidates_include_inactive_drops_the_active_clause():
     assert "is_active" not in sql
 
 
+async def test_list_candidates_orders_deterministically():
+    """Bin-packing (curator.collections.capacity_fill_strategy) is size-order-sensitive, and Python's
+    sorted() is stable -- so ties at equal composite score need a deterministic starting order, or the
+    same collection could pack differently between two runs. See sort_order's own module docstring."""
+    pool = FakePool(fetchall_results=[[]])
+    repo = CollectionsRepository(pool)
+
+    await repo.list_candidates("sub-1")
+
+    sql, _params = pool.connections[0].executed[0]
+    assert "ORDER BY g.canonical_title, g.game_id" in sql
+
+
+async def test_list_candidates_omits_the_installed_elsewhere_clause_when_not_asked():
+    pool = FakePool(fetchall_results=[[]])
+    repo = CollectionsRepository(pool)
+
+    await repo.list_candidates("sub-1")
+
+    sql, params = pool.connections[0].executed[0]
+    assert "console_installs" not in sql
+    assert params == ("sub-1",)
+
+
+async def test_list_candidates_excludes_games_installed_on_the_given_consoles():
+    pool = FakePool(fetchall_results=[[]])
+    repo = CollectionsRepository(pool)
+
+    await repo.list_candidates("sub-1", exclude_installed_on=("c1", "c2"))
+
+    sql, params = pool.connections[0].executed[0]
+    assert "console_installs" in sql
+    assert "ci.installed = true" in sql
+    # Scoped to identity_sub's own consoles via a join to user_consoles -- the caller-passed ids are
+    # matched against ci.console_id, but only among rows already scoped to this identity_sub, so a
+    # foreign console id can't be used to probe another user's install state.
+    assert "uc.identity_sub = %s" in sql
+    assert params == ("sub-1", "sub-1", ["c1", "c2"])
+
+
 async def test_save_definition_returns_new_id_and_serializes_genre_filter():
     pool = FakePool(fetchone_results=[("def-1",)])
     repo = CollectionsRepository(pool)
@@ -212,9 +252,9 @@ async def test_save_definition_returns_new_id_and_serializes_genre_filter():
     sql, params = pool.connections[0].executed[0]
     assert "INSERT INTO collection_definitions" in sql
     assert params is not None
-    # The trailing element is share_slug -- generated fresh (secrets.token_urlsafe) on every call, so it
-    # can only be asserted structurally, not as a literal value.
-    assert params[:-1] == (
+    # The second-to-last element is share_slug -- generated fresh (secrets.token_urlsafe) on every call,
+    # so it can only be asserted structurally, not as a literal value. The last is exclude_installed_on.
+    assert params[:-2] == (
         "sub-1",
         "My RPGs",
         None,
@@ -228,8 +268,9 @@ async def test_save_definition_returns_new_id_and_serializes_genre_filter():
         None,
         None,
     )
-    assert isinstance(params[-1], str)
-    assert len(params[-1]) > 0
+    assert isinstance(params[-2], str)
+    assert len(params[-2]) > 0
+    assert params[-1] == []
 
 
 async def test_save_definition_persists_min_percent_completed():
@@ -241,9 +282,21 @@ async def test_save_definition_persists_min_percent_completed():
 
     _sql, params = pool.connections[0].executed[0]
     assert params is not None
-    assert params[:-1] == ("sub-1", "Nearly Done", None, "filter_list", None, [], None, None, None, False, 75, None)
-    assert isinstance(params[-1], str)
-    assert len(params[-1]) > 0
+    assert params[:-2] == ("sub-1", "Nearly Done", None, "filter_list", None, [], None, None, None, False, 75, None)
+    assert isinstance(params[-2], str)
+    assert len(params[-2]) > 0
+
+
+async def test_save_definition_persists_exclude_installed_on():
+    pool = FakePool(fetchone_results=[("def-1",)])
+    repo = CollectionsRepository(pool)
+    spec = CollectionSpec(kind="filter_list", exclude_installed_on=("c1", "c2"))
+
+    await repo.save_definition("sub-1", "Not on my PS5", spec)
+
+    _sql, params = pool.connections[0].executed[0]
+    assert params is not None
+    assert params[-1] == ["c1", "c2"]
 
 
 async def test_save_definition_serializes_filter_predicate_as_json():
@@ -255,7 +308,7 @@ async def test_save_definition_serializes_filter_predicate_as_json():
 
     _sql, params = pool.connections[0].executed[0]
     assert params is not None
-    assert params[-2] == '{"op": "genre_in", "values": ["RPG", "Action"]}'
+    assert params[-3] == '{"op": "genre_in", "values": ["RPG", "Action"]}'
 
 
 async def test_save_definition_leaves_filter_predicate_null_when_not_supplied():
@@ -266,7 +319,7 @@ async def test_save_definition_leaves_filter_predicate_null_when_not_supplied():
 
     _sql, params = pool.connections[0].executed[0]
     assert params is not None
-    assert params[-2] is None
+    assert params[-3] is None
 
 
 async def test_save_definition_stores_membership_ranked_by_position():
@@ -318,6 +371,7 @@ async def test_list_definitions_maps_rows():
                     "unlisted",
                     "abc123",
                     3,
+                    ["c1"],
                 )
             ],
         ]
@@ -337,10 +391,12 @@ async def test_list_definitions_maps_rows():
     assert definitions[0].include_inactive is True
     assert definitions[0].min_percent_completed == 60
     assert definitions[0].filter_predicate is None
+    assert definitions[0].exclude_installed_on == ("c1",)
     # to_spec() must carry it, or a saved "include everything I ever had" collection silently reverts to
     # active-only the next time it is re-run.
     assert definitions[0].to_spec().include_inactive is True
     assert definitions[0].to_spec().min_percent_completed == 60
+    assert definitions[0].to_spec().exclude_installed_on == ("c1",)
 
 
 async def test_list_definitions_parses_a_stored_filter_predicate():
@@ -366,6 +422,7 @@ async def test_list_definitions_parses_a_stored_filter_predicate():
                     "private",
                     None,
                     0,
+                    [],
                 )
             ],
         ]
@@ -399,6 +456,7 @@ async def test_get_definition_scopes_to_identity_sub():
                 "private",
                 "xyz789",
                 0,
+                [],
             )
         ]
     )

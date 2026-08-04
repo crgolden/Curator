@@ -58,6 +58,9 @@ class LibraryGameResponse(BaseModel):
     #: unavailable (no PSN link, trophy harvesting disabled, or no confident title match -- see
     #: ``curator.psn.trophy_completion``).
     percent_completed: int | None
+    #: Cover art, same fallback ``GET /collections/{id}/items`` already resolves -- ``None`` if neither
+    #: source has one yet.
+    cover_image_url: str | None
 
 
 class LibraryPageResponse(BaseModel):
@@ -146,6 +149,7 @@ async def get_library(
                 opencritic_enriched=game.opencritic_enriched,
                 is_active=game.is_active,
                 percent_completed=game.percent_completed,
+                cover_image_url=game.cover_image_url,
             )
             for game in games
         ],

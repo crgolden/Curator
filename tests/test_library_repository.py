@@ -154,8 +154,9 @@ async def test_list_entries_with_enrichment_maps_rows_and_total():
                     True,
                     "NPWR12345_00",
                     63,
+                    "https://cdn.example/elden-ring.jpg",
                 ),
-                ("game-2", "Unmatched", None, None, None, None, None, False, False, False, None, None),
+                ("game-2", "Unmatched", None, None, None, None, None, False, False, False, None, None, None),
             ]
         ],
     )
@@ -176,8 +177,10 @@ async def test_list_entries_with_enrichment_maps_rows_and_total():
     assert games[0].np_communication_id == "NPWR12345_00"
     # Read straight off the row -- no PSN call, no name matching on this path.
     assert games[0].percent_completed == 63
+    assert games[0].cover_image_url == "https://cdn.example/elden-ring.jpg"
     assert games[1].percent_completed is None
     assert games[1].category is None
+    assert games[1].cover_image_url is None
     # A lapsed entitlement stays listed and is flagged, rather than vanishing from the library.
     assert games[1].is_active is False
     assert games[1].np_communication_id is None
@@ -218,6 +221,17 @@ async def test_list_entries_with_enrichment_orders_by_sort_column_nulls_last():
 
     select_sql, _ = pool.connections[0].executed[1]
     assert "ORDER BY ge.psn_rating DESC NULLS LAST, g.canonical_title ASC" in select_sql
+
+
+async def test_list_entries_with_enrichment_sorts_by_percent_completed():
+    pool = FakePool(fetchone_results=[(0,)], fetchall_results=[[]])
+    repo = LibraryRepository(pool)
+
+    await repo.list_entries_with_enrichment("sub-1", sort="percent_completed", sort_dir="desc")
+
+    select_sql, _ = pool.connections[0].executed[1]
+    assert "ORDER BY le.trophy_percent_completed DESC NULLS LAST, g.canonical_title ASC" in select_sql
+    assert "cover_image_url" in select_sql
 
 
 async def test_list_entries_with_enrichment_applies_limit_and_offset():

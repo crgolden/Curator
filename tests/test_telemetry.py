@@ -59,8 +59,12 @@ class _FakeTracerProvider:
 
 
 class _FakeMetricReader:
-    def __init__(self, exporter):
+    last_kwargs: ClassVar[dict[str, Any]] = {}
+
+    def __init__(self, exporter, **kwargs):
         self.exporter = exporter
+        self.kwargs = kwargs
+        type(self).last_kwargs = kwargs
 
 
 class _FakeMeterProvider:
@@ -88,10 +92,16 @@ class _FakeTraceNamespace:
     def set_tracer_provider(self, provider):
         self.tracer_providers.append(provider)
 
+    def get_tracer_provider(self):
+        return self.tracer_providers[-1]
+
 
 class _FakeMetricsNamespace:
     def __init__(self):
         self.meter_providers = []
+
+    def get_meter_provider(self):
+        return self.meter_providers[-1]
 
     def set_meter_provider(self, provider):
         self.meter_providers.append(provider)
@@ -121,6 +131,7 @@ def _patch_otlp_collaborators(monkeypatch):
     _FakeTracerProvider.instances = 0
     _FakeMeterProvider.instances = 0
     _FakeInstrumentor.instrument_calls = 0
+    _FakeMetricReader.last_kwargs = {}
 
 
 # ---------------------------------------------------------------------------------------------------
@@ -167,6 +178,61 @@ def test_register_otlp_providers_registers_exactly_once_across_repeated_calls(mo
     assert _FakeTracerProvider.instances == 1
     assert _FakeMeterProvider.instances == 1
     assert _FakeInstrumentor.instrument_calls == 2  # psycopg + requests, once each
+
+
+def test_register_otlp_providers_shortens_the_metric_export_interval(monkeypatch):
+    """A gunicorn worker recycled between the SDK-default 60s ticks would report traces (flushed
+    continuously via BatchSpanProcessor's own thread) but drop every metric -- shortening the interval
+    narrows that window. See the `_METRIC_EXPORT_INTERVAL_MILLIS` comment for the full explanation.
+    """
+    _patch_otlp_collaborators(monkeypatch)
+
+    telemetry._register_otlp_providers("https://alloy.example.test:4317")
+
+    assert _FakeMetricReader.last_kwargs == {"export_interval_millis": telemetry._METRIC_EXPORT_INTERVAL_MILLIS}
+    assert telemetry._METRIC_EXPORT_INTERVAL_MILLIS < 60_000  # strictly shorter than the SDK default
+
+
+def test_shutdown_telemetry_is_a_noop_when_never_configured(monkeypatch):
+    monkeypatch.setattr(telemetry, "_otel_configured", False)
+
+    telemetry.shutdown_telemetry()  # must not raise, must not touch trace/metrics namespaces
+
+
+def test_shutdown_telemetry_shuts_down_both_providers_when_configured(monkeypatch):
+    _patch_otlp_collaborators(monkeypatch)
+    telemetry._register_otlp_providers("https://alloy.example.test:4317")
+
+    shutdown_calls: list[str] = []
+
+    class _ShutdownTracerProvider:
+        def shutdown(self):
+            shutdown_calls.append("tracer")
+
+    class _ShutdownMeterProvider:
+        def shutdown(self):
+            shutdown_calls.append("meter")
+
+    telemetry.trace.set_tracer_provider(_ShutdownTracerProvider())
+    telemetry.metrics.set_meter_provider(_ShutdownMeterProvider())
+
+    telemetry.shutdown_telemetry()
+
+    assert shutdown_calls == ["tracer", "meter"]
+
+
+def test_shutdown_telemetry_swallows_a_failing_provider_shutdown(monkeypatch):
+    _patch_otlp_collaborators(monkeypatch)
+    telemetry._register_otlp_providers("https://alloy.example.test:4317")
+
+    class _BoomProvider:
+        def shutdown(self):
+            raise RuntimeError("collector unreachable")
+
+    telemetry.trace.set_tracer_provider(_BoomProvider())
+    telemetry.metrics.set_meter_provider(_BoomProvider())
+
+    telemetry.shutdown_telemetry()  # must not raise
 
 
 def test_configure_tracing_and_metrics_noop_when_alloy_endpoint_absent(monkeypatch):
@@ -328,7 +394,7 @@ def test_format_log_record_produces_flat_log_level_and_service_name():
 
     assert doc["message"] == "something happened: detail"
     assert doc["log.level"] == "Warning"  # fleet's Serilog/ECS spelling, not Python's own "WARNING"
-    assert doc["service.name"] == "curator"
+    assert doc["service.name"] == "crgolden-curator"
     assert doc["logger.name"] == "curator.psn_routes"
     assert "log" not in doc  # flat key, never a nested `log: {level: ...}` object
     assert "error.stack_trace" not in doc

@@ -16,6 +16,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from curator.collections.game_candidate import GameCandidate
+from curator.collections.sort_order import resolve_sort_key
 
 
 @dataclass(frozen=True, slots=True)
@@ -54,9 +55,10 @@ def fill_capacity_multi_bin(
     bins: list[StorageBin],
     *,
     routing_genres: tuple[str, ...] = (),
+    sort_order: str | None = None,
 ) -> MultiBinFillResult:
-    """Greedily fill a set of capacity bins, highest rank/composite score first, first-fit across bins in
-    the order given.
+    """Greedily fill a set of capacity bins, highest-ranked first, first-fit across bins in the order
+    given.
 
     Each candidate is offered to ``bins`` in list order and placed in the first one with enough remaining
     capacity; a candidate that fits nowhere goes to ``overflow``. The caller decides both bin order (e.g.
@@ -70,6 +72,8 @@ def fill_capacity_multi_bin(
     :param routing_genres: If non-empty, only candidates whose genre is in this set are considered; the
         rest are excluded from both ``installed_by_bin`` and ``overflow`` entirely -- a caller doing
         multi-console routing decides what happens to them (e.g. offering them to another console).
+    :param sort_order: See :func:`curator.collections.sort_order.resolve_sort_key`. ``None`` keeps this
+        function's own long-standing default, ``(rank_score, composite_score)`` descending.
     :returns: The :class:`MultiBinFillResult`.
     """
     pool = candidates
@@ -77,7 +81,10 @@ def fill_capacity_multi_bin(
         allowed = {genre.lower() for genre in routing_genres}
         pool = [candidate for candidate in pool if candidate.genre.lower() in allowed]
 
-    ranked = sorted(pool, key=lambda candidate: (candidate.rank_score, candidate.composite_score or 0.0), reverse=True)
+    key = resolve_sort_key(
+        sort_order, default=lambda candidate: (candidate.rank_score, candidate.composite_score or 0.0)
+    )
+    ranked = sorted(pool, key=key, reverse=True)
 
     remaining_gb = {b.bin_id: b.capacity_gb for b in bins}
     installed: dict[str, list[GameCandidate]] = {b.bin_id: [] for b in bins}

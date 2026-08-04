@@ -11,7 +11,9 @@ from typing import Any, Literal
 
 from psycopg_pool import AsyncConnectionPool
 
-LibrarySortField = Literal["title", "category", "rawg_rating", "opencritic_rating", "psn_rating"]
+LibrarySortField = Literal[
+    "title", "category", "rawg_rating", "opencritic_rating", "psn_rating", "percent_completed"
+]
 
 _SORT_COLUMNS: dict[str, str] = {
     "title": "g.canonical_title",
@@ -19,6 +21,7 @@ _SORT_COLUMNS: dict[str, str] = {
     "rawg_rating": "ge.critical_score",
     "opencritic_rating": "ge.oc_score",
     "psn_rating": "ge.psn_rating",
+    "percent_completed": "le.trophy_percent_completed",
 }
 
 
@@ -49,6 +52,11 @@ class LibraryGameView:
     #: library-refresh job. ``None`` means no match, no trophies, or ``harvest_trophies`` disabled -- all
     #: three render blank. Read straight from the row: no PSN call and no name matching on this path.
     percent_completed: int | None = None
+    #: Same two-source fallback ``CollectionsRepository.list_definition_items`` already uses: a real PSN
+    #: store cover from ``psn_catalog_cache`` (only present once catalog enrichment has run for this game),
+    #: falling back to whatever artwork entitlement ingestion captured. ``None`` if neither source has one
+    #: yet -- the row still renders, just without art.
+    cover_image_url: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -320,6 +328,13 @@ class LibraryRepository:
         (not enriched yet, not an error); ``rawg_enriched``/``opencritic_enriched`` still default to
         ``False`` via ``COALESCE``.
 
+        ``cover_image_url`` uses the same two-source COALESCE fallback
+        ``CollectionsRepository.list_definition_items`` already uses (a real PSN store cover from
+        ``psn_catalog_cache`` first, entitlement-ingestion artwork second) -- as a scalar subquery, not a
+        ``JOIN``, so it can't multiply rows or skew ``total``. Unlike that method this one is already
+        scoped to one ``identity_sub`` via ``le``, so the lookup needs no self-join to reach an "any
+        owner's" row first.
+
         :param identity_sub: The Curator user id (Identity's ``sub``).
         :param search: Optional case-insensitive title substring filter.
         :param category: Optional exact-match category (resolved genre name) filter.
@@ -361,7 +376,19 @@ class LibraryRepository:
                 SELECT g.game_id, g.canonical_title, gen.name, ge.critical_score, ge.oc_score,
                        ge.psn_rating, le.product_id,
                        COALESCE(ge.rawg_enriched, false), COALESCE(ge.opencritic_enriched, false),
-                       le.is_active, le.np_communication_id, le.trophy_percent_completed
+                       le.is_active, le.np_communication_id, le.trophy_percent_completed,
+                       COALESCE(
+                           (SELECT pcc.cover_image_url FROM psn_catalog_cache pcc
+                            WHERE pcc.title_id = le.title_id AND pcc.cover_image_url IS NOT NULL LIMIT 1),
+                           (
+                               SELECT COALESCE(es.title_image_url, es.game_icon_url, es.concept_icon_url)
+                               FROM game_concepts gc
+                               JOIN entitlement_snapshots es ON es.concept_id = gc.concept_id
+                               WHERE gc.game_id = g.game_id
+                                 AND COALESCE(es.title_image_url, es.game_icon_url, es.concept_icon_url) IS NOT NULL
+                               LIMIT 1
+                           )
+                       ) AS cover_image_url
                 {base_query}
                 ORDER BY {sort_column} {direction} NULLS LAST, g.canonical_title ASC
                 LIMIT %s OFFSET %s
@@ -384,6 +411,7 @@ class LibraryRepository:
                 is_active=bool(row[9]),
                 np_communication_id=row[10],
                 percent_completed=row[11],
+                cover_image_url=row[12],
             )
             for row in rows
         ]

@@ -179,6 +179,7 @@ class FakeLibraryGameView:
         opencritic_enriched=False,
         is_active=True,
         percent_completed=None,
+        cover_image_url=None,
     ) -> None:
         self.game_id = game_id
         self.title = title
@@ -191,6 +192,7 @@ class FakeLibraryGameView:
         self.opencritic_enriched = opencritic_enriched
         self.is_active = is_active
         self.percent_completed = percent_completed
+        self.cover_image_url = cover_image_url
 
 
 class FakeCollectionsRepository:
@@ -628,7 +630,17 @@ def test_library_200_with_data_when_public_and_show_library_true():
         is_public=True, show_library=True, show_collections=False, show_trophies=False, show_identity=False
     )
     library_repository = FakeLibraryRepository(
-        {SUB_A: [FakeLibraryGameView("game-1", "Elden Ring", rawg_enriched=True, opencritic_enriched=False)]}
+        {
+            SUB_A: [
+                FakeLibraryGameView(
+                    "game-1",
+                    "Elden Ring",
+                    rawg_enriched=True,
+                    opencritic_enriched=False,
+                    cover_image_url="https://cdn.example/elden-ring.jpg",
+                )
+            ]
+        }
     )
     client, *_ = _build(
         repository=repository, profile_repository=profile_repository, library_repository=library_repository
@@ -653,6 +665,8 @@ def test_library_200_with_data_when_public_and_show_library_true():
                 # Always None in this pass -- viewer-mode trophy completion isn't built yet (would need
                 # the viewer's own PSN client called against the target's account id).
                 "percent_completed": None,
+                # Not privacy-sensitive, so resolved for real rather than stubbed like percent_completed.
+                "cover_image_url": "https://cdn.example/elden-ring.jpg",
             }
         ],
         "total": 1,

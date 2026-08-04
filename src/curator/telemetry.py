@@ -6,9 +6,9 @@ Both legs are independently no-op when their configuration is absent -- local de
 starting: :func:`configure_telemetry` wraps each leg in its own broad ``except Exception`` so a bad
 endpoint, an unreachable collector, or any other telemetry-only failure is logged to stderr and swallowed
 rather than raised into ``create_app``. This mirrors the fleet convention (see the workspace root
-``AGENTS.md``): OTLP gRPC to Grafana Alloy for traces and metrics with ``service.name`` = ``"curator"``,
-``/health`` excluded from tracing, and Elasticsearch-shipped logs carrying ``service.name`` and a flat
-``log.level`` field (mirroring what the Churches Node app ships).
+``AGENTS.md``): OTLP gRPC to Grafana Alloy for traces and metrics with ``service.name`` =
+``"crgolden-curator"``, ``/health`` excluded from tracing, and Elasticsearch-shipped logs carrying
+``service.name`` and a flat ``log.level`` field (mirroring what the Churches Node app ships).
 
 :func:`configure_telemetry` is called once per app from :func:`curator.app.create_app`. Because each
 gunicorn worker process calls the factory independently, per-worker OTel initialization comes for free --
@@ -30,7 +30,7 @@ import threading
 from datetime import datetime, timezone
 from logging.handlers import QueueHandler, QueueListener
 from queue import SimpleQueue
-from typing import Any
+from typing import Any, cast
 
 from elasticsearch import Elasticsearch
 from fastapi import FastAPI
@@ -50,8 +50,15 @@ from opentelemetry.trace import Span
 
 from curator.settings import Settings
 
-SERVICE_NAME_VALUE = "curator"
+SERVICE_NAME_VALUE = "crgolden-curator"
 _HEALTH_EXCLUDED_URLS = "health"
+
+# OTel SDK default is 60_000ms. Traces flush independently via BatchSpanProcessor's own background
+# thread (schedule_delay_millis default 5_000ms) regardless of how the process exits, but metrics only
+# leave the process on this timer or an explicit shutdown()/force_flush() -- a gunicorn worker recycled
+# faster than the default interval would report traces but never a single metric. 15s keeps the gap small
+# without exporting on every scrape.
+_METRIC_EXPORT_INTERVAL_MILLIS = 15_000
 
 # RAWG sends its API key as a URL query parameter (?key=...), which OpenTelemetry's httpx instrumentation
 # otherwise records verbatim as a span attribute on every call, success or failure -- independent of (and
@@ -162,7 +169,12 @@ def _register_otlp_providers(alloy_endpoint: str) -> None:
 
         meter_provider = MeterProvider(
             resource=resource,
-            metric_readers=[PeriodicExportingMetricReader(OTLPMetricExporter(endpoint=alloy_endpoint))],
+            metric_readers=[
+                PeriodicExportingMetricReader(
+                    OTLPMetricExporter(endpoint=alloy_endpoint),
+                    export_interval_millis=_METRIC_EXPORT_INTERVAL_MILLIS,
+                )
+            ],
         )
         metrics.set_meter_provider(meter_provider)
 
@@ -175,6 +187,30 @@ def _register_otlp_providers(alloy_endpoint: str) -> None:
             httpx_instrumentor.instrument(async_request_hook=_redact_rawg_key_from_span)
 
         _otel_configured = True
+
+
+def shutdown_telemetry() -> None:
+    """Flush and shut down the tracer/meter providers, iff OTLP telemetry was configured.
+
+    Call once from the app's lifespan shutdown. Spans already flush continuously via
+    ``BatchSpanProcessor``'s own background thread, so this matters most for metrics --
+    ``PeriodicExportingMetricReader`` only leaves the process on its timer or an explicit
+    ``shutdown()``/``force_flush()``, and a gunicorn worker recycled between timer ticks would
+    otherwise drop whatever it had accumulated. Swallows any failure, matching every other
+    telemetry entry point in this module: a slow or unreachable collector at shutdown must never
+    turn a clean exit into a crash or a hung process.
+    """
+    if not _otel_configured:
+        return
+    # get_tracer_provider()/get_meter_provider() are typed against the API-level base classes, which
+    # don't declare shutdown() -- only the SDK types do. _register_otlp_providers is the only place
+    # that ever calls set_tracer_provider()/set_meter_provider(), and it always registers the SDK
+    # TracerProvider/MeterProvider constructed above, so the cast reflects what's actually registered
+    # whenever _otel_configured is True.
+    with contextlib.suppress(Exception):
+        cast(TracerProvider, trace.get_tracer_provider()).shutdown()
+    with contextlib.suppress(Exception):
+        cast(MeterProvider, metrics.get_meter_provider()).shutdown()
 
 
 def _instrument_app(app: FastAPI) -> None:

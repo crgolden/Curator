@@ -144,6 +144,9 @@ class ProfileLibraryGameResponse(BaseModel):
     #: ``GET /users/{sub}/profile`` already uses for its PSN-derived sections), not built in this pass. See
     #: ``curator.psn.trophy_completion``.
     percent_completed: int | None
+    #: Cover art -- same fallback as the owner's own view; not privacy-sensitive, so unlike
+    #: ``percent_completed`` this one is resolved for real rather than stubbed.
+    cover_image_url: str | None
 
 
 class ProfileLibraryPageResponse(BaseModel):
@@ -485,6 +488,7 @@ async def get_user_library(
                 opencritic_enriched=game.opencritic_enriched,
                 is_active=game.is_active,
                 percent_completed=None,
+                cover_image_url=game.cover_image_url,
             )
             for game in games
         ],

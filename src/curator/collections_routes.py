@@ -64,6 +64,12 @@ class CollectionSpecRequest(BaseModel):
     filter_predicate: dict[str, Any] | None = None
     include_inactive: bool = False
     min_percent_completed: int | None = None
+    #: A named sort-order variant (``curator.collections.sort_order``), or omitted to keep whichever
+    #: strategy runs this spec's own default order.
+    sort_order: str | None = None
+    #: Console ids (the caller's own) whose currently-installed games are excluded from this run's
+    #: candidate pool entirely -- see ``CollectionSpec.exclude_installed_on``.
+    exclude_installed_on: list[str] = []
 
 
 class CollectionGameResponse(BaseModel):
@@ -120,6 +126,8 @@ async def preview_collection(
                 filter_predicate=filter_predicate,
                 include_inactive=spec.include_inactive,
                 min_percent_completed=spec.min_percent_completed,
+                sort_order=spec.sort_order,
+                exclude_installed_on=tuple(spec.exclude_installed_on),
             ),
             size_estimates=size_estimates,
         )
@@ -166,6 +174,8 @@ class SaveDefinitionRequest(BaseModel):
     filter_predicate: dict[str, Any] | None = None
     include_inactive: bool = False
     min_percent_completed: int | None = None
+    sort_order: str | None = None
+    exclude_installed_on: list[str] = []
 
 
 class UpdateDefinitionRequest(BaseModel):
@@ -190,6 +200,8 @@ class DefinitionResponse(BaseModel):
     filter_predicate: dict[str, Any] | None
     include_inactive: bool
     min_percent_completed: int | None
+    sort_order: str | None
+    exclude_installed_on: list[str]
     visibility: str
     share_slug: str | None
     item_count: int
@@ -254,10 +266,17 @@ async def save_definition(
     filter_predicate = _parse_filter_predicate(body.filter_predicate)
     collections_repository: CollectionsRepository = request.app.state.collections_repository
 
-    if body.console_id is not None:
+    if body.console_id is not None or body.exclude_installed_on:
         consoles = await collections_repository.list_user_consoles(claims.sub)
-        if not any(console.console_id == body.console_id for console in consoles):
+        owned_console_ids = {console.console_id for console in consoles}
+        if body.console_id is not None and body.console_id not in owned_console_ids:
             raise HTTPException(status_code=400, detail=f"Unknown console_id {body.console_id!r} for this user.")
+        unknown_exclusions = [cid for cid in body.exclude_installed_on if cid not in owned_console_ids]
+        if unknown_exclusions:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Unknown console_id(s) for this user in exclude_installed_on: {unknown_exclusions!r}.",
+            )
 
     game_ids = _normalize_game_ids(body.game_ids)
     await _reject_unknown_games(collections_repository, game_ids)
@@ -275,6 +294,8 @@ async def save_definition(
                 filter_predicate=filter_predicate,
                 include_inactive=body.include_inactive,
                 min_percent_completed=body.min_percent_completed,
+                sort_order=body.sort_order,
+                exclude_installed_on=tuple(body.exclude_installed_on),
             ),
             description=body.description,
             game_ids=game_ids,
@@ -534,6 +555,8 @@ async def run_definition(
             else None,
             "include_inactive": definition.include_inactive,
             "min_percent_completed": definition.min_percent_completed,
+            "sort_order": definition.sort_order,
+            "exclude_installed_on": list(definition.exclude_installed_on),
         },
         list(result.included),
         list(result.excluded),
@@ -562,6 +585,8 @@ def _definition_to_response(definition: CollectionDefinition) -> DefinitionRespo
         else None,
         include_inactive=definition.include_inactive,
         min_percent_completed=definition.min_percent_completed,
+        sort_order=definition.sort_order,
+        exclude_installed_on=list(definition.exclude_installed_on),
         visibility=definition.visibility,
         share_slug=definition.share_slug,
         item_count=definition.item_count,

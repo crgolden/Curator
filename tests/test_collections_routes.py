@@ -97,6 +97,7 @@ class FakeCollectionsRepository:
             min_percent_completed=spec.min_percent_completed,
             filter_predicate=spec.filter_predicate,
             share_slug=f"slug-{definition_id}",
+            exclude_installed_on=spec.exclude_installed_on,
         )
         self.items[definition_id] = tuple(game_ids)
         return definition_id
@@ -281,6 +282,22 @@ def test_preview_passes_min_percent_completed_through_to_spec():
     assert orchestrator.generate_calls[0][1].min_percent_completed == 50
 
 
+def test_preview_passes_sort_order_and_exclude_installed_on_through_to_spec():
+    orchestrator = FakeOrchestrator()
+    client, validator = _build(orchestrator)
+    validator.register("token-a", _claims(sub="sub-a"))
+
+    client.post(
+        "/collections/preview",
+        json={"kind": "filter_list", "sort_order": "composite_desc", "exclude_installed_on": ["c1", "c2"]},
+        headers=_bearer("token-a"),
+    )
+
+    spec = orchestrator.generate_calls[0][1]
+    assert spec.sort_order == "composite_desc"
+    assert spec.exclude_installed_on == ("c1", "c2")
+
+
 def test_preview_response_includes_percent_completed():
     candidate = GameCandidate(
         game_id="g1",
@@ -431,6 +448,53 @@ def test_save_definition_rejects_a_console_the_caller_does_not_own():
     assert response.status_code == 400
     assert "Unknown console_id" in response.json()["detail"]
     assert collections_repository.definitions == {}
+
+
+def test_save_definition_rejects_an_exclude_installed_on_console_the_caller_does_not_own():
+    collections_repository = FakeCollectionsRepository()
+    client, validator = _build(collections_repository=collections_repository)
+    validator.register("token-a", _claims(sub="sub-a"))
+
+    response = client.post(
+        "/collections",
+        json={"name": "Not on my Vita", "kind": "filter_list", "exclude_installed_on": ["console-not-mine"]},
+        headers=_bearer("token-a"),
+    )
+
+    assert response.status_code == 400
+    assert "exclude_installed_on" in response.json()["detail"]
+    assert collections_repository.definitions == {}
+
+
+def test_save_definition_round_trips_sort_order_and_exclude_installed_on():
+    console = UserConsole(
+        console_id="console-a",
+        name="Living room PS5",
+        platform="PS5",
+        raw_capacity_gb=800.0,
+        update_buffer_gb=50.0,
+        routing_genres=(),
+        fill_order=0,
+    )
+    collections_repository = FakeCollectionsRepository(consoles=[console])
+    client, validator = _build(collections_repository=collections_repository)
+    validator.register("token-a", _claims(sub="sub-a"))
+
+    response = client.post(
+        "/collections",
+        json={
+            "name": "Not on my PS5",
+            "kind": "filter_list",
+            "sort_order": "composite_desc",
+            "exclude_installed_on": ["console-a"],
+        },
+        headers=_bearer("token-a"),
+    )
+
+    assert response.status_code == 201
+    body = response.json()
+    assert body["sort_order"] == "composite_desc"
+    assert body["exclude_installed_on"] == ["console-a"]
 
 
 def test_save_definition_accepts_a_console_the_caller_owns():

@@ -4,7 +4,7 @@ genre-set classification."""
 from __future__ import annotations
 
 from curator.collections.collection_spec import CollectionSpec
-from curator.collections.filter_list_strategy import apply_filter_list
+from curator.collections.filter_list_strategy import apply_filter_list, filter_candidates
 from curator.collections.filter_predicate import And, GenreIn, Or, TierIn
 from curator.collections.game_candidate import GameCandidate
 
@@ -175,3 +175,49 @@ def test_min_percent_completed_skipped_when_completion_unavailable():
     result = apply_filter_list(candidates, spec, completion_available=False)
 
     assert {c.game_id for c in result} == {"a", "b"}
+
+
+def test_sort_order_none_keeps_the_default_composite_then_rank_order():
+    candidates = [
+        _candidate("high_composite_low_rank", composite_score=90, rank_score=1),
+        _candidate("low_composite_high_rank", composite_score=10, rank_score=5),
+    ]
+    spec = CollectionSpec(kind="filter_list", sort_order=None)
+
+    result = apply_filter_list(candidates, spec)
+
+    assert [c.game_id for c in result] == ["high_composite_low_rank", "low_composite_high_rank"]
+
+
+def test_sort_order_composite_desc_is_the_same_key_capacity_fill_uses():
+    """Confirms filter_list and capacity_fill share one named-sort-order vocabulary
+    (curator.collections.sort_order) rather than each strategy inventing its own spelling."""
+    candidates = [_candidate("no_score", composite_score=None), _candidate("scored", composite_score=1.0)]
+    spec = CollectionSpec(kind="filter_list", sort_order="composite_desc")
+
+    result = apply_filter_list(candidates, spec)
+
+    assert [c.game_id for c in result] == ["scored", "no_score"]
+
+
+def test_unknown_sort_order_raises():
+    spec = CollectionSpec(kind="filter_list", sort_order="not_a_real_order")
+
+    try:
+        apply_filter_list([_candidate("a")], spec)
+    except ValueError:
+        return
+    raise AssertionError("expected a ValueError for an unknown sort_order")
+
+
+def test_filter_candidates_is_unsorted_and_shared_by_apply_filter_list():
+    """filter_candidates() is the extracted filtering half apply_filter_list() and
+    CollectionOrchestrator's capacity_fill pre-filter both build on -- this only proves apply_filter_list
+    is filter_candidates() plus a sort, not a second, independently-maintained copy of the same rules."""
+    candidates = [_candidate("rpg", genre="RPG"), _candidate("sports", genre="Sports")]
+    spec = CollectionSpec(kind="filter_list", genre_filter=("RPG",))
+
+    filtered = filter_candidates(candidates, spec)
+
+    assert [c.game_id for c in filtered] == ["rpg"]
+    assert [c.game_id for c in apply_filter_list(candidates, spec)] == [c.game_id for c in filtered]

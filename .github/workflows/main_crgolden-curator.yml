@@ -31,8 +31,17 @@ jobs:
         with:
           python-version: '3.14'
 
+      # pyproject.toml + poetry.lock is the single dependency manifest -- a requirements.txt hand-maintained
+      # separately from pyproject.toml once drifted out of sync and shipped a ModuleNotFoundError to
+      # production (see workspace AGENTS/DEPLOYMENT.md). virtualenvs.create=false installs straight into
+      # this job's Python so every later step (ruff/mypy/pytest) keeps running as a bare `python -m <tool>`.
+      - name: Install Poetry
+        run: python -m pip install poetry
+
       - name: Install dependencies
-        run: python -m pip install -e ".[dev]"
+        run: |
+          poetry config virtualenvs.create false
+          poetry install --extras dev
 
       # Each of the three checks below runs as its own step (rather than one combined lint stage) so a
       # failure is attributable to the specific tool at a glance in the Actions UI.
@@ -91,8 +100,32 @@ jobs:
           mkdir -p publish
           cp -r src publish/src
           cp -r db publish/db
-          cp requirements.txt publish/requirements.txt
+          cp pyproject.toml publish/pyproject.toml
+          cp poetry.lock publish/poetry.lock
           cp app.py publish/app.py
+
+      # Installs from the assembled publish/ payload itself (not the repo root) into a throwaway venv, the
+      # same way Oryx's production build will, then imports the real gunicorn entrypoint with dummy secrets.
+      # This exists because a dependency present in pyproject.toml's dev extras but missing from the
+      # production manifest once passed every CI check (ruff/mypy/pytest all installed it via the dev
+      # extras) and only surfaced as a ModuleNotFoundError crash loop after deploying to Azure — this step
+      # fails the same way, in CI, before anything touches Azure.
+      - name: Verify deployment package boots
+        working-directory: publish
+        run: |
+          python -m venv /tmp/smoke-venv
+          /tmp/smoke-venv/bin/python -m pip install poetry --quiet
+          /tmp/smoke-venv/bin/poetry config virtualenvs.create false
+          /tmp/smoke-venv/bin/poetry install --no-root --quiet
+          /tmp/smoke-venv/bin/python -c "
+          import os
+          from cryptography.fernet import Fernet
+          os.environ['OIDC_AUTHORITY'] = 'https://smoke-test.invalid'
+          os.environ['CURATOR_TOKEN_KEY'] = Fernet.generate_key().decode()
+          os.environ['CURATOR_DATABASE_URL'] = 'postgresql://smoke:test@localhost:5432/smoke'
+          import app
+          print('Smoke test OK:', app.app)
+          "
 
       - name: Login to Azure
         uses: azure/login@532459ea530d8321f2fb9bb10d1e0bcf23869a43  # v3.0.0

@@ -131,6 +131,53 @@ def test_second_bin_absorbs_overflow_from_the_first():
     assert result.overflow == ()
 
 
+def test_sort_order_none_keeps_the_default_rank_score_first_order():
+    # b has the higher composite but a has the higher rank_score -- default order must still favor a,
+    # confirming an unset sort_order changes nothing (existing behavior, asserted explicitly here so a
+    # future default-key change can't silently regress it).
+    candidates = [
+        _candidate("a", 10, rank_score=5, composite_score=10),
+        _candidate("b", 10, rank_score=1, composite_score=90),
+    ]
+
+    result = fill_capacity_multi_bin(candidates, _one_bin(100), sort_order=None)
+
+    assert [c.game_id for c in result.installed_by_bin["console"]] == ["a", "b"]
+
+
+def test_sort_order_composite_desc_ignores_rank_score():
+    # Same candidates as above, but sort_order="composite_desc" must flip the order -- rank_score (the
+    # F2P/franchise bonus) has no term in the legacy PS4 Criterion/Blockbuster rule this reproduces
+    # (Tools/PlayStation/LIFECYCLE_AUDIT.md), unlike this strategy's own default.
+    candidates = [
+        _candidate("a", 10, rank_score=5, composite_score=10),
+        _candidate("b", 10, rank_score=1, composite_score=90),
+    ]
+
+    result = fill_capacity_multi_bin(candidates, _one_bin(100), sort_order="composite_desc")
+
+    assert [c.game_id for c in result.installed_by_bin["console"]] == ["b", "a"]
+
+
+def test_sort_order_composite_desc_nulls_last():
+    candidates = [
+        _candidate("no_score", 10, composite_score=None),
+        _candidate("scored", 10, composite_score=1.0),
+    ]
+
+    result = fill_capacity_multi_bin(candidates, _one_bin(100), sort_order="composite_desc")
+
+    assert [c.game_id for c in result.installed_by_bin["console"]] == ["scored", "no_score"]
+
+
+def test_unknown_sort_order_raises():
+    try:
+        fill_capacity_multi_bin([_candidate("a", 10)], _one_bin(100), sort_order="not_a_real_order")
+    except ValueError:
+        return
+    raise AssertionError("expected a ValueError for an unknown sort_order")
+
+
 def test_a_usb_bin_never_appears_when_the_caller_omits_it_for_ps5_candidates():
     # This module has no platform awareness -- the caller (CollectionOrchestrator) is responsible for
     # simply never including a kind="usb" device's StorageBin when the run is for a PS5 console. Here

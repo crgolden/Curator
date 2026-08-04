@@ -87,7 +87,7 @@ from curator.public_collections_routes import router as public_collections_route
 from curator.redis_client import RedisAdapter, build_redis_client
 from curator.settings import Settings
 from curator.storage_devices_routes import router as storage_devices_router
-from curator.telemetry import configure_telemetry
+from curator.telemetry import configure_telemetry, shutdown_telemetry
 from curator.token_validation import JwtValidator, TokenValidatorLike
 from curator.trophy_routes import router as trophy_router
 
@@ -389,6 +389,7 @@ def create_app(
                 await redis_client.aclose()
             if owns_pool and pool is not None:
                 await pool.close()
+            shutdown_telemetry()
 
     app = FastAPI(title="Curator", lifespan=lifespan)
 

@@ -183,11 +183,12 @@ Two independent, optional legs, wired up in `curator.telemetry.configure_telemet
 `create_app`:
 
 - **Traces + metrics**: OTLP gRPC to Grafana Alloy, enabled by setting `AlloyEndpoint`. Resource
-  `service.name` is `curator`; the FastAPI app, psycopg, and outbound `httpx` calls (covers `curator.psn`'s
-  calls to Sony) are all instrumented. `/health` is excluded from tracing, matching the fleet convention.
+  `service.name` is `crgolden-curator`; the FastAPI app, psycopg, and outbound `httpx` calls (covers
+  `curator.psn`'s calls to Sony) are all instrumented. `/health` is excluded from tracing, matching the
+  fleet convention.
 - **Structured logging**: root-logger documents shipped to Elasticsearch, enabled by setting
   `ElasticsearchNode` together with `ElasticsearchUsername`/`ElasticsearchPassword`. Each document carries
-  `service.name: "curator"` and a flat `log.level` field translated to the fleet's Serilog/ECS vocabulary
+  `service.name: "crgolden-curator"` and a flat `log.level` field translated to the fleet's Serilog/ECS vocabulary
   (`Information`/`Warning`/`Error`/... rather than Python's own `INFO`/`WARNING`/`ERROR`) — mirroring what
   the `Churches` Node app ships — written into the `logs-app-curator` data stream (`op_type="create"`,
   matching the Grafana Elasticsearch datasource pattern `logs-app-*` and Elasticsearch's built-in `logs`

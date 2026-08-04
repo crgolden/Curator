@@ -3,11 +3,14 @@ Azure connection, no real database)."""
 
 from __future__ import annotations
 
+import asyncio
 from types import SimpleNamespace
 from typing import Any
 
+import pytest
 from azure.servicebus.exceptions import MessageLockLostError, ServiceBusConnectionError
 
+from curator.jobs import queue_consumer as queue_consumer_module
 from curator.jobs.queue_consumer import QueueConsumer, RateLimitRetryScheduled
 
 
@@ -28,12 +31,13 @@ class FakeReceiver:
     succeeds, or that raises a lock-loss error tenacity must not retry).
     """
 
-    def __init__(self, messages, *, dead_letter_raises=None, complete_raises=None):
+    def __init__(self, messages, *, dead_letter_raises=None, complete_raises=None, iterate_raises=None):
         self._messages = list(messages)
         self.completed = []
         self.dead_lettered = []
         self._dead_letter_raises = dead_letter_raises
         self._complete_raises = complete_raises
+        self._iterate_raises = list(iterate_raises) if iterate_raises is not None else None
         self.complete_call_count = 0
         self.dead_letter_call_count = 0
 
@@ -41,6 +45,10 @@ class FakeReceiver:
         return self
 
     async def __anext__(self):
+        if self._iterate_raises:
+            exc = self._iterate_raises.pop(0)
+            if exc is not None:
+                raise exc
         if not self._messages:
             raise StopAsyncIteration
         return self._messages.pop(0)
@@ -402,6 +410,67 @@ async def test_complete_message_failure_does_not_stop_the_drain_loop():
 
     assert handler.calls == [("r1", "sub-1"), ("r2", "sub-2")]
     assert job_runs_repository.succeeded == ["r1", "r2"]
+
+
+async def test_receiver_iteration_failure_reconnects_and_keeps_draining(monkeypatch):
+    """The ``async for`` iteration itself -- not per-message handling -- can raise: e.g. a Service Bus
+    connectivity blip while fetching the next message, distinct from every failure exercised above (which
+    all happen *after* a message was already received). This used to propagate out of the drain method
+    entirely, killing its background task with no supervisor to restart it and silencing the queue until
+    the whole app restarted. Now it must be caught, logged, and followed by a backoff before reconnecting
+    on the same receiver -- proven here by a message becoming processable only after the reconnect."""
+    sleeps: list[float] = []
+    monkeypatch.setattr("asyncio.sleep", _record_sleep(sleeps))
+    handler = RecordingHandler()
+    receiver = FakeReceiver(
+        [FakeMessage('{"run_id": "r1", "identity_sub": "sub-1"}')],
+        iterate_raises=[ServiceBusConnectionError()],
+    )
+    job_runs_repository = FakeJobRunsRepository()
+    consumer = QueueConsumer(
+        library_refresh_receiver=receiver,
+        library_refresh_continuation_receiver=FakeReceiver([]),
+        enrichment_receiver=FakeReceiver([]),
+        on_library_refresh=handler,
+        on_library_refresh_continuation=RecordingHandler(),
+        on_enrichment_run=RecordingHandler(),
+        job_runs_repository=job_runs_repository,
+    )
+
+    await consumer.drain_library_refresh()  # must not raise
+
+    assert handler.calls == [("r1", "sub-1")]  # processed only after the reconnect
+    assert job_runs_repository.succeeded == ["r1"]
+    assert sleeps == [queue_consumer_module._RECEIVE_ERROR_BACKOFF_SECONDS]
+
+
+async def test_receiver_iteration_cancellation_still_propagates(monkeypatch):
+    """Unlike a real receive error, cancellation (from :meth:`QueueConsumer.stop`) must never be treated
+    as a reconnect-worthy failure -- it has to propagate so ``stop()``'s ``await task`` actually completes."""
+    sleeps: list[float] = []
+    monkeypatch.setattr("asyncio.sleep", _record_sleep(sleeps))
+    receiver = FakeReceiver([], iterate_raises=[asyncio.CancelledError()])
+    consumer = QueueConsumer(
+        library_refresh_receiver=receiver,
+        library_refresh_continuation_receiver=FakeReceiver([]),
+        enrichment_receiver=FakeReceiver([]),
+        on_library_refresh=RecordingHandler(),
+        on_library_refresh_continuation=RecordingHandler(),
+        on_enrichment_run=RecordingHandler(),
+        job_runs_repository=FakeJobRunsRepository(),
+    )
+
+    with pytest.raises(asyncio.CancelledError):
+        await consumer.drain_library_refresh()
+
+    assert sleeps == []
+
+
+def _record_sleep(sleeps: list[float]):
+    async def _sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+
+    return _sleep
 
 
 class FakeLockRenewer:

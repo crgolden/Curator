@@ -65,6 +65,12 @@ gone. Deliberately excludes MessageLockLostError/SessionLockLostError: once the 
 a message's lock, retrying the exact same settle call cannot succeed, so those are caught separately
 and never retried (see QueueConsumer._settle)."""
 
+_RECEIVE_ERROR_BACKOFF_SECONDS = 5.0
+"""How long a drain loop waits before reconnecting after the receiver's own iteration -- not a
+per-message handler -- raises (see QueueConsumer._drain). Fixed rather than tenacity's exponential
+backoff (`_settle_with_retry`'s use case): this loop runs for the app's lifetime and should keep
+retrying indefinitely rather than give up after a bounded number of attempts."""
+
 
 @retry(
     retry=retry_if_exception_type(_TRANSIENT_SERVICE_BUS_ERRORS),
@@ -220,65 +226,98 @@ class QueueConsumer:
         self._tasks = []
 
     async def drain_library_refresh(self) -> None:
-        """Process every message on the library-refresh queue until the receiver stops iterating.
+        """Process every message on the library-refresh queue.
 
-        Each message's handling is wrapped in a broad ``except`` -- a failure anywhere inside
-        :meth:`_handle` (including ``try_begin_delivery``/``mark_succeeded``/``mark_failed`` or the
-        ``dead_letter_message``/``complete_message`` calls themselves, not just the job's own ``process``
-        call) must never escape this loop. An uncaught exception here kills the ``asyncio.Task`` this method
-        runs as (started once, in :meth:`start`) with no supervisor to restart it, permanently silencing
-        this queue for every future message until the whole app restarts -- exactly the failure mode a
-        first live production run surfaced (a single RAWG 401 during processing was logged and the run
-        correctly marked ``failed``, but the subsequent ``dead_letter_message`` call apparently raised,
-        and every later library-refresh message was left stuck at ``queued`` forever).
+        See :meth:`_drain` for how per-message and receive-level failures are both handled without ever
+        letting this method's background task (started once, in :meth:`start`) die -- an uncaught
+        exception here previously left this queue's messages stuck at ``queued`` forever, exactly the
+        failure mode a first live production run surfaced (a single RAWG 401 during processing was logged
+        and the run correctly marked ``failed``, but the subsequent ``dead_letter_message`` call apparently
+        raised, and every later library-refresh message was left stuck at ``queued`` forever).
         """
-        async for message in self._library_refresh_receiver:
-            try:
-                await self._handle(
-                    message,
-                    self._library_refresh_receiver,
-                    required_fields=("run_id", "identity_sub"),
-                    process=lambda payload: self._on_library_refresh(payload["run_id"], payload["identity_sub"]),
-                )
-            except Exception:
-                logger.exception("Unhandled error draining a library-refresh message; continuing to drain")
+        await self._drain(
+            self._library_refresh_receiver,
+            queue_label="library-refresh",
+            required_fields=("run_id", "identity_sub"),
+            process=lambda payload: self._on_library_refresh(payload["run_id"], payload["identity_sub"]),
+        )
 
     async def drain_library_refresh_continuation(self) -> None:
-        """Process every message on the library-refresh continuation queue until the receiver stops
-        iterating.
+        """Process every message on the library-refresh continuation queue.
 
-        See :meth:`drain_library_refresh` for why every exception here is caught rather than allowed to
-        kill this loop's background task. A message only ever becomes visible here once its scheduled
-        ``retry_after_seconds`` delay has elapsed (see
+        See :meth:`_drain` for how failures are handled. A message only ever becomes visible here once its
+        scheduled ``retry_after_seconds`` delay has elapsed (see
         ``curator.jobs.queue_publisher.QueuePublisher.publish_library_refresh_continuation``).
         """
-        async for message in self._library_refresh_continuation_receiver:
-            try:
-                await self._handle(
-                    message,
-                    self._library_refresh_continuation_receiver,
-                    required_fields=("run_id", "identity_sub", "remaining_game_ids", "provider", "retry_after_seconds"),
-                    process=self._on_library_refresh_continuation,
-                )
-            except Exception:
-                logger.exception("Unhandled error draining a library-refresh-continuation message; continuing to drain")
+        await self._drain(
+            self._library_refresh_continuation_receiver,
+            queue_label="library-refresh-continuation",
+            required_fields=("run_id", "identity_sub", "remaining_game_ids", "provider", "retry_after_seconds"),
+            process=self._on_library_refresh_continuation,
+        )
 
     async def drain_enrichment(self) -> None:
-        """Process every message on the enrichment queue until the receiver stops iterating.
+        """Process every message on the enrichment queue.
 
-        See :meth:`drain_library_refresh` for why every exception here is caught rather than allowed to
-        kill this loop's background task.
+        See :meth:`_drain` for how failures are handled.
         """
-        async for message in self._enrichment_receiver:
+        await self._drain(
+            self._enrichment_receiver,
+            queue_label="enrichment",
+            required_fields=("run_id",),
+            process=lambda _payload: self._on_enrichment_run(),
+        )
+
+    async def _drain(
+        self,
+        receiver: MessageReceiver,
+        *,
+        queue_label: str,
+        required_fields: tuple[str, ...],
+        process: Any,
+    ) -> None:
+        """Process every message from ``receiver`` until its iteration ends normally or this task is
+        cancelled -- shared by all three ``drain_*`` methods.
+
+        Two failure modes are handled differently, neither ever allowed to kill this method's background
+        task:
+
+        * A failure *handling* a received message (:meth:`_handle`, including its own
+          ``dead_letter_message``/``complete_message`` calls, not just the job's own ``process`` call) is
+          caught by the inner ``except`` and logged -- the ``async for`` keeps iterating to the next
+          message.
+        * A failure *receiving* the next message -- the ``async for`` statement itself raising, e.g.
+          because the Service Bus connection dropped while fetching -- is caught by the outer ``except``,
+          logged, and followed by a fixed backoff (:data:`_RECEIVE_ERROR_BACKOFF_SECONDS`) before
+          reconnecting (re-entering ``async for`` on the same receiver). This case previously was not
+          caught at all: it would propagate out of the calling ``drain_*`` method, kill the
+          ``asyncio.Task`` it runs as with no supervisor to restart it, and silence this queue for every
+          future message until the whole app restarted.
+
+        ``asyncio.CancelledError`` (from :meth:`stop`) is always re-raised, never treated as a receive
+        error. Normal completion of the iteration (the receiver stops yielding messages on its own,
+        without raising) returns rather than reconnecting -- real Service Bus receivers iterate
+        indefinitely and only stop via cancellation, so this path exists for test doubles and any
+        receiver implementation that does terminate.
+        """
+        while True:
             try:
-                await self._handle(
-                    message,
-                    self._enrichment_receiver,
-                    required_fields=("run_id",),
-                    process=lambda _payload: self._on_enrichment_run(),
-                )
+                async for message in receiver:
+                    try:
+                        await self._handle(message, receiver, required_fields=required_fields, process=process)
+                    except Exception:
+                        logger.exception("Unhandled error draining a %s message; continuing to drain", queue_label)
+            except asyncio.CancelledError:
+                raise
             except Exception:
-                logger.exception("Unhandled error draining an enrichment message; continuing to drain")
+                logger.exception(
+                    "Unhandled error receiving from the %s queue; reconnecting in %.0fs",
+                    queue_label,
+                    _RECEIVE_ERROR_BACKOFF_SECONDS,
+                )
+                await asyncio.sleep(_RECEIVE_ERROR_BACKOFF_SECONDS)
+                continue
+            return
 
     async def _settle(
         self,

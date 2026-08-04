@@ -33,13 +33,21 @@ class CollectionSpec:
         a run during a PSN outage or with trophy harvesting disabled must not silently exclude everything.
         Always applied on top of either the flat fields or ``filter_predicate`` -- see
         :mod:`curator.collections.filter_predicate`'s module docstring for why it stays out of the tree.
-    :param sort_order: Reserved for future sort variants; the only sort implemented today is composite
-        score descending (both strategies already do this).
+    :param sort_order: A named sort-order variant (see :mod:`curator.collections.sort_order`), or
+        ``None`` to keep whichever strategy runs this spec's own default order (the two strategies
+        default to different key precedence -- see each one's own docstring).
     :param include_inactive: Whether to draw on games the user can no longer play (lapsed PS Plus titles
         and the like). Defaults to ``False`` -- a collection is normally built from what its owner can
         actually launch -- and opting in gives "everything I ever had access to" instead. Applied in
         :meth:`~curator.collections.repository.CollectionsRepository.list_candidates`, the single
         chokepoint every strategy's candidate pool flows through, rather than in each strategy.
+    :param exclude_installed_on: Console ids (the caller's own -- validated by
+        :class:`~curator.collections.collection_orchestrator.CollectionOrchestrator`) whose currently-
+        installed games (``console_installs.installed = true``) are excluded from this run's candidate
+        pool entirely. For "give me what's left for my Vita that isn't already on my PS5", not for
+        capacity accounting -- a game excluded this way never appears in ``included`` *or* ``excluded``,
+        the same "not in the pool at all" treatment ``fill_capacity_multi_bin``'s ``routing_genres``
+        already gives a non-matching genre.
     """
 
     kind: str
@@ -51,3 +59,4 @@ class CollectionSpec:
     include_inactive: bool = False
     min_percent_completed: int | None = None
     filter_predicate: FilterPredicate | None = None
+    exclude_installed_on: tuple[str, ...] = ()

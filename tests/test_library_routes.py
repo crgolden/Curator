@@ -79,6 +79,7 @@ class FakeLibraryGameView:
         is_active=True,
         np_communication_id=None,
         percent_completed=None,
+        cover_image_url=None,
     ):
         self.game_id = game_id
         self.title = title
@@ -92,6 +93,7 @@ class FakeLibraryGameView:
         self.is_active = is_active
         self.np_communication_id = np_communication_id
         self.percent_completed = percent_completed
+        self.cover_image_url = cover_image_url
 
 
 _SORT_ATTRS = {
@@ -100,6 +102,7 @@ _SORT_ATTRS = {
     "rawg_rating": "rawg_rating",
     "opencritic_rating": "opencritic_rating",
     "psn_rating": "psn_rating",
+    "percent_completed": "percent_completed",
 }
 
 
@@ -336,6 +339,7 @@ def test_get_library_returns_callers_own_games_with_ratings_and_category():
             psn_product_id="UP0700-CUSA23100_00-ELDENRING0000000",
             rawg_enriched=True,
             opencritic_enriched=True,
+            cover_image_url="https://cdn.example/elden-ring.jpg",
         ),
         FakeLibraryGameView("game-2", "Unmatched Game", rawg_enriched=False, opencritic_enriched=False),
     ]
@@ -359,6 +363,7 @@ def test_get_library_returns_callers_own_games_with_ratings_and_category():
                 "opencritic_enriched": True,
                 "is_active": True,
                 "percent_completed": None,
+                "cover_image_url": "https://cdn.example/elden-ring.jpg",
             },
             {
                 "game_id": "game-2",
@@ -372,6 +377,7 @@ def test_get_library_returns_callers_own_games_with_ratings_and_category():
                 "opencritic_enriched": False,
                 "is_active": True,
                 "percent_completed": None,
+                "cover_image_url": None,
             },
         ],
         "total": 2,
@@ -459,6 +465,22 @@ def test_get_library_sort_by_rating_nulls_last_ascending_and_descending():
 
     desc = client.get("/library?sort=rawg_rating&sortDir=desc", headers=_bearer("token-a")).json()
     assert [g["title"] for g in desc["games"]] == ["High", "Low", "No Rating"]
+
+
+def test_get_library_sort_by_percent_completed_nulls_last_ascending_and_descending():
+    games = [
+        FakeLibraryGameView("g1", "No Progress"),
+        FakeLibraryGameView("g2", "Mostly Done", percent_completed=90),
+        FakeLibraryGameView("g3", "Barely Started", percent_completed=10),
+    ]
+    client, validator, _publisher = _build(library_repository=FakeLibraryRepository({"sub-a": games}))
+    validator.register("token-a", _claims(sub="sub-a"))
+
+    asc = client.get("/library?sort=percent_completed&sortDir=asc", headers=_bearer("token-a")).json()
+    assert [g["title"] for g in asc["games"]] == ["Barely Started", "Mostly Done", "No Progress"]
+
+    desc = client.get("/library?sort=percent_completed&sortDir=desc", headers=_bearer("token-a")).json()
+    assert [g["title"] for g in desc["games"]] == ["Mostly Done", "Barely Started", "No Progress"]
 
 
 def test_get_library_rejects_unknown_sort_field():

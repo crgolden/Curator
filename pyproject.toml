@@ -39,11 +39,12 @@ dev = [
 ]
 
 [build-system]
-requires = ["setuptools>=83.0.0"]
-build-backend = "setuptools.build_meta"
+requires = ["poetry-core>=2.0.0"]
+build-backend = "poetry.core.masonry.api"
 
-[tool.setuptools.packages.find]
-where = ["src"]
+# Poetry-core needs this to find the src-layout package; PEP 621's [project] table has no equivalent field.
+[tool.poetry]
+packages = [{ include = "curator", from = "src" }]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
