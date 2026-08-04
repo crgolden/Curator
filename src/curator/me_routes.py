@@ -41,6 +41,10 @@ class MeResponse(BaseModel):
     email: str | None
     linked: bool
     psn: PsnSummary | None
+    #: Whether the caller holds the ``curator.admin`` claim (see ``TokenClaims.is_admin``) -- lets
+    #: Librarian show/hide admin-only UI (e.g. the enrichment-run page) without duplicating the claim
+    #: check client-side against a less authoritative channel (the BFF's own OIDC claims).
+    is_admin: bool
 
 
 class AccountActionResponse(BaseModel):
@@ -61,8 +65,8 @@ class AccountActionsResponse(BaseModel):
 async def me(request: Request, claims: TokenClaims = Depends(require_verified_caller)) -> MeResponse:
     """Return the caller's identity plus their PSN link status.
 
-    :returns: ``{"sub", "email", "linked", "psn"}`` where ``psn`` is ``None`` when unlinked, else
-        ``{"access_token_expires_at", "refresh_token_expires_at"}`` (ISO-8601 strings, or ``None``).
+    :returns: ``{"sub", "email", "linked", "psn", "is_admin"}`` where ``psn`` is ``None`` when unlinked,
+        else ``{"access_token_expires_at", "refresh_token_expires_at"}`` (ISO-8601 strings, or ``None``).
     """
     repository: Repository = request.app.state.repository
     token_crypto: TokenCrypto = request.app.state.token_crypto
@@ -79,6 +83,7 @@ async def me(request: Request, claims: TokenClaims = Depends(require_verified_ca
         email=claims.email,
         linked=link is not None,
         psn=_psn_summary(link) if link is not None else None,
+        is_admin=claims.is_admin,
     )
 
 

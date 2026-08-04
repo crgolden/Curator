@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
 
 from curator.jobs.repository import JobRunsRepository
+
+_NOW = datetime(2026, 8, 3, 12, 0, 0, tzinfo=timezone.utc)
 
 
 class FakeCursor:
@@ -186,7 +189,7 @@ async def test_mark_rate_limited_returns_an_incrementing_seq_across_repeated_cal
 
 
 async def test_get_returns_run():
-    pool = FakePool(fetchone_results=[("run-1", "library_refresh", "sub-1", "running", None, None)])
+    pool = FakePool(fetchone_results=[("run-1", "library_refresh", "sub-1", "running", None, None, _NOW)])
     repo = JobRunsRepository(pool)
 
     run = await repo.get("run-1")
@@ -198,11 +201,12 @@ async def test_get_returns_run():
     assert run.status == "running"
     assert run.error is None
     assert run.result_summary is None
+    assert run.updated_at == _NOW
 
 
 async def test_get_returns_result_summary():
     summary = {"rawg_enriched_titles": ["Elden Ring"], "opencritic_topup_incomplete": True}
-    pool = FakePool(fetchone_results=[("run-1", "library_refresh", "sub-1", "succeeded", None, summary)])
+    pool = FakePool(fetchone_results=[("run-1", "library_refresh", "sub-1", "succeeded", None, summary, _NOW)])
     repo = JobRunsRepository(pool)
 
     run = await repo.get("run-1")
@@ -216,5 +220,52 @@ async def test_get_returns_none_when_not_found():
     repo = JobRunsRepository(pool)
 
     run = await repo.get("unknown")
+
+    assert run is None
+
+
+async def test_find_active_run_returns_matching_row():
+    pool = FakePool(fetchone_results=[("run-1", "library_refresh", "sub-1", "running", None, None, _NOW)])
+    repo = JobRunsRepository(pool)
+
+    run = await repo.find_active_run("sub-1", "library_refresh")
+
+    assert run is not None
+    assert run.run_id == "run-1"
+    sql, params = pool.connections[0].executed[0]
+    assert "identity_sub = %s AND kind = %s" in sql
+    assert "status NOT IN ('succeeded', 'failed')" in sql
+    assert "ORDER BY created_at DESC LIMIT 1" in sql
+    assert params == ("sub-1", "library_refresh")
+
+
+async def test_find_active_run_returns_none_when_no_non_terminal_row_exists():
+    pool = FakePool(fetchone_results=[None])
+    repo = JobRunsRepository(pool)
+
+    run = await repo.find_active_run("sub-1", "library_refresh")
+
+    assert run is None
+
+
+async def test_get_latest_by_kind_returns_matching_row():
+    pool = FakePool(fetchone_results=[("run-1", "enrichment", None, "succeeded", None, None, _NOW)])
+    repo = JobRunsRepository(pool)
+
+    run = await repo.get_latest_by_kind("enrichment")
+
+    assert run is not None
+    assert run.run_id == "run-1"
+    sql, params = pool.connections[0].executed[0]
+    assert "kind = %s" in sql
+    assert "ORDER BY created_at DESC LIMIT 1" in sql
+    assert params == ("enrichment",)
+
+
+async def test_get_latest_by_kind_returns_none_when_no_run_of_that_kind_exists():
+    pool = FakePool(fetchone_results=[None])
+    repo = JobRunsRepository(pool)
+
+    run = await repo.get_latest_by_kind("enrichment")
 
     assert run is None

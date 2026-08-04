@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
+
 from cryptography.fernet import Fernet
 from fastapi.testclient import TestClient
 
@@ -30,21 +32,36 @@ class FakePublisher:
 
 
 class FakeJobRun:
-    def __init__(self, run_id, kind, identity_sub, status, error=None, result_summary=None):
+    def __init__(self, run_id, kind, identity_sub, status, error=None, result_summary=None, updated_at=None):
         self.run_id = run_id
         self.kind = kind
         self.identity_sub = identity_sub
         self.status = status
         self.error = error
         self.result_summary = result_summary
+        self.updated_at = updated_at if updated_at is not None else datetime.now(timezone.utc)
 
 
 class FakeJobRunsRepository:
     def __init__(self, runs=None):
         self.runs: dict[str, FakeJobRun] = {run.run_id: run for run in (runs or [])}
+        self.failed_calls = []
 
     async def get(self, run_id):
         return self.runs.get(run_id)
+
+    async def find_active_run(self, identity_sub, kind):
+        candidates = [
+            run
+            for run in self.runs.values()
+            if run.identity_sub == identity_sub and run.kind == kind and run.status not in ("succeeded", "failed")
+        ]
+        return max(candidates, key=lambda run: run.updated_at, default=None)
+
+    async def mark_failed(self, run_id, error):
+        self.failed_calls.append((run_id, error))
+        self.runs[run_id].status = "failed"
+        self.runs[run_id].error = error
 
 
 class FakeLibraryGameView:
@@ -155,6 +172,89 @@ def test_publishes_for_the_callers_own_sub_and_returns_run_id():
     assert response.status_code == 202
     assert response.json() == {"run_id": "run-1"}
     assert publisher.library_refresh_calls == ["sub-a"]
+
+
+def test_duplicate_refresh_returns_existing_run_id_instead_of_publishing_again():
+    active = FakeJobRun("run-existing", "library_refresh", "sub-a", "running")
+    client, validator, publisher = _build(FakeJobRunsRepository([active]))
+    validator.register("token-a", _claims(sub="sub-a"))
+
+    response = client.post("/library/refresh", headers=_bearer("token-a"))
+
+    assert response.status_code == 202
+    assert response.json() == {"run_id": "run-existing"}
+    assert publisher.library_refresh_calls == []
+
+
+def test_duplicate_refresh_guard_is_scoped_to_the_caller_and_kind():
+    other_users_run = FakeJobRun("run-other", "library_refresh", "sub-b", "running")
+    enrichment_run = FakeJobRun("run-enrichment", "enrichment", None, "running")
+    client, validator, publisher = _build(FakeJobRunsRepository([other_users_run, enrichment_run]))
+    validator.register("token-a", _claims(sub="sub-a"))
+
+    response = client.post("/library/refresh", headers=_bearer("token-a"))
+
+    assert response.status_code == 202
+    assert response.json() == {"run_id": "run-1"}
+    assert publisher.library_refresh_calls == ["sub-a"]
+
+
+def test_a_terminal_run_does_not_block_a_new_refresh():
+    finished = FakeJobRun("run-old", "library_refresh", "sub-a", "succeeded")
+    client, validator, publisher = _build(FakeJobRunsRepository([finished]))
+    validator.register("token-a", _claims(sub="sub-a"))
+
+    response = client.post("/library/refresh", headers=_bearer("token-a"))
+
+    assert response.status_code == 202
+    assert response.json() == {"run_id": "run-1"}
+    assert publisher.library_refresh_calls == ["sub-a"]
+
+
+def test_a_stale_non_terminal_run_is_superseded_not_returned():
+    # Older than the 24h staleness threshold, still nominally "rate_limited" -- e.g. its scheduled
+    # continuation message never fired, or the queue consumer was down for an extended outage.
+    stale = FakeJobRun(
+        "run-stale",
+        "library_refresh",
+        "sub-a",
+        "rate_limited",
+        updated_at=datetime.now(timezone.utc) - timedelta(hours=25),
+    )
+    job_runs_repository = FakeJobRunsRepository([stale])
+    client, validator, publisher = _build(job_runs_repository)
+    validator.register("token-a", _claims(sub="sub-a"))
+
+    response = client.post("/library/refresh", headers=_bearer("token-a"))
+
+    assert response.status_code == 202
+    assert response.json() == {"run_id": "run-1"}
+    assert publisher.library_refresh_calls == ["sub-a"]
+    assert job_runs_repository.failed_calls == [
+        ("run-stale", "Superseded: no progress for over 24 hours, treated as abandoned.")
+    ]
+    assert job_runs_repository.runs["run-stale"].status == "failed"
+
+
+def test_a_run_within_the_staleness_threshold_is_not_superseded_even_while_rate_limited():
+    # A legitimate long provider-backoff wait (observed up to ~8h in prod) must not be mistaken for dead.
+    waiting = FakeJobRun(
+        "run-waiting",
+        "library_refresh",
+        "sub-a",
+        "rate_limited",
+        updated_at=datetime.now(timezone.utc) - timedelta(hours=8),
+    )
+    job_runs_repository = FakeJobRunsRepository([waiting])
+    client, validator, publisher = _build(job_runs_repository)
+    validator.register("token-a", _claims(sub="sub-a"))
+
+    response = client.post("/library/refresh", headers=_bearer("token-a"))
+
+    assert response.status_code == 202
+    assert response.json() == {"run_id": "run-waiting"}
+    assert publisher.library_refresh_calls == []
+    assert job_runs_repository.failed_calls == []
 
 
 def test_queue_not_configured_returns_503():

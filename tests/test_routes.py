@@ -547,6 +547,13 @@ def test_me_reports_unlinked():
     assert body["email"] == EMAIL
     assert body["linked"] is False
     assert body["psn"] is None
+    assert body["is_admin"] is False
+
+
+def test_me_reports_is_admin_true_for_an_admin_claim():
+    client, *_ = _build_with_valid_token(is_admin=True)
+    response = client.get("/me", headers=_bearer("valid-token"))
+    assert response.json()["is_admin"] is True
 
 
 def test_me_with_matching_verified_link_keeps_it_and_touches_verified():

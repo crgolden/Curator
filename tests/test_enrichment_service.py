@@ -122,12 +122,15 @@ class FakeEnrichmentRepository:
 _UNSET = object()
 
 
-def _service(rawg_client=_UNSET, opencritic_client=_UNSET, catalog_client=None, repository=None):
+def _service(
+    rawg_client=_UNSET, opencritic_client=_UNSET, catalog_client=None, repository=None, opencritic_admin_clients=()
+):
     return EnrichmentService(
         rawg_client=FakeRawgClient() if rawg_client is _UNSET else rawg_client,
         opencritic_client=FakeOpenCriticClient() if opencritic_client is _UNSET else opencritic_client,
         catalog_client=catalog_client or FakeCatalogClient(),
         repository=repository or FakeEnrichmentRepository(),
+        opencritic_admin_clients=opencritic_admin_clients,
     )
 
 
@@ -365,7 +368,7 @@ async def test_refresh_opencritic_cache_paginates_both_platforms_and_saves():
     ]
     opencritic_client = FakeOpenCriticClient(games_by_platform={"ps4": ps4_games, "ps5": ps5_games})
     repository = FakeEnrichmentRepository()
-    service = _service(opencritic_client=opencritic_client, repository=repository)
+    service = _service(opencritic_client=None, opencritic_admin_clients=(opencritic_client,), repository=repository)
 
     total = await service.refresh_opencritic_cache()
 
@@ -383,17 +386,17 @@ async def test_refresh_opencritic_cache_resumes_from_and_advances_the_shared_cur
             "ps5": PaginationResult(games=[], next_skip=0, exhausted=True),
         }
     )
-    service = _service(opencritic_client=opencritic_client, repository=repository)
+    service = _service(opencritic_client=None, opencritic_admin_clients=(opencritic_client,), repository=repository)
 
     await service.refresh_opencritic_cache()
 
-    assert opencritic_client.fetch_calls[0] == ("ps4", 40, None)
+    assert opencritic_client.fetch_calls[0] == ("ps4", 40, 20)  # bounded to _OPENCRITIC_ADMIN_REFRESH_MAX_PAGES
     assert repository.opencritic_cursors["ps4"] == 60
     assert repository.opencritic_cursors["ps5"] == 0
 
 
-async def test_refresh_opencritic_cache_requires_a_configured_client():
-    service = _service(opencritic_client=None)
+async def test_refresh_opencritic_cache_requires_at_least_one_admin_client():
+    service = _service(opencritic_client=None, opencritic_admin_clients=())
 
     with pytest.raises(RuntimeError):
         await service.refresh_opencritic_cache()
@@ -401,7 +404,7 @@ async def test_refresh_opencritic_cache_requires_a_configured_client():
 
 async def test_refresh_opencritic_cache_translates_401_to_auth_error():
     opencritic_client = FakeOpenCriticClient(raises=OpenCriticApiError("bad key", status_code=401))
-    service = _service(opencritic_client=opencritic_client)
+    service = _service(opencritic_client=None, opencritic_admin_clients=(opencritic_client,))
 
     with pytest.raises(EnrichmentAuthError) as exc_info:
         await service.refresh_opencritic_cache()
@@ -411,7 +414,7 @@ async def test_refresh_opencritic_cache_translates_401_to_auth_error():
 
 async def test_refresh_opencritic_cache_translates_403_to_auth_error():
     opencritic_client = FakeOpenCriticClient(raises=OpenCriticApiError("forbidden", status_code=403))
-    service = _service(opencritic_client=opencritic_client)
+    service = _service(opencritic_client=None, opencritic_admin_clients=(opencritic_client,))
 
     with pytest.raises(EnrichmentAuthError):
         await service.refresh_opencritic_cache()
@@ -421,7 +424,7 @@ async def test_refresh_opencritic_cache_translates_429_to_rate_limit_error():
     opencritic_client = FakeOpenCriticClient(
         raises=OpenCriticApiError("rate limited", status_code=429, retry_after_seconds=120.0)
     )
-    service = _service(opencritic_client=opencritic_client)
+    service = _service(opencritic_client=None, opencritic_admin_clients=(opencritic_client,))
 
     with pytest.raises(EnrichmentRateLimitError) as exc_info:
         await service.refresh_opencritic_cache()
@@ -433,12 +436,56 @@ async def test_refresh_opencritic_cache_translates_429_to_rate_limit_error():
 async def test_refresh_opencritic_cache_skips_platform_on_5xx():
     opencritic_client = FakeOpenCriticClient(raises=OpenCriticApiError("server error", status_code=503))
     repository = FakeEnrichmentRepository()
-    service = _service(opencritic_client=opencritic_client, repository=repository)
+    service = _service(opencritic_client=None, opencritic_admin_clients=(opencritic_client,), repository=repository)
 
     total = await service.refresh_opencritic_cache()
 
     assert total == 0
     assert repository.saved_opencritic_batches == []
+
+
+async def test_refresh_opencritic_platform_rotates_to_next_key_on_429_and_persists_partial_progress():
+    """key 1 rate-limits partway through a page and had already fetched some games on an earlier page;
+    key 2 must resume from the *advanced* cursor key 1's partial progress left behind, not from the
+    original start_skip -- the exact gap the old RotatingOpenCriticClient (a single captured closure) had."""
+    partial_games = [
+        OpenCriticGame(oc_game_id=1, name="Partial Game", top_critic_score=70, tier="Fair", percent_recommended=50)
+    ]
+    key_one = FakeOpenCriticClient(
+        raises=OpenCriticApiError(
+            "rate limited", status_code=429, retry_after_seconds=60.0, partial_games=partial_games, partial_next_skip=20
+        )
+    )
+    key_two_games = [
+        OpenCriticGame(oc_game_id=2, name="Key Two Game", top_critic_score=80, tier="Strong", percent_recommended=80)
+    ]
+    key_two = FakeOpenCriticClient(games_by_platform={"ps4": key_two_games})
+    repository = FakeEnrichmentRepository()
+    service = _service(opencritic_client=None, opencritic_admin_clients=(key_one, key_two), repository=repository)
+
+    total = await service.refresh_opencritic_cache(platforms=("ps4",))
+
+    assert total == 1
+    assert repository.saved_opencritic_batches == [partial_games, key_two_games]  # key 1's partial progress persisted
+    assert key_two.fetch_calls == [("ps4", 20, 20)]  # resumed from key 1's advanced cursor, not 0
+
+
+async def test_refresh_opencritic_platform_does_not_rotate_on_5xx_and_persists_partial_progress():
+    partial_games = [
+        OpenCriticGame(oc_game_id=1, name="Partial Game", top_critic_score=70, tier="Fair", percent_recommended=50)
+    ]
+    key_one = FakeOpenCriticClient(
+        raises=OpenCriticApiError("server error", status_code=503, partial_games=partial_games, partial_next_skip=20)
+    )
+    key_two = FakeOpenCriticClient()
+    repository = FakeEnrichmentRepository()
+    service = _service(opencritic_client=None, opencritic_admin_clients=(key_one, key_two), repository=repository)
+
+    total = await service.refresh_opencritic_cache(platforms=("ps4",))
+
+    assert total == 0
+    assert repository.saved_opencritic_batches == [partial_games]  # key 1's partial progress still persisted
+    assert key_two.fetch_calls == []  # never rotated to -- a 5xx isn't key-specific
 
 
 async def test_has_rawg_client_reflects_configured_client():
@@ -449,6 +496,13 @@ async def test_has_rawg_client_reflects_configured_client():
 async def test_has_opencritic_client_reflects_configured_client():
     assert _service(opencritic_client=FakeOpenCriticClient()).has_opencritic_client is True
     assert _service(opencritic_client=None).has_opencritic_client is False
+
+
+async def test_has_opencritic_client_reflects_configured_admin_clients():
+    with_admin = _service(opencritic_client=None, opencritic_admin_clients=(FakeOpenCriticClient(),))
+    without_admin = _service(opencritic_client=None, opencritic_admin_clients=())
+    assert with_admin.has_opencritic_client is True
+    assert without_admin.has_opencritic_client is False
 
 
 async def test_has_catalog_client_reflects_configured_client():

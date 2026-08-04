@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any
 
 from psycopg_pool import AsyncConnectionPool
@@ -24,6 +25,7 @@ class JobRun:
     status: str
     error: str | None
     result_summary: dict[str, Any] | None
+    updated_at: datetime
 
 
 class JobRunsRepository:
@@ -143,12 +145,55 @@ class JobRunsRepository:
         """Return one run, or ``None`` if ``run_id`` is unknown."""
         async with self._pool.connection() as conn, conn.cursor() as cur:
             await cur.execute(
-                "SELECT run_id, kind, identity_sub, status, error, result_summary FROM job_runs WHERE run_id = %s",
+                "SELECT run_id, kind, identity_sub, status, error, result_summary, updated_at "
+                "FROM job_runs WHERE run_id = %s",
                 (run_id,),
             )
             row = await cur.fetchone()
         if row is None:
             return None
+        return self._row_to_job_run(row)
+
+    async def find_active_run(self, identity_sub: str, kind: str) -> JobRun | None:
+        """Return the caller's own most recent non-terminal (``queued``/``running``/``rate_limited``) run
+        of this kind, or ``None`` if none exists.
+
+        Backs ``POST /library/refresh``'s duplicate-run guard: a caller with an already-in-flight run
+        should get that run's id back, not start a second, genuinely concurrent job against the same real,
+        rate-limited PSN/RAWG/OpenCritic APIs. Staleness (deciding whether a returned run is actually still
+        alive or should be superseded) is deliberately left to the caller -- this method only reports what
+        exists, since ``updated_at`` is already on :class:`JobRun` for that decision.
+        """
+        async with self._pool.connection() as conn, conn.cursor() as cur:
+            await cur.execute(
+                "SELECT run_id, kind, identity_sub, status, error, result_summary, updated_at "
+                "FROM job_runs WHERE identity_sub = %s AND kind = %s "
+                "AND status NOT IN ('succeeded', 'failed') "
+                "ORDER BY created_at DESC LIMIT 1",
+                (identity_sub, kind),
+            )
+            row = await cur.fetchone()
+        return self._row_to_job_run(row) if row is not None else None
+
+    async def get_latest_by_kind(self, kind: str) -> JobRun | None:
+        """Return the most recently *queued* run of this kind, or ``None`` if none exists yet.
+
+        Backs the admin-visible ``GET /enrichment/runs/latest`` status endpoint. Ordered by
+        ``created_at`` (queued-time), not ``updated_at`` -- ``updated_at`` bumps on every status
+        transition, which would make an old, still-stuck run look "latest" again the moment it's next
+        touched (e.g. a stale run superseded by :meth:`find_active_run`'s staleness escape).
+        """
+        async with self._pool.connection() as conn, conn.cursor() as cur:
+            await cur.execute(
+                "SELECT run_id, kind, identity_sub, status, error, result_summary, updated_at "
+                "FROM job_runs WHERE kind = %s ORDER BY created_at DESC LIMIT 1",
+                (kind,),
+            )
+            row = await cur.fetchone()
+        return self._row_to_job_run(row) if row is not None else None
+
+    @staticmethod
+    def _row_to_job_run(row: tuple[Any, ...]) -> JobRun:
         return JobRun(
             run_id=str(row[0]),
             kind=row[1],
@@ -156,4 +201,5 @@ class JobRunsRepository:
             status=row[3],
             error=row[4],
             result_summary=row[5],
+            updated_at=row[6],
         )

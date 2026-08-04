@@ -9,11 +9,10 @@ only against the larger total-requests budget. Matching lives in
 
 from __future__ import annotations
 
-from collections.abc import Callable, Coroutine
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
-from typing import Any, Protocol, TypeVar
+from typing import Any, Protocol
 
 import httpx
 
@@ -40,6 +39,12 @@ class OpenCriticApiError(Exception):
     :param provider_detail: A truncated, key-redacted excerpt of the response body, or ``None`` if it was
         empty or unreadable. RapidAPI answers 401/403 for an unsubscribed plan as readily as for a bad key,
         and only the body says which -- see the equivalent note on ``RawgApiError``.
+    :param partial_games: Every game :meth:`OpenCriticClient.fetch_platform_games` fetched and parsed
+        successfully before this error -- ``None`` unless that method set it (it never gets carried by
+        constructor argument; ``_raise_for_status`` builds this exception without access to pagination
+        state, so the pagination loop annotates it after catching, before re-raising).
+    :param partial_next_skip: The offset of the page that failed -- resuming pagination from here re-fetches
+        it, since ``skip`` only advances after a page is *successfully* parsed.
     """
 
     def __init__(
@@ -49,11 +54,32 @@ class OpenCriticApiError(Exception):
         status_code: int,
         retry_after_seconds: float | None = None,
         provider_detail: str | None = None,
+        partial_games: list[OpenCriticGame] | None = None,
+        partial_next_skip: int | None = None,
     ) -> None:
         super().__init__(message)
         self.status_code = status_code
         self.retry_after_seconds = retry_after_seconds
         self.provider_detail = provider_detail
+        self.partial_games = partial_games
+        self.partial_next_skip = partial_next_skip
+
+
+class OpenCriticNetworkError(Exception):
+    """A network-level failure (timeout, connection reset) mid-pagination in
+    :meth:`OpenCriticClient.fetch_platform_games` -- distinct from :class:`OpenCriticApiError` (a non-2xx
+    HTTP response), but carries the same partial-progress fields so a caller can persist whatever was
+    fetched before the failure instead of discarding the whole call.
+
+    :param partial_games: Every game successfully fetched and parsed before this failure.
+    :param partial_next_skip: The offset of the page that failed -- resuming from here re-fetches it,
+        rather than skipping past it.
+    """
+
+    def __init__(self, *, partial_games: list[OpenCriticGame], partial_next_skip: int) -> None:
+        super().__init__("Network error while paginating OpenCritic's catalog.")
+        self.partial_games = partial_games
+        self.partial_next_skip = partial_next_skip
 
 
 def _response_detail(response: httpx.Response, api_key: str) -> str | None:
@@ -187,7 +213,11 @@ class OpenCriticClient:
         :param max_pages: Optional page-count cap, so one caller's top-up can't burn through the whole
             day's budget in a single call.
         :returns: A :class:`PaginationResult`.
-        :raises OpenCriticApiError: On a non-2xx response.
+        :raises OpenCriticApiError: On a non-2xx response. Carries ``partial_games``/``partial_next_skip``
+            for whatever pages completed successfully before the failure, so a caller can persist that
+            progress instead of discarding the whole call.
+        :raises OpenCriticNetworkError: On a network-level failure (timeout, connection reset) mid-
+            pagination, carrying the same partial-progress fields.
         """
         games: list[OpenCriticGame] = []
         skip = start_skip
@@ -196,12 +226,20 @@ class OpenCriticClient:
         exhausted = False
 
         while True:
-            response = await self._client.get(
-                f"{OPENCRITIC_BASE_URL}/game",
-                params={"platforms": platform, "sort": "name", "order": "asc", "skip": skip},
-                headers=self._headers,
-            )
-            self._raise_for_status(response)
+            try:
+                response = await self._client.get(
+                    f"{OPENCRITIC_BASE_URL}/game",
+                    params={"platforms": platform, "sort": "name", "order": "asc", "skip": skip},
+                    headers=self._headers,
+                )
+            except httpx.HTTPError as exc:
+                raise OpenCriticNetworkError(partial_games=games, partial_next_skip=skip) from exc
+            try:
+                self._raise_for_status(response)
+            except OpenCriticApiError as exc:
+                exc.partial_games = games
+                exc.partial_next_skip = skip
+                raise
             data = response.json()
             if not isinstance(data, list) or not data:
                 exhausted = True
@@ -232,62 +270,13 @@ class OpenCriticClient:
 
 class OpenCriticClientProtocol(Protocol):
     """The subset of :class:`OpenCriticClient` that
-    :class:`~curator.enrichment.enrichment_service.EnrichmentService` depends on -- satisfied structurally
-    by both :class:`OpenCriticClient` and :class:`RotatingOpenCriticClient`."""
+    :class:`~curator.enrichment.enrichment_service.EnrichmentService` depends on. Admin-key rotation lives
+    in :class:`~curator.enrichment.enrichment_service.EnrichmentService` itself (not a wrapper client
+    implementing this protocol), since it needs to re-read the shared pagination cursor between key
+    attempts -- see ``EnrichmentService._refresh_opencritic_platform``."""
 
     async def validate_key(self) -> None: ...
 
     async def fetch_platform_games(
         self, platform: str, *, start_skip: int = 0, max_pages: int | None = None
     ) -> PaginationResult: ...
-
-
-_T = TypeVar("_T")
-
-_ROTATE_ON_STATUS_CODES = (401, 403, 429)
-
-
-class RotatingOpenCriticClient:
-    """Rotates across multiple single-key :class:`OpenCriticClient` instances behind the same interface
-    :class:`~curator.enrichment.enrichment_service.EnrichmentService` depends on
-    (:class:`OpenCriticClientProtocol`), advancing to the next key on a 401/403/429 from the current one --
-    see :class:`curator.enrichment.rawg_client.RotatingRawgClient` for the identical rationale and
-    lazy-round-robin behavior (the two are separate classes rather than one generic wrapper since
-    :class:`OpenCriticClient`'s and :class:`RawgClient`'s method shapes differ).
-
-    :param clients: Every admin OpenCritic client, one per configured key, in rotation order.
-    """
-
-    def __init__(self, clients: list[OpenCriticClientProtocol]) -> None:
-        if not clients:
-            raise ValueError("RotatingOpenCriticClient requires at least one client.")
-        self._clients = clients
-        self._index = 0
-
-    async def validate_key(self) -> None:
-        await self._call(lambda client: client.validate_key())
-
-    async def fetch_platform_games(
-        self, platform: str, *, start_skip: int = 0, max_pages: int | None = None
-    ) -> PaginationResult:
-        return await self._call(
-            lambda client: client.fetch_platform_games(platform, start_skip=start_skip, max_pages=max_pages)
-        )
-
-    async def _call(self, invoke: Callable[[OpenCriticClientProtocol], Coroutine[Any, Any, _T]]) -> _T:
-        """Try the current client, rotating to the next on a 401/403/429 and retrying the same call,
-        until either one succeeds or every client has failed once (in which case the last error is
-        raised, and the index stays wherever it landed rather than resetting to 0 for the next call)."""
-        last_exc: OpenCriticApiError | None = None
-        for _ in range(len(self._clients)):
-            client = self._clients[self._index]
-            try:
-                return await invoke(client)
-            except OpenCriticApiError as exc:
-                last_exc = exc
-                if exc.status_code in _ROTATE_ON_STATUS_CODES:
-                    self._index = (self._index + 1) % len(self._clients)
-                    continue
-                raise
-        assert last_exc is not None  # the loop above only exits without returning after setting last_exc
-        raise last_exc

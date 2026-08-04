@@ -46,7 +46,7 @@ from curator.enrichment.enrichment_service import (
     EnrichmentService,
     next_rate_limit_backoff_seconds,
 )
-from curator.enrichment.opencritic_client import OpenCriticClient, OpenCriticClientProtocol, RotatingOpenCriticClient
+from curator.enrichment.opencritic_client import OpenCriticClient, OpenCriticClientProtocol
 from curator.enrichment.publisher_tier import PublisherTierRule, fingerprint_publisher_tier_rules
 from curator.enrichment.rawg_client import RawgClient, RawgClientProtocol, RotatingRawgClient
 from curator.enrichment.repository import EnrichmentRepository
@@ -259,9 +259,12 @@ def create_app(
     # PsnSession, unlike RAWG/OpenCritic, so this singleton's enrich_game() calls always pass
     # title_id=None and skip the PSN-native genre/rating supplement.
     #
-    # More than one configured key per provider wraps in a rotating client (advances to the next key on a
+    # More than one configured RAWG key wraps in a rotating client (advances to the next key on a
     # 401/403/429 from the current one) so a full-catalog run isn't capped at a single key's daily quota --
     # per-user BYOK is unaffected, always exactly one key. A single key skips the wrapper entirely.
+    # OpenCritic's admin rotation lives in EnrichmentService itself instead (every configured client passed
+    # through directly), since it needs to re-read the shared pagination cursor between key attempts -- see
+    # EnrichmentService._refresh_opencritic_platform.
     admin_rawg_clients: list[RawgClientProtocol] = [RawgClient(http_client, key) for key in settings.rawg_api_keys]
     admin_rawg_client: RawgClientProtocol | None = (
         admin_rawg_clients[0]
@@ -273,15 +276,11 @@ def create_app(
     admin_opencritic_clients: list[OpenCriticClientProtocol] = [
         OpenCriticClient(http_client, key) for key in settings.opencritic_rapidapi_keys
     ]
-    admin_opencritic_client: OpenCriticClientProtocol | None = (
-        admin_opencritic_clients[0]
-        if len(admin_opencritic_clients) == 1
-        else RotatingOpenCriticClient(admin_opencritic_clients)
-        if admin_opencritic_clients
-        else None
-    )
     enrichment_service = EnrichmentService(
-        rawg_client=admin_rawg_client, opencritic_client=admin_opencritic_client, repository=enrichment_repository
+        rawg_client=admin_rawg_client,
+        opencritic_client=None,
+        opencritic_admin_clients=tuple(admin_opencritic_clients),
+        repository=enrichment_repository,
     )
 
     service_bus_credential: DefaultAzureCredential | None = None

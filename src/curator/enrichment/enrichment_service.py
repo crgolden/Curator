@@ -15,7 +15,7 @@ from typing import Any
 import httpx
 
 from curator.enrichment.genre_reconciliation_service import reconcile_genres
-from curator.enrichment.opencritic_client import OpenCriticApiError, OpenCriticClientProtocol
+from curator.enrichment.opencritic_client import OpenCriticApiError, OpenCriticClientProtocol, OpenCriticNetworkError
 from curator.enrichment.opencritic_matcher import OpenCriticGame, build_name_index
 from curator.enrichment.opencritic_matcher import find_match as find_opencritic_match
 from curator.enrichment.publisher_tier import PublisherTierRule, classify_tier
@@ -28,6 +28,12 @@ from curator.scoring.size_estimation_service import SizeEstimate, estimate_insta
 _MULTIPLAYER_KEYWORDS = ("multiplayer", "co-op", "online", "pvp", "cooperative")
 _OPENCRITIC_TOPUP_PLATFORMS = ("ps4", "ps5")
 _OPENCRITIC_TOPUP_MAX_PAGES = 5
+#: 4x the per-user top-up cap -- appropriate for an explicit, infrequent admin action instead of an
+#: incidental per-refresh top-up, while still bounded/resumable via the cursor rather than trying to sweep
+#: OpenCritic's entire catalog in one call (the bug this bound fixes: the very first admin run burned
+#: through every configured key's daily quota before any of them could make bounded, resumable progress).
+_OPENCRITIC_ADMIN_REFRESH_MAX_PAGES = 20
+_OPENCRITIC_ROTATE_ON_STATUS_CODES = (401, 403, 429)
 _AUTH_FAILURE_STATUS_CODES = (401, 403)
 _RATE_LIMIT_STATUS_CODE = 429
 _DEFAULT_RATE_LIMIT_RETRY_SECONDS = 3600.0
@@ -131,9 +137,13 @@ class EnrichmentService:
         ``enrich_game`` then skips the RAWG signal entirely for every game rather than failing. Curator
         never provisions a shared/fallback RAWG key (see ``curator.app._library_refresh_handler``).
     :param opencritic_client: The caller's OpenCritic API client, or ``None`` if they haven't configured an
-        OpenCritic key. Used two ways: :meth:`refresh_opencritic_cache` (admin-only catalog-wide re-scrape)
-        and, when this instance is built for a user's own library refresh, a bounded once-per-run top-up in
-        :meth:`_resolve_opencritic` on a cache miss (see that method).
+        OpenCritic key. Used for a user's own library refresh: a bounded once-per-run top-up in
+        :meth:`_resolve_opencritic` on a cache miss (see that method). Never populated on the same instance
+        as ``opencritic_admin_clients`` -- a per-user instance always has at most one BYOK key, never
+        rotated.
+    :param opencritic_admin_clients: Every admin OpenCritic client, one per configured key, in rotation
+        order -- used only by :meth:`refresh_opencritic_cache` (the admin catalog-wide re-scrape). Empty for
+        a per-user instance.
     :param catalog_client: The PSN official-catalog client. PSN's catalog API needs an authenticated
         session scoped to one user, unlike RAWG/OpenCritic, so callers that only need
         :meth:`refresh_opencritic_cache` (no PSN signal involved) may omit it; :meth:`enrich_game` then
@@ -157,9 +167,11 @@ class EnrichmentService:
         catalog_client: CatalogClient | None = None,
         repository: EnrichmentRepository,
         rate_limit_backoff_seconds: dict[str, float] | None = None,
+        opencritic_admin_clients: tuple[OpenCriticClientProtocol, ...] = (),
     ) -> None:
         self._rawg_client = rawg_client
         self._opencritic_client = opencritic_client
+        self._opencritic_admin_clients = opencritic_admin_clients
         self._catalog_client = catalog_client
         self._repository = repository
         self._opencritic_topup_attempted = False
@@ -174,8 +186,10 @@ class EnrichmentService:
 
     @property
     def has_opencritic_client(self) -> bool:
-        """Whether an OpenCritic client is configured -- see :attr:`has_rawg_client`."""
-        return self._opencritic_client is not None
+        """Whether an OpenCritic client is configured -- see :attr:`has_rawg_client`. Checks both the
+        per-user ``opencritic_client`` and the admin ``opencritic_admin_clients`` tuple; only one is ever
+        populated on a given instance."""
+        return self._opencritic_client is not None or bool(self._opencritic_admin_clients)
 
     @property
     def has_catalog_client(self) -> bool:
@@ -217,42 +231,73 @@ class EnrichmentService:
 
     async def refresh_opencritic_cache(self, platforms: tuple[str, ...] = ("ps4", "ps5")) -> int:
         """Paginate OpenCritic's PS4/PS5 catalog into ``opencritic_cache``, resuming from the shared
-        cursor (see ``db/migrations/0004_user_enrichment_keys.sql``).
+        cursor (see ``db/migrations/0004_user_enrichment_keys.sql``), rotating across every configured
+        admin key on a 401/403/429 (see :meth:`_refresh_opencritic_platform`).
 
         Call this on a schedule (it's the "background worker, not a bursty backfill" workflow the
         migration plan's rate-limit section calls for), not per-request -- OpenCritic's RapidAPI BASIC
-        plan caps at 200 requests/day total. Shares its progress cursor with per-user BYOK top-ups
+        plan caps at 200 requests/day total per key, and each call is bounded to
+        :data:`_OPENCRITIC_ADMIN_REFRESH_MAX_PAGES` pages so one run can't burn a whole key's daily quota
+        trying to sweep the entire catalog at once. Shares its progress cursor with per-user BYOK top-ups
         (:meth:`_resolve_opencritic`), so both cooperatively sweep the same catalog over time.
 
         :param platforms: The RapidAPI platform slugs to paginate.
         :returns: The total number of games fetched across all platforms.
-        :raises RuntimeError: If no OpenCritic client is configured (this method requires one -- unlike
-            :meth:`enrich_game`, it has no "skip silently" fallback since it's the admin's own explicit
-            re-scrape action).
-        :raises EnrichmentAuthError: If the configured key is rejected (401/403).
-        :raises EnrichmentRateLimitError: If OpenCritic rate-limits the request (429).
+        :raises RuntimeError: If no admin OpenCritic client is configured (this method requires at least
+            one -- unlike :meth:`enrich_game`, it has no "skip silently" fallback since it's the admin's
+            own explicit re-scrape action).
+        :raises EnrichmentAuthError: If every configured key was rejected (401/403).
+        :raises EnrichmentRateLimitError: If every configured key was rate-limited (429).
         """
-        if self._opencritic_client is None:
-            raise RuntimeError("refresh_opencritic_cache requires an OpenCritic client.")
+        if not self._opencritic_admin_clients:
+            raise RuntimeError("refresh_opencritic_cache requires at least one admin OpenCritic client.")
 
         total = 0
         for platform in platforms:
+            total += await self._refresh_opencritic_platform(platform)
+        return total
+
+    async def _refresh_opencritic_platform(self, platform: str) -> int:
+        """Sweep one platform's OpenCritic catalog (bounded by :data:`_OPENCRITIC_ADMIN_REFRESH_MAX_PAGES`
+        pages), rotating across :attr:`_opencritic_admin_clients` on a 401/403/429 from the current key.
+
+        Re-reads the shared cursor before each key's attempt (rather than once up front), so a key that
+        rotates in after a prior key's partial progress resumes past it instead of replaying the same
+        pages -- the gap the single shared-closure retry in the old ``RotatingOpenCriticClient`` had, since
+        it captured ``start_skip`` once before any key was tried.
+
+        :returns: The number of games fetched for this platform -- ``0`` if every key failed with a
+            non-rotating error (a 5xx/network blip, not key-specific), matching the prior single-client
+            swallow-and-move-on behavior instead of failing the whole run over a transient blip.
+        :raises EnrichmentAuthError: If every configured key was rejected (401/403).
+        :raises EnrichmentRateLimitError: If every configured key was rate-limited (429).
+        """
+        last_exc: OpenCriticApiError | None = None
+        for client in self._opencritic_admin_clients:
             start_skip = await self._repository.get_opencritic_cursor(platform)
             try:
-                result = await self._opencritic_client.fetch_platform_games(platform, start_skip=start_skip)
-            except OpenCriticApiError as exc:
-                if exc.status_code in _AUTH_FAILURE_STATUS_CODES:
-                    raise EnrichmentAuthError("opencritic", str(exc)) from None
-                if exc.status_code == _RATE_LIMIT_STATUS_CODE:
-                    retry_after = self._rate_limit_retry_after("opencritic", exc.retry_after_seconds)
-                    raise EnrichmentRateLimitError("opencritic", retry_after) from None
-                continue  # transient (5xx) -- skip this platform's page, same swallow as _run_opencritic_topup
-            except httpx.HTTPError:
-                continue  # network error/timeout reaching OpenCritic -- same as a transient 5xx
+                result = await client.fetch_platform_games(
+                    platform, start_skip=start_skip, max_pages=_OPENCRITIC_ADMIN_REFRESH_MAX_PAGES
+                )
+            except (OpenCriticApiError, OpenCriticNetworkError) as exc:
+                if exc.partial_games:
+                    await self._repository.save_opencritic_games(exc.partial_games)
+                if exc.partial_next_skip is not None:
+                    await self._repository.set_opencritic_cursor(platform, exc.partial_next_skip)
+                if isinstance(exc, OpenCriticApiError) and exc.status_code in _OPENCRITIC_ROTATE_ON_STATUS_CODES:
+                    last_exc = exc
+                    continue  # a per-key failure (bad key/rate-limited) -- worth trying the next key
+                return 0  # 5xx/network error isn't key-specific -- rotating wouldn't help; matches the
+                # prior single-client swallow-and-move-on
             await self._repository.save_opencritic_games(result.games)
             await self._repository.set_opencritic_cursor(platform, result.next_skip)
-            total += len(result.games)
-        return total
+            return len(result.games)
+
+        assert last_exc is not None  # every client was tried and rotated past (401/403/429), so this is set
+        if last_exc.status_code in _AUTH_FAILURE_STATUS_CODES:
+            raise EnrichmentAuthError("opencritic", str(last_exc)) from None
+        retry_after = self._rate_limit_retry_after("opencritic", last_exc.retry_after_seconds)
+        raise EnrichmentRateLimitError("opencritic", retry_after) from None
 
     async def enrich_game(
         self,

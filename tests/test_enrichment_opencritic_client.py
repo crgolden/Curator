@@ -5,13 +5,7 @@ from __future__ import annotations
 import httpx
 import pytest
 
-from curator.enrichment.opencritic_client import (
-    OpenCriticApiError,
-    OpenCriticClient,
-    PaginationResult,
-    RotatingOpenCriticClient,
-)
-from curator.enrichment.opencritic_matcher import OpenCriticGame
+from curator.enrichment.opencritic_client import OpenCriticApiError, OpenCriticClient, OpenCriticNetworkError
 
 
 class RequestRecorder:
@@ -197,102 +191,50 @@ async def test_fetch_platform_games_retry_after_seconds_none_when_header_absent(
     assert exc_info.value.retry_after_seconds is None
 
 
-class FakeSingleKeyOpenCriticClient:
-    """A hand-written fake satisfying OpenCriticClientProtocol -- used instead of the real
-    OpenCriticClient so RotatingOpenCriticClient's rotation logic is tested in isolation from
-    HTTP/mock-transport concerns."""
-
-    def __init__(self, *, key_label: str, raises: OpenCriticApiError | None = None):
-        self.key_label = key_label
-        self._raises = raises
-        self.validate_calls = 0
-        self.fetch_calls: list[str] = []
-
-    async def validate_key(self):
-        self.validate_calls += 1
-        if self._raises is not None:
-            raise self._raises
-
-    async def fetch_platform_games(self, platform, *, start_skip=0, max_pages=None):
-        self.fetch_calls.append(platform)
-        if self._raises is not None:
-            raise self._raises
-        game = OpenCriticGame(
-            oc_game_id=0, name=self.key_label, top_critic_score=None, tier="", percent_recommended=None
-        )
-        return PaginationResult(games=[game], next_skip=0, exhausted=True)
+def _full_page(name: str) -> list[dict]:
+    """A page with exactly DEFAULT_PAGE_SIZE (20) entries, so pagination continues to a second page
+    instead of treating a short first page as end-of-catalog."""
+    return [
+        {"id": i, "name": f"{name} {i}", "topCriticScore": 80, "tier": "Fair", "percentRecommended": 60}
+        for i in range(20)
+    ]
 
 
-def test_rotating_client_requires_at_least_one_client():
-    with pytest.raises(ValueError, match="at least one client"):
-        RotatingOpenCriticClient([])
-
-
-async def test_rotating_client_rotates_to_next_key_on_401_and_succeeds():
-    failing = FakeSingleKeyOpenCriticClient(key_label="key-1", raises=OpenCriticApiError("bad key", status_code=401))
-    working = FakeSingleKeyOpenCriticClient(key_label="key-2")
-    client = RotatingOpenCriticClient([failing, working])
-
-    result = await client.fetch_platform_games("ps5")
-
-    assert result.games[0].name == "key-2"
-    assert failing.fetch_calls == ["ps5"]
-    assert working.fetch_calls == ["ps5"]
-
-
-@pytest.mark.parametrize("status_code", [401, 403, 429])
-async def test_rotating_client_rotates_on_every_rotatable_status_code(status_code):
-    failing = FakeSingleKeyOpenCriticClient(key_label="key-1", raises=OpenCriticApiError("x", status_code=status_code))
-    working = FakeSingleKeyOpenCriticClient(key_label="key-2")
-    client = RotatingOpenCriticClient([failing, working])
-
-    result = await client.fetch_platform_games("ps5")
-
-    assert result.games[0].name == "key-2"
-
-
-async def test_rotating_client_raises_last_error_once_every_key_exhausted():
-    first = FakeSingleKeyOpenCriticClient(key_label="key-1", raises=OpenCriticApiError("first", status_code=429))
-    second = FakeSingleKeyOpenCriticClient(key_label="key-2", raises=OpenCriticApiError("second", status_code=429))
-    client = RotatingOpenCriticClient([first, second])
+async def test_fetch_platform_games_attaches_partial_progress_to_api_error():
+    """A hard pagination error mid-sweep (e.g. an auth rejection on page 2) must not discard page 1's
+    already-fetched games -- see EnrichmentService._refresh_opencritic_platform, which persists these."""
+    page_one = _full_page("Game")
+    recorder = RequestRecorder([httpx.Response(200, json=page_one), httpx.Response(401, json={"error": "bad key"})])
+    client = _client(recorder)
 
     with pytest.raises(OpenCriticApiError) as exc_info:
         await client.fetch_platform_games("ps5")
 
-    assert str(exc_info.value) == "second"
-    assert first.fetch_calls == ["ps5"]
-    assert second.fetch_calls == ["ps5"]
+    assert exc_info.value.partial_games is not None
+    assert len(exc_info.value.partial_games) == 20
+    assert exc_info.value.partial_next_skip == 20  # the failed page's own offset, not skipped past
 
 
-async def test_rotating_client_does_not_rotate_on_a_non_rotatable_status_code():
-    error = OpenCriticApiError("server error", status_code=500)
-    failing = FakeSingleKeyOpenCriticClient(key_label="key-1", raises=error)
-    working = FakeSingleKeyOpenCriticClient(key_label="key-2")
-    client = RotatingOpenCriticClient([failing, working])
+async def test_fetch_platform_games_wraps_a_network_error_with_partial_progress():
+    page_one = _full_page("Game")
 
-    with pytest.raises(OpenCriticApiError):
+    def raise_network_error(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("boom", request=request)
+
+    call_count = 0
+
+    def recorder(request: httpx.Request) -> httpx.Response:
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            return httpx.Response(200, json=page_one)
+        return raise_network_error(request)
+
+    client = OpenCriticClient(httpx.AsyncClient(transport=httpx.MockTransport(recorder)), rapidapi_key="test-key")
+
+    with pytest.raises(OpenCriticNetworkError) as exc_info:
         await client.fetch_platform_games("ps5")
 
-    assert working.fetch_calls == []  # never rotated to -- a 500 isn't a rotate-on status code
-
-
-async def test_rotating_client_stays_on_last_good_index_across_calls():
-    failing = FakeSingleKeyOpenCriticClient(key_label="key-1", raises=OpenCriticApiError("bad key", status_code=401))
-    working = FakeSingleKeyOpenCriticClient(key_label="key-2")
-    client = RotatingOpenCriticClient([failing, working])
-
-    await client.fetch_platform_games("ps5")
-    await client.fetch_platform_games("ps4")
-
-    # the second call goes straight to key-2 rather than re-trying key-1 first
-    assert failing.fetch_calls == ["ps5"]
-    assert working.fetch_calls == ["ps5", "ps4"]
-
-
-async def test_rotating_client_delegates_validate_key():
-    working = FakeSingleKeyOpenCriticClient(key_label="key-1")
-    client = RotatingOpenCriticClient([working])
-
-    await client.validate_key()
-
-    assert working.validate_calls == 1
+    assert len(exc_info.value.partial_games) == 20
+    assert exc_info.value.partial_next_skip == 20
+    assert isinstance(exc_info.value.__cause__, httpx.ConnectError)

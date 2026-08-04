@@ -12,6 +12,7 @@ calls bound by those services' own rate limits. ``GET /library/refresh/{run_id}`
 from __future__ import annotations
 
 import logging
+from datetime import datetime, timedelta, timezone
 from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
@@ -26,6 +27,15 @@ from curator.token_validation import TokenClaims
 
 router = APIRouter(prefix="/library", tags=["library"])
 logger = logging.getLogger("curator")
+
+#: How long a non-terminal run can go without a status update before it's treated as abandoned rather than
+#: legitimately in-flight, and superseded by a fresh refresh. Deliberately generous: a run correctly
+#: waiting out a provider rate-limit backoff can legitimately sit rate_limited for hours -- one prod
+#: incident observed retry_after_seconds escalate to 28800 (8h) across several genuine rate-limit hits.
+#: This threshold only exists to eventually unstick a run that's genuinely dead (e.g. its scheduled
+#: continuation message never fires, or the queue consumer is down for an extended outage), not to police
+#: how long a legitimate backoff is allowed to run.
+_STALE_RUN_THRESHOLD = timedelta(hours=24)
 
 
 class LibraryGameResponse(BaseModel):
@@ -147,9 +157,23 @@ async def get_library(
 async def refresh_library(request: Request, claims: TokenClaims = Depends(require_bearer)) -> LibraryRefreshResponse:
     """Queue a library-refresh job for the caller's own PSN entitlements.
 
-    :returns: The new job's run id.
+    If the caller already has a non-terminal run, its run id is returned instead of enqueueing a second,
+    genuinely concurrent job against the same real, rate-limited PSN/RAWG/OpenCritic APIs -- unless that
+    run has gone stale (see :data:`_STALE_RUN_THRESHOLD`), in which case it's marked failed and superseded
+    by a fresh one rather than permanently blocking this caller from ever refreshing again.
+
+    :returns: The existing non-terminal run's id, or a newly queued run's id.
     :raises fastapi.HTTPException: 503, if the job queue isn't configured on this deployment.
     """
+    job_runs_repository: JobRunsRepository = request.app.state.job_runs_repository
+    active_run = await job_runs_repository.find_active_run(claims.sub, "library_refresh")
+    if active_run is not None:
+        if datetime.now(timezone.utc) - active_run.updated_at < _STALE_RUN_THRESHOLD:
+            return LibraryRefreshResponse(run_id=active_run.run_id)
+        await job_runs_repository.mark_failed(
+            active_run.run_id, "Superseded: no progress for over 24 hours, treated as abandoned."
+        )
+
     queue_publisher: QueuePublisher | None = request.app.state.queue_publisher
     if queue_publisher is None:
         raise HTTPException(status_code=503, detail="Library refresh queue is not configured.")
