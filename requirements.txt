@@ -21,3 +21,4 @@ opentelemetry-instrumentation-fastapi>=0.48b0
 opentelemetry-instrumentation-psycopg>=0.48b0
 opentelemetry-instrumentation-httpx>=0.48b0
 elasticsearch>=9.4.1,<10.0.0
+tenacity>=9.0.0,<10.0.0
