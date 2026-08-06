@@ -17,6 +17,7 @@ import json
 import secrets
 from collections.abc import Sequence
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any
 
 from psycopg_pool import AsyncConnectionPool
@@ -81,6 +82,23 @@ class StorageDevice:
         """The device's real usable capacity: ``capacity_gb - buffer_gb``. Mirrors
         :attr:`UserConsole.effective_capacity_gb` -- same computation, same "one place only" rationale."""
         return self.capacity_gb - self.buffer_gb
+
+
+@dataclass(frozen=True, slots=True)
+class MeasuredSize:
+    """One ``game_measured_sizes`` row -- a global, per-(game, platform) contributed install size (WP13).
+
+    Unlike :class:`UserConsole`/:class:`StorageDevice`, this is not scoped to its contributor: it is
+    catalog-wide, the same trust model as ``rawg_cache``/``game_enrichment``. ``recorded_by`` is an
+    accountability trail only, and is ``None`` once its contributor's account has been deleted (see
+    migration 0025's ``ON DELETE SET NULL`` -- the measured size itself outlives the account that
+    contributed it, since other users' ``capacity_fill`` collections may already be sized against it)."""
+
+    game_id: str
+    platform: str  # "PS5" | "PS4"
+    size_gb: float
+    recorded_by: str | None
+    recorded_at: datetime
 
 
 @dataclass(frozen=True, slots=True)
@@ -535,6 +553,53 @@ class CollectionsRepository:
             rows = await cur.fetchall()
         return {str(row[0]) for row in rows}
 
+    async def list_measured_sizes(self, game_id: str) -> list[MeasuredSize]:
+        """Return every ``game_measured_sizes`` row for one game -- at most two (one per platform),
+        since the table is upserted per (game_id, platform), not a history."""
+        async with self._pool.connection() as conn, conn.cursor() as cur:
+            await cur.execute(
+                """
+                SELECT game_id, platform, size_gb, recorded_by, recorded_at
+                FROM game_measured_sizes WHERE game_id = %s ORDER BY platform
+                """,
+                (game_id,),
+            )
+            rows = await cur.fetchall()
+        return [
+            MeasuredSize(
+                game_id=str(row[0]),
+                platform=row[1],
+                size_gb=float(row[2]),
+                recorded_by=str(row[3]) if row[3] is not None else None,
+                recorded_at=row[4],
+            )
+            for row in rows
+        ]
+
+    async def upsert_measured_size(self, game_id: str, platform: str, size_gb: float, recorded_by: str) -> MeasuredSize:
+        """Record (or overwrite) one game's measured install size for one platform. Global and
+        contributor-agnostic by design (WP13, see :class:`MeasuredSize`) -- a second contributor
+        reporting a different number for the same (game_id, platform) simply supersedes the first, the
+        same "last write wins, no moderation machinery" precedent as a contributed enrichment key."""
+        async with self._pool.connection() as conn, conn.cursor() as cur:
+            await cur.execute(
+                """
+                INSERT INTO game_measured_sizes (game_id, platform, size_gb, recorded_by, recorded_at)
+                VALUES (%s, %s, %s, %s, now())
+                ON CONFLICT (game_id, platform) DO UPDATE SET
+                    size_gb = EXCLUDED.size_gb,
+                    recorded_by = EXCLUDED.recorded_by,
+                    recorded_at = now()
+                RETURNING recorded_at
+                """,
+                (game_id, platform, size_gb, recorded_by),
+            )
+            row = await cur.fetchone()
+        assert row is not None
+        return MeasuredSize(
+            game_id=game_id, platform=platform, size_gb=size_gb, recorded_by=recorded_by, recorded_at=row[0]
+        )
+
     async def list_candidates(
         self,
         identity_sub: str,
@@ -620,10 +685,9 @@ class CollectionsRepository:
                 SELECT g.game_id, g.canonical_title, gen.name, ge.aaa_tier, g.franchise,
                        ge.critical_score, ge.oc_score, ge.psn_rating, ge.is_free_to_play,
                        (
-                           SELECT ms.size_gb FROM measured_sizes ms
-                           WHERE ms.identity_sub = le.identity_sub AND ms.game_id = g.game_id
-                             AND ms.platform = (CASE WHEN le.native_ps5 THEN 'PS5' ELSE 'PS4' END)
-                           ORDER BY ms.measured_at DESC LIMIT 1
+                           SELECT gms.size_gb FROM game_measured_sizes gms
+                           WHERE gms.game_id = g.game_id
+                             AND gms.platform = (CASE WHEN le.native_ps5 THEN 'PS5' ELSE 'PS4' END)
                        ) AS measured_size_gb,
                        le.np_communication_id, le.trophy_percent_completed
                 FROM library_entries le

@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from datetime import datetime, timezone
 
-from curator.jobs.repository import JobRunsRepository
+from curator.jobs.repository import DEFAULT_LEASE_SECONDS, JobRunsRepository
 
 _NOW = datetime(2026, 8, 3, 12, 0, 0, tzinfo=timezone.utc)
 
@@ -86,7 +86,7 @@ async def test_try_begin_delivery_returns_true_and_updates_status_when_row_is_cl
     sql, params = pool.connections[0].executed[0]
     assert "UPDATE job_runs" in sql
     assert "RETURNING run_id" in sql
-    assert params == ("run-1", 0)
+    assert params == (DEFAULT_LEASE_SECONDS, "run-1", 0)
 
 
 async def test_try_begin_delivery_returns_false_when_seq_does_not_match():
@@ -100,7 +100,71 @@ async def test_try_begin_delivery_returns_false_when_seq_does_not_match():
 
     assert began is False
     _sql, params = pool.connections[0].executed[0]
-    assert params == ("run-1", 3)
+    assert params == (DEFAULT_LEASE_SECONDS, "run-1", 3)
+
+
+async def test_try_begin_delivery_only_claims_a_running_row_whose_lease_has_lapsed():
+    """0026: the SQL must refuse a *concurrent* redelivery of the still-current checkpoint. A seq-only CAS
+    would let a second copy in while the first is still inside process(); the lease predicate is what
+    makes a 'running' row claimable only once its lease has actually expired."""
+    pool = FakePool(fetchone_results=[("run-1",)])
+    repo = JobRunsRepository(pool)
+
+    await repo.try_begin_delivery("run-1", 0)
+
+    sql, _params = pool.connections[0].executed[0]
+    assert "status <> 'running' OR lease_expires_at IS NULL OR lease_expires_at <= now()" in sql
+    assert "lease_expires_at = now() + make_interval(secs => %s)" in sql
+
+
+async def test_try_begin_delivery_accepts_a_custom_lease_duration():
+    pool = FakePool(fetchone_results=[("run-1",)])
+    repo = JobRunsRepository(pool)
+
+    await repo.try_begin_delivery("run-1", 0, lease_seconds=5.0)
+
+    _sql, params = pool.connections[0].executed[0]
+    assert params == (5.0, "run-1", 0)
+
+
+async def test_renew_lease_pushes_the_lease_forward_only_while_running():
+    pool = FakePool(fetchone_results=[("run-1",)])
+    repo = JobRunsRepository(pool)
+
+    renewed = await repo.renew_lease("run-1")
+
+    assert renewed is True
+    sql, params = pool.connections[0].executed[0]
+    assert "lease_expires_at = now() + make_interval(secs => %s)" in sql
+    assert "status = 'running'" in sql
+    assert params == (DEFAULT_LEASE_SECONDS, "run-1")
+
+
+async def test_renew_lease_returns_false_once_the_run_is_no_longer_running():
+    """The heartbeat's cue to stop: a run that reached succeeded/failed/rate_limited already had its lease
+    cleared, and a late heartbeat must not resurrect one."""
+    pool = FakePool(fetchone_results=[None])
+    repo = JobRunsRepository(pool)
+
+    assert await repo.renew_lease("run-1") is False
+
+
+async def test_terminal_and_checkpoint_transitions_all_clear_the_lease():
+    """Every exit from 'running' must release the lease, or a finished run would stay unclaimable for the
+    rest of its lease window."""
+    for call in (
+        lambda repo: repo.mark_succeeded("run-1"),
+        lambda repo: repo.mark_failed("run-1", "boom"),
+    ):
+        pool = FakePool()
+        await call(JobRunsRepository(pool))
+        sql, _params = pool.connections[0].executed[0]
+        assert "lease_expires_at = NULL" in sql
+
+    pool = FakePool(fetchone_results=[(2,)])
+    await JobRunsRepository(pool).mark_rate_limited("run-1", {"remaining_count": 1})
+    sql, _params = pool.connections[0].executed[0]
+    assert "lease_expires_at = NULL" in sql
 
 
 async def test_try_begin_delivery_returns_false_when_status_already_terminal():

@@ -14,6 +14,12 @@ from typing import Any
 
 from psycopg_pool import AsyncConnectionPool
 
+#: How long a delivery's processing lease is held before another delivery may claim the run (0026).
+#: Must comfortably exceed :data:`curator.jobs.queue_consumer.LEASE_HEARTBEAT_SECONDS` so an ordinary
+#: heartbeat delay never lets a second copy in, while a genuinely dead processor still frees its run
+#: within a bounded, human-scale window rather than needing manual DB cleanup.
+DEFAULT_LEASE_SECONDS = 120.0
+
 
 @dataclass(frozen=True, slots=True)
 class JobRun:
@@ -52,7 +58,9 @@ class JobRunsRepository:
                 (run_id, kind, identity_sub),
             )
 
-    async def try_begin_delivery(self, run_id: str, expected_seq: int) -> bool:
+    async def try_begin_delivery(
+        self, run_id: str, expected_seq: int, lease_seconds: float = DEFAULT_LEASE_SECONDS
+    ) -> bool:
         """Atomically claim a delivery of ``run_id`` at checkpoint ``expected_seq``, transitioning it to
         ``running`` if -- and only if -- that checkpoint is still current.
 
@@ -74,18 +82,51 @@ class JobRunsRepository:
         no guard, which is exactly what let a stale redelivery silently erase an already-recorded
         ``rate_limited`` checkpoint before reprocessing started.
 
+        **Concurrency, not just staleness (0026).** The ``seq`` check alone cannot reject a *concurrent*
+        redelivery of the checkpoint that is still current: if the Service Bus lock lapses while the
+        original delivery is still inside ``process()``, the redelivered copy sees ``status = 'running'``
+        with ``seq`` not yet advanced and would pass a ``seq``-only CAS, so both copies would run at once
+        and both would spend real PSN/RAWG/OpenCritic rate-limit budget. A ``running`` row is therefore
+        claimable only once its **lease** has lapsed -- see ``lease_expires_at`` in migration ``0026`` and
+        :meth:`renew_lease`. A live processor heartbeats its lease forward and keeps the run to itself; a
+        processor that died outright stops heartbeating, its lease expires, and the run frees itself for
+        redelivery without manual intervention.
+
         :param run_id: The run id carried in the delivered message's payload.
         :param expected_seq: The ``seq`` carried in the delivered message's payload (``0`` for a message
             with no ``seq`` field at all, matching this column's default for a freshly created run).
+        :param lease_seconds: How long the claim is held before another delivery may take it over, absent
+            a :meth:`renew_lease` heartbeat. Must comfortably exceed the heartbeat interval.
         :returns: ``True`` if the claim succeeded and the run is now ``running``; ``False`` if it was
-            stale and nothing was changed.
+            stale, terminal, or currently leased by a live processor -- nothing was changed.
         """
         async with self._pool.connection() as conn, conn.cursor() as cur:
             await cur.execute(
-                "UPDATE job_runs SET status = 'running', error = NULL, updated_at = now() "
+                "UPDATE job_runs SET status = 'running', error = NULL, updated_at = now(), "
+                "lease_expires_at = now() + make_interval(secs => %s) "
                 "WHERE run_id = %s AND seq = %s AND status NOT IN ('succeeded', 'failed') "
+                "AND (status <> 'running' OR lease_expires_at IS NULL OR lease_expires_at <= now()) "
                 "RETURNING run_id",
-                (run_id, expected_seq),
+                (lease_seconds, run_id, expected_seq),
+            )
+            row = await cur.fetchone()
+        return row is not None
+
+    async def renew_lease(self, run_id: str, lease_seconds: float = DEFAULT_LEASE_SECONDS) -> bool:
+        """Push ``run_id``'s processing lease further into the future -- the heartbeat that tells
+        :meth:`try_begin_delivery` this run is still being actively worked on (0026).
+
+        Only renews a run that is still ``running``: once it has reached ``succeeded``/``failed``/
+        ``rate_limited`` its lease is deliberately cleared, and a late heartbeat must not resurrect it.
+
+        :returns: ``True`` if the lease was renewed; ``False`` if the run is no longer ``running`` (the
+            caller's cue to stop heartbeating).
+        """
+        async with self._pool.connection() as conn, conn.cursor() as cur:
+            await cur.execute(
+                "UPDATE job_runs SET lease_expires_at = now() + make_interval(secs => %s) "
+                "WHERE run_id = %s AND status = 'running' RETURNING run_id",
+                (lease_seconds, run_id),
             )
             row = await cur.fetchone()
         return row is not None
@@ -99,7 +140,8 @@ class JobRunsRepository:
         """
         async with self._pool.connection() as conn, conn.cursor() as cur:
             await cur.execute(
-                "UPDATE job_runs SET status = %s, result_summary = %s, updated_at = now() WHERE run_id = %s",
+                "UPDATE job_runs SET status = %s, result_summary = %s, updated_at = now(), "
+                "lease_expires_at = NULL WHERE run_id = %s",
                 ("succeeded", json.dumps(result_summary) if result_summary is not None else None, run_id),
             )
 
@@ -127,7 +169,7 @@ class JobRunsRepository:
         async with self._pool.connection() as conn, conn.cursor() as cur:
             await cur.execute(
                 "UPDATE job_runs SET status = 'rate_limited', result_summary = %s, seq = seq + 1, "
-                "updated_at = now() WHERE run_id = %s RETURNING seq",
+                "updated_at = now(), lease_expires_at = NULL WHERE run_id = %s RETURNING seq",
                 (json.dumps(result_summary), run_id),
             )
             row = await cur.fetchone()
@@ -135,9 +177,12 @@ class JobRunsRepository:
         return int(row[0])
 
     async def _set_status(self, run_id: str, status: str, *, error: str | None = None) -> None:
+        # lease_expires_at is cleared on every status transition out of 'running' (0026) -- a run that is
+        # no longer running holds no processing lease, so a later heartbeat can't resurrect one.
         async with self._pool.connection() as conn, conn.cursor() as cur:
             await cur.execute(
-                "UPDATE job_runs SET status = %s, error = %s, updated_at = now() WHERE run_id = %s",
+                "UPDATE job_runs SET status = %s, error = %s, updated_at = now(), lease_expires_at = NULL "
+                "WHERE run_id = %s",
                 (status, error, run_id),
             )
 

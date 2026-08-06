@@ -89,10 +89,11 @@ that safe to do repeatedly, but it still assumes the target database is not some
 
 What it checks: every table the migration is expected to create exists; representative CHECK constraints
 reject an out-of-enum value (`game_assignments.collection_status`, `user_consoles.platform`,
-`exclusion_rules.rule_type`); `measured_sizes` retains history (two inserts for the same
-user/game/platform at different `measured_at` both persist, rather than one overwriting the other); and no
-column named anything like `%email%` or `%npsso%` exists anywhere in the schema (the hard privacy tenet
-documented in the migration's own header comment).
+`exclusion_rules.rule_type`); `game_measured_sizes` upserts per (game_id, platform) rather than
+accumulating history (a second `PUT` for the same pair overwrites, it doesn't add a row), and its
+`recorded_by` survives its contributor's account deletion as `NULL` rather than cascading away (migration
+0025); and no column named anything like `%email%` or `%npsso%` exists anywhere in the schema (the hard
+privacy tenet documented in the migration's own header comment).
 
 ```powershell
 # Create a throwaway database (adjust host/user for your environment)

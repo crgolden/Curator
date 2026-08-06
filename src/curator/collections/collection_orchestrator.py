@@ -232,7 +232,15 @@ class CollectionOrchestrator:
             game_id=row.game_id,
             title=row.title,
             genre=row.genre or "",
-            aaa_tier=row.aaa_tier or "Indie",
+            # "" (not "Indie") for a game with no recorded tier -- WP8's reproduction against real
+            # ground truth showed defaulting to "Indie" incorrectly satisfied both TierIn(("Indie",))
+            # and aaa_tier_filter == "Indie" for tier-less games, misclassifying them. An empty string
+            # never equals or is IN any real tier value, so a tier-less game now correctly matches
+            # neither an Indie-tier nor an AAA/AA-tier predicate -- see AGENTS/PARKING_LOT.md's WP8
+            # section for the full diagnosis. Deliberately independent of estimate_install_size_gb's own
+            # separate `row.aaa_tier or "Indie"` fallback just above -- that one is a defensible "assume
+            # Indie-sized" conservative default for a different purpose and is intentionally unchanged.
+            aaa_tier=row.aaa_tier or "",
             franchise=row.franchise or "",
             composite_score=comp,
             rank_score=points,

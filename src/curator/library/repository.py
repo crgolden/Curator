@@ -11,9 +11,7 @@ from typing import Any, Literal
 
 from psycopg_pool import AsyncConnectionPool
 
-LibrarySortField = Literal[
-    "title", "category", "rawg_rating", "opencritic_rating", "psn_rating", "percent_completed"
-]
+LibrarySortField = Literal["title", "category", "rawg_rating", "opencritic_rating", "psn_rating", "percent_completed"]
 
 _SORT_COLUMNS: dict[str, str] = {
     "title": "g.canonical_title",

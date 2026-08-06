@@ -99,6 +99,7 @@ class FakeJobRunsRepository:
         self.succeeded_summaries: dict[str, dict | None] = {}
         self.failed: list[tuple[str, str]] = []
         self.rate_limited_calls: list[tuple[str, dict]] = []
+        self.lease_renewals: list[str] = []
 
     def seed(self, run_id: str, *, status: str = "queued", seq: int = 0, error: str | None = None) -> None:
         """Pre-populate a run's state before delivering a message, for tests exercising a stale
@@ -108,12 +109,26 @@ class FakeJobRunsRepository:
     def _run(self, run_id: str) -> dict[str, Any]:
         return self._runs.setdefault(run_id, {"status": "queued", "seq": 0, "error": None})
 
-    async def try_begin_delivery(self, run_id, expected_seq):
+    async def try_begin_delivery(self, run_id, expected_seq, lease_seconds=None):
         run = self._run(run_id)
         if run["seq"] != expected_seq or run["status"] in ("succeeded", "failed"):
             return False
+        # 0026's lease predicate: a run already 'running' and still leased belongs to a live processor,
+        # so a concurrent redelivery must not claim it. `leased` is set/cleared by this fake's own
+        # renew_lease/mark_* methods, mirroring what the real SQL does with lease_expires_at.
+        if run["status"] == "running" and run.get("leased"):
+            return False
         run["status"] = "running"
+        run["leased"] = True
         self.began.append(run_id)
+        return True
+
+    async def renew_lease(self, run_id, lease_seconds=None):
+        run = self._run(run_id)
+        self.lease_renewals.append(run_id)
+        if run["status"] != "running":
+            return False
+        run["leased"] = True
         return True
 
     async def get(self, run_id):
@@ -125,22 +140,28 @@ class FakeJobRunsRepository:
             return None
         return SimpleNamespace(status=run["status"], error=run["error"])
 
+    # Every transition out of 'running' clears `leased`, mirroring the real SQL's
+    # `lease_expires_at = NULL` (0026) -- a finished run must not stay unclaimable for its lease window.
     async def mark_succeeded(self, run_id, result_summary=None):
         self.succeeded.append(run_id)
         self.succeeded_summaries[run_id] = result_summary
-        self._run(run_id)["status"] = "succeeded"
+        run = self._run(run_id)
+        run["status"] = "succeeded"
+        run["leased"] = False
 
     async def mark_failed(self, run_id, error):
         self.failed.append((run_id, error))
         run = self._run(run_id)
         run["status"] = "failed"
         run["error"] = error
+        run["leased"] = False
 
     async def mark_rate_limited(self, run_id, result_summary):
         self.rate_limited_calls.append((run_id, result_summary))
         run = self._run(run_id)
         run["seq"] += 1
         run["status"] = "rate_limited"
+        run["leased"] = False
         return run["seq"]
 
 
@@ -708,6 +729,58 @@ async def test_stale_redelivery_with_superseded_seq_settles_without_reprocessing
     assert job_runs_repository.began == []
     assert job_runs_repository.succeeded == []
     assert job_runs_repository.failed == []
+
+
+async def test_concurrent_redelivery_of_the_current_checkpoint_is_refused_while_the_lease_is_live():
+    """0026, the case the ``seq`` CAS alone could not catch. The checkpoint is still current (``seq`` 0
+    matches) and the run is not terminal, so a seq-only guard would let this second copy through and both
+    would burn real PSN/RAWG/OpenCritic budget concurrently. The live processing lease is what refuses it."""
+    handler = RecordingHandler()
+    job_runs_repository = FakeJobRunsRepository()
+    # A live processor already holds this run: still 'running', seq not yet advanced, lease not expired.
+    job_runs_repository.seed("r1", status="running", seq=0)
+    job_runs_repository._run("r1")["leased"] = True
+    receiver = FakeReceiver([FakeMessage(_CONTINUATION_PAYLOAD)])
+    consumer = QueueConsumer(
+        library_refresh_receiver=FakeReceiver([]),
+        library_refresh_continuation_receiver=receiver,
+        enrichment_receiver=FakeReceiver([]),
+        on_library_refresh=RecordingHandler(),
+        on_library_refresh_continuation=handler,
+        on_enrichment_run=RecordingHandler(),
+        job_runs_repository=job_runs_repository,
+    )
+
+    await consumer.drain_library_refresh_continuation()
+
+    assert handler.calls == []  # no second concurrent copy of the work
+    assert job_runs_repository.began == []
+    assert len(receiver.completed) == 1  # settled, not left for yet another redelivery
+
+
+async def test_redelivery_is_allowed_once_a_dead_processors_lease_has_lapsed():
+    """The other half of the tradeoff: a run left at 'running' because its processor died must NOT be
+    stuck forever. With the lease lapsed (``leased`` false), the redelivery claims it and reprocesses --
+    which is exactly what excluding 'running' from the CAS outright would have broken."""
+    handler = RecordingHandler()
+    job_runs_repository = FakeJobRunsRepository()
+    job_runs_repository.seed("r1", status="running", seq=0)  # no live lease -> processor is gone
+    receiver = FakeReceiver([FakeMessage(_CONTINUATION_PAYLOAD)])
+    consumer = QueueConsumer(
+        library_refresh_receiver=FakeReceiver([]),
+        library_refresh_continuation_receiver=receiver,
+        enrichment_receiver=FakeReceiver([]),
+        on_library_refresh=RecordingHandler(),
+        on_library_refresh_continuation=handler,
+        on_enrichment_run=RecordingHandler(),
+        job_runs_repository=job_runs_repository,
+    )
+
+    await consumer.drain_library_refresh_continuation()
+
+    assert len(handler.calls) == 1  # recovered, not stuck
+    assert job_runs_repository.began == ["r1"]
+    assert job_runs_repository.succeeded == ["r1"]
 
 
 async def test_stale_redelivery_of_an_already_succeeded_run_settles_without_reprocessing():

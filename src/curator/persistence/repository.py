@@ -238,10 +238,12 @@ class Repository:
         Every account-scoped table declares ``REFERENCES app_users (identity_sub) ON DELETE CASCADE``, so
         this one delete wipes everything Curator has ever stored about the user: ``psn_links``,
         ``psn_test_accounts``, ``entitlement_pulls``, ``library_entries``, ``library_exclusions``,
-        ``user_consoles``, ``measured_sizes``, ``collection_definitions``, ``collection_runs``,
-        ``job_runs``, ``user_enrichment_keys``, ``user_profiles`` and ``follows``. Their child tables
+        ``user_consoles``, ``collection_definitions``, ``collection_runs``, ``job_runs``,
+        ``user_enrichment_keys``, ``user_profiles`` and ``follows``. Their child tables
         (``entitlement_snapshots``, ``collection_items``, ``console_installs``) cascade in turn from those
-        parents.
+        parents. ``game_measured_sizes.recorded_by`` (0025) is a deliberate exception -- ``ON DELETE
+        SET NULL``, not ``CASCADE``, since it is global contributed data (see that migration's own header
+        comment), not something owned by the account being deleted.
 
         Eight of those cascades were missing from ``0001_initial.sql`` and were added by
         ``0009_fix_delete_cascades.sql`` -- before it, this method raised a foreign-key violation for any

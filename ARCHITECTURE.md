@@ -143,11 +143,13 @@ existed; there is no separate "revoked" state to fall out of sync with `visibili
 ## Data model
 
 Scoped to the entities a user or a collaborating repo actually interacts with. Not shown: pure lookup and
-provider-cache tables (`genres`, `publisher_tiers`, `franchise_rules`, `edition_ranks`, `size_estimates`,
-`rawg_cache`, `opencritic_cache`, `psn_catalog_cache`, `psn_game_search_cache`, `psn_player_search_cache`,
-`exclusion_rules`, `global_exclusions`, `data_quality_flags`, `game_name_overrides`,
-`curation_rule_pass_state`) and audit/history tables (`account_action_log`, `entitlement_pulls`,
-`entitlement_snapshots`, `collection_runs`, `collection_items`, `measured_sizes`).
+provider/contributor-cache tables (`genres`, `publisher_tiers`, `franchise_rules`, `edition_ranks`,
+`size_estimates`, `rawg_cache`, `opencritic_cache`, `psn_catalog_cache`, `psn_game_search_cache`,
+`psn_player_search_cache`, `exclusion_rules`, `global_exclusions`, `data_quality_flags`,
+`game_name_overrides`, `curation_rule_pass_state`, `game_measured_sizes` — WP13's global, upserted,
+any-authenticated-user-may-contribute install-size cache, `game_enrichment`'s own shape rather than the
+per-user history table it replaced) and audit/history tables (`account_action_log`, `entitlement_pulls`,
+`entitlement_snapshots`, `collection_runs`, `collection_items`).
 
 ```mermaid
 erDiagram

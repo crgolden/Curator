@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
+
 from curator.collections.collection_spec import CollectionSpec
 from curator.collections.filter_predicate import GenreIn
 from curator.collections.game_candidate import GameCandidate
@@ -670,3 +672,45 @@ async def test_save_run_writes_run_and_items():
     excluded_params = conn.executed[2][1]
     assert excluded_params is not None
     assert excluded_params[:2] == ("run-1", "g2")
+
+
+async def test_list_measured_sizes_maps_rows():
+    recorded_at = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    pool = FakePool(fetchall_results=[[("g1", "PS5", 42.5, "sub-a", recorded_at)]])
+    repo = CollectionsRepository(pool)
+
+    sizes = await repo.list_measured_sizes("g1")
+
+    assert len(sizes) == 1
+    assert sizes[0].game_id == "g1"
+    assert sizes[0].platform == "PS5"
+    assert sizes[0].size_gb == 42.5
+    assert sizes[0].recorded_by == "sub-a"
+    assert sizes[0].recorded_at == recorded_at
+
+
+async def test_list_measured_sizes_reports_no_contributor_after_recorded_by_is_set_null():
+    recorded_at = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    pool = FakePool(fetchall_results=[[("g1", "PS5", 42.5, None, recorded_at)]])
+    repo = CollectionsRepository(pool)
+
+    sizes = await repo.list_measured_sizes("g1")
+
+    assert sizes[0].recorded_by is None
+
+
+async def test_upsert_measured_size_upserts_on_game_and_platform():
+    recorded_at = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    pool = FakePool(fetchone_results=[(recorded_at,)])
+    repo = CollectionsRepository(pool)
+
+    measured_size = await repo.upsert_measured_size("g1", "PS5", 42.5, "sub-a")
+
+    assert measured_size.game_id == "g1"
+    assert measured_size.platform == "PS5"
+    assert measured_size.size_gb == 42.5
+    assert measured_size.recorded_by == "sub-a"
+    assert measured_size.recorded_at == recorded_at
+    conn = pool.connections[0]
+    assert "ON CONFLICT (game_id, platform) DO UPDATE" in conn.executed[0][0]
+    assert conn.executed[0][1] == ("g1", "PS5", 42.5, "sub-a")

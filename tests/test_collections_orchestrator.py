@@ -333,6 +333,30 @@ async def test_free_to_play_penalizes_rank_score():
     assert by_id["f2p"].rank_score < by_id["paid"].rank_score
 
 
+async def test_missing_aaa_tier_defaults_to_empty_string_not_indie():
+    """WP8: a game with no recorded tier must not silently satisfy an Indie-tier predicate/filter -- see
+    CollectionOrchestrator._score's own comment and AGENTS/PARKING_LOT.md's WP8 section for the full
+    diagnosis (defaulting to "Indie" here previously misclassified two real-world titles)."""
+    repository = FakeCollectionsRepository(candidates=[_row("g1", aaa_tier=None)])
+    orchestrator = CollectionOrchestrator(repository)
+
+    result = await orchestrator.generate("sub-1", CollectionSpec(kind="filter_list"), size_estimates=[])
+
+    assert result.included[0].aaa_tier == ""
+
+
+async def test_missing_aaa_tier_does_not_satisfy_an_indie_tier_filter():
+    repository = FakeCollectionsRepository(candidates=[_row("g1", aaa_tier=None), _row("g2", aaa_tier="Indie")])
+    orchestrator = CollectionOrchestrator(repository)
+
+    result = await orchestrator.generate(
+        "sub-1", CollectionSpec(kind="filter_list", aaa_tier_filter="Indie"), size_estimates=[]
+    )
+
+    assert [c.game_id for c in result.included] == ["g2"]
+    assert [c.game_id for c in result.excluded] == ["g1"]
+
+
 async def test_composite_score_averages_available_sources():
     repository = FakeCollectionsRepository(candidates=[_row("g1", critical_score=80.0, oc_score=90.0, psn_rating=5.0)])
     orchestrator = CollectionOrchestrator(repository)
@@ -514,9 +538,7 @@ async def test_chained_candidate_ids_order_breaks_ties():
     # genre_filter="Sports" excludes both RPG candidates from the spec's own normal match entirely --
     # they can only enter the packing pool via chained_candidate_ids, which is the point: this isolates
     # the chained list's own tie-break order from matched's (unaffected, pool-order) tie-break.
-    spec = CollectionSpec(
-        kind="capacity_fill", console_id="c1", genre_filter=("Sports",), sort_order="composite_desc"
-    )
+    spec = CollectionSpec(kind="capacity_fill", console_id="c1", genre_filter=("Sports",), sort_order="composite_desc")
     result_a_first = await orchestrator.generate(
         "sub-1", spec, size_estimates=[], chained_candidate_ids=("only_room_for_one_a", "only_room_for_one_b")
     )

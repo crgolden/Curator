@@ -1,0 +1,29 @@
+-- Curator schema — migration 0026 (job_runs processing lease)
+-- Target: PostgreSQL 17. Applied automatically by db/run_migrations.py in the deploy job.
+--
+-- Closes the concurrent-redelivery window left open by 0022's `seq` compare-and-swap
+-- (JobRunsRepository.try_begin_delivery). That CAS correctly rejects a *stale* redelivery — one whose
+-- `seq` checkpoint has already been superseded — but it cannot reject a *concurrent* redelivery of the
+-- checkpoint that is still current: if a Service Bus lock lapses while the original delivery is still
+-- inside process(), the redelivered copy sees status='running' with `seq` not yet advanced, passes the
+-- CAS, and both copies run at once. Completion stays correct (whichever mark_* lands second wins), but
+-- both copies burn real PSN/RAWG/OpenCritic rate-limit budget for that window.
+--
+-- Simply excluding 'running' from the claimable statuses would close that window and open a worse one:
+-- a row left at 'running' because its processor died outright (app restart, container recycle) would be
+-- permanently unclaimable by any future redelivery — a stuck run needing manual DB surgery, which is
+-- exactly the cleanup that had to be done by hand for two orphaned production runs.
+--
+-- A lease resolves the tradeoff instead of picking a side. The active processor stamps
+-- lease_expires_at into the future and heartbeats it forward while it works
+-- (JobRunsRepository.renew_lease, driven by QueueConsumer's heartbeat task). A 'running' row is
+-- therefore claimable only once its lease has actually lapsed — so a live processor's run is protected
+-- from a concurrent redelivery, while a dead processor's run frees itself automatically after the lease
+-- expires, with no manual intervention.
+--
+-- NULL means "not currently leased" and is the correct state for every non-running status: the column is
+-- cleared on every transition out of 'running' (succeeded/failed/rate_limited), so a rate_limited run
+-- waiting on its continuation message never looks leased. Existing rows backfill to NULL, which makes any
+-- row already stuck at 'running' immediately claimable — the desired recovery behaviour, not a problem.
+ALTER TABLE job_runs
+    ADD COLUMN lease_expires_at TIMESTAMPTZ;

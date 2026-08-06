@@ -64,6 +64,7 @@ from curator.library.repository import LibraryRepository
 from curator.library_routes import router as library_router
 from curator.link_service import AgentFactory, PsnAgentLike
 from curator.me_routes import router as me_router
+from curator.measured_sizes_routes import router as measured_sizes_router
 from curator.persistence.crypto import TokenCrypto
 from curator.persistence.db_token_store import DbTokenStore
 from curator.persistence.enrichment_keys_repository import EnrichmentKeysRepository
@@ -427,6 +428,7 @@ def create_app(
     app.include_router(collections_router)
     app.include_router(consoles_router)
     app.include_router(storage_devices_router)
+    app.include_router(measured_sizes_router)
     app.include_router(trophy_router)
     app.include_router(preferences_router)
     app.include_router(identity_router)

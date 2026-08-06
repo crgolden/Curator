@@ -44,6 +44,4 @@ def resolve_sort_key(sort_order: str | None, default: SortKey) -> SortKey:
     try:
         return _SORT_ORDERS[sort_order]
     except KeyError:
-        raise ValueError(
-            f"Unknown sort_order {sort_order!r}; expected one of {sorted(_SORT_ORDERS)}"
-        ) from None
+        raise ValueError(f"Unknown sort_order {sort_order!r}; expected one of {sorted(_SORT_ORDERS)}") from None

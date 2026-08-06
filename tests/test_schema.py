@@ -66,7 +66,7 @@ EXPECTED_TABLES = {
     "library_entries",
     "library_exclusions",
     "user_consoles",
-    "measured_sizes",
+    "game_measured_sizes",
     "collection_definitions",
     "collection_definition_items",
     "collection_runs",
@@ -191,25 +191,46 @@ def test_collection_definitions_share_slug_is_unique(db_connection, seeded_user_
         )
 
 
-def test_measured_sizes_retains_history_across_measured_at(db_connection, seeded_user_and_game):
+def test_game_measured_sizes_upserts_per_game_and_platform(db_connection, seeded_user_and_game):
+    """WP13: global cache, not history -- a second contribution for the same (game_id, platform)
+    overwrites the first rather than accumulating a row (the never-written `measured_sizes` table this
+    replaced was the opposite shape; see migration 0025's own header comment)."""
+    user_sub, game_id = seeded_user_and_game
+    upsert_sql = (
+        "INSERT INTO game_measured_sizes (game_id, platform, size_gb, recorded_by) VALUES (%s, %s, %s, %s) "
+        "ON CONFLICT (game_id, platform) DO UPDATE SET "
+        "size_gb = EXCLUDED.size_gb, recorded_by = EXCLUDED.recorded_by"
+    )
+    with db_connection.cursor() as cur:
+        cur.execute(upsert_sql, (game_id, "PS5", 42.5, user_sub))
+        cur.execute(upsert_sql, (game_id, "PS5", 50.0, user_sub))
+        cur.execute(
+            "SELECT count(*), max(size_gb) FROM game_measured_sizes WHERE game_id = %s AND platform = %s",
+            (game_id, "PS5"),
+        )
+        count, size_gb = cur.fetchone()
+    assert count == 1
+    assert float(size_gb) == 50.0
+
+
+def test_game_measured_sizes_recorded_by_survives_contributor_deletion(db_connection, seeded_user_and_game):
+    """WP13: `recorded_by` is `ON DELETE SET NULL`, not `CASCADE` -- the measured size is global,
+    contributed data other users' collections may already be sized against, so deleting the contributor's
+    account must not silently delete it (see migration 0025's own header comment)."""
     user_sub, game_id = seeded_user_and_game
     with db_connection.cursor() as cur:
         cur.execute(
-            "INSERT INTO measured_sizes (identity_sub, game_id, platform, size_gb, measured_at) "
-            "VALUES (%s, %s, %s, %s, now())",
-            (user_sub, game_id, "PS5", 42.5),
+            "INSERT INTO game_measured_sizes (game_id, platform, size_gb, recorded_by) VALUES (%s, %s, %s, %s)",
+            (game_id, "PS5", 42.5, user_sub),
         )
+        cur.execute("DELETE FROM app_users WHERE identity_sub = %s", (user_sub,))
         cur.execute(
-            "INSERT INTO measured_sizes (identity_sub, game_id, platform, size_gb, measured_at) "
-            "VALUES (%s, %s, %s, %s, now() + interval '1 second')",
-            (user_sub, game_id, "PS5", 50.0),
+            "SELECT size_gb, recorded_by FROM game_measured_sizes WHERE game_id = %s AND platform = %s",
+            (game_id, "PS5"),
         )
-        cur.execute(
-            "SELECT count(*) FROM measured_sizes WHERE identity_sub = %s AND game_id = %s",
-            (user_sub, game_id),
-        )
-        (count,) = cur.fetchone()
-    assert count == 2
+        size_gb, recorded_by = cur.fetchone()
+    assert float(size_gb) == 42.5
+    assert recorded_by is None
 
 
 def test_job_runs_rejects_invalid_status(db_connection):
@@ -297,8 +318,8 @@ def test_deleting_a_user_cascades_every_per_user_table(db_connection, seeded_use
         )
         cur.execute("INSERT INTO storage_device_installs (device_id, game_id) VALUES (%s, %s)", (device_id, game_id))
         cur.execute(
-            "INSERT INTO measured_sizes (identity_sub, game_id, platform, size_gb) VALUES (%s, %s, %s, %s)",
-            (user_sub, game_id, "PS5", 50.0),
+            "INSERT INTO game_measured_sizes (game_id, platform, size_gb, recorded_by) VALUES (%s, %s, %s, %s)",
+            (game_id, "PS5", 50.0, user_sub),
         )
         cur.execute(
             "INSERT INTO collection_definitions (definition_id, identity_sub, name, kind) VALUES (%s, %s, %s, %s)",
@@ -338,7 +359,6 @@ def test_deleting_a_user_cascades_every_per_user_table(db_connection, seeded_use
             "library_exclusions",
             "user_consoles",
             "storage_devices",
-            "measured_sizes",
             "collection_definitions",
             "collection_runs",
             "job_runs",
@@ -346,6 +366,14 @@ def test_deleting_a_user_cascades_every_per_user_table(db_connection, seeded_use
             cur.execute(f"SELECT count(*) FROM {table} WHERE identity_sub = %s", (user_sub,))
             (count,) = cur.fetchone()
             assert count == 0, f"{table} still has rows for the deleted user"
+
+        # game_measured_sizes is the one deliberate exception (WP13, migration 0025): global contributed
+        # data, ON DELETE SET NULL rather than CASCADE, so the row survives with no accountable user --
+        # see test_game_measured_sizes_recorded_by_survives_contributor_deletion for the focused version.
+        cur.execute(
+            "SELECT recorded_by FROM game_measured_sizes WHERE game_id = %s AND platform = %s", (game_id, "PS5")
+        )
+        assert cur.fetchone()[0] is None
 
         cur.execute("SELECT count(*) FROM entitlement_snapshots WHERE pull_id = %s", (pull_id,))
         assert cur.fetchone()[0] == 0
