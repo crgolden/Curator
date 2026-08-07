@@ -184,7 +184,6 @@ def test_resolve_completion_mixes_exact_and_fuzzy_across_different_games():
     assert result == {"g1": 87, "g2": 42}
 
 
-
 async def test_no_games_returns_empty_without_touching_repository():
     repository = FakeRepository()
     factory = FakeTrophyClientFactory()

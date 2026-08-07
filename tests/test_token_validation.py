@@ -158,11 +158,9 @@ def test_unknown_kid_triggers_a_refetch_and_succeeds_once_the_key_is_present():
     fetcher = FakeFetcher({"keys": [old_key.as_dict(private=False)]})
     validator = JwtValidator(AUTHORITY, fetch_json=fetcher)
 
-
     token_old = _sign(old_key, "key-1")
     validator.validate(token_old)
     fetch_count_after_first_validate = len(fetcher.urls)
-
 
     fetcher.jwks = {"keys": [old_key.as_dict(private=False), new_key.as_dict(private=False)]}
     token_new = _sign(new_key, "key-2")

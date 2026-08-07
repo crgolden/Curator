@@ -326,7 +326,6 @@ async def test_rejected_key_degrades_the_run_and_records_the_rejection():
         }
     )
 
-
     assert result is not None
     assert result["rejected_providers"] == ["rawg"]
     assert collaborators.enrichment_keys_repository.rejected_calls == [("sub-1", "rawg")]

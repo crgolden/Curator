@@ -376,7 +376,6 @@ async def test_enrich_delta_degrades_instead_of_failing_on_a_rejected_key():
         games, ["game-1", "game-2", "game-3"], publisher_tier_rules=[], size_estimates=[]
     )
 
-
     assert result.enriched_count == 3
     assert result.rejected_providers == ["rawg"]
     assert enrichment_service.disabled_providers == ["rawg"]
@@ -395,7 +394,6 @@ async def test_enrich_delta_stops_rather_than_looping_if_the_same_provider_keeps
     result = await orchestrator.enrich_delta(
         games, ["game-1", "game-2", "game-3"], publisher_tier_rules=[], size_estimates=[]
     )
-
 
     assert result.enriched_count == 1
     assert result.rejected_providers == ["rawg"]

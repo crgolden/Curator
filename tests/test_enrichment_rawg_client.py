@@ -314,7 +314,6 @@ async def test_rotating_client_stays_on_last_good_index_across_calls():
     await client.search_games("First Call")
     await client.search_games("Second Call")
 
-
     assert failing.search_calls == ["First Call"]
     assert working.search_calls == ["First Call", "Second Call"]
 

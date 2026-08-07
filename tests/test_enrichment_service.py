@@ -798,7 +798,6 @@ async def test_enrich_game_opencritic_topup_only_attempted_once_per_service_inst
             size_estimates=_SIZE_ESTIMATES,
         )
 
-
     assert len(opencritic_client.fetch_calls) == 2
 
 
