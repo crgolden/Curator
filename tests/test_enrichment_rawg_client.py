@@ -126,8 +126,7 @@ async def test_validate_key_raises_sanitized_error_on_401():
 
 
 async def test_error_carries_the_response_body_as_provider_detail():
-    # RAWG answers 401 for a wrong key, an unverified account, and an exhausted monthly quota alike --
-    # only the body says which, so it has to survive the wrapping.
+
     recorder = RequestRecorder([httpx.Response(401, json={"error": "The monthly limit has been reached"})])
     client = _client(recorder)
 
@@ -315,7 +314,7 @@ async def test_rotating_client_stays_on_last_good_index_across_calls():
     await client.search_games("First Call")
     await client.search_games("Second Call")
 
-    # the second call goes straight to key-2 rather than re-trying key-1 first
+
     assert failing.search_calls == ["First Call"]
     assert working.search_calls == ["First Call", "Second Call"]
 

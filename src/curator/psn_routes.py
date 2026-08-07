@@ -79,7 +79,6 @@ async def psn_link(
     redis_adapter = request.app.state.redis_adapter
     audit_repository: AccountActionLogRepository = request.app.state.audit_repository
 
-    # require_verified_caller guarantees claims.email is set before this dependency chain runs.
     assert claims.email is not None, "psn_link requires a verified caller (claims.email must be set)"
 
     try:

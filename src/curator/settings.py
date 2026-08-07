@@ -19,36 +19,16 @@ from curator.persistence.connection import resolve_database_url
 _OIDC_AUTHORITY_ENV_NAMES: tuple[str, ...] = ("OIDC_AUTHORITY",)
 _TOKEN_KEY_ENV_NAMES: tuple[str, ...] = ("CURATOR_TOKEN_KEY",)
 
-# Fleet-convention telemetry settings (see workspace AGENTS.md): App Service application settings of these
-# exact names, already used by the other repos' OTLP/Elasticsearch legs. Every one of them is optional --
-# unset locally and in CI -- so `curator.telemetry.configure_telemetry` disables each leg independently
-# rather than requiring all-or-nothing.
 _ALLOY_ENDPOINT_ENV_NAMES: tuple[str, ...] = ("AlloyEndpoint",)
 _ELASTICSEARCH_NODE_ENV_NAMES: tuple[str, ...] = ("ElasticsearchNode",)
 _ELASTICSEARCH_USERNAME_ENV_NAMES: tuple[str, ...] = ("ElasticsearchUsername",)
 _ELASTICSEARCH_PASSWORD_ENV_NAMES: tuple[str, ...] = ("ElasticsearchPassword",)
 
-# Enrichment/jobs settings -- all optional. Unset locally and in CI, same as the telemetry legs above:
-# GET /catalog/games and every other route work fine without them; only POST /enrichment/runs (RAWG/
-# OpenCritic) and the two job queues (library-refresh, enrichment) need them, and only once Service Bus
-# queues are actually provisioned (see the migration plan's "Open follow-ups" -- not yet done as of this
-# writing).
-#
-# RawgApiKey/OpenCriticRapidApiKey are array-shaped (zero or more admin keys) -- resolved via indexed env
-# vars (RawgApiKey__0, RawgApiKey__1, ...), matching the __N array convention ASP.NET Core's configuration
-# system already uses fleet-wide for a real array setting (e.g. Identity's CorsPolicy__Origins__N in
-# appsettings.json/Azure App Service), not a comma-joined string. See _resolve_indexed_keys.
 _RAWG_API_KEY_PREFIX = "RawgApiKey"
 _OPENCRITIC_RAPIDAPI_KEY_PREFIX = "OpenCriticRapidApiKey"
 _SERVICE_BUS_NAMESPACE_ENV_NAMES: tuple[str, ...] = ("ServiceBusNamespace",)
 _SERVICE_BUS_CONNECTION_ENV_NAMES: tuple[str, ...] = ("ServiceBusConnectionString",)
 
-# Redis-backed trophy caching (curator.psn.trophy_cache) and distributed PSN rate limiting
-# (curator.psn.rate_limiter) -- also optional, unset in dev/CI. Names match the fleet convention already
-# used by Manuals/Infrastructure (RedisHost/RedisPort/RedisSsl config values, RedisPassword Key Vault
-# secret). Unlike those, ``redis_host`` unset here just falls back to an uncached TrophyClient and a
-# no-op NullRateLimiter rather than disabling a whole feature -- PSN calls still work, just without the
-# fleet-wide shared budget/cache.
 _REDIS_HOST_ENV_NAMES: tuple[str, ...] = ("RedisHost",)
 _REDIS_PORT_ENV_NAMES: tuple[str, ...] = ("RedisPort",)
 _REDIS_PASSWORD_ENV_NAMES: tuple[str, ...] = ("RedisPassword",)

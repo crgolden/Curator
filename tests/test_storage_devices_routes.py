@@ -285,11 +285,7 @@ def test_sets_install_state_on_an_m2_device_for_a_ps5_game():
 
 
 def test_allows_installing_a_ps5_game_on_usb_storage():
-    # Sony's own Extended Storage lets a PS5 title be copied to USB -- it just can't run from there
-    # until moved back to the console's own drive or an M.2 expansion (see the route's own docstring).
-    # This endpoint tracks "parked here, taking up space," not playability; a capacity_fill collection
-    # run is the one place playability is actually enforced, by never proposing a USB bin for a PS5
-    # title in the first place.
+
     repo = FakeCollectionsRepository(devices=[_device("d1", "sub-a", kind="usb")])
     client, validator = _build(repo)
     validator.register("token-a", _claims(sub="sub-a"))

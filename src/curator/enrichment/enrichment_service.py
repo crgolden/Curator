@@ -28,10 +28,6 @@ from curator.scoring.size_estimation_service import SizeEstimate, estimate_insta
 _MULTIPLAYER_KEYWORDS = ("multiplayer", "co-op", "online", "pvp", "cooperative")
 _OPENCRITIC_TOPUP_PLATFORMS = ("ps4", "ps5")
 _OPENCRITIC_TOPUP_MAX_PAGES = 5
-#: 4x the per-user top-up cap -- appropriate for an explicit, infrequent admin action instead of an
-#: incidental per-refresh top-up, while still bounded/resumable via the cursor rather than trying to sweep
-#: OpenCritic's entire catalog in one call (the bug this bound fixes: the very first admin run burned
-#: through every configured key's daily quota before any of them could make bounded, resumable progress).
 _OPENCRITIC_ADMIN_REFRESH_MAX_PAGES = 20
 _OPENCRITIC_ROTATE_ON_STATUS_CODES = (401, 403, 429)
 _AUTH_FAILURE_STATUS_CODES = (401, 403)
@@ -286,9 +282,8 @@ class EnrichmentService:
                     await self._repository.set_opencritic_cursor(platform, exc.partial_next_skip)
                 if isinstance(exc, OpenCriticApiError) and exc.status_code in _OPENCRITIC_ROTATE_ON_STATUS_CODES:
                     last_exc = exc
-                    continue  # a per-key failure (bad key/rate-limited) -- worth trying the next key
-                return 0  # 5xx/network error isn't key-specific -- rotating wouldn't help; matches the
-                # prior single-client swallow-and-move-on
+                    continue
+                return 0
             await self._repository.save_opencritic_games(result.games)
             await self._repository.set_opencritic_cursor(platform, result.next_skip)
             return len(result.games)
@@ -394,9 +389,9 @@ class EnrichmentService:
             if exc.status_code == _RATE_LIMIT_STATUS_CODE:
                 retry_after = self._rate_limit_retry_after("rawg", exc.retry_after_seconds)
                 raise EnrichmentRateLimitError("rawg", retry_after) from None
-            return None  # transient (5xx) -- skip this game's RAWG signal, don't cache a false negative
+            return None
         except httpx.HTTPError:
-            return None  # network error/timeout reaching RAWG -- same as a transient 5xx, skip this game
+            return None
 
         match = find_rawg_match(title, candidates)
         if match is None:
@@ -413,7 +408,7 @@ class EnrichmentService:
                 raise EnrichmentRateLimitError("rawg", retry_after) from None
             return None
         except httpx.HTTPError:
-            return None  # network error/timeout reaching RAWG -- same as a transient 5xx, skip this game
+            return None
 
         await self._repository.save_rawg_cache(title, rawg_game_id=match.rawg_game_id, raw=detail)
         return detail
@@ -454,10 +449,9 @@ class EnrichmentService:
                 if exc.status_code == _RATE_LIMIT_STATUS_CODE:
                     retry_after = self._rate_limit_retry_after("opencritic", exc.retry_after_seconds)
                     raise EnrichmentRateLimitError("opencritic", retry_after) from None
-                self.opencritic_topup_incomplete = True  # transient (5xx) -- stop the top-up, don't fail the run
+                self.opencritic_topup_incomplete = True
                 return
             except httpx.HTTPError:
-                # network error/timeout reaching OpenCritic -- same as a transient 5xx, stop the top-up
                 self.opencritic_topup_incomplete = True
                 return
 
@@ -483,12 +477,6 @@ class EnrichmentService:
         try:
             concept = await self._catalog_client.title_concept(title_id)
         except httpx.HTTPError:
-            # Network error/timeout reaching PSN's catalog endpoint -- same transient-failure handling as
-            # _resolve_rawg/_run_opencritic_topup: skip this game's PSN-catalog signal, don't cache a false
-            # negative. PsnAuthError is deliberately NOT caught here -- unlike a rejected RAWG/OpenCritic
-            # key, it means this user's own PSN link/session is dead, which is a materially different,
-            # instance-wide condition than one BYOK provider going bad, and is left to propagate and abort
-            # the run rather than being silently swallowed per-game.
             return PsnCatalogLookup(genres=[], star_rating=None)
         await self._repository.save_psn_catalog_cache(
             PsnCatalogCacheEntry(

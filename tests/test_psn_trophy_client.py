@@ -29,8 +29,6 @@ class FakeSession:
         self.get_calls.append((url, params or {}))
         if "devices/accounts/me" in url:
             return FakeResponse({"accountId": self._own_account_id})
-        # Pick the longest (most specific) matching key -- e.g. a "users/me/..." progress-endpoint key
-        # must win over a shorter meta-endpoint key that happens to be a substring of the same URL.
         matches = [key for key in self._responses if key in url]
         if matches:
             best = max(matches, key=len)

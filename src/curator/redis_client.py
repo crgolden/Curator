@@ -20,15 +20,6 @@ from redis.exceptions import TimeoutError as RedisTimeoutError
 
 from curator.settings import Settings
 
-# A connection idle long enough (PSN rate-limiter/token-store calls only happen while a user's job is
-# actively running, so the shared connection pool can sit unused for a while between them) can be silently
-# dropped by the far end -- observed in production as `ConnectionError: Error 104 ... Connection reset by
-# peer` surfacing straight out of a library-refresh job with no retry, dead-lettering it (see
-# 504_TRACKING.md's Librarian/Churches node-redis incidents for the same idle-connection-death mechanism
-# hitting a different client library). `health_check_interval` makes redis-py PING a connection that's been
-# idle past this many seconds before reusing it, transparently opening a fresh one if the ping fails, and
-# `retry`/`retry_on_error` retries the command itself (with a fresh connection) a few times if it still hits
-# a connection-level error -- both were absent before, so a single dead connection was fatal to the request.
 _HEALTH_CHECK_INTERVAL_SECONDS = 30
 _RETRY_BACKOFF_BASE_SECONDS = 0.1
 _RETRY_BACKOFF_CAP_SECONDS = 1.0

@@ -106,7 +106,6 @@ def test_predicate_to_dict_and_parse_predicate_round_trip():
     ],
 )
 def test_parse_predicate_rejects_malformed_input(raw):
-    # Every malformed shape above raises plain ValueError with a different message describing what's
-    # wrong with it -- no single `match` covers them all, and there's no more specific exception type.
+
     with pytest.raises(ValueError):  # noqa: PT011
         parse_predicate(raw)

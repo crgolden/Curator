@@ -143,11 +143,6 @@ def _seed_custom_link(repo: RecordingRepository, crypto: TokenCrypto, sub: str, 
     )
 
 
-# ---------------------------------------------------------------------------------------------------
-# Every bearer-required route rejects missing/garbage tokens.
-# ---------------------------------------------------------------------------------------------------
-
-
 @pytest.mark.parametrize(("method", "path", "kwargs"), _BEARER_REQUIRED_ROUTES)
 def test_bearer_required_routes_reject_missing_authorization_header(method, path, kwargs):
     client, *_ = _build()
@@ -160,11 +155,6 @@ def test_bearer_required_routes_reject_garbage_token(method, path, kwargs):
     client, *_ = _build()
     response = getattr(client, method)(path, headers=_bearer("garbage-not-a-real-token"), **kwargs)
     assert response.status_code == 401
-
-
-# ---------------------------------------------------------------------------------------------------
-# Cross-user isolation.
-# ---------------------------------------------------------------------------------------------------
 
 
 def test_cross_user_isolation_between_two_established_callers():
@@ -187,26 +177,20 @@ def test_cross_user_isolation_between_two_established_callers():
         agent_factory=agent_factory,
         token_validator=validator,
     )
-    # DELETE /psn/link clears stored trophy progress, and this test unlinks A -- without a stand-in the
-    # route reaches for a connection pool that doesn't exist in an offline test.
     app.state.library_repository = FakeLibraryRepository()
     client = TestClient(app)
 
-    # Establish A's identity. (Reverify-on-token matches emails, so A's pre-seeded link survives.)
     me_response = client.get("/me", headers=_bearer("token-a"))
     assert me_response.status_code == 200
     assert repo.delete_calls == []
 
-    # From here on, only calls made as A are in scope for the isolation assertion below.
     baseline = len(repo.all_subs_seen)
 
-    # A's /me reflects only A's link, not B's.
     me_body = me_response.json()
     assert me_body["sub"] == "sub-a"
     assert me_body["linked"] is True
     assert repo.links["sub-b"].psn_account_id == "psn-account-b"
 
-    # A's DELETE deletes only A's rows; B's link record is untouched in the fake.
     delete_response = client.delete("/psn/link", headers=_bearer("token-a"))
     assert delete_response.status_code == 204
     assert repo.delete_calls == ["sub-a"]
@@ -215,25 +199,17 @@ def test_cross_user_isolation_between_two_established_callers():
     assert repo.links["sub-b"].access_token_expires_at == datetime(2026, 1, 1, 2, tzinfo=timezone.utc)
     assert repo.links["sub-b"].refresh_token_expires_at == datetime(2026, 2, 1, 2, tzinfo=timezone.utc)
 
-    # A's POST /psn/link (re-linking after her own delete) writes only under A's sub.
     agent_factory.account_id = "psn-account-a-relinked"
     link_response = client.post("/psn/link", json={"npsso": "a-new-npsso"}, headers=_bearer("token-a"))
     assert link_response.status_code == 200
     assert agent_factory.calls[-1] == ("sub-a", "a-new-npsso")
     assert repo.set_link_account_calls[-1] == ("sub-a", "psn-account-a-relinked")
 
-    # B's row was never touched by any of A's requests.
     assert repo.links["sub-b"].psn_account_id == "psn-account-b"
     assert repo.links["sub-b"].access_token_expires_at == datetime(2026, 1, 1, 2, tzinfo=timezone.utc)
 
-    # The repository was never consulted about B's sub at any point during A's requests.
     subs_touched_by_a = set(repo.all_subs_seen[baseline:])
     assert subs_touched_by_a == {"sub-a"}
-
-
-# ---------------------------------------------------------------------------------------------------
-# No route accepts a caller-supplied target-user identifier.
-# ---------------------------------------------------------------------------------------------------
 
 
 _ALLOWED_PATH_PARAMETERS = {"console_id", "game_id", "np_communication_id", "sub"}

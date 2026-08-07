@@ -59,16 +59,10 @@ class CollectionSpecRequest(BaseModel):
     genre_filter: list[str] = []
     min_score: float | None = None
     aaa_tier_filter: str | None = None
-    #: An OR-capable predicate tree (WP8) -- see ``curator.collections.filter_predicate``'s module
-    #: docstring. Replaces ``genre_filter``/``min_score``/``aaa_tier_filter`` entirely when set.
     filter_predicate: dict[str, Any] | None = None
     include_inactive: bool = False
     min_percent_completed: int | None = None
-    #: A named sort-order variant (``curator.collections.sort_order``), or omitted to keep whichever
-    #: strategy runs this spec's own default order.
     sort_order: str | None = None
-    #: Console ids (the caller's own) whose currently-installed games are excluded from this run's
-    #: candidate pool entirely -- see ``CollectionSpec.exclude_installed_on``.
     exclude_installed_on: list[str] = []
 
 
@@ -83,8 +77,6 @@ class CollectionGameResponse(BaseModel):
     composite_score: float | None
     rank_score: int
     size_gb: float
-    #: Percentage of this game's trophies the owner has earned, or ``None`` if unavailable (no PSN link,
-    #: trophy harvesting disabled, or no confident title match -- see ``curator.psn.trophy_completion``).
     percent_completed: int | None
 
 
@@ -226,8 +218,6 @@ class CollectionItemResponse(BaseModel):
     oc_score: float | None
     psn_rating: float | None
     cover_image_url: str | None
-    #: Whether the collection's owner can still play this -- the owner's access, identical for every
-    #: viewer. A title the owner has since lost stays listed and is shown as unavailable.
     owner_has_access: bool
 
 
@@ -301,13 +291,8 @@ async def save_definition(
             game_ids=game_ids,
         )
     except psycopg.errors.UniqueViolation as exc:
-        # collection_definitions has UNIQUE (identity_sub, name); without this the constraint error
-        # surfaces to the caller as an opaque 500.
         raise HTTPException(status_code=409, detail=f"You already have a collection named {body.name!r}.") from exc
 
-    # Re-fetched rather than built from the request body in memory: share_slug is generated inside
-    # save_definition and never returned any other way, and item_count has to reflect what was actually
-    # stored (post-deduplication), not len(body.game_ids).
     saved = await collections_repository.get_definition(claims.sub, definition_id)
     assert saved is not None  # just inserted, in the same identity_sub scope
     return _definition_to_response(saved)
@@ -427,8 +412,6 @@ async def update_definition(
     except psycopg.errors.UniqueViolation as exc:
         raise HTTPException(status_code=409, detail=f"You already have a collection named {name!r}.") from exc
 
-    # Re-fetched rather than patched in memory: a membership replacement changes item_count, and a
-    # stale-but-plausible count from before the edit would be a worse bug than one extra query.
     updated_definition = await collections_repository.get_definition(claims.sub, definition_id)
     assert updated_definition is not None  # confirmed to exist and be ours moments ago
     items = await collections_repository.list_definition_items(definition_id)

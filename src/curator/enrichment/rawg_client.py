@@ -19,8 +19,6 @@ from curator.psn.session import NullRateLimiter, RateLimiter
 
 RAWG_BASE_URL = "https://api.rawg.io/api"
 
-# Enough of an error body to carry RAWG's own sentence-long explanation, short enough that a wall of
-# HTML from a proxy can't flood the log.
 MAX_PROVIDER_DETAIL_CHARS = 300
 
 
@@ -175,8 +173,6 @@ class RawgClient:
         return await self._client.get(url, params=params)
 
     def _raise_for_status(self, response: httpx.Response) -> None:
-        # An instance method, not a static one, so the caller's own key can be redacted out of the body
-        # excerpt before it goes anywhere.
         try:
             response.raise_for_status()
         except httpx.HTTPStatusError as exc:

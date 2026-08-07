@@ -66,8 +66,6 @@ async def reverify_link(
     except Exception:
         return
 
-    # Callers must have already enforced `claims.email is not None` (see this function's docstring and
-    # `curator.deps.require_verified_caller`) -- narrow it here so normalize_email(claims.email) type-checks.
     assert claims.email is not None, "reverify_link requires a verified caller (claims.email must be set)"
 
     stale = (

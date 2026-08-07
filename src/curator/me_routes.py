@@ -41,9 +41,6 @@ class MeResponse(BaseModel):
     email: str | None
     linked: bool
     psn: PsnSummary | None
-    #: Whether the caller holds the ``curator.admin`` claim (see ``TokenClaims.is_admin``) -- lets
-    #: Librarian show/hide admin-only UI (e.g. the enrichment-run page) without duplicating the claim
-    #: check client-side against a less authoritative channel (the BFF's own OIDC claims).
     is_admin: bool
 
 

@@ -118,8 +118,7 @@ def test_unknown_slug_404s():
 
 
 def test_response_omits_authoring_fields_an_anonymous_viewer_should_not_see():
-    # console_id/genre_filter/etc. are provenance for the owner's own re-run workflow, not part of what a
-    # share link is for -- see the response model's own docstring.
+
     repo = FakeCollectionsRepository([_definition()])
     client = _build(repo)
 

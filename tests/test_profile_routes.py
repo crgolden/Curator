@@ -262,11 +262,6 @@ def _seed_users(repository: FakeRepository, *subs: str) -> None:
     repository.users.update(subs)
 
 
-# ---------------------------------------------------------------------------------------------------
-# /me/profile-settings
-# ---------------------------------------------------------------------------------------------------
-
-
 def test_get_my_profile_settings_never_404s_with_no_row():
     client, *_ = _build()
     response = client.get("/me/profile-settings", headers=_bearer("token-a"))
@@ -327,11 +322,6 @@ def test_put_profile_settings_never_leaks_across_users():
     assert {call[0] for call in profile_repository.upsert_calls} == {SUB_A, SUB_B}
 
 
-# ---------------------------------------------------------------------------------------------------
-# GET /users/{sub}/profile
-# ---------------------------------------------------------------------------------------------------
-
-
 def test_get_profile_unknown_sub_is_404():
     client, *_ = _build()
     response = client.get("/users/nobody/profile", headers=_bearer("token-a"))
@@ -373,8 +363,6 @@ def test_owner_viewing_own_private_profile_sees_everything():
     assert body["collections_visible"] is True
     assert body["trophies"] == {"level": 42, "tier": 3, "earned": {"bronze": 1, "silver": 2, "gold": 3, "platinum": 4}}
     assert body["identity"] == {"online_id": "OwnerOnlineId"}
-    # The viewer's OWN client was built with the OWNER's account id -- since viewer == owner here, that's
-    # trivially "own account id", but the call still goes through the account_id-targeted path.
     assert trophy_client.calls == ["acct-a"]
     assert social_client.calls == ["acct-a"]
 
@@ -434,7 +422,6 @@ def test_show_and_harvest_trophies_true_but_viewer_has_no_psn_link_is_none_and_s
         is_public=True, show_library=False, show_collections=False, show_trophies=True, show_identity=False
     )
     repository.links[SUB_A] = _link(psn_account_id="acct-a", harvest_trophies=True)
-    # No entry seeded in trophy_factory.linked for SUB_B -- the viewer has no PSN link of their own.
     trophy_factory = FakeProfileTrophyClientFactory()
 
     client, *_ = _build(
@@ -477,7 +464,6 @@ def test_cross_user_trophy_lookup_uses_the_targets_account_id_via_the_viewers_ow
     assert response.status_code == 200
     assert body["trophies"]["level"] == 7
     assert body["identity"] == {"online_id": "TargetOnlineId"}
-    # The client was built for the VIEWER (B), called with the TARGET's (A's) account id.
     assert trophy_factory.calls == [SUB_B]
     assert trophy_client.calls == ["acct-a"]
     assert social_factory.calls == [SUB_B]
@@ -486,11 +472,6 @@ def test_cross_user_trophy_lookup_uses_the_targets_account_id_via_the_viewers_ow
 
 def test_profile_identity_response_has_no_region_field_at_all():
     assert "region" not in ProfileIdentityResponse.model_fields
-
-
-# ---------------------------------------------------------------------------------------------------
-# POST/DELETE /users/{sub}/follow
-# ---------------------------------------------------------------------------------------------------
 
 
 def test_follow_unknown_sub_is_404():
@@ -536,11 +517,6 @@ def test_unfollow_is_always_204_but_only_logs_when_a_row_was_removed():
     assert audit.entries == [(SUB_B, "followed", SUB_A), (SUB_B, "unfollowed", SUB_A)]
 
 
-# ---------------------------------------------------------------------------------------------------
-# GET /users/{sub}/followers, /users/{sub}/following
-# ---------------------------------------------------------------------------------------------------
-
-
 def test_followers_unknown_sub_is_404():
     client, *_ = _build()
     response = client.get("/users/nobody/followers", headers=_bearer("token-a"))
@@ -570,7 +546,6 @@ def test_followers_pagination():
     follow_repository = FakeFollowRepository()
     client, *_ = _build(repository=repository, follow_repository=follow_repository)
 
-    # Seed three followers of sub-a directly via the fake follow repository.
     async def _seed():
         await follow_repository.follow("sub-b", "sub-a")
         await follow_repository.follow("sub-c", "sub-a")
@@ -589,11 +564,6 @@ def test_following_not_gated_by_is_public_and_unknown_sub_is_404():
     client, *_ = _build()
     response = client.get("/users/nobody/following", headers=_bearer("token-a"))
     assert response.status_code == 404
-
-
-# ---------------------------------------------------------------------------------------------------
-# GET /users/{sub}/library, /users/{sub}/collections
-# ---------------------------------------------------------------------------------------------------
 
 
 def test_library_403_when_private():
@@ -660,12 +630,8 @@ def test_library_200_with_data_when_public_and_show_library_true():
                 "psn_product_id": None,
                 "rawg_enriched": True,
                 "opencritic_enriched": False,
-                # The profile owner's access, not the viewer's -- like every other field here.
                 "is_active": True,
-                # Always None in this pass -- viewer-mode trophy completion isn't built yet (would need
-                # the viewer's own PSN client called against the target's account id).
                 "percent_completed": None,
-                # Not privacy-sensitive, so resolved for real rather than stubbed like percent_completed.
                 "cover_image_url": "https://cdn.example/elden-ring.jpg",
             }
         ],
@@ -789,9 +755,6 @@ def test_collections_200_with_data_when_public_and_show_collections_true():
 
 
 def test_collections_hides_unlisted_and_private_collections_from_a_non_owner():
-    # The account-wide show_collections/is_public gate is open, but per-collection visibility (0019) is
-    # a second, independent gate underneath it -- only "public" collections may appear here for anyone
-    # but the owner, share link or not.
     repository = FakeRepository()
     _seed_users(repository, SUB_A, SUB_B)
     profile_repository = FakeProfileRepository()

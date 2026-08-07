@@ -72,10 +72,6 @@ backoff (`_settle_with_retry`'s use case): this loop runs for the app's lifetime
 retrying indefinitely rather than give up after a bounded number of attempts."""
 
 LEASE_HEARTBEAT_SECONDS = 30.0
-"""How often an in-flight delivery pushes its job_runs processing lease forward (0026, see
-QueueConsumer._heartbeat_lease). Comfortably shorter than JobRunsRepository.DEFAULT_LEASE_SECONDS so an
-ordinary scheduling delay -- or one skipped tick from a transient database blip -- never lets the lease
-lapse while the run is genuinely still being worked on."""
 
 
 @retry(
@@ -403,13 +399,6 @@ class QueueConsumer:
         if not began:
             current = await self._job_runs_repository.get(run_id)
             if current is not None and current.status == "failed":
-                # Unlike a superseded checkpoint or an already-succeeded run (nothing went wrong in
-                # either case), this redelivery belongs to a run that already failed -- most likely
-                # because the original dead_letter_message call for it failed too (see _settle). Silently
-                # completing here would make the message vanish from both the active queue and the DLQ,
-                # with zero operator visibility that anything ever failed -- inconsistent with every other
-                # failure path in this module, which always dead-letters. Dead-letter it instead, using the
-                # error already recorded on the run, so it still surfaces for follow-up.
                 logger.warning(
                     "Stale redelivery for run %s of an already-failed run -- dead-lettering instead of "
                     "silently completing so it still surfaces in the DLQ for operator follow-up",
@@ -432,24 +421,14 @@ class QueueConsumer:
             await self._settle(receiver, message, dead_letter=False)
             return
 
-        # Hold the run's processing lease open for as long as this delivery is actually working on it
-        # (0026), so a redelivery triggered by a lapsed Service Bus lock can't start a second, concurrent
-        # copy. Cancelled in `finally` on every exit path -- including the early `return`s below, which is
-        # why they are wrapped rather than left to fall through.
         heartbeat = asyncio.create_task(self._heartbeat_lease(run_id))
         try:
             try:
                 result_summary = await process(payload)
             except RateLimitRetryScheduled:
-                # The handler already ran mark_rate_limited + republished the remaining games itself -- no
-                # further status write, and definitely no dead-letter (this isn't a failure).
                 await self._settle(receiver, message, dead_letter=False)
                 return
             except Exception as exc:
-                # logger.exception still ships a full stack trace to Elasticsearch for operator debugging,
-                # but what actually reaches job_runs.error / the browser / the dead-letter reason is always
-                # the friendly, sanitized text below -- never the raw exception (see
-                # curator.jobs.error_messages).
                 logger.exception("Job processing failed, dead-lettering message")
                 friendly_error = friendly_job_error(exc)
                 await self._job_runs_repository.mark_failed(run_id, friendly_error)
@@ -464,20 +443,12 @@ class QueueConsumer:
             heartbeat.cancel()
 
     async def _heartbeat_lease(self, run_id: str) -> None:
-        """Renew ``run_id``'s processing lease on a fixed interval until cancelled, or until the run stops
-        being ``running`` (0026).
-
-        A heartbeat failure is logged and retried on the next tick rather than aborting the run: the lease
-        only needs to be refreshed before it expires, so one transient database blip is survivable, and
-        killing real in-flight PSN/RAWG work over it would be strictly worse than the duplicate-delivery
-        risk it guards against.
-        """
+        """Renew ``run_id``'s processing lease every :data:`LEASE_HEARTBEAT_SECONDS` until cancelled, or
+        until the run is no longer ``running``."""
         while True:
             await asyncio.sleep(LEASE_HEARTBEAT_SECONDS)
             try:
                 if not await self._job_runs_repository.renew_lease(run_id):
-                    # No longer 'running' -- the run reached a terminal/checkpoint status, which already
-                    # cleared the lease. Nothing left to hold.
                     return
             except asyncio.CancelledError:
                 raise

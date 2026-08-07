@@ -9,7 +9,7 @@ from curator.scoring.scoring_service import composite_score, rank_score
 
 
 def test_all_three_sources_averaged():
-    # PSN 5.0 -> (5-1)/4*100 = 100
+
     assert composite_score(80, 90, 5.0) == pytest.approx((80 + 90 + 100) / 3, rel=1e-3)
 
 

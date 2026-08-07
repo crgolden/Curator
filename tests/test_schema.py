@@ -350,7 +350,6 @@ def test_deleting_a_user_cascades_every_per_user_table(db_connection, seeded_use
             (user_sub, "account_deleted"),
         )
 
-        # The delete under test. Before 0009 this raised psycopg.errors.ForeignKeyViolation.
         cur.execute("DELETE FROM app_users WHERE identity_sub = %s", (user_sub,))
 
         for table in (
@@ -367,9 +366,6 @@ def test_deleting_a_user_cascades_every_per_user_table(db_connection, seeded_use
             (count,) = cur.fetchone()
             assert count == 0, f"{table} still has rows for the deleted user"
 
-        # game_measured_sizes is the one deliberate exception (WP13, migration 0025): global contributed
-        # data, ON DELETE SET NULL rather than CASCADE, so the row survives with no accountable user --
-        # see test_game_measured_sizes_recorded_by_survives_contributor_deletion for the focused version.
         cur.execute(
             "SELECT recorded_by FROM game_measured_sizes WHERE game_id = %s AND platform = %s", (game_id, "PS5")
         )
@@ -379,22 +375,15 @@ def test_deleting_a_user_cascades_every_per_user_table(db_connection, seeded_use
         assert cur.fetchone()[0] == 0
         cur.execute("SELECT count(*) FROM collection_items WHERE run_id = %s", (run_id,))
         assert cur.fetchone()[0] == 0
-        # 0011's child table joins the same chain: app_users -> collection_definitions -> here.
         cur.execute("SELECT count(*) FROM collection_definition_items WHERE definition_id = %s", (definition_id,))
         assert cur.fetchone()[0] == 0
         cur.execute("SELECT count(*) FROM console_installs WHERE console_id = %s", (console_id,))
         assert cur.fetchone()[0] == 0
-        # storage_devices.identity_sub -> app_users cascades directly; storage_device_installs then
-        # cascades one level further via storage_devices.device_id, same two-hop shape as console_installs.
         cur.execute("SELECT count(*) FROM storage_device_installs WHERE device_id = %s", (device_id,))
         assert cur.fetchone()[0] == 0
-        # collection_follows (0019) is another two-hop cascade: identity_sub -> collection_definitions
-        # (0009's existing cascade) -> here, via definition_id.
         cur.execute("SELECT count(*) FROM collection_follows WHERE definition_id = %s", (definition_id,))
         assert cur.fetchone()[0] == 0
 
-        # account_action_log deliberately has NO foreign key to app_users -- it must survive deletion
-        # for its retention window (GDPR Art. 17(3)(e)). See 0003_account_action_log.sql.
         cur.execute("SELECT count(*) FROM account_action_log WHERE identity_sub = %s", (user_sub,))
         assert cur.fetchone()[0] == 1
 
@@ -428,7 +417,6 @@ def test_deleting_a_console_detaches_its_storage_device_rather_than_deleting_it(
         assert row is not None, "the device itself must survive its console being deleted"
         assert row[0] is None, "the device must become unattached, not still point at the deleted console"
 
-        # Its installs are untouched by the console's deletion -- they belong to the device, not the console.
         cur.execute(
             "SELECT installed FROM storage_device_installs WHERE device_id = %s AND game_id = %s", (device_id, game_id)
         )
@@ -464,7 +452,6 @@ def test_is_active_is_per_user_and_defaults_to_true(db_connection, seeded_user_a
             "INSERT INTO library_entries (identity_sub, game_id, is_active) VALUES (%s, %s, false)",
             (user_a, game_id),
         )
-        # Omits is_active entirely -- the default must be "playable", so a pre-0012 row stays owned.
         cur.execute("INSERT INTO library_entries (identity_sub, game_id) VALUES (%s, %s)", (user_b, game_id))
 
         cur.execute(

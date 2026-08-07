@@ -37,23 +37,9 @@ class LibraryGameView:
     psn_product_id: str | None
     rawg_enriched: bool
     opencritic_enriched: bool
-    #: Whether the user can still play this. ``False`` means the entitlement ended -- a PS Plus title
-    #: that left the catalog, a lapsed subscription -- and the game is shown as no longer playable rather
-    #: than quietly dropped, which is what happened before ``0012_library_entry_active_state.sql``.
     is_active: bool = True
-    #: This entry's matched PSN trophy-title id, persisted by ``LibraryBuildOrchestrator.match_trophies``
-    #: (``0014_library_entries_trophy_match.sql``), or ``None`` if never matched (or matched nothing).
-    #: ``curator.psn.trophy_completion`` uses this for a cheap, exact read-time lookup instead of
-    #: re-running its fuzzy name match on every request.
     np_communication_id: str | None = None
-    #: Stored trophy completion percentage (``0015_library_entries_trophy_progress.sql``), refreshed by the
-    #: library-refresh job. ``None`` means no match, no trophies, or ``harvest_trophies`` disabled -- all
-    #: three render blank. Read straight from the row: no PSN call and no name matching on this path.
     percent_completed: int | None = None
-    #: Same two-source fallback ``CollectionsRepository.list_definition_items`` already uses: a real PSN
-    #: store cover from ``psn_catalog_cache`` (only present once catalog enrichment has run for this game),
-    #: falling back to whatever artwork entitlement ingestion captured. ``None`` if neither source has one
-    #: yet -- the row still renders, just without art.
     cover_image_url: str | None = None
 
 

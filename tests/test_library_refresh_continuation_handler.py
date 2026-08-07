@@ -242,8 +242,7 @@ async def test_success_merges_new_titles_into_existing_result_summary():
     )
 
     assert result is not None
-    # No RAWG/OpenCritic key configured -- this game enriches with neither signal, but the prior run's
-    # already-enriched titles must still be carried forward untouched.
+
     assert result["rawg_enriched_titles"] == ["Old Game"]
     assert result["opencritic_enriched_titles"] == []
     assert result["opencritic_topup_incomplete"] is False
@@ -327,7 +326,7 @@ async def test_rejected_key_degrades_the_run_and_records_the_rejection():
         }
     )
 
-    # The run reaches completion (returns a result summary, doesn't raise) despite RAWG rejecting the key.
+
     assert result is not None
     assert result["rejected_providers"] == ["rawg"]
     assert collaborators.enrichment_keys_repository.rejected_calls == [("sub-1", "rawg")]

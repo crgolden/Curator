@@ -507,9 +507,7 @@ async def test_has_opencritic_client_reflects_configured_admin_clients():
 
 async def test_has_catalog_client_reflects_configured_client():
     assert _service(catalog_client=FakeCatalogClient()).has_catalog_client is True
-    # _service() substitutes a falsy catalog_client with a FakeCatalogClient() default (matching how
-    # every other caller treats "no client given" as "use the default"), so exercising the True-`None`
-    # case needs a direct construction rather than going through that helper.
+
     service = EnrichmentService(
         rawg_client=FakeRawgClient(), opencritic_client=FakeOpenCriticClient(), repository=FakeEnrichmentRepository()
     )
@@ -566,8 +564,7 @@ async def test_enrich_game_rawg_transient_failure_skips_that_games_rawg_signal()
 
 
 async def test_enrich_game_rawg_search_timeout_skips_that_games_rawg_signal():
-    # httpx.ReadTimeout is not a RawgApiError -- RawgClient never wraps it, so this exercises the
-    # separate except httpx.HTTPError branch, not the RawgApiError one above.
+
     rawg_client = FakeRawgClient(search_raises=httpx.ReadTimeout("timed out"))
     service = _service(rawg_client=rawg_client)
 
@@ -648,8 +645,7 @@ async def test_enrich_game_rawg_rate_limit_falls_back_to_default_and_doubles_on_
 
 
 async def test_enrich_game_opencritic_topup_timeout_sets_incomplete_flag_not_a_raised_error():
-    # httpx.ReadTimeout is not an OpenCriticApiError -- OpenCriticClient never wraps it, so this exercises
-    # the separate except httpx.HTTPError branch alongside the existing 5xx one.
+
     opencritic_client = FakeOpenCriticClient(raises=httpx.ReadTimeout("timed out"))
     service = _service(opencritic_client=opencritic_client)
 
@@ -667,8 +663,7 @@ async def test_enrich_game_opencritic_topup_timeout_sets_incomplete_flag_not_a_r
 
 
 async def test_enrich_game_psn_catalog_timeout_skips_that_games_psn_signal():
-    # httpx.ReadTimeout is not something CatalogClient wraps into a Curator-specific error -- exercises
-    # the same transient-network except httpx.HTTPError handling already applied to RAWG/OpenCritic above.
+
     catalog_client = FakeCatalogClient(raises=httpx.ReadTimeout("timed out"))
     repository = FakeEnrichmentRepository()
     service = _service(catalog_client=catalog_client, repository=repository)
@@ -803,7 +798,7 @@ async def test_enrich_game_opencritic_topup_only_attempted_once_per_service_inst
             size_estimates=_SIZE_ESTIMATES,
         )
 
-    # Two misses, but only one top-up attempt (both platforms) across the whole run.
+
     assert len(opencritic_client.fetch_calls) == 2
 
 

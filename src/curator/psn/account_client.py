@@ -20,10 +20,6 @@ from curator.psn.session import PsnSession
 _PROFILE_URI = "https://m.np.playstation.com/api/userProfile/v1/internal/users"
 _LEGACY_PROFILE_URI = "https://us-prof.np.community.playstation.net/userProfile/v1/users"
 
-# SEN account record for the signed-in user. Unlike the dms.api "devices/accounts/me" endpoint (which only
-# carries account id + devices), this returns the private account profile -- including the email address --
-# and is reachable with the ordinary mobile access token. Self-only: it always describes the authenticated
-# account.
 _ACCOUNT_ME_URL = "https://accounts.api.playstation.com/api/v1/accounts/me"
 _MY_ACCOUNT_URL = "https://dms.api.playstation.com/api/v1/devices/accounts/me"
 

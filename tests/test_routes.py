@@ -30,8 +30,6 @@ from curator.token_validation import TokenClaims, TokenError
 SUB = "sub-1"
 EMAIL = "user@example.com"
 
-# A fixed "now" `touch_link_verified` stamps on to a link -- deliberately far from any `iat` used below so
-# "does this token's iat come before/after the link's last_verified_at" comparisons are unambiguous.
 TOUCHED_AT = datetime(2027, 1, 1, tzinfo=timezone.utc)
 
 OLD_IAT = datetime(2026, 1, 1, tzinfo=timezone.utc)
@@ -315,8 +313,7 @@ def _build(repository=None, token_crypto=None, agent_factory=None, token_validat
         token_validator=token_validator,
         audit_repository=audit_repository,
     )
-    # DELETE /psn/link clears stored trophy progress, so every build needs a library repository that
-    # doesn't reach for a real connection pool. Read it back off app.state to assert against it.
+
     app.state.library_repository = FakeLibraryRepository()
     client = TestClient(app)
     return client, repository, token_crypto, agent_factory, token_validator, audit_repository
@@ -638,7 +635,7 @@ def test_me_reverify_skips_psn_check_when_token_iat_not_newer_than_last_verified
     agent_factory = FakeAgentFactory(repo, crypto)
     _seed_link(repo, crypto, SUB, last_verified_at=NEW_IAT)
     validator = FakeTokenValidator()
-    # OLD_IAT is not newer than the link's last_verified_at (NEW_IAT) -- must not re-trigger a PSN check.
+
     validator.register("valid-token", _claims(iat=OLD_IAT))
     client, *_ = _build(repository=repo, token_crypto=crypto, agent_factory=agent_factory, token_validator=validator)
 

@@ -41,8 +41,6 @@ def test_merge_is_case_insensitive_on_name():
 
 
 def test_does_not_merge_when_names_disagree():
-    # Sony's raw data has been observed pointing two genuinely different games at the same wrong
-    # product id -- a bare product-id merge would incorrectly conflate them.
     groups = {
         "c1": [_entry("BioShock: The Collection", "PID-SHARED", "c1")],
         "c2": [_entry("Bioshock Infinite: The Complete Edition", "PID-SHARED", "c2")],

@@ -101,7 +101,6 @@ async def test_get_status_maps_rejected_at_columns():
 
     status = await repo.get_status("sub-1")
 
-    # A key can be both configured (a row/ciphertext exists) and rejected (it no longer works) at once.
     assert status.rawg_configured is True
     assert status.rawg_key_rejected_at == rejected
     assert status.opencritic_key_rejected_at is None
@@ -132,7 +131,6 @@ async def test_upsert_rawg_key_executes_upsert():
     assert "INSERT INTO user_enrichment_keys" in sql
     assert "ON CONFLICT (identity_sub) DO UPDATE" in sql
     assert "rawg_api_key_enc" in sql
-    # A successful re-save is proof any prior rejection no longer applies.
     assert "rawg_key_rejected_at = NULL" in sql
     assert params == ("sub-1", b"rawg-enc")
 

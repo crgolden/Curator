@@ -118,8 +118,7 @@ async def test_account_email_verified_false_when_explicit_false_or_missing():
 
 
 async def test_account_email_verified_uses_main_entrys_own_flag():
-    # Two entries: the non-main one is verified, the isMain one is not. The result must reflect the CHOSEN
-    # (isMain) entry's flag, not any-verified-entry-wins.
+
     body = {
         "emailAddresses": [
             {"address": "old@example.com", "isMain": False, "isVerified": True},

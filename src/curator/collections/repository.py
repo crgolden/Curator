@@ -49,8 +49,6 @@ class UserConsole:
     update_buffer_gb: float
     routing_genres: tuple[str, ...]
     fill_order: int
-    #: Purely informational (0018) -- drives consoles_routes.py's default-capacity lookup at creation
-    #: time only. raw_capacity_gb is always independently editable regardless of what's recorded here.
     model: str | None = None
 
     @property
@@ -86,13 +84,9 @@ class StorageDevice:
 
 @dataclass(frozen=True, slots=True)
 class MeasuredSize:
-    """One ``game_measured_sizes`` row -- a global, per-(game, platform) contributed install size (WP13).
+    """One ``game_measured_sizes`` row -- a global, per-(game, platform) contributed install size.
 
-    Unlike :class:`UserConsole`/:class:`StorageDevice`, this is not scoped to its contributor: it is
-    catalog-wide, the same trust model as ``rawg_cache``/``game_enrichment``. ``recorded_by`` is an
-    accountability trail only, and is ``None`` once its contributor's account has been deleted (see
-    migration 0025's ``ON DELETE SET NULL`` -- the measured size itself outlives the account that
-    contributed it, since other users' ``capacity_fill`` collections may already be sized against it)."""
+    ``recorded_by`` is ``None`` once its contributor's account has been deleted."""
 
     game_id: str
     platform: str  # "PS5" | "PS4"
@@ -123,23 +117,10 @@ class CollectionDefinition:
     description: str | None = None
     include_inactive: bool = False
     min_percent_completed: int | None = None
-    #: An OR-capable predicate tree (WP8), replacing the flat genre/score/tier fields above when set. See
-    #: :mod:`curator.collections.filter_predicate`'s module docstring for why it's a separate field rather
-    #: than folded into them.
     filter_predicate: FilterPredicate | None = None
-    #: ``"private"``/``"unlisted"``/``"public"`` (0019) -- a per-collection gate underneath the existing
-    #: account-wide ``user_profiles.show_collections``/``is_public`` gate, not a replacement for it.
     visibility: str = "private"
-    #: Generated client-side at creation for every collection regardless of visibility (0019) -- inert
-    #: unless ``visibility != "private"``. See migration 0019's header for why it's never lazy.
     share_slug: str | None = None
-    #: How many games this collection currently holds. Cheap (one JOIN/subquery), so it's included on
-    #: every read rather than requiring a second ``list_definition_items`` call just to answer "how big
-    #: is this" -- what ``ProfileDefinitionResponse`` was missing before 0019.
     item_count: int = 0
-    #: See :attr:`~curator.collections.collection_spec.CollectionSpec.exclude_installed_on`. Persisted
-    #: (0024) the same way ``sort_order``/``genre_filter``/etc. already are -- provenance for
-    #: :meth:`to_spec`'s fresh-proposal re-run, not something re-derived from stored membership.
     exclude_installed_on: tuple[str, ...] = ()
 
     def to_spec(self) -> CollectionSpec:
@@ -179,10 +160,6 @@ class CollectionItem:
     oc_score: float | None
     psn_rating: float | None
     cover_image_url: str | None
-    #: Whether the collection's **owner** can still play this game. Deliberately the owner's access and
-    #: not the viewer's: a shared collection describes what its author curated, so it must read the same
-    #: to everyone. ``False`` marks a title the owner has since lost access to -- it stays in the list
-    #: (it is their list) and is rendered as unavailable rather than silently disappearing.
     owner_has_access: bool
 
 
@@ -200,12 +177,7 @@ class RawCandidateRow:
     psn_rating: float | None
     is_free_to_play: bool | None
     measured_size_gb: float | None
-    #: This entry's matched PSN trophy-title id, or ``None`` if never matched -- see
-    #: ``0014_library_entries_trophy_match.sql``. ``curator.psn.trophy_completion`` uses this for a cheap,
-    #: exact completion-percentage lookup instead of fuzzy name matching.
     np_communication_id: str | None = None
-    #: Stored trophy completion percentage (``0015_library_entries_trophy_progress.sql``). Read straight
-    #: from the row, so scoring a candidate pool needs no PSN call and no name matching.
     percent_completed: int | None = None
 
 
@@ -554,8 +526,7 @@ class CollectionsRepository:
         return {str(row[0]) for row in rows}
 
     async def list_measured_sizes(self, game_id: str) -> list[MeasuredSize]:
-        """Return every ``game_measured_sizes`` row for one game -- at most two (one per platform),
-        since the table is upserted per (game_id, platform), not a history."""
+        """Return every recorded measured size for one game -- at most one row per platform."""
         async with self._pool.connection() as conn, conn.cursor() as cur:
             await cur.execute(
                 """
@@ -577,10 +548,7 @@ class CollectionsRepository:
         ]
 
     async def upsert_measured_size(self, game_id: str, platform: str, size_gb: float, recorded_by: str) -> MeasuredSize:
-        """Record (or overwrite) one game's measured install size for one platform. Global and
-        contributor-agnostic by design (WP13, see :class:`MeasuredSize`) -- a second contributor
-        reporting a different number for the same (game_id, platform) simply supersedes the first, the
-        same "last write wins, no moderation machinery" precedent as a contributed enrichment key."""
+        """Record one game's measured install size for one platform, superseding any existing value."""
         async with self._pool.connection() as conn, conn.cursor() as cur:
             await cur.execute(
                 """
@@ -661,12 +629,6 @@ class CollectionsRepository:
 
         completion_clause = ""
         if min_percent_completed is not None:
-            # A game with no stored percentage can't satisfy a floor, so this excludes NULLs -- but only
-            # when the user has *some* progress stored. A user who has never had a trophy refresh (or who
-            # has harvest_trophies off) has NULL everywhere, and applying the floor would empty their
-            # collection for a reason that has nothing to do with the collection. That is the same guard
-            # curator.collections.filter_list_strategy's completion_available parameter provides for the
-            # in-memory path, expressed here so it survives the move into SQL.
             completion_clause = """
                 AND (
                     le.trophy_percent_completed >= %s
@@ -769,8 +731,6 @@ class CollectionsRepository:
             (first occurrence wins) rather than colliding on ``collection_definition_items``' primary key.
         :returns: The new definition's id.
         """
-        # Generated for every collection regardless of visibility -- see migration 0019's header for why
-        # this is unconditional rather than lazy (only assigned when sharing is first turned on).
         share_slug = secrets.token_urlsafe(9)
         async with self._pool.connection() as conn, conn.cursor() as cur:
             await cur.execute(
@@ -834,9 +794,6 @@ class CollectionsRepository:
             rows = await cur.fetchall()
         return {str(row[0]) for row in rows}
 
-    #: Shared by every read of collection_definitions -- item_count is one subquery, computed here rather
-    #: than making every caller (owner listing, profile listing, public share route) issue a second query
-    #: just to answer "how big is this" (what ProfileDefinitionResponse was missing before 0019).
     _DEFINITION_COLUMNS = """
         cd.definition_id, cd.identity_sub, cd.name, cd.kind, cd.console_id, cd.genre_filter, cd.min_score,
         cd.aaa_tier_filter, cd.sort_order, cd.description, cd.include_inactive, cd.min_percent_completed,

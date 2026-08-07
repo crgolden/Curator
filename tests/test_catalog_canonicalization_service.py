@@ -20,7 +20,7 @@ from curator.catalog.franchise_assigner import FranchiseRule
 
 _EDITION_RANKS = {"director": 1, "complete": 2, "gold": 3, "definitive": 4, "remastered": 5, "ps5": 6}
 _NAME_OVERRIDES = {
-    "10005732": "Cities: Skylines Remastered",  # title_meta_name wrongly names bundled DLC
+    "10005732": "Cities: Skylines Remastered",
     "10002926": "Bioshock Infinite: The Complete Edition",
 }
 _FRANCHISE_RULES = [
@@ -53,9 +53,6 @@ def _canonicalize(snapshots, *, exclusion_rules=None, franchise_rules=None, name
     )
 
 
-# ── normalize_name ──────────────────────────────────────────────────────────────────────────────────
-
-
 def test_strips_trademark_symbol():
     assert normalize_name("God of War™") == "God of War"
 
@@ -80,9 +77,6 @@ def test_strips_leading_trailing_whitespace():
     assert normalize_name("  Horizon  ") == "Horizon"
 
 
-# ── edition_rank ────────────────────────────────────────────────────────────────────────────────────
-
-
 def test_directors_cut_beats_complete():
     assert edition_rank("Ghost of Tsushima: Director's Cut", _EDITION_RANKS) < edition_rank(
         "God of War: Complete Edition", _EDITION_RANKS
@@ -103,9 +97,6 @@ def test_remastered_between_definitive_and_ps5():
     assert r < edition_rank("Horizon Zero Dawn PS5", _EDITION_RANKS)
 
 
-# ── canonicalize: activeFlag ────────────────────────────────────────────────────────────────────────
-
-
 def test_active_false_kept_but_flagged_inactive():
     """Inactive entitlements are kept and flagged, not dropped.
 
@@ -124,7 +115,6 @@ def test_active_false_kept_but_flagged_inactive():
 
 
 def test_active_missing_treated_as_active():
-    # Purchased titles omit activeFlag entirely -- only an explicit False is an ended entitlement.
     data = [_snapshot("God of War", "PS4GD")]
 
     games = _canonicalize(data)
@@ -143,8 +133,6 @@ def test_active_true_included():
 
 
 def test_concept_with_one_active_entry_is_active():
-    # A purchased copy coexisting with a lapsed PS Plus copy: any surviving access keeps the game
-    # playable, so the game is active even though one of its entitlements is not.
     data = [
         _snapshot("Game", "PS4GD", concept_id="123", active=False, entitlement_id="e1"),
         _snapshot("Game", "PS4GD", concept_id="123", active=True, entitlement_id="e2"),
@@ -185,7 +173,6 @@ def test_an_active_entry_wins_the_edition_tiebreak_over_an_inactive_ps5_one():
 
     assert games[0].winning_entitlement_id == "active-ps4"
     assert games[0].native_ps5 is False
-    # Platform availability is a fact about the game, so the inactive PS5 edition still counts here.
     assert games[0].ps4_eligible is True
 
 
@@ -197,15 +184,11 @@ def test_edition_tiebreak_falls_through_to_an_inactive_entry_when_none_are_activ
 
     games = _canonicalize(data)
 
-    # No active entry to prefer, so the usual PSGD-beats-PS4GD ordering decides.
     assert games[0].winning_entitlement_id == "inactive-ps5"
     assert games[0].active is False
 
 
 def test_winning_title_id_follows_the_winning_entry():
-    # winning_title_id exists purely so curator.library.library_build_orchestrator's trophy-match stage
-    # can attempt an exact PS4 trophy lookup within the same build run -- it must track whichever entry
-    # actually wins the edition tiebreak, the same as winning_entitlement_id already does.
     data = [
         _snapshot(
             "Game", "PSGD", concept_id="789", active=False, entitlement_id="inactive-ps5", title_id="PPSA00001_00"
@@ -227,12 +210,7 @@ def test_winning_title_id_is_none_when_the_winning_entry_has_no_title_id():
     assert games[0].winning_title_id is None
 
 
-# ── canonicalize: PSGD/PS4GD + edition tiebreak ────────────────────────────────────────────────────
-
-
 def test_psgd_beats_ps4gd_regardless_of_edition():
-    # Critical regression: "Complete Edition" (PS4GD, rank=2) was beating "Remastered" (PSGD, rank=5)
-    # because edition rank was the primary key. Fix: PSGD is always the primary sort key.
     data = [
         _snapshot("Horizon Zero Dawn: Complete Edition", "PS4GD", concept_id="1", entitlement_id="e1"),
         _snapshot("Horizon Zero Dawn Remastered", "PSGD", concept_id="1", entitlement_id="e2"),
@@ -244,8 +222,6 @@ def test_psgd_beats_ps4gd_regardless_of_edition():
 
 
 def test_psgd_beats_ps4gd_same_name():
-    # Regression: equal-name PSGD/PS4GD tiebreak resolved by insertion order, misclassifying 314 games
-    # as PS4-only.
     data = [
         _snapshot("Game Title", "PS4GD", concept_id="2", entitlement_id="e1"),
         _snapshot("Game Title", "PSGD", concept_id="2", entitlement_id="e2"),
@@ -263,19 +239,12 @@ def test_directors_cut_beats_base_within_ps4gd():
     assert "Director" in result[0].canonical_title
 
 
-# ── canonicalize: display name resolution ──────────────────────────────────────────────────────────
-
-
 def test_title_meta_preferred_for_display():
-    # Regression: game_meta_name = "CoffeeTalk" (no space); title_meta_name = "Coffee Talk". Display
-    # must use title_meta_name.
     data = [_snapshot("CoffeeTalk", "PS4GD", tm_name="Coffee Talk")]
     assert _canonicalize(data)[0].canonical_title == "Coffee Talk"
 
 
 def test_gm_name_used_for_exclusion_not_tm_name():
-    # game_meta_name carries "Bonus Content"/"Demo" suffixes that title_meta_name sometimes strips, so
-    # exclusion must check game_meta_name.
     exclusion_rules = [ExclusionRule(rule_id="x1", rule_type="name_pattern", pattern=r"bonus content")]
     data = [
         _snapshot("Horizon Zero Dawn Bonus Content App", "PSGD", tm_name="Horizon Zero Dawn"),
@@ -284,8 +253,6 @@ def test_gm_name_used_for_exclusion_not_tm_name():
 
 
 def test_display_name_concept_override_for_dlc_title_meta():
-    # Regression: Cities: Skylines PSGD entry has title_meta_name = "Cities: Skylines - Synthetic Dawn
-    # Radio" (a radio-station DLC), not the game name. The override table fixes this.
     concept_id = "10005732"
     assert concept_id in _NAME_OVERRIDES
     data = [
@@ -299,9 +266,6 @@ def test_display_name_concept_override_for_dlc_title_meta():
     result = _canonicalize(data)
     assert len(result) == 1
     assert result[0].canonical_title == "Cities: Skylines Remastered"
-
-
-# ── canonicalize: flags/franchise/dedup/sort ───────────────────────────────────────────────────────
 
 
 def test_native_ps5_yes_for_psgd():

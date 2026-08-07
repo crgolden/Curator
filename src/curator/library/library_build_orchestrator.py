@@ -28,10 +28,6 @@ if TYPE_CHECKING:
     from curator.psn.trophy_cache import CachedTrophyClient
     from curator.psn.trophy_client import TrophyClient
 
-#: PSN's PS4 store/content title ids start with this prefix (PS5's start with "PPSA" instead). Real PSN
-#: API tooling confirms the app-level "resolve a store title id to its trophy npCommunicationId" lookup
-#: (``TrophyClient.trophy_titles_for_title``) only works for this prefix -- there is no known public
-#: equivalent for PS5 title ids, so those always fall back to fuzzy name matching.
 _PS4_TITLE_ID_PREFIX = "CUSA"
 
 
@@ -182,8 +178,6 @@ async def enrich_games(
             )
         except EnrichmentAuthError as exc:
             if exc.provider in rejected_providers:
-                # disable_provider() already made this provider inert -- the same exception recurring for
-                # it would mean a logic error, not a real retry opportunity. Stop rather than spin.
                 break
             rejected_providers.append(exc.provider)
             enrichment_service.disable_provider(exc.provider)
@@ -366,10 +360,6 @@ class LibraryBuildOrchestrator:
         for game_id, game in candidates:
             title_id = game.winning_title_id
             if title_id and title_id.startswith(_PS4_TITLE_ID_PREFIX):
-                # One call per game (not batched across games): trophy_titles_for_title()'s response
-                # groups results by title id internally but the client doesn't currently surface which
-                # input id each result came back for, so batching would make results ambiguous. Bounded
-                # by the delta check above -- a steady-state library only pays this for new PS4 titles.
                 matches = await trophy_client.trophy_titles_for_title([title_id])
                 exact = next(
                     (title for title in matches if title.np_communication_id and title.progress is not None), None
@@ -404,17 +394,10 @@ class LibraryBuildOrchestrator:
                     )
                     fuzzy_matched_count += 1
                 else:
-                    # No confident match -- still stamp trophy_match_attempted_at so a genuinely
-                    # trophy-less title isn't re-attempted on every future refresh forever.
                     await self._library_repository.set_trophy_match(
                         identity_sub, game_id, np_communication_id=None, method=None
                     )
 
-        # Progress refresh for the whole library, not just this run's new matches. Identity is resolved
-        # once and never revisited, but percentages move every time the user plays, so a refresh that only
-        # covered newly-matched games would leave an established library permanently frozen at whatever
-        # each game read the day it was first matched. Reuses the titles already fetched above when the
-        # fuzzy pass ran; only pays for its own fetch when every game was already matched.
         if not titles:
             titles = await trophy_client.trophy_titles(limit=500)
         progress_by_np_id = {

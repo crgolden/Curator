@@ -158,14 +158,12 @@ def test_unknown_kid_triggers_a_refetch_and_succeeds_once_the_key_is_present():
     fetcher = FakeFetcher({"keys": [old_key.as_dict(private=False)]})
     validator = JwtValidator(AUTHORITY, fetch_json=fetcher)
 
-    # Prime the validator's cache with the "old" JWKS (simulating a Curator process that started before
-    # Identity rotated in key-2).
+
     token_old = _sign(old_key, "key-1")
     validator.validate(token_old)
     fetch_count_after_first_validate = len(fetcher.urls)
 
-    # Identity rotates: key-2 appears in the JWKS. A token signed with it carries an unrecognized kid, so
-    # the validator must refetch (not just fail) before giving up.
+
     fetcher.jwks = {"keys": [old_key.as_dict(private=False), new_key.as_dict(private=False)]}
     token_new = _sign(new_key, "key-2")
 

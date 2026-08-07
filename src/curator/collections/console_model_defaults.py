@@ -22,9 +22,6 @@ MODEL_CAPACITY_GB: dict[str, float] = {
     "PS4 Pro": 850.0,
 }
 
-# Used when either no model was given at all, or one was given but isn't in MODEL_CAPACITY_GB -- a
-# bigger guess than a known model's own published figure, which is why default_capacity_gb() reports it
-# separately (callers flag this case more loudly than a matched-model default).
 _PLATFORM_FALLBACK_GB: dict[str, float] = {"PS5": 667.0, "PS4": 430.0}
 _UNKNOWN_PLATFORM_FALLBACK_GB = 500.0
 

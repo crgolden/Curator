@@ -191,8 +191,6 @@ async def test_capacity_fill_spills_overflow_onto_an_attached_device():
         "sub-1", CollectionSpec(kind="capacity_fill", console_id="c1"), size_estimates=[]
     )
 
-    # Both titles fit -- one on the console's own drive, one on the attached M.2 -- because the two
-    # capacities are separate bins rather than pooled into one 120GB number a single-bin fill would use.
     assert {c.game_id for c in result.included} == {"a", "b"}
     assert result.excluded == ()
     assert result.used_gb == 120.0
@@ -219,8 +217,6 @@ async def test_capacity_fill_never_offers_usb_storage_to_a_ps5_console():
         "sub-1", CollectionSpec(kind="capacity_fill", console_id="c1"), size_estimates=[]
     )
 
-    # A PS5 title cannot run from USB storage -- the attached USB device's ample capacity must never
-    # absorb it, so it overflows despite the device having room to spare.
     assert result.included == ()
     assert [c.game_id for c in result.excluded] == ["a"]
 
@@ -287,8 +283,6 @@ async def test_filter_list_does_not_require_console():
 
 
 async def test_candidate_pool_excludes_inactive_entitlements_by_default():
-    # A collection is normally built from what its owner can actually launch. The filter lives in
-    # list_candidates -- the single chokepoint -- so every strategy inherits it.
     repository = FakeCollectionsRepository(candidates=[_row("g1")])
     orchestrator = CollectionOrchestrator(repository)
 
@@ -502,7 +496,7 @@ async def test_chained_candidate_ids_bypass_the_specs_own_predicate():
         consoles=[_console()],
         candidates=[
             _row("blockbuster_match", genre="Shooter", measured_size_gb=10.0),
-            _row("chained_in", genre="RPG", measured_size_gb=10.0),  # Criterion's genre, not Blockbuster's
+            _row("chained_in", genre="RPG", measured_size_gb=10.0),
             _row("neither", genre="Puzzle", measured_size_gb=10.0),
         ],
     )
@@ -535,9 +529,6 @@ async def test_chained_candidate_ids_order_breaks_ties():
     )
     orchestrator = CollectionOrchestrator(repository)
 
-    # genre_filter="Sports" excludes both RPG candidates from the spec's own normal match entirely --
-    # they can only enter the packing pool via chained_candidate_ids, which is the point: this isolates
-    # the chained list's own tie-break order from matched's (unaffected, pool-order) tie-break.
     spec = CollectionSpec(kind="capacity_fill", console_id="c1", genre_filter=("Sports",), sort_order="composite_desc")
     result_a_first = await orchestrator.generate(
         "sub-1", spec, size_estimates=[], chained_candidate_ids=("only_room_for_one_a", "only_room_for_one_b")
@@ -563,7 +554,7 @@ async def test_chained_candidate_ids_not_double_counted_when_already_matched():
         chained_candidate_ids=("g1",),
     )
 
-    assert [c.game_id for c in result.included] == ["g1"]  # once, not twice
+    assert [c.game_id for c in result.included] == ["g1"]
 
 
 async def test_sort_order_reaches_capacity_fill_packing():
@@ -580,9 +571,6 @@ async def test_sort_order_reaches_capacity_fill_packing():
         "sub-1", CollectionSpec(kind="capacity_fill", console_id="c1", sort_order="composite_desc"), size_estimates=[]
     )
 
-    # critical_score is the only score set (oc_score/psn_rating both None), so composite_score ==
-    # critical_score here -- "high_rank_low_composite" (default critical_score=90.0 from _row) must sort
-    # first under composite_desc even though nothing set its rank_score higher.
     assert next(c.game_id for c in result.included) == "high_rank_low_composite"
 
 

@@ -107,5 +107,5 @@ async def test_publish_library_refresh_continuation_schedules_a_message_with_the
         "seq": 1,
     }
     assert schedule_time_utc >= before
-    # No job_runs row is created -- this reuses an existing run_id, it doesn't mint a new run.
+
     assert job_runs_repository.created == []

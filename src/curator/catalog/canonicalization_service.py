@@ -55,11 +55,6 @@ class GroupedEntry:
     product_id: str | None
     entitlement_id: str
     active: bool | None = None
-    #: PSN's store/content title id (e.g. ``"CUSA00419_00"``). Used within the same build run by a
-    #: downstream stage (``curator.library.library_build_orchestrator.LibraryBuildOrchestrator
-    #: .match_trophies``) for an exact PS4 trophy-title lookup (``TrophyClient.trophy_titles_for_title``),
-    #: and persisted to ``library_entries.title_id`` (see ``0023_library_entries_title_id.sql``) for the
-    #: PSN catalog enrichment continuation-resume path. See ``CanonicalGame.winning_title_id``.
     title_id: str | None = None
 
 
@@ -80,10 +75,6 @@ class CanonicalGame:
     concept_ids: tuple[str, ...]
     winning_entitlement_id: str | None
     active: bool = True
-    #: The winning edition's PSN store/content title id, if known. Used transiently within the same build
-    #: pass for :meth:`~curator.library.library_build_orchestrator.LibraryBuildOrchestrator.match_trophies`'s
-    #: exact lookup, and persisted to ``library_entries.title_id`` for PSN catalog enrichment's
-    #: continuation-resume path (``0023_library_entries_title_id.sql``). See ``GroupedEntry.title_id``.
     winning_title_id: str | None = None
 
 
@@ -141,26 +132,14 @@ def canonicalize(
     groups: dict[str, list[GroupedEntry]] = {}
 
     for snapshot in snapshots:
-        # Inactive entitlements used to be dropped here. They are kept now and carried through to
-        # library_entries.is_active instead: dropping them made "everything I ever had access to"
-        # unreachable, and -- because library_entries is upserted with no delete pass -- left a lapsed
-        # title stranded in the user's library forever rather than hiding it. See
-        # 0012_library_entry_active_state.sql.
         if snapshot.concept_id and snapshot.concept_id in globally_excluded_concept_ids:
             continue
 
-        # Exclusion uses game_meta_name -- it carries "Bonus Content", "Demo", etc. suffixes that
-        # title_meta_name often strips.
         gm_name = normalize_name(snapshot.game_meta_name or "")
         if not gm_name or should_exclude(gm_name, exclusion_rules):
             continue
 
         concept_id = snapshot.concept_id or ""
-        # Display name prefers title_meta_name -- it's a per-entitlement field, so it correctly carries
-        # edition-specific text (e.g. "DEATH STRANDING DIRECTOR'S CUT") that concept_meta_name does NOT
-        # (concept-level, identical across every edition sharing a concept id). name_overrides is the
-        # manual escape hatch for the specific concepts where title_meta_name IS wrong (cross-concept
-        # metadata corruption).
         raw_display = name_overrides.get(concept_id) or snapshot.title_meta_name or snapshot.game_meta_name or ""
         name = normalize_name(raw_display)
         if not name:
@@ -174,8 +153,6 @@ def canonicalize(
                 concept_id=concept_id or None,
                 product_id=snapshot.product_id,
                 entitlement_id=snapshot.entitlement_id,
-                # activeFlag missing entirely means active (purchased titles omit it); only an explicit
-                # False is an ended entitlement.
                 active=snapshot.active,
                 title_id=snapshot.title_id,
             )
@@ -185,19 +162,8 @@ def canonicalize(
 
     canonical: list[CanonicalGame] = []
     for entries in merged_groups.values():
-        # Deliberately computed over every entry, active or not: which platforms a game shipped on is a
-        # fact about the game, not about whether this user's access to it has lapsed.
         has_ps5 = any(e.package_type == "PSGD" for e in entries)
         has_ps4 = any(e.package_type == "PS4GD" for e in entries)
-        # Active entries win outright. This term exists because inactive entitlements used to be filtered
-        # out before this line ran, which made the winner active by construction; now that they survive,
-        # an inactive PSGD would otherwise beat an active PS4GD and canonical_title/product_id/
-        # winning_entitlement_id would start naming an edition the user cannot launch. Ranking active
-        # first reproduces the old winner exactly whenever the group has any active entry, and only falls
-        # through to an inactive one when every entry is inactive.
-        # Below that: PSGD always beats PS4GD regardless of edition rank -- a PS5 native remaster
-        # outranks a PS4 Complete Edition in the same concept group. Within the same packageType, prefer
-        # the higher-ranked (lower rank number) edition.
         winner = min(
             entries,
             key=lambda e: (
@@ -215,8 +181,6 @@ def canonicalize(
                 product_id=winner.product_id,
                 concept_ids=tuple(sorted({e.concept_id for e in entries if e.concept_id})),
                 winning_entitlement_id=winner.entitlement_id,
-                # Any surviving access keeps the game playable: a user who had a title on PS Plus and
-                # later bought it has one inactive and one active entitlement, and still owns the game.
                 active=any(e.active is not False for e in entries),
                 winning_title_id=winner.title_id,
             )

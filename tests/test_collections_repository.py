@@ -13,8 +13,6 @@ from curator.collections.repository import CollectionsRepository
 class FakeCursor:
     def __init__(self, connection):
         self._connection = connection
-        # psycopg exposes rowcount as a plain (non-async) attribute; delete_definition reads it to tell
-        # "deleted" from "wasn't yours / didn't exist".
         self.rowcount = connection.rowcount
 
     async def execute(self, sql, params=None):
@@ -236,9 +234,6 @@ async def test_list_candidates_excludes_games_installed_on_the_given_consoles():
     sql, params = pool.connections[0].executed[0]
     assert "console_installs" in sql
     assert "ci.installed = true" in sql
-    # Scoped to identity_sub's own consoles via a join to user_consoles -- the caller-passed ids are
-    # matched against ci.console_id, but only among rows already scoped to this identity_sub, so a
-    # foreign console id can't be used to probe another user's install state.
     assert "uc.identity_sub = %s" in sql
     assert params == ("sub-1", "sub-1", ["c1", "c2"])
 
@@ -254,8 +249,6 @@ async def test_save_definition_returns_new_id_and_serializes_genre_filter():
     sql, params = pool.connections[0].executed[0]
     assert "INSERT INTO collection_definitions" in sql
     assert params is not None
-    # The second-to-last element is share_slug -- generated fresh (secrets.token_urlsafe) on every call,
-    # so it can only be asserted structurally, not as a literal value. The last is exclude_installed_on.
     assert params[:-2] == (
         "sub-1",
         "My RPGs",
@@ -336,13 +329,10 @@ async def test_save_definition_stores_membership_ranked_by_position():
     assert executed[0][1] is not None
     assert executed[0][1][2] == "Best of"
     assert "INSERT INTO collection_definition_items" in executed[1][0]
-    # Rank follows the caller's array position, not the id -- the owner's chosen order is the stored order.
     assert [call[1] for call in executed[1:]] == [("def-1", "g2", 1), ("def-1", "g1", 2)]
 
 
 async def test_save_definition_drops_duplicate_game_ids():
-    # collection_definition_items is keyed on (definition_id, game_id); a repeated id would otherwise
-    # violate the primary key and surface as a 500 on an otherwise reasonable request.
     pool = FakePool(fetchone_results=[("def-1",)])
     repo = CollectionsRepository(pool)
 
@@ -394,16 +384,12 @@ async def test_list_definitions_maps_rows():
     assert definitions[0].min_percent_completed == 60
     assert definitions[0].filter_predicate is None
     assert definitions[0].exclude_installed_on == ("c1",)
-    # to_spec() must carry it, or a saved "include everything I ever had" collection silently reverts to
-    # active-only the next time it is re-run.
     assert definitions[0].to_spec().include_inactive is True
     assert definitions[0].to_spec().min_percent_completed == 60
     assert definitions[0].to_spec().exclude_installed_on == ("c1",)
 
 
 async def test_list_definitions_parses_a_stored_filter_predicate():
-    # psycopg auto-deserializes JSONB columns to a plain dict -- same as job_runs.result_summary's
-    # existing pattern (curator.jobs.repository), so the row value here is already a dict, not a str.
     pool = FakePool(
         fetchall_results=[
             [
@@ -434,7 +420,6 @@ async def test_list_definitions_parses_a_stored_filter_predicate():
     definitions = await repo.list_definitions("sub-1")
 
     assert definitions[0].filter_predicate == GenreIn(values=("RPG",))
-    # to_spec() must carry it, or a saved OR-predicate collection reverts to no filter at all on re-run.
     assert definitions[0].to_spec().filter_predicate == GenreIn(values=("RPG",))
 
 
@@ -474,8 +459,6 @@ async def test_get_definition_scopes_to_identity_sub():
 
 
 async def test_existing_game_ids_casts_to_uuid_array():
-    # Without the ::uuid[] cast Postgres compares uuid to text and the query fails outright; with it, a
-    # malformed id raises InvalidTextRepresentation, which the route turns into a 400.
     pool = FakePool(fetchall_results=[[("g1",)]])
     repo = CollectionsRepository(pool)
 
@@ -496,8 +479,6 @@ async def test_existing_game_ids_short_circuits_on_empty_input():
 
 
 async def test_list_definition_items_takes_no_identity_sub_and_orders_by_rank():
-    # No owner scoping anywhere in this query: a collection's contents (and its cover art) must look the
-    # same to the owner, another signed-in viewer, and an anonymous one.
     row = ("g1", 1, "God of War", "God of War", "Action", "AAA", 94.0, 92.0, 4.5, "a.png", True)
     pool = FakePool(fetchall_results=[[row]])
     repo = CollectionsRepository(pool)
@@ -512,14 +493,10 @@ async def test_list_definition_items_takes_no_identity_sub_and_orders_by_rank():
     sql, params = pool.connections[0].executed[0]
     assert params == ("def-1",)
     assert "ORDER BY cdi.rank" in sql
-    # The only identity in this query is the owner's, reached through collection_definitions -- never a
-    # viewer's, or a shared collection would render differently depending on who opened it. The single
-    # bind parameter above is the proof: there is nowhere to pass a viewer.
     assert "cd.identity_sub" in sql
 
 
 async def test_list_definition_items_reports_a_game_the_owner_lost_access_to():
-    # It stays in the collection -- it is the owner's curated list -- and is flagged rather than dropped.
     row = ("g1", 1, "Lapsed Title", None, None, None, None, None, None, None, False)
     pool = FakePool(fetchall_results=[[row]])
     repo = CollectionsRepository(pool)
@@ -569,8 +546,6 @@ async def test_list_definition_items_joins_psn_catalog_cache_by_title_id_not_pro
 
 
 async def test_update_definition_sets_updated_at_explicitly():
-    # collection_definitions.updated_at has DEFAULT now() but no trigger, so an UPDATE that omits it
-    # leaves the creation timestamp in place forever.
     pool = FakePool()
     repo = CollectionsRepository(pool)
 
@@ -591,8 +566,6 @@ async def test_update_definition_leaves_membership_alone_when_game_ids_is_none()
 
 
 async def test_update_definition_replaces_membership_in_the_same_transaction():
-    # One connection block, so a rename can never land while its item replacement fails -- a collection
-    # named for one thing holding the contents of another is worse than the edit not happening.
     pool = FakePool()
     repo = CollectionsRepository(pool)
 
@@ -615,7 +588,6 @@ async def test_delete_definition_reports_whether_a_row_went():
 
 
 async def test_delete_definition_returns_false_when_not_the_callers():
-    # Scoped by identity_sub in SQL, so "someone else's" and "doesn't exist" are the same 0-row outcome.
     pool = FakePool(rowcount=0)
     repo = CollectionsRepository(pool)
 

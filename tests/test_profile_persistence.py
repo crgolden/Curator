@@ -71,11 +71,6 @@ class FakePool:
         return conn
 
 
-# ---------------------------------------------------------------------------------------------------
-# ProfileRepository
-# ---------------------------------------------------------------------------------------------------
-
-
 async def test_get_settings_returns_all_false_defaults_when_no_row():
     pool = FakePool(fetchone_result=None)
     repo = ProfileRepository(pool)
@@ -120,11 +115,6 @@ async def test_upsert_settings_round_trips_every_field():
     assert "INSERT INTO user_profiles" in sql
     assert "ON CONFLICT (identity_sub) DO UPDATE" in sql
     assert params == ("sub-1", True, True, True, False, True)
-
-
-# ---------------------------------------------------------------------------------------------------
-# FollowRepository
-# ---------------------------------------------------------------------------------------------------
 
 
 async def test_follow_executes_insert_with_on_conflict_do_nothing():

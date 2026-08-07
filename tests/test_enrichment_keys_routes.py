@@ -132,8 +132,6 @@ def test_get_status_surfaces_a_rejected_rawg_key_even_though_it_is_still_configu
 
     status = client.get("/me/enrichment-keys", headers=_bearer("valid-token")).json()
 
-    # Still configured -- the key exists -- but flagged as no longer working, so /psn can distinguish a
-    # healthy key from one that needs to be re-entered.
     assert status["rawg_configured"] is True
     assert status["rawg_key_rejected_at"] == _FIXED_REJECTED_AT.isoformat()
     assert status["opencritic_key_rejected_at"] is None
@@ -157,7 +155,7 @@ def test_put_rawg_key_encrypts_and_stores_then_status_reflects_it():
     assert response.status_code == 204
     sub, key_enc = repo.upsert_rawg_calls[0]
     assert sub == SUB
-    assert key_enc != b"my-rawg-key"  # encrypted, not stored raw
+    assert key_enc != b"my-rawg-key"
     assert audit.entries == [(SUB, "enrichment_key_added", "rawg")]
 
     status = client.get("/me/enrichment-keys", headers=_bearer("valid-token")).json()
@@ -226,8 +224,6 @@ def test_put_rawg_key_rejected_by_provider_is_400_and_not_persisted():
 
 
 def test_provider_rejection_logs_the_providers_own_explanation_never_the_key(caplog):
-    # The 400 body has to say the same thing for every rejection reason, so the log is the only place the
-    # real cause survives -- and it must survive without dragging the caller's key along with it.
     def _handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(401, json={"error": "The monthly limit has been reached for secret-key"})
 

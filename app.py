@@ -52,8 +52,6 @@ def _report_bootstrap_failure(exc: BaseException) -> None:
 
     :param exc: The exception that aborted bootstrap.
     """
-    # PascalCase, not SCREAMING_CASE: matches the fleet-wide Azure App Service setting convention (see
-    # curator.settings), not a naming mistake -- ruff's uppercase-env-var convention doesn't apply here.
     node = os.environ.get("ElasticsearchNode")  # noqa: SIM112
     username = os.environ.get("ElasticsearchUsername")  # noqa: SIM112
     password = os.environ.get("ElasticsearchPassword")  # noqa: SIM112

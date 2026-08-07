@@ -17,8 +17,6 @@ from curator.psn.session import PsnSession
 
 _GAME_TITLES_URI = "https://m.np.playstation.com/api/catalog/v2/titles"
 
-# Universal search is entirely GraphQL persisted queries, not a plain REST endpoint. A first "context" query
-# returns the initial page + a cursor; subsequent pages use a "domain" query with that cursor.
 _SEARCH_COMMON_HEADERS = {
     "accept": "application/json",
     "content-type": "application/json",
@@ -62,7 +60,6 @@ def _cover_image_url(media: Any) -> str | None:
     for preferred in ("GAMEHUB_COVER_ART", "MASTER", "LOGO"):
         if by_type.get(preferred):
             return str(by_type[preferred])
-    # Fall back to the first image with a URL.
     return next((img.get("url") for img in images if isinstance(img, dict) and img.get("url")), None)
 
 
@@ -91,7 +88,6 @@ def _parse_title_concept(concept: dict[str, Any]) -> TitleConcept:
 def _game_search_result(item: dict[str, Any]) -> GameSearchResult:
     """Map a raw PSN universal-search game/add-on item to our :class:`GameSearchResult`."""
     result = item.get("result") or {}
-    # A Concept carries its price on a defaultProduct; a Product carries it directly.
     price = result.get("price") or (result.get("defaultProduct") or {}).get("price") or {}
     media = result.get("media") or []
     image_url = next((m.get("url") for m in media if isinstance(m, dict) and m.get("url")), None)

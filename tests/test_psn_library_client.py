@@ -134,9 +134,7 @@ async def test_entitlements_default_is_unbounded_past_500():
 
 
 async def test_entitlements_explicit_limit_still_caps():
-    # PSN honors the requested page limit, so a single page of exactly 15 (page_limit = min(20, 15)) is
-    # what a real response would look like -- proves an explicit limit still stops the loop early even
-    # though totalResults says there's far more available.
+
     page = _synthetic_page(0, 15, total_results=1000)
     client = LibraryClient(FakeSession(entitlements_pages=[page]))
 

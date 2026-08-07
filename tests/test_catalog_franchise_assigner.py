@@ -113,8 +113,6 @@ def test_anno_1800_matches():
 
 
 def test_anno_mutationem_does_not_match():
-    # Regression: \banno\b matched "ANNO" in "ANNO: Mutationem", incorrectly awarding +1 franchise pt.
-    # Fixed to \banno \d{4}\b.
     assert _assign("ANNO: Mutationem") == ""
 
 
@@ -144,19 +142,15 @@ def test_no_franchise_for_standalone():
 
 
 def test_nba_2k_with_year_matches():
-    # Regression: \bnba 2k\b failed for "NBA 2K16" -- digit after "2k" is a word char so \b didn't fire.
-    # Fixed to \bnba 2k (no trailing \b).
     assert _assign("NBA 2K25") == "NBA 2K"
     assert _assign("NBA 2K16") == "NBA 2K"
 
 
 def test_watch_dogs_underscore_matches():
-    # Regression: "watch dogs" (space) didn't match "Watch_Dogs2" (underscore). Fixed to watch.?dogs.
     assert _assign("Watch_Dogs2") == "Watch Dogs"
 
 
 def test_eas_fc_matches():
-    # Regression: "ea sports fc" didn't match "EAS FC 24" (abbreviated form).
     assert _assign("EAS FC 24") == "FIFA / EA Sports FC"
 
 

@@ -210,7 +210,7 @@ async def test_handle_skips_opencritic_refresh_when_not_configured():
     assert result is not None
     assert enrichment_service.refresh_opencritic_cache_calls == 0
     assert result["opencritic_cache_refresh"] == {"status": "not_configured"}
-    # passes 2/3/4 still ran despite OpenCritic being unconfigured
+
     assert catalog_repository.reclassify_franchise_calls == [_FRANCHISE_RULES]
 
 
@@ -225,7 +225,7 @@ async def test_handle_records_opencritic_auth_error_without_failing_job():
 
     assert result is not None
     assert result["opencritic_cache_refresh"] == {"status": "auth_error", "detail": "bad key"}
-    # the job as a whole still completes normally -- passes 2/3/4 still ran
+
     assert catalog_repository.reclassify_franchise_calls == [_FRANCHISE_RULES]
 
 
@@ -310,7 +310,7 @@ async def test_handle_stops_enrichment_pass_on_provider_error_but_reports_partia
     result = await handle()
 
     assert result is not None
-    # the first game was enriched and saved before the stop
+
     assert len(enrichment_repository.save_calls) == 1
     assert enrichment_repository.save_calls[0][0] == "id-1"
     enrichment_summary = result["enrichment"]

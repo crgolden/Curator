@@ -89,9 +89,6 @@ def _request(repository: FakeRepository, trophy_client_factory: FakeTrophyClient
     )
 
 
-# -- match_completion (pure) -------------------------------------------------------------------------
-
-
 def test_match_completion_matches_identical_titles():
     titles = [_title("God of War Ragnarök", progress=87)]
     result = match_completion(titles, [("g1", "God of War Ragnarök")])
@@ -129,17 +126,12 @@ def test_match_completion_resolves_multiple_games_independently():
 
 
 def test_match_completion_is_one_to_one_only_the_better_match_keeps_the_title():
-    # "Sample Game" and "Sample Games" both clear threshold against the single trophy title -- a base
-    # game and a similarly-named edition/sequel is exactly the kind of collision this guards against.
-    # Without one-to-one assignment, both would independently claim the same title's percentage.
     titles = [_title("Sample Game", progress=87)]
     result = match_completion(titles, [("weaker", "Sample Games"), ("exact", "Sample Game")], threshold=0.80)
     assert result == {"exact": 87}
 
 
 def test_match_completion_one_to_one_assignment_is_score_ordered_not_input_ordered():
-    # The weaker match is listed first in the input; the exact match must still win the title, proving
-    # assignment is sorted by score rather than "first candidate in iteration order wins."
     titles = [_title("Sample Game", progress=87)]
     result = match_completion(titles, [("weaker", "Sample Games"), ("exact", "Sample Game")], threshold=0.80)
     assert "weaker" not in result
@@ -147,8 +139,6 @@ def test_match_completion_one_to_one_assignment_is_score_ordered_not_input_order
 
 
 def test_match_completion_title_claimed_by_one_game_is_unavailable_to_another():
-    # Once "Sample Game" is claimed by the exact match, a second, unrelated game must not also be able to
-    # claim it even if it would otherwise have cleared threshold against it in isolation.
     titles = [_title("Sample Game", progress=87)]
     result = match_completion(
         titles,
@@ -158,13 +148,8 @@ def test_match_completion_title_claimed_by_one_game_is_unavailable_to_another():
     assert result == {"exact": 87}
 
 
-# -- _resolve_completion (pure: exact-by-id lookup, fuzzy fallback for the rest) -----------------------
-
-
 def test_resolve_completion_exact_lookup_by_persisted_np_communication_id():
     titles = [_title("Some Trophy Title Name", progress=75, np_communication_id="NPWR00001_00")]
-    # canonical_title is deliberately nothing like the trophy title's name -- proves this resolves by id,
-    # not by falling through to a fuzzy match that happens to also succeed.
     result = _resolve_completion(titles, [("g1", "Totally Different Catalog Title", "NPWR00001_00")])
     assert result == {"g1": 75}
 
@@ -176,16 +161,12 @@ def test_resolve_completion_falls_back_to_fuzzy_when_no_persisted_id():
 
 
 def test_resolve_completion_persisted_id_not_found_in_current_titles_falls_back_to_fuzzy():
-    # A stale/wrong persisted id (or PSN simply not returning that title this call) must not produce a
-    # blank result if the fuzzy fallback would otherwise have found a confident match.
     titles = [_title("God of War Ragnarök", progress=87, np_communication_id="NPWR00002_00")]
     result = _resolve_completion(titles, [("g1", "God of War Ragnarök", "NPWR00099_00")])
     assert result == {"g1": 87}
 
 
 def test_resolve_completion_exact_match_withholds_its_title_from_the_fuzzy_pool():
-    # "g1" exactly claims the only trophy title via its persisted id. "g2" has no persisted id and would
-    # otherwise fuzzy-match that same title (identical name) -- it must not also claim it.
     titles = [_title("Same Name", progress=75, np_communication_id="NPWR00001_00")]
     result = _resolve_completion(titles, [("g1", "Anything", "NPWR00001_00"), ("g2", "Same Name", None)])
     assert result == {"g1": 75}
@@ -202,8 +183,6 @@ def test_resolve_completion_mixes_exact_and_fuzzy_across_different_games():
     )
     assert result == {"g1": 87, "g2": 42}
 
-
-# -- get_completion_map / get_completion_result (soft-failing orchestration) -------------------------
 
 
 async def test_no_games_returns_empty_without_touching_repository():

@@ -23,6 +23,4 @@ class GameCandidate:
     composite_score: float | None
     rank_score: int
     size_gb: float
-    #: Percentage of this game's trophies the owner has earned, or ``None`` if unavailable (no PSN link,
-    #: trophy harvesting disabled, or no confident title match -- see ``curator.psn.trophy_completion``).
     percent_completed: int | None = None

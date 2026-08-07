@@ -215,8 +215,7 @@ def test_a_terminal_run_does_not_block_a_new_refresh():
 
 
 def test_a_stale_non_terminal_run_is_superseded_not_returned():
-    # Older than the 24h staleness threshold, still nominally "rate_limited" -- e.g. its scheduled
-    # continuation message never fired, or the queue consumer was down for an extended outage.
+
     stale = FakeJobRun(
         "run-stale",
         "library_refresh",
@@ -240,7 +239,7 @@ def test_a_stale_non_terminal_run_is_superseded_not_returned():
 
 
 def test_a_run_within_the_staleness_threshold_is_not_superseded_even_while_rate_limited():
-    # A legitimate long provider-backoff wait (observed up to ~8h in prod) must not be mistaken for dead.
+
     waiting = FakeJobRun(
         "run-waiting",
         "library_refresh",
@@ -385,8 +384,7 @@ def test_get_library_returns_callers_own_games_with_ratings_and_category():
 
 
 def test_get_library_flags_a_game_the_caller_lost_access_to():
-    # A lapsed PS Plus title stays in the library, marked -- rather than silently disappearing (which is
-    # what dropping inactive entitlements at ingestion appeared to do, while actually stranding the row).
+
     games = [
         FakeLibraryGameView("game-1", "Still Mine"),
         FakeLibraryGameView("game-2", "Lapsed Plus Title", is_active=False),

@@ -40,15 +40,8 @@ if TYPE_CHECKING:
     from curator.psn.models import TrophyTitle
     from curator.psn.trophy_client import TrophyClientFactory
 
-#: Below this similarity ratio, a "best" trophy title match isn't trusted. Stricter than
-#: ``rawg_matcher.DEFAULT_MATCH_THRESHOLD`` (0.45) -- that threshold suits RAWG search results already
-#: narrowed semantically, but here both names come from PSN's own catalog for the literal same game, so an
-#: honest match should usually score much higher. A wrong match (someone else's completion percentage shown
-#: against the wrong game) is worse than a blank one, so this errs toward blank.
 DEFAULT_MATCH_THRESHOLD = 0.80
 
-#: The same cap ``GET /trophies/titles`` already exposes (``Query(..., le=500)``) -- bounds a cold-cache
-#: fetch to at most ~10 sequential PSN calls at the client's internal page size of 50.
 _TITLES_LIMIT = 500
 
 
@@ -82,8 +75,6 @@ def match_titles(
     if not games or not named_titles:
         return {}
 
-    # Normalized once per string, not once per pairwise comparison (each string was previously re-normalized
-    # inside every comparison it took part in -- once per title for every game, and vice versa).
     normalized_games = [(game_id, normalize(canonical_title)) for game_id, canonical_title in games]
     normalized_titles = [(index, normalize(title.name or "")) for index, title in enumerate(named_titles)]
 
@@ -91,9 +82,6 @@ def match_titles(
     for game_id, game_norm in normalized_games:
         for title_index, title_norm in normalized_titles:
             matcher = SequenceMatcher(None, game_norm, title_norm)
-            # real_quick_ratio() (O(1), length-based) and quick_ratio() (O(n), character-count-based) are
-            # both upper bounds on ratio() -- checking them first rejects most pairs before the expensive
-            # full comparison ever runs, without ever producing a false negative.
             if matcher.real_quick_ratio() < threshold or matcher.quick_ratio() < threshold:
                 continue
             score = matcher.ratio()
@@ -170,8 +158,6 @@ def _resolve_completion(titles: list[TrophyTitle], games: Iterable[tuple[str, st
             fuzzy_candidates.append((game_id, canonical_title))
 
     if fuzzy_candidates:
-        # Titles an exact lookup already claimed are withheld from the fuzzy pool too -- otherwise a
-        # similarly-named unmatched game could still claim an already-resolved title's percentage.
         remaining_titles = [title for title in titles if title.np_communication_id not in exact_np_ids]
         result.update(match_completion(remaining_titles, fuzzy_candidates))
     return result

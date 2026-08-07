@@ -23,10 +23,6 @@ from curator.collections.game_candidate import GameCandidate
 SortKey = Callable[[GameCandidate], tuple[object, ...]]
 
 _SORT_ORDERS: dict[str, SortKey] = {
-    # Not None first, then descending by value -- the same "NULLS LAST, descending" shape used
-    # everywhere else scores are sorted (e.g. curator.library.repository's SQL ORDER BY columns), just
-    # expressed as an in-memory key since this sort has to run before capacity-fill packing, which SQL
-    # can't do.
     "composite_desc": lambda candidate: (candidate.composite_score is not None, candidate.composite_score or 0.0),
 }
 

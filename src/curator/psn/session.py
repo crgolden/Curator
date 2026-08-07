@@ -32,17 +32,13 @@ _AUTH_BASE = "https://ca.account.sony.com/api/authz/v3/oauth"
 _CLIENT_ID = "09515159-7237-4370-9b40-3806e67c0891"
 _SCOPE = "psn:mobile.v2.core psn:clientapp"
 _REDIRECT_URI = "com.scee.psxandroid.scecompcall://redirect"
-# PSN's fixed OAuth client secret for the official Android app (not user-specific).
 _BASIC_AUTH = "Basic MDk1MTUxNTktNzIzNy00MzcwLTliNDAtMzgwNmU2N2MwODkxOnVjUGprYTV0bnRCMktxc1A="
 _TOKEN_USER_AGENT = "com.sony.snei.np.android.sso.share.oauth.versa.USER_AGENT"
 
-# A representative mobile-browser UA per request. PSN does not appear to fingerprint strictly -- a live spike
-# against a real account with this exact UA succeeded with no blocking.
 _DEFAULT_USER_AGENT = (
     "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Mobile Safari/537.36"
 )
 
-# A conservative, untested guess at PSN's rate limit.
 RATE_LIMIT_MAX_REQUESTS = 300
 RATE_LIMIT_WINDOW_SECONDS = 15 * 60
 
@@ -242,11 +238,6 @@ class PsnSession:
         token: dict[str, Any] = response.json()
         now = time.time()
         token["access_token_expires_at"] = token["expires_in"] + now
-        # _authorization_code() always requests access_type=offline, so a normal exchange gets a refresh_token.
-        # PSN can still theoretically omit one (rate limiting, an account-level restriction, ...); such a token
-        # is still persisted below -- it's usable until access_token_expires_at, at which point _refresh() will
-        # raise PsnAuthError (no refresh_token to use), and reverify_link() treats that as a stale link and
-        # clears it, prompting the user for a fresh npsso.
         if "refresh_token_expires_in" in token:
             token["refresh_token_expires_at"] = token["refresh_token_expires_in"] + now
         self.token_response = token

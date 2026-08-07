@@ -9,8 +9,6 @@ from curator.psn.models import Entitlement
 class FakeLibraryClient:
     def __init__(self, entitlements=None, raw_entries=None):
         self._entitlements = entitlements or []
-        # Verbatim PSN payloads keyed by entitlement_id; defaults to a marker dict per entitlement so
-        # tests can assert the raw pass-through without spelling out a full payload every time.
         self._raw_entries = raw_entries or {
             (entitlement.entitlement_id or ""): {"id": entitlement.entitlement_id, "_fake_raw": True}
             for entitlement in self._entitlements

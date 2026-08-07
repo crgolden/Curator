@@ -9,13 +9,9 @@ import re
 from dataclasses import dataclass
 from difflib import SequenceMatcher
 
-# PS4/PS5 platform ids on RAWG. Rejecting results without either prevents matching PC-only, mobile, or
-# prior-gen PlayStation titles (PS3/PS2/PS1) that share a name with a PS4/PS5 game -- RAWG's broader
-# "playstation" parent-platform slug covers PS1-PS5 and is too imprecise for this.
 PS4_PLATFORM_ID = 18
 PS5_PLATFORM_ID = 187
 
-# Below this SequenceMatcher ratio, a "best" candidate isn't trusted as a real match.
 DEFAULT_MATCH_THRESHOLD = 0.45
 
 

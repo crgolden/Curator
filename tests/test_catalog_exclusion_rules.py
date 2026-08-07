@@ -27,7 +27,6 @@ def test_excludes_media_app_exact():
 
 
 def test_excludes_media_app_with_suffix():
-    # "VUDU HD Movies" must match "VUDU" via startswith.
     assert should_exclude("VUDU HD Movies", _RULES) is True
 
 
@@ -60,7 +59,6 @@ def test_excludes_season_pass():
 
 
 def test_whitelist_overrides_exclusion():
-    # Ghost of Tsushima - Bonus Content is a full standalone mode, not DLC.
     assert should_exclude("Ghost of Tsushima - Bonus Content", _RULES) is False
 
 
@@ -69,7 +67,6 @@ def test_normal_game_not_excluded():
 
 
 def test_call_of_duty_infinite_warfare_not_excluded():
-    # Paid title; only Warzone (F2P) is excluded from the Call of Duty family.
     assert should_exclude("Call of Duty: Infinite Warfare", _RULES) is False
 
 

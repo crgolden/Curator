@@ -88,7 +88,6 @@ async def test_require_preference_returns_link_when_category_flag_on():
 @pytest.mark.parametrize("category", ["harvest_identity", "harvest_presence", "harvest_devices"])
 async def test_require_preference_checks_the_named_category_independently(category):
     repository = FakeRepository()
-    # Only harvest_trophies is on -- every other category must still be gated off.
     repository.links[SUB] = _link(harvest_trophies=True)
 
     with pytest.raises(HTTPException) as exc_info:

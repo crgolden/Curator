@@ -21,8 +21,6 @@ from curator.enrichment.opencritic_matcher import OpenCriticGame
 OPENCRITIC_BASE_URL = "https://opencritic-api.p.rapidapi.com"
 DEFAULT_PAGE_SIZE = 20
 
-# Enough of an error body to carry RapidAPI's own explanation, short enough that a wall of HTML from a
-# gateway can't flood the log.
 MAX_PROVIDER_DETAIL_CHARS = 300
 
 
@@ -163,8 +161,6 @@ class OpenCriticClient:
         self._headers = {"x-rapidapi-host": "opencritic-api.p.rapidapi.com", "x-rapidapi-key": rapidapi_key}
 
     def _raise_for_status(self, response: httpx.Response) -> None:
-        # An instance method, not a static one, so the caller's own key can be redacted out of the body
-        # excerpt before it goes anywhere.
         try:
             response.raise_for_status()
         except httpx.HTTPStatusError as exc:
@@ -248,9 +244,6 @@ class OpenCriticClient:
             games.extend(_to_game(entry) for entry in data if entry.get("id") is not None and entry.get("name"))
 
             count = len(data)
-            # This page is fully processed -- advance the resume point now, before any of the break
-            # conditions below, so a rate-limit-triggered stop still resumes past it next time instead of
-            # re-fetching (and re-counting against quota) the exact same page.
             skip += page_size
 
             remaining = response.headers.get("X-RateLimit-Requests-Remaining")

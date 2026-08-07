@@ -113,9 +113,6 @@ class FakeJobRunsRepository:
         run = self._run(run_id)
         if run["seq"] != expected_seq or run["status"] in ("succeeded", "failed"):
             return False
-        # 0026's lease predicate: a run already 'running' and still leased belongs to a live processor,
-        # so a concurrent redelivery must not claim it. `leased` is set/cleared by this fake's own
-        # renew_lease/mark_* methods, mirroring what the real SQL does with lease_expires_at.
         if run["status"] == "running" and run.get("leased"):
             return False
         run["status"] = "running"
@@ -140,8 +137,6 @@ class FakeJobRunsRepository:
             return None
         return SimpleNamespace(status=run["status"], error=run["error"])
 
-    # Every transition out of 'running' clears `leased`, mirroring the real SQL's
-    # `lease_expires_at = NULL` (0026) -- a finished run must not stay unclaimable for its lease window.
     async def mark_succeeded(self, run_id, result_summary=None):
         self.succeeded.append(run_id)
         self.succeeded_summaries[run_id] = result_summary
@@ -737,7 +732,6 @@ async def test_concurrent_redelivery_of_the_current_checkpoint_is_refused_while_
     would burn real PSN/RAWG/OpenCritic budget concurrently. The live processing lease is what refuses it."""
     handler = RecordingHandler()
     job_runs_repository = FakeJobRunsRepository()
-    # A live processor already holds this run: still 'running', seq not yet advanced, lease not expired.
     job_runs_repository.seed("r1", status="running", seq=0)
     job_runs_repository._run("r1")["leased"] = True
     receiver = FakeReceiver([FakeMessage(_CONTINUATION_PAYLOAD)])

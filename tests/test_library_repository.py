@@ -8,8 +8,6 @@ from curator.library.repository import LibraryRepository
 class FakeCursor:
     def __init__(self, connection):
         self._connection = connection
-        # psycopg exposes rowcount as a plain attribute; refresh_trophy_progress/clear_trophy_progress
-        # read it to report how many entries they touched.
         self.rowcount = connection.rowcount
 
     async def execute(self, sql, params=None):
@@ -175,13 +173,13 @@ async def test_list_entries_with_enrichment_maps_rows_and_total():
     assert games[0].rawg_enriched is True
     assert games[0].is_active is True
     assert games[0].np_communication_id == "NPWR12345_00"
-    # Read straight off the row -- no PSN call, no name matching on this path.
+
     assert games[0].percent_completed == 63
     assert games[0].cover_image_url == "https://cdn.example/elden-ring.jpg"
     assert games[1].percent_completed is None
     assert games[1].category is None
     assert games[1].cover_image_url is None
-    # A lapsed entitlement stays listed and is flagged, rather than vanishing from the library.
+
     assert games[1].is_active is False
     assert games[1].np_communication_id is None
 
@@ -311,14 +309,12 @@ async def test_set_trophy_match_persists_exact_match():
     sql, params = pool.connections[0].executed[0]
     assert "UPDATE library_entries" in sql
     assert "trophy_match_attempted_at = now()" in sql
-    # percent_completed appears twice: once as the value, once driving the CASE that decides whether to
-    # stamp trophy_progress_fetched_at.
+
     assert params == ("NPWR12345_00", "exact", 63, 63, "sub-1", "game-1")
 
 
 async def test_set_trophy_match_persists_no_match_found():
-    # Stamping trophy_match_attempted_at even on a no-match result is what keeps a genuinely trophy-less
-    # title (an app, an F2P game) from being re-attempted on every future refresh forever.
+
     pool = FakePool()
     repo = LibraryRepository(pool)
 
@@ -326,8 +322,7 @@ async def test_set_trophy_match_persists_no_match_found():
 
     sql, params = pool.connections[0].executed[0]
     assert params == (None, None, None, None, "sub-1", "game-1")
-    # A no-match attempt must not stamp a progress timestamp -- that column means "this percentage was
-    # true as of then", and there is no percentage here.
+
     assert "ELSE now() END" in sql
 
 

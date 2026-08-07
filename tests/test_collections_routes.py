@@ -54,21 +54,15 @@ class FakeCollectionsRepository:
         self.consoles: list[UserConsole] = list(consoles or [])
         self.duplicate_names = set(duplicate_names)
         self.known_games = set(known_games)
-        # Ids the real ::uuid[] cast would reject before it ever got to compare them.
         self.malformed_game_ids = set(malformed_game_ids)
         self._candidates = list(candidates)
         self._next_id = 1
         self.collection_follows: dict[str, set[str]] = {}
 
     async def list_user_consoles(self, identity_sub):
-        # The real query is scoped by identity_sub in SQL, so it only ever returns the caller's own
-        # consoles -- self.consoles is therefore already "this user's consoles".
         return self.consoles
 
     async def list_candidates(self, identity_sub, *, platform=None, include_inactive=False, min_percent_completed=None):
-        # The routes no longer resolve trophy completion themselves: each candidate row carries its stored
-        # percentage and the completion floor is applied in SQL, so this is only reached via the
-        # orchestrator (faked in this file).
         return self._candidates
 
     async def existing_game_ids(self, game_ids):
@@ -103,9 +97,6 @@ class FakeCollectionsRepository:
         return definition_id
 
     def _with_live_item_count(self, definition):
-        # item_count is a real, derived field (0019) -- computed fresh from self.items rather than trusted
-        # off the stored dataclass, so a membership change via update_definition is reflected immediately,
-        # matching how the real repository always recomputes it from collection_definition_items.
         return replace(definition, item_count=len(self.items.get(definition.definition_id, ())))
 
     async def list_definitions(self, identity_sub):
@@ -341,13 +332,10 @@ def test_preview_never_resolves_trophy_completion_at_request_time():
     _, _, completion_map, completion_available = orchestrator.generate_calls[0]
     assert completion_map is None
     assert completion_available is False
-    # The decisive assertion: no trophy client was ever built for this request.
     assert factory.calls == []
 
 
 def test_preview_threads_the_completion_floor_through_to_the_spec():
-    # The floor is applied in SQL by list_candidates now, so what matters here is that the route puts it
-    # on the spec rather than filtering after the fact.
     orchestrator = FakeOrchestrator()
     client, validator = _build(orchestrator)
     validator.register("token-a", _claims(sub="sub-a"))
@@ -433,8 +421,6 @@ def test_save_definition_persists_and_returns_it():
 
 
 def test_save_definition_rejects_a_console_the_caller_does_not_own():
-    # No consoles configured for this caller, so any console_id is foreign to them. Before this was
-    # validated at save time, the definition saved cleanly and only failed on the first run.
     collections_repository = FakeCollectionsRepository()
     client, validator = _build(collections_repository=collections_repository)
     validator.register("token-a", _claims(sub="sub-a"))
@@ -538,7 +524,6 @@ def test_save_definition_persists_min_percent_completed():
 
 
 def test_save_definition_duplicate_name_returns_409():
-    # collection_definitions has UNIQUE (identity_sub, name); unhandled, that surfaced as a raw 500.
     collections_repository = FakeCollectionsRepository(duplicate_names={"My RPGs"})
     client, validator = _build(collections_repository=collections_repository)
     validator.register("token-a", _claims(sub="sub-a"))
@@ -616,13 +601,10 @@ def test_save_definition_stores_the_supplied_game_ids():
 
     assert response.status_code == 201
     assert response.json()["description"] == "Best of"
-    # Order is preserved as given -- the owner's ordering is the collection's ordering.
     assert collections_repository.items["def-1"] == ("g2", "g1")
 
 
 def test_save_definition_defaults_kind_so_a_handpicked_list_needs_no_spec():
-    # A user who assembled a collection by browsing supplies neither a kind nor any filter; requiring
-    # them would make the "pick titles" path impossible to express.
     collections_repository = FakeCollectionsRepository(known_games={"g1"})
     client, validator = _build(collections_repository=collections_repository)
     validator.register("token-a", _claims(sub="sub-a"))
@@ -697,8 +679,6 @@ def test_save_definition_rejects_an_unknown_game_id():
 
 
 def test_save_definition_rejects_a_malformed_game_id_as_400_not_500():
-    # game_id is a uuid column; a non-UUID string reaches Postgres as InvalidTextRepresentation, which
-    # without handling surfaces as an opaque 500 for what is plainly a bad request.
     collections_repository = FakeCollectionsRepository(malformed_game_ids={"not-a-uuid"})
     client, validator = _build(collections_repository=collections_repository)
     validator.register("token-a", _claims(sub="sub-a"))
@@ -710,8 +690,6 @@ def test_save_definition_rejects_a_malformed_game_id_as_400_not_500():
 
 
 def test_save_definition_lower_cases_game_ids_before_validating_them():
-    # Postgres canonicalizes UUIDs to lower case, so an uppercase id matches in SQL but comes back
-    # lower-cased -- without normalization the membership check rejects a game the caller really owns.
     game_id = "550e8400-e29b-41d4-a716-446655440000"
     collections_repository = FakeCollectionsRepository(known_games={game_id})
     client, validator = _build(collections_repository=collections_repository)
@@ -776,12 +754,10 @@ def test_patch_definition_leaves_omitted_fields_alone():
 
     assert response.status_code == 200
     assert response.json()["description"] == "Original"
-    # Membership is untouched by a metadata-only patch.
     assert collections_repository.items["def-a"] == ("g1",)
 
 
 def test_patch_definition_can_clear_a_description_with_an_explicit_null():
-    # An omitted field and an explicit null must not mean the same thing, or there is no way to clear one.
     collections_repository = FakeCollectionsRepository([_definition(description="Original")])
     client, validator = _build(collections_repository=collections_repository)
     validator.register("token-a", _claims(sub="sub-a"))
@@ -892,7 +868,7 @@ def test_cannot_follow_your_own_collection():
 
 
 def test_cannot_follow_a_private_collection():
-    other = _definition(identity_sub="sub-b")  # visibility defaults to "private"
+    other = _definition(identity_sub="sub-b")
     collections_repository = FakeCollectionsRepository([other])
     client, validator = _build(collections_repository=collections_repository)
     validator.register("token-a", _claims(sub="sub-a"))
@@ -949,8 +925,6 @@ def test_lists_followed_collections():
 
 
 def test_run_definition_does_not_change_stored_membership():
-    # A run is a proposal against the saved spec, not an edit. If it silently rewrote membership, a
-    # collection would stop being a snapshot the moment its owner asked for a refresh.
     collections_repository = FakeCollectionsRepository([_definition()])
     collections_repository.items["def-a"] = ("g1",)
     candidate = GameCandidate(
@@ -974,7 +948,6 @@ def test_run_definition_does_not_change_stored_membership():
 
 
 def test_run_definition_does_not_resolve_completion_at_request_time():
-    # Same contract as preview: a run reads persisted percentages, it does not re-resolve them.
     collections_repository = FakeCollectionsRepository([_definition()])
     orchestrator = FakeOrchestrator()
     client, validator = _build(orchestrator, collections_repository)

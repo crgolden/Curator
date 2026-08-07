@@ -16,12 +16,9 @@ from curator.psn.session import PsnSession
 
 _ENTITLEMENTS_URL = "https://m.np.playstation.com/api/entitlement/v2/users/me/internal/entitlements"
 
-# PSN GraphQL persisted-query endpoint. The sha256 hashes identify the server-registered query; they rotate
-# when Sony updates its apps, so a rotation surfaces as a GraphQL error (see curator.psn._graphql).
 _OP_RECENTLY_PLAYED = ("getUserGameList", "e780a6d8b921ef0c59ec01ea5c5255671272ca0d819edb61320914cf7a78b3ae")
 _OP_PURCHASED = ("getPurchasedGameList", "2c045408b0a4d0264bb5a3edfed4efd49fb4749cf8d216be9043768adff905e2")
 
-# PSN's GraphQL gateway rejects GET persisted queries without an Apollo CSRF-preflight signal.
 _GRAPHQL_HEADERS = {"apollo-require-preflight": "true"}
 
 

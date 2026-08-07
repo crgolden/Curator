@@ -182,7 +182,6 @@ async def test_upsert_game_matches_by_known_concept_id():
 
 
 async def test_upsert_game_matches_by_normalized_title_when_no_concept_match():
-    # concept lookup returns nothing, then title lookup finds an existing row.
     pool = FakePool(fetchone_results=[None, ("title-matched-id",)])
     repo = CatalogRepository(pool)
     game = CanonicalGame(
@@ -251,8 +250,6 @@ async def test_list_all_game_ids_and_titles_maps_rows():
 
 
 async def test_reclassify_franchise_updates_only_changed_rows():
-    # "Call of Duty: Black Ops 4" currently has no franchise, but a rule now matches it;
-    # "God of War" already has the correct franchise assigned, so it should be left alone.
     pool = FakePool(
         fetchall_results=[
             [

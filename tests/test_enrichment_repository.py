@@ -114,8 +114,7 @@ async def test_save_opencritic_games_upserts_each():
 
     conn = pool.connections[0]
     assert len(conn.executed) == 2
-    # Trailing None is opencritic_cache.raw -- these fixtures carry no raw payload. The column was
-    # declared in 0001_initial.sql but omitted from the INSERT until now, so it was NULL on every row.
+
     assert conn.executed[0][1] == (1, "Game A", 85, "Strong", 90, None)
 
 
@@ -203,8 +202,7 @@ async def test_get_active_genres_maps_rows():
 
 
 async def test_reclassify_tier_updates_only_changed_rows():
-    # "id-1" was enriched before publisher_tiers existed and defaulted to Indie; a rule now matches
-    # its publisher. "id-2" is already correctly classified and should be left alone.
+
     pool = FakePool(
         fetchall_results=[
             [

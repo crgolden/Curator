@@ -119,8 +119,6 @@ def test_no_bins_sends_everything_to_overflow():
 
 
 def test_second_bin_absorbs_overflow_from_the_first():
-    # A console with a full internal drive and an attached device: two 60GB titles, a 50GB console and a
-    # 50GB device -- neither bin alone fits both, but together they do, and first-fit tries bins in order.
     candidates = [_candidate("a", 60, rank_score=2), _candidate("b", 60, rank_score=1)]
     bins = [StorageBin("console", 60.0), StorageBin("device-1", 60.0)]
 
@@ -132,9 +130,6 @@ def test_second_bin_absorbs_overflow_from_the_first():
 
 
 def test_sort_order_none_keeps_the_default_rank_score_first_order():
-    # b has the higher composite but a has the higher rank_score -- default order must still favor a,
-    # confirming an unset sort_order changes nothing (existing behavior, asserted explicitly here so a
-    # future default-key change can't silently regress it).
     candidates = [
         _candidate("a", 10, rank_score=5, composite_score=10),
         _candidate("b", 10, rank_score=1, composite_score=90),
@@ -146,9 +141,6 @@ def test_sort_order_none_keeps_the_default_rank_score_first_order():
 
 
 def test_sort_order_composite_desc_ignores_rank_score():
-    # Same candidates as above, but sort_order="composite_desc" must flip the order -- rank_score (the
-    # F2P/franchise bonus) has no term in the legacy PS4 Criterion/Blockbuster rule this reproduces
-    # (Tools/PlayStation/LIFECYCLE_AUDIT.md), unlike this strategy's own default.
     candidates = [
         _candidate("a", 10, rank_score=5, composite_score=10),
         _candidate("b", 10, rank_score=1, composite_score=90),
@@ -179,12 +171,8 @@ def test_unknown_sort_order_raises():
 
 
 def test_a_usb_bin_never_appears_when_the_caller_omits_it_for_ps5_candidates():
-    # This module has no platform awareness -- the caller (CollectionOrchestrator) is responsible for
-    # simply never including a kind="usb" device's StorageBin when the run is for a PS5 console. Here
-    # that's simulated by just not passing a USB bin at all: a title too big for the one bin given
-    # overflows, it never silently lands somewhere it couldn't actually run from.
     candidates = [_candidate("a", 500)]
-    bins = [StorageBin("console", 100.0)]  # the USB device that could have held this is deliberately absent
+    bins = [StorageBin("console", 100.0)]
 
     result = fill_capacity_multi_bin(candidates, bins)
 

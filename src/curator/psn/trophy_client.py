@@ -30,7 +30,6 @@ if TYPE_CHECKING:
 _TROPHIES_URI = "https://m.np.playstation.com/api/trophy/v1"
 _GAMES_LIST_URI = "https://m.np.playstation.com/api/gamelist/v2"
 
-# Maps PSN's raw title-stats "category" value to the platform name this client exposes.
 _PLATFORM_CATEGORY_NAMES = {"ps4_game": "PS4", "ps5_native_game": "PS5"}
 
 _PLAY_DURATION_RE = re.compile(r"PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?")

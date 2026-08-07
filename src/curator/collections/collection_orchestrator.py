@@ -100,9 +100,6 @@ class CollectionOrchestrator:
         bins: list[StorageBin] = []
         routing_genres: tuple[str, ...] = ()
 
-        # Fetched once and shared by both consumers below (capacity_fill's own console/bin resolution,
-        # and exclude_installed_on's ownership check) rather than querying twice -- and not fetched at
-        # all for the common case (filter_list with no exclude_installed_on), which needs neither.
         consoles = None
         if spec.kind == "capacity_fill" or spec.exclude_installed_on:
             consoles = await self._repository.list_user_consoles(identity_sub)
@@ -124,11 +121,6 @@ class CollectionOrchestrator:
             platform = console.platform
             routing_genres = console.routing_genres
 
-            # Console-internal storage first, then each currently-attached device, in the order
-            # list_storage_devices already returns (by name) -- first-fit tries bins in this order.
-            # A kind="usb" device is never offered to a PS5 run at all: a PS5 title cannot run from
-            # external USB storage (curator.storage_devices_routes enforces the same rule at install
-            # time), and "not in the candidate pool" is a stronger guarantee than "filtered out after".
             bins = [StorageBin(bin_id=console.console_id, capacity_gb=console.effective_capacity_gb)]
             attached_devices = [
                 device
@@ -147,9 +139,6 @@ class CollectionOrchestrator:
             min_percent_completed=spec.min_percent_completed,
             exclude_installed_on=spec.exclude_installed_on,
         )
-        # Each row already carries its stored trophy percentage, and the completion floor was applied in
-        # SQL above. completion_map is only an override for a caller that resolved fresher numbers than
-        # the persisted ones; absent it, the row's own value stands.
         completion_map = completion_map or {}
         candidates = [
             self._score(
@@ -162,12 +151,6 @@ class CollectionOrchestrator:
         ]
 
         if spec.kind == "capacity_fill":
-            # Previously skipped entirely for capacity_fill (only routing_genres, a console property,
-            # ever filtered this pool) -- reproducing the legacy PS4 Criterion/Blockbuster rule needs
-            # both a genre/tier predicate *and* GB packing in the same run. Safe by construction for
-            # every existing capacity_fill spec: filter_candidates() with every flat field unset and no
-            # predicate returns the pool unchanged, which is every capacity_fill spec that exists today
-            # (nothing has ever set these fields for this kind before now).
             matched = filter_candidates(candidates, spec, completion_available=completion_available)
             matched_ids = {candidate.game_id for candidate in matched}
             by_id = {candidate.game_id: candidate for candidate in candidates}
@@ -176,7 +159,7 @@ class CollectionOrchestrator:
             seen_chained_ids: set[str] = set()
             for game_id in chained_candidate_ids or ():
                 if game_id in matched_ids or game_id in seen_chained_ids:
-                    continue  # already counted (normal match) or a duplicate id in the caller's sequence
+                    continue
                 candidate = by_id.get(game_id)
                 if candidate is not None:
                     chained.append(candidate)
@@ -189,10 +172,6 @@ class CollectionOrchestrator:
             fill_result = fill_capacity_multi_bin(
                 matched + chained, bins, routing_genres=routing_genres, sort_order=spec.sort_order
             )
-            # Flattened back into one included/used_gb pair, in bin order (console-internal first, then
-            # each attached device) -- CollectionResult's external shape is unchanged by going multi-bin
-            # internally; which specific bin a recommended game landed on isn't surfaced today (nothing
-            # downstream reads it), so this stays additive rather than a breaking response-shape change.
             included = tuple(
                 candidate for storage_bin in bins for candidate in fill_result.installed_by_bin[storage_bin.bin_id]
             )
@@ -215,10 +194,6 @@ class CollectionOrchestrator:
         percent_completed: int | None = None,
     ) -> GameCandidate:
         comp = composite_score(row.critical_score, row.oc_score, row.psn_rating)
-        # game_enrichment.is_free_to_play is a clean boolean (the schema fix that replaced the legacy
-        # pipeline's free-text Multiplayer keyword-match smell) -- rank_score()'s signature still takes a
-        # free-text descriptor (ported faithfully from ps_assign_ps5.py), so synthesize the minimal text
-        # its F2P keyword check needs rather than changing that already-shipped, already-tested function.
         multiplayer_text = "free to play" if row.is_free_to_play else ""
         points = rank_score(comp, multiplayer_text, row.franchise)
         size_gb = row.measured_size_gb
@@ -232,14 +207,6 @@ class CollectionOrchestrator:
             game_id=row.game_id,
             title=row.title,
             genre=row.genre or "",
-            # "" (not "Indie") for a game with no recorded tier -- WP8's reproduction against real
-            # ground truth showed defaulting to "Indie" incorrectly satisfied both TierIn(("Indie",))
-            # and aaa_tier_filter == "Indie" for tier-less games, misclassifying them. An empty string
-            # never equals or is IN any real tier value, so a tier-less game now correctly matches
-            # neither an Indie-tier nor an AAA/AA-tier predicate -- see AGENTS/PARKING_LOT.md's WP8
-            # section for the full diagnosis. Deliberately independent of estimate_install_size_gb's own
-            # separate `row.aaa_tier or "Indie"` fallback just above -- that one is a defensible "assume
-            # Indie-sized" conservative default for a different purpose and is intentionally unchanged.
             aaa_tier=row.aaa_tier or "",
             franchise=row.franchise or "",
             composite_score=comp,

@@ -23,7 +23,6 @@ def _client(recorder: RequestRecorder) -> OpenCriticClient:
 
 
 async def test_error_carries_the_response_body_as_provider_detail():
-    # RapidAPI answers 403 for an unsubscribed plan as readily as for a bad key; only the body says which.
     body = {"message": "You are not subscribed to this API."}
     recorder = RequestRecorder([httpx.Response(403, json=body)])
     client = _client(recorder)
@@ -131,7 +130,7 @@ async def test_fetch_platform_games_respects_max_pages():
 
     result = await client.fetch_platform_games("ps5", max_pages=1)
 
-    assert len(recorder.requests) == 1  # first full page fetched, then max_pages=1 stops before a second
+    assert len(recorder.requests) == 1
     assert result.exhausted is False
     assert result.next_skip == 20
 
@@ -140,7 +139,7 @@ async def test_validate_key_succeeds_on_200():
     recorder = RequestRecorder([httpx.Response(200, json=[])])
     client = _client(recorder)
 
-    await client.validate_key()  # no exception
+    await client.validate_key()
 
     assert len(recorder.requests) == 1
     assert recorder.requests[0].url.params["platforms"] == "ps5"
@@ -212,7 +211,7 @@ async def test_fetch_platform_games_attaches_partial_progress_to_api_error():
 
     assert exc_info.value.partial_games is not None
     assert len(exc_info.value.partial_games) == 20
-    assert exc_info.value.partial_next_skip == 20  # the failed page's own offset, not skipped past
+    assert exc_info.value.partial_next_skip == 20
 
 
 async def test_fetch_platform_games_wraps_a_network_error_with_partial_progress():

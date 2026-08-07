@@ -244,28 +244,7 @@ def create_app(
     follow_repository = follow_repository or FollowRepository(shared_pool)
 
     owns_http_client = http_client is None
-    # httpx's implicit default (5s across connect/read/write/pool) is what actually killed a real library
-    # refresh in production -- request #12 of ~1045 to RAWG hit it under real load (see WP6/WP7 notes in
-    # AGENTS/Curator.md). An explicit, slightly more generous budget makes that kind of blip survivable
-    # without masking a truly hung connection forever; it does not retry -- see AGENTS/Curator.md's WP7
-    # section for why a retry-with-backoff library was evaluated and not adopted in this same pass.
     http_client = http_client or httpx.AsyncClient(timeout=httpx.Timeout(10.0, connect=5.0))
-    # Admin-only catalog-wide singleton, built from Settings.rawg_api_keys/opencritic_rapidapi_keys -- its
-    # ONLY caller is _enrichment_run_handler (POST /enrichment/runs, require_admin-gated), which uses it
-    # both for refresh_opencritic_cache() and, for still-unenriched catalog games, enrich_game() itself.
-    # Per-user library refreshes never use this: Curator provisions no shared/fallback RAWG/OpenCritic
-    # key (it doesn't scale to every user's library) -- _library_refresh_handler below builds its own
-    # per-user clients from that user's own stored keys instead, via enrichment_keys_repository. No
-    # catalog_client here either: the official PSN-catalog signal needs a per-user authenticated
-    # PsnSession, unlike RAWG/OpenCritic, so this singleton's enrich_game() calls always pass
-    # title_id=None and skip the PSN-native genre/rating supplement.
-    #
-    # More than one configured RAWG key wraps in a rotating client (advances to the next key on a
-    # 401/403/429 from the current one) so a full-catalog run isn't capped at a single key's daily quota --
-    # per-user BYOK is unaffected, always exactly one key. A single key skips the wrapper entirely.
-    # OpenCritic's admin rotation lives in EnrichmentService itself instead (every configured client passed
-    # through directly), since it needs to re-read the shared pagination cursor between key attempts -- see
-    # EnrichmentService._refresh_opencritic_platform.
     admin_rawg_clients: list[RawgClientProtocol] = [RawgClient(http_client, key) for key in settings.rawg_api_keys]
     admin_rawg_client: RawgClientProtocol | None = (
         admin_rawg_clients[0]
@@ -293,9 +272,6 @@ def create_app(
             fully_qualified_namespace=settings.service_bus_namespace,
             credential=service_bus_credential,
         )
-        # The Python SDK has no async administration client -- QueueDepthMonitor runs this sync client's
-        # calls via asyncio.to_thread. Only meaningful against the real namespace (Manage claims, RBAC),
-        # same as why this is gated on service_bus_namespace and not service_bus_connection_string below.
         service_bus_admin_credential = SyncDefaultAzureCredential()
         queue_depth_monitor = QueueDepthMonitor(
             admin_client=ServiceBusAdministrationClient(
@@ -318,9 +294,6 @@ def create_app(
             enrichment_sender=service_bus_client.get_queue_sender(ENRICHMENT_QUEUE),
             job_runs_repository=job_runs_repository,
         )
-        # 15 minutes: generous enough to cover a large library at RAWG's ~1 req/sec per-user throttle
-        # (see _library_refresh_handler), well past the queue's 1-minute LockDuration, while still bounding
-        # worst-case duplicate-redelivery exposure if a message somehow hangs forever.
         lock_renewer = ServiceBusLockRenewer(max_lock_renewal_duration=900)
         queue_consumer = QueueConsumer(
             library_refresh_receiver=service_bus_client.get_queue_receiver(LIBRARY_REFRESH_QUEUE),
@@ -461,21 +434,8 @@ def create_app(
         logger.error("Unhandled exception on %s %s", request.method, request.url.path, exc_info=exc)
         return PlainTextResponse("Internal Server Error", status_code=500)
 
-    # Telemetry (OTLP traces/metrics to Grafana Alloy, Elasticsearch structured logging) is configured last,
-    # after routes are registered, so FastAPI instrumentation sees the full route table. Each gunicorn
-    # worker calls this factory independently, so per-worker init comes for free here -- do not move this to
-    # module import time (breaks fork-safety) or call it more than once per app. It is a no-op per leg when
-    # that leg's settings are absent, and never raises: a telemetry failure must never prevent app startup.
     configure_telemetry(app, settings)
 
-    # require_bearer/require_verified_caller/require_admin read the Authorization header manually (there's
-    # no session, no OIDC client, so FastAPI's fastapi.security.HTTPBearer dependency injection isn't used
-    # anywhere) -- which means FastAPI can't auto-discover a security scheme for the generated OpenAPI
-    # document the way it would if a route depended on HTTPBearer directly. Declaring it here once is what
-    # makes /docs's "Authorize" button work for every protected route below, matching the OpenAPI-discipline
-    # convention this migration's plan calls for (see Manuals/Products/Directory, which all expose the same
-    # bearer scheme).
-    # FastAPI's own documented pattern for customizing the generated schema.
     app.openapi = lambda: _openapi_schema_with_bearer_auth(app)  # type: ignore[method-assign]
 
     return app
@@ -836,10 +796,6 @@ def _library_refresh_handler(
             library_repository=library_repository,
         )
 
-        # Reuses this same job's PsnSession rather than a fresh one -- this is exactly the
-        # trophy_client_factory-built client's own construction, just against a session already open.
-        # None (skipping curator.library.library_build_orchestrator.LibraryBuildOrchestrator
-        # .match_trophies entirely) unless the user has actually opted into harvest_trophies.
         trophy_client: TrophyClient | CachedTrophyClient | None = None
         link = await repository.get_link(identity_sub)
         if link is not None and link.harvest_trophies:
@@ -950,10 +906,6 @@ def _library_refresh_continuation_handler(
             redis_adapter=redis_adapter,
         )
 
-        # A fresh EnrichmentService is built per continuation message, but one run's retry chain spans
-        # many messages -- seeding the provider that just rate-limited us with an already-doubled backoff
-        # is what makes the wait escalate across the whole chain instead of resetting to the 1h default on
-        # every resume (see EnrichmentService's rate_limit_backoff_seconds docstring).
         per_user_enrichment_service = EnrichmentService(
             rawg_client=user_rawg_client,
             opencritic_client=user_opencritic_client,
@@ -989,9 +941,6 @@ def _library_refresh_continuation_handler(
         )
 
         if enrich_result.rejected_providers:
-            # Scoped to just this call's own rejections, not the merged/cumulative list below -- see
-            # _record_rejected_providers's docstring for why re-marking an already-known rejection on every
-            # continuation resume would be wrong.
             await _record_rejected_providers(
                 identity_sub,
                 enrich_result.rejected_providers,

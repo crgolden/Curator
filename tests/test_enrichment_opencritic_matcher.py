@@ -24,9 +24,6 @@ def test_normalize_converts_roman_numerals():
 
 
 def test_normalize_strips_punctuation_and_symbols():
-    # NFKD-decomposes "™" to literal "TM" letters before the symbol-strip regex runs (matching
-    # ps_opencritic.py's original normalize() exactly) -- so a directly-adjacent "™" merges into the
-    # preceding word rather than vanishing cleanly, same as upstream.
     assert normalize("Marvel's Spider-Man 2") == "marvels spider man 2"
     assert normalize("Marvel's Spider-Man™ 2") == "marvels spider mantm 2"
 
@@ -60,7 +57,6 @@ def test_strategy_2_subtitle_stripped_match():
 
 
 def test_strategy_3_space_stripped_match():
-    # "CoffeeTalk" (workbook) vs. "Coffee Talk" (OpenCritic).
     games = [_game(1, "Coffee Talk")]
     index, nospace_index = build_name_index(games)
     result = find_match("CoffeeTalk", index, nospace_index)
@@ -69,7 +65,6 @@ def test_strategy_3_space_stripped_match():
 
 
 def test_strategy_5_substring_fallback_a_our_title_inside_catalog_name():
-    # "Skyrim" matching "The Elder Scrolls V: Skyrim - Special Edition".
     games = [_game(1, "The Elder Scrolls V: Skyrim - Special Edition")]
     index, nospace_index = build_name_index(games)
     result = find_match("Skyrim", index, nospace_index)
@@ -78,10 +73,6 @@ def test_strategy_5_substring_fallback_a_our_title_inside_catalog_name():
 
 
 def test_strategy_6_substring_fallback_b_catalog_name_at_start_of_our_title():
-    # "Grand Theft Auto III" (OpenCritic) matching "Grand Theft Auto III [en dash] The Definitive
-    # Edition" -- strip_subtitle() only recognizes ": "/" - " (plain hyphen), so an en dash separator
-    # can't resolve via the earlier subtitle-stripped strategy and must fall through to the substring
-    # cascade.
     games = [_game(1, "Grand Theft Auto III")]
     index, nospace_index = build_name_index(games)
     result = find_match("Grand Theft Auto III – The Definitive Edition", index, nospace_index)  # noqa: RUF001

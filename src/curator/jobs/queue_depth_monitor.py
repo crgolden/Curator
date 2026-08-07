@@ -18,7 +18,6 @@ from curator.telemetry import record_queue_depth
 
 logger = logging.getLogger(__name__)
 
-# 15 minutes, matching Functions' QueueDepthMonitorJob TimerTrigger cadence.
 _DEFAULT_POLL_INTERVAL_SECONDS = 900.0
 
 

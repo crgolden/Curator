@@ -84,9 +84,6 @@ def _encrypted_link(crypto: TokenCrypto, payload: dict) -> LinkRecord:
     )
 
 
-# ── load() ────────────────────────────────────────────────────────────────────
-
-
 async def test_load_returns_none_when_no_row():
     store = DbTokenStore("sub-1", FakeRepository(), _make_crypto())
     assert await store.load() is None
@@ -172,9 +169,6 @@ async def test_load_returns_durable_dict_even_with_neither_access_nor_refresh_to
     store = DbTokenStore("sub-1", repo, crypto)
 
     assert await store.load() == {"scope": "psn:mobile.v2.core"}
-
-
-# ── save() ────────────────────────────────────────────────────────────────────
 
 
 async def test_save_no_op_when_dict_has_no_access_token():
@@ -325,9 +319,6 @@ async def test_save_skips_redis_cache_when_access_token_already_expired():
     assert redis.set_calls == []
 
 
-# ── clear() ───────────────────────────────────────────────────────────────────
-
-
 async def test_clear_deletes_the_link():
     repo = FakeRepository()
     repo.links["sub-1"] = _encrypted_link(_make_crypto(), {"refresh_token": "RT"})
@@ -361,8 +352,6 @@ async def test_clear_without_redis_configured_only_deletes_the_row():
 
 
 def test_db_token_store_satisfies_async_token_store_contract_shape():
-    # The folded-in PSN client's TokenStore contract is duck-typed: async load()/save(dict)/clear()
-    # coroutine methods. Verify DbTokenStore exposes the same shape.
     import inspect
 
     store = DbTokenStore("sub-1", FakeRepository(), _make_crypto())

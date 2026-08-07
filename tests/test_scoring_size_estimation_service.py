@@ -56,8 +56,7 @@ def test_title_override_is_platform_specific():
 
 
 def test_longest_matching_title_pattern_wins():
-    # "call of duty: modern warfare ii" (more specific) must win over the shorter
-    # "call of duty: modern warfare" substring that also matches.
+
     result = estimate_install_size_gb(
         "Call of Duty: Modern Warfare II", "Shooter", is_ps5=True, aaa_tier="AAA", estimates=_ESTIMATES
     )

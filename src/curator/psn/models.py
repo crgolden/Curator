@@ -213,19 +213,6 @@ class AccountDevice:
     deactivation_date: str | None = None
 
 
-# ----------------------------------------------------------------------------------------------------------
-# Account PII shape (documentation-only, intentionally never hydrated).
-#
-# The ``accounts.api.playstation.com/api/v1/accounts/me`` endpoint returns the signed-in account's full
-# private record. Curator deliberately does NOT read, map, or persist that PII. The models below exist
-# purely as a *guide marker* -- they document what PSN exposes so a future maintainer knows the shape -- but
-# no code path populates them, and none should be added without a deliberate privacy decision. The one
-# sanctioned field is the email, surfaced narrowly by ``curator.psn.account_client``'s ``account_email``
-# (a single string, not persisted). If you ever need more of this data, hydrate it explicitly and
-# consciously; do not wire a blanket mapper that pulls the whole record into memory.
-# ----------------------------------------------------------------------------------------------------------
-
-
 @dataclass(frozen=True, slots=True)
 class AccountEmail:
     """Shape of an account email address (guide marker -- never hydrated; see the note above)."""

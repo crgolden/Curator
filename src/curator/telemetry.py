@@ -34,7 +34,8 @@ from typing import Any, cast
 
 from elasticsearch import Elasticsearch
 from fastapi import FastAPI
-from opentelemetry import metrics, trace
+from opentelemetry import metrics as metrics
+from opentelemetry import trace as trace
 from opentelemetry.exporter.otlp.proto.grpc.metric_exporter import OTLPMetricExporter
 from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExporter
 from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
@@ -53,21 +54,11 @@ from curator.settings import Settings
 SERVICE_NAME_VALUE = "crgolden-curator"
 _HEALTH_EXCLUDED_URLS = "health"
 
-# OTel SDK default is 60_000ms. Traces flush independently via BatchSpanProcessor's own background
-# thread (schedule_delay_millis default 5_000ms) regardless of how the process exits, but metrics only
-# leave the process on this timer or an explicit shutdown()/force_flush() -- a gunicorn worker recycled
-# faster than the default interval would report traces but never a single metric. 15s keeps the gap small
-# without exporting on every scrape.
 _METRIC_EXPORT_INTERVAL_MILLIS = 15_000
 
-# RAWG sends its API key as a URL query parameter (?key=...), which OpenTelemetry's httpx instrumentation
-# otherwise records verbatim as a span attribute on every call, success or failure -- independent of (and
-# not covered by) the exception-message sanitization in curator.enrichment.rawg_client. The instrumentor's
-# own built-in redact_query_parameters only strips a fixed allowlist (AWSAccessKeyId/Signature/sig/
-# X-Goog-Signature) that doesn't include "key", so this needs its own hook.
 _REDACT_QUERY_PARAM_HOSTS = ("api.rawg.io",)
 _REDACT_QUERY_PARAM_NAME = "key"
-_URL_SPAN_ATTRIBUTE_KEYS = ("http.url", "url.full")  # old and new HTTP semconv, respectively
+_URL_SPAN_ATTRIBUTE_KEYS = ("http.url", "url.full")
 
 
 async def _redact_rawg_key_from_span(span: Span, request_info: RequestInfo) -> None:
@@ -79,27 +70,14 @@ async def _redact_rawg_key_from_span(span: Span, request_info: RequestInfo) -> N
     sanitized = request_info.url.copy_with(
         params={key: value for key, value in request_info.url.params.items() if key != _REDACT_QUERY_PARAM_NAME}
     )
-    # `Span.attributes` is an SDK-level detail (always present on the real/no-op spans this hook actually
-    # runs against) not declared on the API-level `Span` type this hook is typed against -- getattr avoids
-    # depending on that undeclared attribute while still overwriting it when present.
     existing_attributes = getattr(span, "attributes", None) or {}
     for attribute_key in _URL_SPAN_ATTRIBUTE_KEYS:
         if attribute_key in existing_attributes:
             span.set_attribute(attribute_key, str(sanitized))
 
 
-# Must match the Grafana Elasticsearch datasource pattern (`logs-app-*`, see
-# Tools/Grafana/01-bootstrap.sh) so Curator's logs appear in the Logs/Fleet dashboards alongside the
-# .NET apps and Churches -- "app" here is the fleet's app-logs dataset convention, not a claim that
-# Curator is a .NET app. This also matches Elasticsearch's built-in `logs` index template (pattern
-# `logs-*-*`, composed with the managed `logs@lifecycle` ILM policy), which is what gives the .NET
-# apps' and Churches' `logs-app-*` data streams their automatic rollover/retention with zero
-# explicit bootstrap code -- the same thing a bare, unmanaged `curator-logs-<date>` index never got.
 _ES_DATA_STREAM = "logs-app-curator"
 
-# Fleet log-level vocabulary (matches Serilog/ECS and Churches' pino LEVEL_NAMES map) so Grafana's
-# `log.level` filters/aggregations, built around Verbose/Debug/Information/Warning/Error/Fatal, also
-# work for Curator instead of seeing Python's own DEBUG/INFO/WARNING/ERROR/CRITICAL spelling.
 _LEVEL_NAMES = {
     "DEBUG": "Debug",
     "INFO": "Information",
@@ -122,8 +100,6 @@ def configure_telemetry(app: FastAPI, settings: Settings) -> None:
     :param settings: The resolved :class:`~curator.settings.Settings`; each leg reads only its own
         fields and is skipped entirely when they are absent.
     """
-    # Deliberately broad: any exception from either leg (a bad endpoint, an unreachable collector, a
-    # misconfigured client, ...) must be logged and swallowed, never allowed to crash app startup.
     try:
         _configure_tracing_and_metrics(app, settings)
     except Exception as exc:
@@ -202,11 +178,6 @@ def shutdown_telemetry() -> None:
     """
     if not _otel_configured:
         return
-    # get_tracer_provider()/get_meter_provider() are typed against the API-level base classes, which
-    # don't declare shutdown() -- only the SDK types do. _register_otlp_providers is the only place
-    # that ever calls set_tracer_provider()/set_meter_provider(), and it always registers the SDK
-    # TracerProvider/MeterProvider constructed above, so the cast reflects what's actually registered
-    # whenever _otel_configured is True.
     with contextlib.suppress(Exception):
         cast(TracerProvider, trace.get_tracer_provider()).shutdown()
     with contextlib.suppress(Exception):
@@ -245,23 +216,11 @@ def _configure_elasticsearch_logging(settings: Settings) -> None:
         )
         handler = _ElasticsearchLogHandler(client)
 
-        # The elasticsearch client's own transport logger (`elastic_transport.transport`) logs every
-        # HTTP call it makes -- including the ones this handler issues to ship a log record. Left
-        # propagating to root, each shipped record produces a new "POST .../_doc ... [status:201]" log
-        # from that logger, which then also gets shipped, forever: a self-sustaining feedback loop that
-        # flooded `logs-dotnet-curator` with over a million docs in production before the pipeline
-        # itself gave out. Disabling propagation on that logger (and the parent `elasticsearch` logger,
-        # for the same reason) breaks the loop at its source, independent of any level filtering below.
         logging.getLogger("elastic_transport").propagate = False
         logging.getLogger("elasticsearch").propagate = False
 
-        # A QueueHandler/QueueListener pair moves the actual ES `index` call onto a background thread, so a
-        # slow or unreachable Elasticsearch node can never block the request thread that emitted the log.
         log_queue: SimpleQueue[logging.LogRecord] = SimpleQueue()
         queue_handler = QueueHandler(log_queue)
-        # Only Warning+ ships to Elasticsearch -- mirrors the Serilog minimum-level-override the
-        # .NET apps set in Azure app settings, keeping chatty info/debug logs out of the fleet's ES
-        # cluster. Root logger stays at INFO so console/uvicorn logging is unaffected.
         queue_handler.setLevel(logging.WARNING)
         listener = QueueListener(log_queue, handler, respect_handler_level=True)
         listener.start()
@@ -338,18 +297,6 @@ class _ElasticsearchLogHandler(logging.Handler):
             )
 
 
-# Service Bus queue-depth gauges -- mirrors Functions' QueueDepthMonitorJob/Telemetry.cs (functions.
-# servicebus.queue.active/deadletter) for Curator's own curator-library-refresh/curator-enrichment queues.
-# Nothing else watches dead-lettered messages: a message that fails processing dead-letters silently (see
-# curator.jobs.queue_consumer) with no alert until someone looks. curator.jobs.queue_depth_monitor polls
-# each queue's runtime properties on a timer and calls record_queue_depth(); these gauges just report
-# whatever was last recorded, exactly like the .NET ObservableGauge callbacks read a ConcurrentDictionary.
-#
-# Registered at module level (not inside configure_telemetry) because OTel's proxy-meter mechanism defers
-# an instrument created via metrics.get_meter() to whichever MeterProvider is installed later by
-# _register_otlp_providers -- these gauges work whether that happens before or after this module is
-# imported, and are a harmless no-op when telemetry is unconfigured (no AlloyEndpoint), same as every other
-# instrument in this module.
 _QUEUE_DEPTH_METER = metrics.get_meter(__name__)
 _QUEUE_ACTIVE_COUNTS: dict[str, int] = {}
 _QUEUE_DEAD_LETTER_COUNTS: dict[str, int] = {}

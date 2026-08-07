@@ -223,7 +223,7 @@ async def test_ingest_delegates_to_ingestion_service():
     pull_id = await orchestrator.ingest("sub-1")
 
     assert pull_id == "pull-99"
-    # Regression: no explicit limit means unbounded (None), never a silently reintroduced cap.
+
     assert ingestion_service.ingest_calls == [("sub-1", None)]
 
 
@@ -255,17 +255,13 @@ async def test_persist_and_link_upserts_game_and_library_entry():
     assert library_repository.upsert_calls == [
         ("sub-1", "game-1", games[0].native_ps5, games[0].ps4_eligible, games[0].active)
     ]
-    # Regression coverage for the product_id/title_id mix-up (0023_library_entries_title_id.sql): the
-    # canonicalized game's winning_title_id (resolved from _snapshot()'s title_id="t1") must reach
-    # upsert_entry's title_id kwarg, not be dropped on the way to library_entries.
+
     assert games[0].winning_title_id == "t1"
     assert library_repository.last_title_id == "t1"
 
 
 async def test_persist_and_link_carries_inactive_state_onto_the_library_entry():
-    # The whole point of keeping inactive entitlements through canonicalization: without this hand-off
-    # a lapsed title is either invisible (old behavior, and stranded in library_entries forever) or
-    # indistinguishable from one the user can still play.
+
     catalog_repository = FakeCatalogRepository()
     library_repository = FakeLibraryRepository()
     orchestrator = LibraryBuildOrchestrator(
@@ -352,7 +348,7 @@ async def test_enrich_delta_stops_early_on_rate_limit_and_reports_remaining_game
     assert result.enriched_count == 1  # Game A succeeded before the rate limit hit
     assert result.rate_limited_provider == "rawg"
     assert result.retry_after_seconds == 120.0
-    # game-2 (the one that hit the limit) is retried first on resume, followed by whatever's left.
+
     assert result.remaining_game_ids == ["game-2", "game-3"]
     assert enrichment_service.enrich_calls == ["Game A", "Game B"]  # never reached Game C
 
@@ -380,12 +376,11 @@ async def test_enrich_delta_degrades_instead_of_failing_on_a_rejected_key():
         games, ["game-1", "game-2", "game-3"], publisher_tier_rules=[], size_estimates=[]
     )
 
-    # The run reaches completion -- a rejected key degrades the provider, it does not abort the run.
+
     assert result.enriched_count == 3
     assert result.rejected_providers == ["rawg"]
     assert enrichment_service.disabled_providers == ["rawg"]
-    # Game B is attempted, rejected, then retried once its provider is disabled -- everything after it
-    # (Game C) is still reached, unlike a rate limit which stops iteration entirely.
+
     assert enrichment_service.enrich_calls == ["Game A", "Game B", "Game B", "Game C"]
 
 
@@ -401,9 +396,7 @@ async def test_enrich_delta_stops_rather_than_looping_if_the_same_provider_keeps
         games, ["game-1", "game-2", "game-3"], publisher_tier_rules=[], size_estimates=[]
     )
 
-    # Game A succeeds; Game B's provider is disabled once, then the loop-guard stops retrying it a second
-    # time (a real disable_provider() can never let this recur -- this is insurance against a logic error,
-    # not an expected path) instead of spinning forever. Game C is never reached.
+
     assert result.enriched_count == 1
     assert result.rejected_providers == ["rawg"]
     assert enrichment_service.disabled_providers == ["rawg"]
@@ -422,7 +415,7 @@ async def test_build_runs_full_pipeline_end_to_end():
     assert result.rawg_enriched_titles == []
     assert result.opencritic_enriched_titles == []
     assert result.opencritic_topup_incomplete is False
-    # Regression: build()'s own limit default must stay unbounded (None), not silently reintroduce a cap.
+
     assert ingestion_service.ingest_calls == [("sub-1", None)]
 
 
@@ -449,7 +442,7 @@ async def test_build_threads_rejected_providers_through_from_enrich_delta():
 
     assert result.rejected_providers == ["rawg"]
     assert result.rate_limited_provider is None
-    # The run still reaches "succeeded" (build() doesn't raise) -- exactly the point of degrading.
+
     assert result.games_enriched == 1
 
 
@@ -530,8 +523,7 @@ async def test_match_trophies_exact_match_for_ps4_title_id():
     assert result.fuzzy_matched_count == 0
     assert result.attempted_count == 1
     assert library_repository.set_trophy_match_calls == [("sub-1", "game-1", "NPWR00001_00", "exact", 75)]
-    # No *fuzzy* pass is needed once every candidate matches exactly, but titles are still fetched once
-    # for the library-wide progress refresh.
+
     assert trophy_client.trophy_titles_call_count == 1
 
 
@@ -576,7 +568,7 @@ async def test_match_trophies_no_confident_match_still_stamps_the_attempt():
     assert result.exact_matched_count == 0
     assert result.fuzzy_matched_count == 0
     assert result.attempted_count == 1
-    # np_communication_id/method both None -- still persisted, so this game isn't re-attempted forever.
+
     assert library_repository.set_trophy_match_calls == [("sub-1", "game-1", None, None, None)]
 
 

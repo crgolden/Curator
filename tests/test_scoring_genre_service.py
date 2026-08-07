@@ -44,12 +44,12 @@ def test_single_tag_has_no_subgenre():
 
 
 def test_prefers_specific_genre_over_generic_simulation():
-    # RAWG tags sports/racing sims as ["Simulation", "Sports", "Racing"] -- Sports/Racing must win.
+
     assert pick_genre_subgenre(["Simulation", "Sports", "Racing"], _PRIORITIES) == ("Sports", "Racing")
 
 
 def test_family_and_simulation_ordering():
-    # PS Store tags Overcooked! All You Can Eat as ["Family", "Simulation"] -- Simulation outranks Family.
+
     assert pick_genre_subgenre(["Family", "Simulation"], _PRIORITIES) == ("Simulation", "Family")
 
 
@@ -60,7 +60,7 @@ def test_unranked_tags_fall_below_every_ranked_tag():
 
 
 def test_ties_keep_original_relative_order():
-    # Neither tag is in the priority table -- stable sort keeps input order.
+
     assert pick_genre_subgenre(["Zeta Tag", "Alpha Tag"], _PRIORITIES) == ("Zeta Tag", "Alpha Tag")
 
 

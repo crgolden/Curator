@@ -136,16 +136,8 @@ class ProfileLibraryGameResponse(BaseModel):
     psn_product_id: str | None
     rawg_enriched: bool
     opencritic_enriched: bool
-    #: Whether the profile's owner can still play this -- their access, not the viewer's, consistent with
-    #: every other field here describing the target rather than whoever is looking.
     is_active: bool
-    #: Always ``None`` for now -- showing the profile owner's own trophy completion here would need the
-    #: viewer's PSN client called against the *target's* account id (the cross-user pattern
-    #: ``GET /users/{sub}/profile`` already uses for its PSN-derived sections), not built in this pass. See
-    #: ``curator.psn.trophy_completion``.
     percent_completed: int | None
-    #: Cover art -- same fallback as the owner's own view; not privacy-sensitive, so unlike
-    #: ``percent_completed`` this one is resolved for real rather than stubbed.
     cover_image_url: str | None
 
 

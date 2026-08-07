@@ -57,7 +57,7 @@ line-length = 120
 src = ["src", "tests"]
 
 [tool.ruff.lint]
-select = ["E", "W", "F", "I", "UP", "B", "SIM", "RUF", "PT"]
+select = ["E", "W", "F", "I", "UP", "B", "SIM", "RUF", "PT", "ERA"]
 # B008 (function call in a default argument) is a real anti-pattern in general, but FastAPI's dependency
 # injection is *built* on `Depends(...)` as a parameter default (see `curator.deps.require_verified_caller`,
 # `curator.me_routes.me`, `curator.psn_routes.psn_link`/`psn_unlink`) -- there is no alternative spelling
@@ -95,6 +95,7 @@ module = [
     "test_collections_orchestrator",
     "test_collections_repository",
     "test_collections_routes",
+    "test_collections_sort_order",
     "test_consoles_routes",
     "test_deps",
     "test_devices_routes",
@@ -127,6 +128,7 @@ module = [
     "test_jobs_repository",
     "test_identity_routes",
     "test_link_service",
+    "test_measured_sizes_routes",
     "test_preferences_routes",
     "test_presence_routes",
     "test_profile_persistence",

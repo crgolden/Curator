@@ -104,12 +104,6 @@ class JwtValidator:
     def __init__(self, authority: str, fetch_json: Callable[[str], dict[str, Any]] = fetch_json) -> None:
         self._authority = authority.rstrip("/")
         self._fetch_json = fetch_json
-        # `algorithms=` on every `jwt.decode()` call below is a required, not cosmetic, argument: passing
-        # no restriction (or deriving one from the token's own `alg` header) is exactly the classic JWT
-        # "algorithm confusion" hole (see https://github.com/authlib/joserfc/issues/27) -- a token could
-        # otherwise claim `alg: HS256` and get "verified" by HMAC-signing it with Identity's *public* RSA
-        # key, which an attacker has (it's published at `jwks_uri`). Pinning to RS256 here, matching
-        # Identity's actual signing algorithm, closes that off.
         self._claims_registry = JWTClaimsRegistry(iss={"essential": True, "value": self._authority})
         self._keyset: KeySet | None = None
 
@@ -153,7 +147,7 @@ class JwtValidator:
         try:
             return jwt.decode(token, keyset, algorithms=_ALGORITHMS).claims
         except InvalidKeyIdError:
-            pass  # unknown kid: fall through to a forced refetch-and-retry, below
+            pass
         except JoseError as exc:
             raise TokenError(f"Malformed or unverifiable token: {exc}") from exc
 
@@ -167,10 +161,6 @@ class JwtValidator:
         """Return the cached :class:`~joserfc.jwk.KeySet`, fetching (or refetching) it when needed."""
         if self._keyset is None or force:
             discovery = self._fetch_json(f"{self._authority}/.well-known/openid-configuration")
-            # `fetch_json` is typed generically (`dict[str, Any]`, since it also serves the unrelated-shape
-            # discovery document above); the JWKS response's actual shape is exactly `KeySetSerialization`
-            # (a `{"keys": [...]}` document), which this cast only asserts for the type checker -- it adds
-            # no runtime behavior, and `KeySet.import_key_set` itself still validates the real content.
             jwks = cast(KeySetSerialization, self._fetch_json(discovery["jwks_uri"]))
             self._keyset = KeySet.import_key_set(jwks)
         return self._keyset

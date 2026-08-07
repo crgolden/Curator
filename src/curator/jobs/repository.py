@@ -14,10 +14,6 @@ from typing import Any
 
 from psycopg_pool import AsyncConnectionPool
 
-#: How long a delivery's processing lease is held before another delivery may claim the run (0026).
-#: Must comfortably exceed :data:`curator.jobs.queue_consumer.LEASE_HEARTBEAT_SECONDS` so an ordinary
-#: heartbeat delay never lets a second copy in, while a genuinely dead processor still frees its run
-#: within a bounded, human-scale window rather than needing manual DB cleanup.
 DEFAULT_LEASE_SECONDS = 120.0
 
 
@@ -82,15 +78,8 @@ class JobRunsRepository:
         no guard, which is exactly what let a stale redelivery silently erase an already-recorded
         ``rate_limited`` checkpoint before reprocessing started.
 
-        **Concurrency, not just staleness (0026).** The ``seq`` check alone cannot reject a *concurrent*
-        redelivery of the checkpoint that is still current: if the Service Bus lock lapses while the
-        original delivery is still inside ``process()``, the redelivered copy sees ``status = 'running'``
-        with ``seq`` not yet advanced and would pass a ``seq``-only CAS, so both copies would run at once
-        and both would spend real PSN/RAWG/OpenCritic rate-limit budget. A ``running`` row is therefore
-        claimable only once its **lease** has lapsed -- see ``lease_expires_at`` in migration ``0026`` and
-        :meth:`renew_lease`. A live processor heartbeats its lease forward and keeps the run to itself; a
-        processor that died outright stops heartbeating, its lease expires, and the run frees itself for
-        redelivery without manual intervention.
+        A ``running`` row is additionally only claimable once its lease has lapsed (see
+        :meth:`renew_lease`), so a concurrent redelivery cannot start a second copy alongside a live one.
 
         :param run_id: The run id carried in the delivered message's payload.
         :param expected_seq: The ``seq`` carried in the delivered message's payload (``0`` for a message
@@ -113,14 +102,9 @@ class JobRunsRepository:
         return row is not None
 
     async def renew_lease(self, run_id: str, lease_seconds: float = DEFAULT_LEASE_SECONDS) -> bool:
-        """Push ``run_id``'s processing lease further into the future -- the heartbeat that tells
-        :meth:`try_begin_delivery` this run is still being actively worked on (0026).
+        """Extend ``run_id``'s processing lease by ``lease_seconds``, only while it is still ``running``.
 
-        Only renews a run that is still ``running``: once it has reached ``succeeded``/``failed``/
-        ``rate_limited`` its lease is deliberately cleared, and a late heartbeat must not resurrect it.
-
-        :returns: ``True`` if the lease was renewed; ``False`` if the run is no longer ``running`` (the
-            caller's cue to stop heartbeating).
+        :returns: ``True`` if the lease was renewed; ``False`` if the run is no longer ``running``.
         """
         async with self._pool.connection() as conn, conn.cursor() as cur:
             await cur.execute(
@@ -177,8 +161,6 @@ class JobRunsRepository:
         return int(row[0])
 
     async def _set_status(self, run_id: str, status: str, *, error: str | None = None) -> None:
-        # lease_expires_at is cleared on every status transition out of 'running' (0026) -- a run that is
-        # no longer running holds no processing lease, so a later heartbeat can't resurrect one.
         async with self._pool.connection() as conn, conn.cursor() as cur:
             await cur.execute(
                 "UPDATE job_runs SET status = %s, error = %s, updated_at = now(), lease_expires_at = NULL "

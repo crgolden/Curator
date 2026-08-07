@@ -134,11 +134,6 @@ def _patch_otlp_collaborators(monkeypatch):
     _FakeMetricReader.last_kwargs = {}
 
 
-# ---------------------------------------------------------------------------------------------------
-# No-op when settings are absent.
-# ---------------------------------------------------------------------------------------------------
-
-
 def test_configure_telemetry_is_a_noop_when_settings_absent(monkeypatch):
     monkeypatch.setattr(telemetry, "_otel_configured", False)
     monkeypatch.setattr(telemetry, "_es_logging_configured", False)
@@ -160,13 +155,7 @@ def test_configure_telemetry_never_raises_even_if_a_leg_blows_up(monkeypatch):
     monkeypatch.setattr(telemetry, "_configure_tracing_and_metrics", _boom)
     monkeypatch.setattr(telemetry, "_configure_elasticsearch_logging", _boom)
 
-    # Must not raise.
     telemetry.configure_telemetry(app=object(), settings=_SETTINGS_NO_TELEMETRY)
-
-
-# ---------------------------------------------------------------------------------------------------
-# OTLP provider registration: idempotent, /health excluded from tracing.
-# ---------------------------------------------------------------------------------------------------
 
 
 def test_register_otlp_providers_registers_exactly_once_across_repeated_calls(monkeypatch):
@@ -256,11 +245,6 @@ def test_instrument_app_excludes_health_from_tracing(monkeypatch):
     called_app, kwargs = _FakeFastAPIInstrumentor.calls[0]
     assert called_app is app
     assert kwargs["excluded_urls"] == "health"
-
-
-# ---------------------------------------------------------------------------------------------------
-# Elasticsearch logging leg: no-op unless fully configured, idempotent, log-doc formatting.
-# ---------------------------------------------------------------------------------------------------
 
 
 class _FakeElasticsearchClient:
@@ -473,12 +457,7 @@ def test_elasticsearch_log_handler_swallows_index_failures():
         name="curator.app", level=logging.INFO, pathname=__file__, lineno=1, msg="x", args=(), exc_info=None
     )
 
-    handler.emit(record)  # must not raise
-
-
-# ---------------------------------------------------------------------------------------------------
-# End-to-end through create_app: telemetry never breaks app construction or /health.
-# ---------------------------------------------------------------------------------------------------
+    handler.emit(record)
 
 
 def test_create_app_health_check_unaffected_by_telemetry_wiring(monkeypatch):
@@ -500,11 +479,6 @@ def test_create_app_health_check_unaffected_by_telemetry_wiring(monkeypatch):
 
     assert response.status_code == 200
     assert response.text == "Healthy"
-
-
-# ---------------------------------------------------------------------------------------------------
-# _redact_rawg_key_from_span: RAWG's API key must never land in a Tempo span attribute.
-# ---------------------------------------------------------------------------------------------------
 
 
 def _traced_span(url_attribute_keys=("http.url", "url.full")):

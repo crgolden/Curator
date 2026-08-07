@@ -58,10 +58,6 @@ class IngestionService:
         """
         entitlements = await self._library_client.entitlements_with_raw(limit=limit)
         snapshots = [_to_snapshot(entitlement) for entitlement, _raw in entitlements]
-        # Hand the verbatim PSN entries through so entitlement_snapshots.raw is actually populated. That
-        # column exists precisely so a mapping bug here never permanently loses a field PSN sent; before
-        # this argument was passed it stored '{}' for every row, discarding roughly two-thirds of the
-        # payload (including every artwork URL) with no way to recover it short of a fresh pull.
         raw_by_entitlement_id = {entitlement.entitlement_id or "": raw for entitlement, raw in entitlements}
         pull_id = await self._repository.record_pull(identity_sub, "curator-live", snapshots, raw=raw_by_entitlement_id)
         return pull_id, snapshots

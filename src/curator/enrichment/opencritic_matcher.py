@@ -42,10 +42,6 @@ class OpenCriticGame:
     top_critic_score: float | None
     tier: str
     percent_recommended: float | None
-    # PSN's verbatim entry, persisted to opencritic_cache.raw so a mapping change never loses a field
-    # OpenCritic sent. Not selected back out by get_all_opencritic_games -- matching needs only the
-    # extracted columns -- so instances read from cache carry None here. compare=False keeps equality
-    # semantics based on the identifying columns alone.
     raw: dict[str, Any] | None = field(default=None, compare=False)
 
 
@@ -144,8 +140,6 @@ def find_match(
     if short_nospace_key != nospace_key and short_nospace_key in nospace_index:
         return _best(nospace_index[short_nospace_key])
 
-    # Substring fallback A: our (possibly subtitle-stripped) key appears, word-bounded, inside a catalog
-    # entry's key.
     search_key = short if len(short) >= len(key) - 2 else key
     if len(search_key) >= 6:
         pattern = rf"\b{re.escape(search_key)}\b"
@@ -153,8 +147,6 @@ def find_match(
         if candidates:
             return _best(candidates)
 
-    # Substring fallback B: a catalog entry's key appears at the start of our key; the longest such
-    # catalog key wins (most specific match).
     best_match: OpenCriticGame | None = None
     best_len = 0
     for oc_key, entries in index.items():

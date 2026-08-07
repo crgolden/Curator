@@ -23,9 +23,6 @@ from curator.psn.errors import MutationNotAllowedError
 if TYPE_CHECKING:
     from curator.psn.account_client import Account
 
-# The online id the test account is expected to have. Verified once at registration so a stray npsso for
-# the wrong account is never pinned; after that the wall uses the immutable account_id. This fallback is a
-# placeholder only -- real usage always sets one of the env vars below to an actual test account.
 DEFAULT_TEST_ONLINE_ID = "curator-test-account"
 _TEST_ONLINE_ID_ENV_NAMES: tuple[str, ...] = ("CURATOR_PSN_TEST_ONLINE_ID", "PSNPY_TEST_ONLINE_ID")
 
