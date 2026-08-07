@@ -18,13 +18,56 @@ import secrets
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 
 from psycopg_pool import AsyncConnectionPool
 
 from curator.collections.collection_spec import CollectionSpec
 from curator.collections.filter_predicate import FilterPredicate, parse_predicate, predicate_to_dict
 from curator.collections.game_candidate import GameCandidate
+
+CollectionItemSortField = Literal["rank", "title", "critical_score", "oc_score", "psn_rating"]
+
+_ITEM_SORT_COLUMNS: dict[str, str] = {
+    "rank": "cdi.rank",
+    "title": "g.canonical_title",
+    "critical_score": "ge.critical_score",
+    "oc_score": "ge.oc_score",
+    "psn_rating": "ge.psn_rating",
+}
+
+_ITEM_COVER_IMAGE_SQL = """
+                       COALESCE(
+                           (
+                               SELECT pcc.cover_image_url
+                               FROM library_entries any_le
+                               JOIN psn_catalog_cache pcc ON pcc.title_id = any_le.title_id
+                               WHERE any_le.game_id = g.game_id AND pcc.cover_image_url IS NOT NULL
+                               LIMIT 1
+                           ),
+                           (
+                               SELECT COALESCE(es.title_image_url, es.game_icon_url, es.concept_icon_url)
+                               FROM game_concepts gc
+                               JOIN entitlement_snapshots es ON es.concept_id = gc.concept_id
+                               WHERE gc.game_id = g.game_id
+                                 AND COALESCE(es.title_image_url, es.game_icon_url, es.concept_icon_url) IS NOT NULL
+                               LIMIT 1
+                           )
+                       ) AS cover_image_url"""
+
+_ITEM_SELECT_COLUMNS = f"""cdi.game_id, cdi.rank, g.canonical_title, g.franchise, gen.name, ge.aaa_tier,
+                       ge.critical_score, ge.oc_score, ge.psn_rating,
+{_ITEM_COVER_IMAGE_SQL},
+                       COALESCE(le.is_active, false) AS owner_has_access"""
+
+_ITEM_BASE_FROM = """
+                FROM collection_definition_items cdi
+                JOIN collection_definitions cd ON cd.definition_id = cdi.definition_id
+                JOIN games g ON g.game_id = cdi.game_id
+                LEFT JOIN game_enrichment ge ON ge.game_id = g.game_id
+                LEFT JOIN genres gen ON gen.genre_id = ge.genre_id
+                LEFT JOIN library_entries le
+                       ON le.game_id = cdi.game_id AND le.identity_sub = cd.identity_sub"""
 
 
 def _deduplicate(game_ids: tuple[str, ...]) -> list[str]:
@@ -901,56 +944,95 @@ class CollectionsRepository:
         """
         async with self._pool.connection() as conn, conn.cursor() as cur:
             await cur.execute(
-                """
-                SELECT cdi.game_id, cdi.rank, g.canonical_title, g.franchise, gen.name, ge.aaa_tier,
-                       ge.critical_score, ge.oc_score, ge.psn_rating,
-                       COALESCE(
-                           (
-                               SELECT pcc.cover_image_url
-                               FROM library_entries any_le
-                               JOIN psn_catalog_cache pcc ON pcc.title_id = any_le.title_id
-                               WHERE any_le.game_id = g.game_id AND pcc.cover_image_url IS NOT NULL
-                               LIMIT 1
-                           ),
-                           (
-                               SELECT COALESCE(es.title_image_url, es.game_icon_url, es.concept_icon_url)
-                               FROM game_concepts gc
-                               JOIN entitlement_snapshots es ON es.concept_id = gc.concept_id
-                               WHERE gc.game_id = g.game_id
-                                 AND COALESCE(es.title_image_url, es.game_icon_url, es.concept_icon_url) IS NOT NULL
-                               LIMIT 1
-                           )
-                       ) AS cover_image_url,
-                       COALESCE(le.is_active, false) AS owner_has_access
-                FROM collection_definition_items cdi
-                JOIN collection_definitions cd ON cd.definition_id = cdi.definition_id
-                JOIN games g ON g.game_id = cdi.game_id
-                LEFT JOIN game_enrichment ge ON ge.game_id = g.game_id
-                LEFT JOIN genres gen ON gen.genre_id = ge.genre_id
-                LEFT JOIN library_entries le
-                       ON le.game_id = cdi.game_id AND le.identity_sub = cd.identity_sub
+                f"""
+                SELECT {_ITEM_SELECT_COLUMNS}
+                {_ITEM_BASE_FROM}
                 WHERE cdi.definition_id = %s
                 ORDER BY cdi.rank
                 """,
                 (definition_id,),
             )
             rows = await cur.fetchall()
-        return [
-            CollectionItem(
-                game_id=str(row[0]),
-                rank=row[1],
-                title=row[2],
-                franchise=row[3],
-                genre=row[4],
-                aaa_tier=row[5],
-                critical_score=float(row[6]) if row[6] is not None else None,
-                oc_score=float(row[7]) if row[7] is not None else None,
-                psn_rating=float(row[8]) if row[8] is not None else None,
-                cover_image_url=row[9],
-                owner_has_access=bool(row[10]),
+        return [self._to_item(row) for row in rows]
+
+    async def list_definition_items_page(
+        self,
+        definition_id: str,
+        *,
+        search: str | None = None,
+        genre: str | None = None,
+        sort: CollectionItemSortField = "rank",
+        sort_dir: str = "asc",
+        limit: int = 50,
+        offset: int = 0,
+    ) -> tuple[list[CollectionItem], int]:
+        """Return one filtered, sorted page of a collection's membership, plus the total matching count.
+
+        The paged sibling of :meth:`list_definition_items`, which still exists for callers that genuinely
+        want the whole membership (the collection *run* path, which bin-packs against every item). This one
+        backs the display surface, where a ``capacity_fill`` collection of several hundred items would
+        otherwise render every row and run the cover-art subquery for each.
+
+        Access scoping is the same as :meth:`list_definition_items` and deliberately so: no ``identity_sub``
+        is taken, because every column resolves either cross-user or from the *owner's* sub. Whoever
+        resolved ``definition_id`` already decided the caller may see this collection.
+
+        :param search: Optional case-insensitive title substring filter.
+        :param genre: Optional exact-match resolved-genre filter.
+        :param sort: Which column to sort by -- resolved through :data:`_ITEM_SORT_COLUMNS` rather than
+            interpolated, so a caller-supplied value can never reach the SQL text even if the route layer's
+            literal constraint were bypassed.
+        :param sort_dir: ``"asc"`` or ``"desc"``; anything else is treated as ``"asc"``.
+        :param limit: Page size.
+        :param offset: Number of matching rows to skip.
+        """
+        conditions = ["cdi.definition_id = %s"]
+        params: list[Any] = [definition_id]
+        if search:
+            conditions.append("g.canonical_title ILIKE %s")
+            params.append(f"%{search}%")
+        if genre:
+            conditions.append("gen.name = %s")
+            params.append(genre)
+        where_clause = " AND ".join(conditions)
+
+        sort_column = _ITEM_SORT_COLUMNS[sort]
+        direction = "DESC" if sort_dir == "desc" else "ASC"
+
+        async with self._pool.connection() as conn, conn.cursor() as cur:
+            await cur.execute(f"SELECT COUNT(*) {_ITEM_BASE_FROM} WHERE {where_clause}", tuple(params))
+            count_row = await cur.fetchone()
+            assert count_row is not None  # COUNT(*) always returns exactly one row
+            total = count_row[0]
+
+            await cur.execute(
+                f"""
+                SELECT {_ITEM_SELECT_COLUMNS}
+                {_ITEM_BASE_FROM}
+                WHERE {where_clause}
+                ORDER BY {sort_column} {direction} NULLS LAST, cdi.rank ASC
+                LIMIT %s OFFSET %s
+                """,
+                (*params, limit, offset),
             )
-            for row in rows
-        ]
+            rows = await cur.fetchall()
+        return [self._to_item(row) for row in rows], total
+
+    @staticmethod
+    def _to_item(row: Sequence[Any]) -> CollectionItem:
+        return CollectionItem(
+            game_id=str(row[0]),
+            rank=row[1],
+            title=row[2],
+            franchise=row[3],
+            genre=row[4],
+            aaa_tier=row[5],
+            critical_score=float(row[6]) if row[6] is not None else None,
+            oc_score=float(row[7]) if row[7] is not None else None,
+            psn_rating=float(row[8]) if row[8] is not None else None,
+            cover_image_url=row[9],
+            owner_has_access=bool(row[10]),
+        )
 
     async def update_definition(
         self, definition_id: str, *, name: str, description: str | None, game_ids: tuple[str, ...] | None = None

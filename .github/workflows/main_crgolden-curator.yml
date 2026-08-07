@@ -117,7 +117,7 @@ jobs:
           source /tmp/smoke-venv/bin/activate
           /tmp/smoke-venv/bin/python -m pip install poetry --quiet
           /tmp/smoke-venv/bin/poetry config virtualenvs.create false
-          /tmp/smoke-venv/bin/poetry install --no-root --quiet
+          /tmp/smoke-venv/bin/poetry install --no-root
           /tmp/smoke-venv/bin/python -c "
           import os
           from cryptography.fernet import Fernet
