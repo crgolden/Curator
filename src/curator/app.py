@@ -34,6 +34,7 @@ from redis.asyncio import Redis
 from curator.audit.repository import ACTION_ENRICHMENT_KEY_REJECTED, AccountActionLogRepository
 from curator.catalog.franchise_assigner import fingerprint_franchise_rules
 from curator.catalog.repository import CatalogRepository
+from curator.catalog.store_backfill_service import StoreBackfillService
 from curator.catalog_routes import router as catalog_router
 from curator.collections.collection_orchestrator import CollectionOrchestrator
 from curator.collections.repository import CollectionsRepository
@@ -81,6 +82,7 @@ from curator.psn.presence_client import PresenceClient, PresenceClientFactory
 from curator.psn.rate_limiter import RedisRateLimiter
 from curator.psn.session import PsnSession, RateLimiter
 from curator.psn.social_client import SocialClient, SocialClientFactory
+from curator.psn.store_client import StoreCatalogClient
 from curator.psn.trophy_cache import CachedTrophyClient
 from curator.psn.trophy_client import TrophyClient, TrophyClientFactory
 from curator.psn_routes import router as psn_router
@@ -237,6 +239,9 @@ def create_app(
     library_repository = library_repository or LibraryRepository(shared_pool)
     collections_repository = collections_repository or CollectionsRepository(shared_pool)
     collection_orchestrator = CollectionOrchestrator(collections_repository)
+    store_backfill_service = StoreBackfillService(
+        StoreCatalogClient(httpx.AsyncClient(timeout=45.0)), catalog_repository
+    )
     job_runs_repository = job_runs_repository or JobRunsRepository(shared_pool)
     audit_repository = audit_repository or AccountActionLogRepository(shared_pool)
     enrichment_keys_repository = enrichment_keys_repository or EnrichmentKeysRepository(shared_pool)
@@ -380,6 +385,7 @@ def create_app(
     app.state.redis_adapter = redis_adapter
     app.state.token_validator = token_validator
     app.state.catalog_repository = catalog_repository
+    app.state.store_backfill_service = store_backfill_service
     app.state.enrichment_repository = enrichment_repository
     app.state.library_repository = library_repository
     app.state.collections_repository = collections_repository

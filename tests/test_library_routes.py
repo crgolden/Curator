@@ -79,6 +79,7 @@ class FakeLibraryGameView:
         is_active=True,
         np_communication_id=None,
         percent_completed=None,
+        source="psn",
         cover_image_url=None,
     ):
         self.game_id = game_id
@@ -93,6 +94,7 @@ class FakeLibraryGameView:
         self.is_active = is_active
         self.np_communication_id = np_communication_id
         self.percent_completed = percent_completed
+        self.source = source
         self.cover_image_url = cover_image_url
 
 
@@ -362,6 +364,7 @@ def test_get_library_returns_callers_own_games_with_ratings_and_category():
                 "opencritic_enriched": True,
                 "is_active": True,
                 "percent_completed": None,
+                "source": "psn",
                 "cover_image_url": "https://cdn.example/elden-ring.jpg",
             },
             {
@@ -376,6 +379,7 @@ def test_get_library_returns_callers_own_games_with_ratings_and_category():
                 "opencritic_enriched": False,
                 "is_active": True,
                 "percent_completed": None,
+                "source": "psn",
                 "cover_image_url": None,
             },
         ],

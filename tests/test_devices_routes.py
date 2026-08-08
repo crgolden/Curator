@@ -8,6 +8,7 @@ from cryptography.fernet import Fernet
 from fastapi.testclient import TestClient
 
 from curator.app import create_app
+from curator.devices_routes import _collapse_by_device_id
 from curator.persistence.crypto import TokenCrypto
 from curator.psn.errors import PsnAuthError
 from curator.psn.models import AccountDevice
@@ -50,7 +51,15 @@ class FakeSocialClientFactory:
         return client
 
 
-def _build(social_client_factory=None, repository=None):
+class FakeCollectionsRepository:
+    def __init__(self, console_id_by_device=None):
+        self.console_id_by_device = dict(console_id_by_device or {})
+
+    async def list_console_device_links(self, identity_sub):
+        return dict(self.console_id_by_device)
+
+
+def _build(social_client_factory=None, repository=None, collections_repository=None):
     settings = _make_settings()
     repository = repository if repository is not None else FakeRepository()
     validator = FakeTokenValidator()
@@ -60,15 +69,111 @@ def _build(social_client_factory=None, repository=None):
         repository=repository,
         token_validator=validator,
         social_client_factory=social_client_factory or FakeSocialClientFactory(),
+        collections_repository=collections_repository or FakeCollectionsRepository(),
     )
     return TestClient(app), app.state.social_client_factory
 
 
-def _build_linked(social_client_factory=None):
+def _build_linked(social_client_factory=None, collections_repository=None):
     repository = FakeRepository()
     crypto = TokenCrypto(Fernet.generate_key())
     _seed_link(repository, crypto, SUB, harvest_devices=True)
-    return _build(social_client_factory, repository=repository)
+    return _build(social_client_factory, repository=repository, collections_repository=collections_repository)
+
+
+def test_repeated_registrations_of_one_device_collapse_to_a_single_entry():
+    """PSN returns one row per activation, so a re-registered device repeats under one device_id.
+
+    Observed live: two PS3 rows 267ms apart plus a third months later, all sharing one device_id.
+    """
+    devices = [
+        AccountDevice(
+            device_id="dev-ps3",
+            device_type="PS3",
+            device_name="PlayStation 3",
+            activation_type="PRIMARY",
+            activation_date="2026-03-09T14:12:31.064Z",
+            deactivation_date=None,
+        ),
+        AccountDevice(
+            device_id="dev-ps3",
+            device_type="PS3",
+            device_name=None,
+            activation_type="PRIMARY",
+            activation_date="2026-05-22T13:47:16.339Z",
+            deactivation_date=None,
+        ),
+        AccountDevice(
+            device_id="dev-ps5",
+            device_type="PS5",
+            device_name="PlayStation 5",
+            activation_type="PRIMARY",
+            activation_date="2026-03-09T14:46:16.408Z",
+            deactivation_date=None,
+        ),
+    ]
+
+    collapsed = _collapse_by_device_id(devices)
+
+    assert [d.device_id for d in collapsed] == ["dev-ps3", "dev-ps5"]
+    assert collapsed[0].activation_date == "2026-05-22T13:47:16.339Z", "the most recent activation wins"
+    assert collapsed[0].device_name == "PlayStation 3", "a name from an older row beats the newer row's null"
+
+
+def test_collapsing_preserves_first_seen_order():
+    devices = [
+        AccountDevice("b", "PS5", "B", "PRIMARY", "2026-01-01T00:00:00Z", None),
+        AccountDevice("a", "PS4", "A", "PRIMARY", "2026-01-02T00:00:00Z", None),
+        AccountDevice("b", "PS5", "B", "PRIMARY", "2026-02-01T00:00:00Z", None),
+    ]
+
+    assert [d.device_id for d in _collapse_by_device_id(devices)] == ["b", "a"]
+
+
+def test_devices_without_an_id_are_kept_rather_than_merged_together():
+    devices = [
+        AccountDevice(None, "PS3", "One", "PRIMARY", "2026-01-01T00:00:00Z", None),
+        AccountDevice(None, "PS3", "Two", "PRIMARY", "2026-01-02T00:00:00Z", None),
+    ]
+
+    collapsed = _collapse_by_device_id(devices)
+
+    assert len(collapsed) == 2, "nothing identifies these well enough to treat them as the same device"
+
+
+def test_get_devices_returns_one_row_per_device_after_collapsing():
+    factory = FakeSocialClientFactory()
+    factory.linked[SUB] = FakeSocialClient()
+    client, _ = _build_linked(factory)
+
+    response = client.get("/devices", headers=_bearer("valid-token"))
+
+    ids = [d["device_id"] for d in response.json()["devices"]]
+    assert len(ids) == len(set(ids)), "the response must never carry the same device_id twice"
+
+
+def test_get_devices_annotates_a_linked_console_without_a_second_call():
+    factory = FakeSocialClientFactory()
+    factory.linked[SUB] = FakeSocialClient()
+    links = FakeCollectionsRepository({"dev-1": "console-a"})
+    client, _ = _build_linked(factory, collections_repository=links)
+
+    response = client.get("/devices", headers=_bearer("valid-token"))
+
+    assert response.status_code == 200
+    devices = response.json()["devices"]
+    assert devices[0]["linked_console_id"] == "console-a"
+
+
+def test_get_devices_reports_no_link_as_null_rather_than_omitting_it():
+    factory = FakeSocialClientFactory()
+    factory.linked[SUB] = FakeSocialClient()
+    client, _ = _build_linked(factory)
+
+    response = client.get("/devices", headers=_bearer("valid-token"))
+
+    assert response.status_code == 200
+    assert response.json()["devices"][0]["linked_console_id"] is None
 
 
 def test_get_devices_no_link_is_404():
@@ -104,6 +209,7 @@ def test_get_devices_happy_path():
                 "activation_type": "PRIMARY",
                 "activation_date": "2026-01-01T00:00:00Z",
                 "deactivation_date": None,
+                "linked_console_id": None,
             }
         ]
     }

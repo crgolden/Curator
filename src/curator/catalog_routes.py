@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel
 
 from curator.catalog.repository import CatalogRepository, GameSummary
-from curator.deps import require_bearer
+from curator.catalog.store_backfill_service import StoreBackfillService
+from curator.deps import require_admin, require_bearer
 from curator.token_validation import TokenClaims
 
 router = APIRouter(prefix="/catalog", tags=["catalog"])
@@ -20,17 +21,50 @@ class GameSummaryResponse(BaseModel):
     franchise: str | None
     genre: str | None
     aaa_tier: str | None
+    cover_image_url: str | None = None
+    store_product_id: str | None = None
 
 
 class CatalogGamesResponse(BaseModel):
     """The ``GET /catalog/games`` response body."""
 
     games: list[GameSummaryResponse]
+    total: int = 0
+
+
+class CategoryBackfillResult(BaseModel):
+    """What one category's walk achieved, and where to resume it."""
+
+    category_id: str
+    next_offset: int
+    completed: bool
+    pages_read: int
+    products_seen: int
+    games_created: int
+    covers_cached: int
+    stopped_reason: str | None
+
+
+class CatalogBackfillResponse(BaseModel):
+    """The ``POST /catalog/backfill`` response body."""
+
+    completed: bool
+    games_created: int
+    covers_cached: int
+    categories: list[CategoryBackfillResult]
+
+
+class CatalogBackfillRequest(BaseModel):
+    """Body for ``POST /catalog/backfill``."""
+
+    category_ids: list[str]
+    max_pages_per_category: int | None = 20
 
 
 @router.get("/games", response_model=CatalogGamesResponse)
 async def list_games(
     request: Request,
+    q: str | None = Query(default=None),
     franchise: str | None = Query(default=None),
     genre: str | None = Query(default=None),
     aaa_tier: str | None = Query(default=None, alias="aaaTier"),
@@ -38,13 +72,15 @@ async def list_games(
     offset: int = Query(default=0, ge=0),
     _claims: TokenClaims = Depends(require_bearer),
 ) -> CatalogGamesResponse:
-    """Browse the shared game catalog, optionally filtered by franchise, genre, or publisher tier.
+    """Browse the shared game catalog, optionally filtered by title, franchise, genre, or publisher tier.
 
-    :returns: A page of matching games, ordered by canonical title.
+    :param q: Optional case-insensitive title substring filter.
+    :returns: A page of matching games ordered by canonical title, plus the total matching count.
     """
     repository: CatalogRepository = request.app.state.catalog_repository
-    games: list[GameSummary] = await repository.list_games(
-        franchise=franchise, genre=genre, aaa_tier=aaa_tier, limit=limit, offset=offset
+    games: list[GameSummary]
+    games, total = await repository.list_games(
+        search=q, franchise=franchise, genre=genre, aaa_tier=aaa_tier, limit=limit, offset=offset
     )
     return CatalogGamesResponse(
         games=[
@@ -54,7 +90,46 @@ async def list_games(
                 franchise=game.franchise,
                 genre=game.genre,
                 aaa_tier=game.aaa_tier,
+                cover_image_url=game.cover_image_url,
+                store_product_id=game.store_product_id,
             )
             for game in games
-        ]
+        ],
+        total=total,
+    )
+
+
+@router.post("/backfill", response_model=CatalogBackfillResponse)
+async def backfill_catalog(
+    request: Request, body: CatalogBackfillRequest, _claims: TokenClaims = Depends(require_admin)
+) -> CatalogBackfillResponse:
+    """Seed the shared catalog by walking public PlayStation Store categories. Admin-scoped.
+
+    Bounded by ``max_pages_per_category``; each category reports a ``next_offset`` to resume from.
+
+    :returns: Per-category progress plus run totals.
+    :raises fastapi.HTTPException: 503, if the store client isn't configured on this deployment.
+    """
+    backfill_service: StoreBackfillService | None = request.app.state.store_backfill_service
+    if backfill_service is None:
+        raise HTTPException(status_code=503, detail="PlayStation Store catalog client is not configured.")
+
+    summary = await backfill_service.backfill(body.category_ids, max_pages_per_category=body.max_pages_per_category)
+    return CatalogBackfillResponse(
+        completed=summary.completed,
+        games_created=summary.games_created,
+        covers_cached=summary.covers_cached,
+        categories=[
+            CategoryBackfillResult(
+                category_id=progress.category_id,
+                next_offset=progress.next_offset,
+                completed=progress.completed,
+                pages_read=progress.pages_read,
+                products_seen=progress.products_seen,
+                games_created=progress.games_created,
+                covers_cached=progress.covers_cached,
+                stopped_reason=progress.stopped_reason,
+            )
+            for progress in summary.categories
+        ],
     )

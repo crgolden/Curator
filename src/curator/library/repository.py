@@ -40,6 +40,7 @@ class LibraryGameView:
     is_active: bool = True
     np_communication_id: str | None = None
     percent_completed: int | None = None
+    source: str = "psn"
     cover_image_url: str | None = None
 
 
@@ -112,9 +113,9 @@ class LibraryRepository:
                 """
                 INSERT INTO library_entries (
                     identity_sub, game_id, native_ps5, ps4_eligible, owned_edition,
-                    winning_entitlement_id, product_id, title_id, is_active, last_seen_at
+                    winning_entitlement_id, product_id, title_id, is_active, source, last_seen_at
                 )
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, now())
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, 'psn', now())
                 ON CONFLICT (identity_sub, game_id) DO UPDATE SET
                     native_ps5 = EXCLUDED.native_ps5,
                     ps4_eligible = EXCLUDED.ps4_eligible,
@@ -123,6 +124,7 @@ class LibraryRepository:
                     product_id = EXCLUDED.product_id,
                     title_id = EXCLUDED.title_id,
                     is_active = EXCLUDED.is_active,
+                    source = 'psn',
                     last_seen_at = now()
                 """,
                 (
@@ -137,6 +139,39 @@ class LibraryRepository:
                     is_active,
                 ),
             )
+
+    async def upsert_manual_entry(
+        self, identity_sub: str, game_id: str, *, native_ps5: bool, ps4_eligible: bool, owned_edition: str | None
+    ) -> None:
+        """Record a game the user owns that PSN has no entitlement for -- a physical disc, typically."""
+        async with self._pool.connection() as conn, conn.cursor() as cur:
+            await cur.execute(
+                """
+                INSERT INTO library_entries (
+                    identity_sub, game_id, native_ps5, ps4_eligible, owned_edition, is_active, source, last_seen_at
+                )
+                VALUES (%s, %s, %s, %s, %s, true, 'manual', now())
+                ON CONFLICT (identity_sub, game_id) DO UPDATE SET
+                    native_ps5 = EXCLUDED.native_ps5,
+                    ps4_eligible = EXCLUDED.ps4_eligible,
+                    owned_edition = EXCLUDED.owned_edition,
+                    last_seen_at = now()
+                WHERE library_entries.source = 'manual'
+                """,
+                (identity_sub, game_id, native_ps5, ps4_eligible, owned_edition),
+            )
+
+    async def delete_manual_entry(self, identity_sub: str, game_id: str) -> bool:
+        """Remove a manually-added game, never a PSN-sourced one.
+
+        :returns: ``True`` if a row was removed, ``False`` if there was no manual entry for that game.
+        """
+        async with self._pool.connection() as conn, conn.cursor() as cur:
+            await cur.execute(
+                "DELETE FROM library_entries WHERE identity_sub = %s AND game_id = %s AND source = 'manual'",
+                (identity_sub, game_id),
+            )
+            return bool(cur.rowcount)
 
     async def get_unmatched_game_ids(self, identity_sub: str, game_ids: list[str]) -> list[str]:
         """Return the subset of ``game_ids`` (already this user's ``library_entries`` rows) with no
@@ -360,7 +395,7 @@ class LibraryRepository:
                 SELECT g.game_id, g.canonical_title, gen.name, ge.critical_score, ge.oc_score,
                        ge.psn_rating, le.product_id,
                        COALESCE(ge.rawg_enriched, false), COALESCE(ge.opencritic_enriched, false),
-                       le.is_active, le.np_communication_id, le.trophy_percent_completed,
+                       le.is_active, le.np_communication_id, le.trophy_percent_completed, le.source,
                        COALESCE(
                            (SELECT pcc.cover_image_url FROM psn_catalog_cache pcc
                             WHERE pcc.title_id = le.title_id AND pcc.cover_image_url IS NOT NULL LIMIT 1),
@@ -395,7 +430,8 @@ class LibraryRepository:
                 is_active=bool(row[9]),
                 np_communication_id=row[10],
                 percent_completed=row[11],
-                cover_image_url=row[12],
+                source=row[12],
+                cover_image_url=row[13],
             )
             for row in rows
         ]

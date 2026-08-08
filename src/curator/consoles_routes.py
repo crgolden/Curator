@@ -209,6 +209,43 @@ async def delete_console(request: Request, console_id: str, claims: TokenClaims 
         raise HTTPException(status_code=404, detail="Console not found.")
 
 
+class DeviceLinkRequest(BaseModel):
+    """Body for ``PUT /consoles/{console_id}/device-link``."""
+
+    device_id: str
+
+
+@router.put("/{console_id}/device-link", status_code=204)
+async def link_console_device(
+    request: Request, console_id: str, body: DeviceLinkRequest, claims: TokenClaims = Depends(require_bearer)
+) -> None:
+    """Link this console to one of the caller's PSN-registered devices (see ``GET /devices``).
+
+    Re-linking replaces whatever either side pointed at before. ``device_id`` is not validated against PSN.
+
+    :raises fastapi.HTTPException: 404, if ``console_id`` doesn't belong to the caller.
+    """
+    repository: CollectionsRepository = request.app.state.collections_repository
+    if await repository.get_console(claims.sub, console_id) is None:
+        raise HTTPException(status_code=404, detail="Console not found.")
+    await repository.link_console_device(claims.sub, console_id, body.device_id)
+
+
+@router.delete("/{console_id}/device-link", status_code=204)
+async def unlink_console_device(
+    request: Request, console_id: str, claims: TokenClaims = Depends(require_bearer)
+) -> None:
+    """Remove this console's device link, leaving both the console and the PSN device untouched.
+
+    :raises fastapi.HTTPException: 404, if ``console_id`` doesn't belong to the caller or has no link.
+    """
+    repository: CollectionsRepository = request.app.state.collections_repository
+    if await repository.get_console(claims.sub, console_id) is None:
+        raise HTTPException(status_code=404, detail="Console not found.")
+    if not await repository.unlink_console_device(claims.sub, console_id):
+        raise HTTPException(status_code=404, detail="Console is not linked to a device.")
+
+
 @router.get("/{console_id}/installs", response_model=ConsoleInstallsResponse)
 async def get_console_installs(
     request: Request, console_id: str, claims: TokenClaims = Depends(require_bearer)

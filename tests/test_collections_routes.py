@@ -160,6 +160,21 @@ class FakeCollectionsRepository:
             for rank, game_id in enumerate(self.items.get(definition_id, ()), start=1)
         ]
 
+    async def list_definition_items_page(
+        self, definition_id, *, search=None, genre=None, sort="rank", sort_dir="asc", limit=50, offset=0
+    ):
+        items = await self.list_definition_items(definition_id)
+        if search:
+            items = [item for item in items if search.lower() in item.title.lower()]
+        return items[offset : offset + limit], len(items)
+
+    async def remove_definition_item(self, definition_id, game_id):
+        members = self.items.get(definition_id, ())
+        if game_id not in members:
+            return False
+        self.items[definition_id] = tuple(member for member in members if member != game_id)
+        return True
+
     async def update_definition(self, definition_id, *, name, description, game_ids=None):
         if name in self.duplicate_names:
             raise psycopg.errors.UniqueViolation(
@@ -716,6 +731,86 @@ def test_get_definition_returns_its_items():
     assert body["definition_id"] == "def-a"
     assert [item["game_id"] for item in body["items"]] == ["g1"]
     assert body["items"][0]["cover_image_url"] == "g1.png"
+
+
+def test_get_definition_items_returns_a_page_and_the_total():
+    collections_repository = FakeCollectionsRepository([_definition()], known_games={"g1", "g2", "g3"})
+    collections_repository.items["def-a"] = ("g1", "g2", "g3")
+    client, validator = _build(collections_repository=collections_repository)
+    validator.register("token-a", _claims(sub="sub-a"))
+
+    response = client.get("/collections/def-a/items?limit=2&offset=1", headers=_bearer("token-a"))
+
+    assert response.status_code == 200
+    body = response.json()
+    assert [item["game_id"] for item in body["items"]] == ["g2", "g3"]
+    assert body["total"] == 3, "total counts the whole collection, not the page"
+
+
+def test_get_definition_items_filters_by_title():
+    collections_repository = FakeCollectionsRepository([_definition()], known_games={"g1", "g2"})
+    collections_repository.items["def-a"] = ("g1", "g2")
+    client, validator = _build(collections_repository=collections_repository)
+    validator.register("token-a", _claims(sub="sub-a"))
+
+    response = client.get("/collections/def-a/items?q=g2", headers=_bearer("token-a"))
+
+    assert [item["game_id"] for item in response.json()["items"]] == ["g2"]
+
+
+def test_get_definition_items_rejects_an_unknown_sort_field():
+    collections_repository = FakeCollectionsRepository([_definition()])
+    client, validator = _build(collections_repository=collections_repository)
+    validator.register("token-a", _claims(sub="sub-a"))
+
+    response = client.get("/collections/def-a/items?sort=game_id", headers=_bearer("token-a"))
+
+    assert response.status_code == 422
+
+
+def test_get_definition_items_not_owned_returns_404():
+    collections_repository = FakeCollectionsRepository([_definition(identity_sub="sub-b")])
+    client, validator = _build(collections_repository=collections_repository)
+    validator.register("token-a", _claims(sub="sub-a"))
+
+    response = client.get("/collections/def-a/items", headers=_bearer("token-a"))
+
+    assert response.status_code == 404
+
+
+def test_remove_definition_item_removes_only_that_title():
+    collections_repository = FakeCollectionsRepository([_definition()], known_games={"g1", "g2"})
+    collections_repository.items["def-a"] = ("g1", "g2")
+    client, validator = _build(collections_repository=collections_repository)
+    validator.register("token-a", _claims(sub="sub-a"))
+
+    response = client.delete("/collections/def-a/items/g1", headers=_bearer("token-a"))
+
+    assert response.status_code == 204
+    assert collections_repository.items["def-a"] == ("g2",)
+
+
+def test_remove_definition_item_not_a_member_returns_404():
+    collections_repository = FakeCollectionsRepository([_definition()], known_games={"g1"})
+    collections_repository.items["def-a"] = ("g1",)
+    client, validator = _build(collections_repository=collections_repository)
+    validator.register("token-a", _claims(sub="sub-a"))
+
+    response = client.delete("/collections/def-a/items/g9", headers=_bearer("token-a"))
+
+    assert response.status_code == 404
+
+
+def test_remove_definition_item_not_owned_returns_404_without_touching_the_collection():
+    collections_repository = FakeCollectionsRepository([_definition(identity_sub="sub-b")], known_games={"g1"})
+    collections_repository.items["def-a"] = ("g1",)
+    client, validator = _build(collections_repository=collections_repository)
+    validator.register("token-a", _claims(sub="sub-a"))
+
+    response = client.delete("/collections/def-a/items/g1", headers=_bearer("token-a"))
+
+    assert response.status_code == 404
+    assert collections_repository.items["def-a"] == ("g1",)
 
 
 def test_get_definition_not_owned_returns_404():

@@ -152,9 +152,10 @@ async def test_list_entries_with_enrichment_maps_rows_and_total():
                     True,
                     "NPWR12345_00",
                     63,
+                    "psn",
                     "https://cdn.example/elden-ring.jpg",
                 ),
-                ("game-2", "Unmatched", None, None, None, None, None, False, False, False, None, None, None),
+                ("game-2", "Unmatched", None, None, None, None, None, False, False, False, None, None, "manual", None),
             ]
         ],
     )
@@ -179,6 +180,8 @@ async def test_list_entries_with_enrichment_maps_rows_and_total():
     assert games[1].percent_completed is None
     assert games[1].category is None
     assert games[1].cover_image_url is None
+    assert games[0].source == "psn"
+    assert games[1].source == "manual", "provenance must survive the row mapping so the UI can mark it"
 
     assert games[1].is_active is False
     assert games[1].np_communication_id is None

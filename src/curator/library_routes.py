@@ -15,10 +15,11 @@ import logging
 from datetime import datetime, timedelta, timezone
 from typing import Any, Literal
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from pydantic import BaseModel
 
 from curator.audit.repository import ACTION_LIBRARY_REFRESH_REQUESTED, AccountActionLogRepository
+from curator.catalog.repository import CatalogRepository
 from curator.deps import require_bearer
 from curator.jobs.queue_publisher import QueuePublisher
 from curator.jobs.repository import JobRunsRepository
@@ -45,6 +46,7 @@ class LibraryGameResponse(BaseModel):
     opencritic_enriched: bool
     is_active: bool
     percent_completed: int | None
+    source: str = "psn"
     cover_image_url: str | None
 
 
@@ -75,6 +77,52 @@ class LibraryRefreshStatusResponse(BaseModel):
     status: str
     error: str | None
     result_summary: dict[str, Any] | None
+
+
+class ManualGameRequest(BaseModel):
+    """Body for ``POST``/``PATCH /library/manual`` -- a game the user owns with no PSN entitlement."""
+
+    game_id: str
+    native_ps5: bool = False
+    ps4_eligible: bool = False
+    owned_edition: str | None = None
+
+
+@router.post("/manual", status_code=204)
+async def add_manual_game(
+    request: Request, body: ManualGameRequest, claims: TokenClaims = Depends(require_bearer)
+) -> Response:
+    """Add a game the user owns that PSN's entitlement API has no record of -- a physical disc, typically.
+
+    Idempotent, and never overwrites a PSN-sourced entry for the same game.
+
+    :raises fastapi.HTTPException: 404, if ``game_id`` is not a known catalog game.
+    """
+    library_repository: LibraryRepository = request.app.state.library_repository
+    catalog_repository: CatalogRepository = request.app.state.catalog_repository
+    if not await catalog_repository.game_exists(body.game_id):
+        raise HTTPException(status_code=404, detail="Unknown game.")
+
+    await library_repository.upsert_manual_entry(
+        claims.sub,
+        body.game_id,
+        native_ps5=body.native_ps5,
+        ps4_eligible=body.ps4_eligible,
+        owned_edition=body.owned_edition,
+    )
+    return Response(status_code=204)
+
+
+@router.delete("/manual/{game_id}", status_code=204)
+async def remove_manual_game(request: Request, game_id: str, claims: TokenClaims = Depends(require_bearer)) -> Response:
+    """Remove a manually-added game. Never deletes a PSN-sourced row.
+
+    :raises fastapi.HTTPException: 404, if the caller has no manual entry for that game.
+    """
+    library_repository: LibraryRepository = request.app.state.library_repository
+    if not await library_repository.delete_manual_entry(claims.sub, game_id):
+        raise HTTPException(status_code=404, detail="No manually-added entry for that game.")
+    return Response(status_code=204)
 
 
 @router.get("/categories", response_model=LibraryCategoriesResponse)
@@ -131,6 +179,7 @@ async def get_library(
                 opencritic_enriched=game.opencritic_enriched,
                 is_active=game.is_active,
                 percent_completed=game.percent_completed,
+                source=game.source,
                 cover_image_url=game.cover_image_url,
             )
             for game in games

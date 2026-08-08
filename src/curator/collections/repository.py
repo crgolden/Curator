@@ -968,20 +968,9 @@ class CollectionsRepository:
     ) -> tuple[list[CollectionItem], int]:
         """Return one filtered, sorted page of a collection's membership, plus the total matching count.
 
-        The paged sibling of :meth:`list_definition_items`, which still exists for callers that genuinely
-        want the whole membership (the collection *run* path, which bin-packs against every item). This one
-        backs the display surface, where a ``capacity_fill`` collection of several hundred items would
-        otherwise render every row and run the cover-art subquery for each.
-
-        Access scoping is the same as :meth:`list_definition_items` and deliberately so: no ``identity_sub``
-        is taken, because every column resolves either cross-user or from the *owner's* sub. Whoever
-        resolved ``definition_id`` already decided the caller may see this collection.
-
         :param search: Optional case-insensitive title substring filter.
         :param genre: Optional exact-match resolved-genre filter.
-        :param sort: Which column to sort by -- resolved through :data:`_ITEM_SORT_COLUMNS` rather than
-            interpolated, so a caller-supplied value can never reach the SQL text even if the route layer's
-            literal constraint were bypassed.
+        :param sort: Which column to sort by, resolved through :data:`_ITEM_SORT_COLUMNS`.
         :param sort_dir: ``"asc"`` or ``"desc"``; anything else is treated as ``"asc"``.
         :param limit: Page size.
         :param offset: Number of matching rows to skip.
@@ -1017,6 +1006,60 @@ class CollectionsRepository:
             )
             rows = await cur.fetchall()
         return [self._to_item(row) for row in rows], total
+
+    async def list_console_device_links(self, identity_sub: str) -> dict[str, str]:
+        """Return this user's ``{device_id: console_id}`` links, for annotating ``GET /devices``.
+
+        Keyed by device rather than console because the caller is decorating a PSN device list: a device
+        with no entry is simply unlinked.
+        """
+        async with self._pool.connection() as conn, conn.cursor() as cur:
+            await cur.execute(
+                "SELECT device_id, console_id FROM console_device_links WHERE identity_sub = %s", (identity_sub,)
+            )
+            rows = await cur.fetchall()
+        return {row[0]: str(row[1]) for row in rows}
+
+    async def link_console_device(self, identity_sub: str, console_id: str, device_id: str) -> None:
+        """Link one console to one PSN-registered device, replacing either side's existing link.
+
+        Re-linking is an update, not an error: pointing a console at a different device, or a device at a
+        different console, is a correction the user is entitled to make without unlinking first. Both
+        conflict targets are handled because either uniqueness rule can be the one that fires.
+        """
+        async with self._pool.connection() as conn, conn.cursor() as cur:
+            await cur.execute(
+                "DELETE FROM console_device_links WHERE identity_sub = %s AND (console_id = %s OR device_id = %s)",
+                (identity_sub, console_id, device_id),
+            )
+            await cur.execute(
+                "INSERT INTO console_device_links (identity_sub, console_id, device_id) VALUES (%s, %s, %s)",
+                (identity_sub, console_id, device_id),
+            )
+
+    async def unlink_console_device(self, identity_sub: str, console_id: str) -> bool:
+        """Remove a console's device link.
+
+        :returns: ``True`` if a link was removed, ``False`` if that console had none.
+        """
+        async with self._pool.connection() as conn, conn.cursor() as cur:
+            await cur.execute(
+                "DELETE FROM console_device_links WHERE identity_sub = %s AND console_id = %s",
+                (identity_sub, console_id),
+            )
+            return bool(cur.rowcount)
+
+    async def remove_definition_item(self, definition_id: str, game_id: str) -> bool:
+        """Remove a single game from a collection's stored membership, leaving every other item untouched.
+
+        :returns: ``True`` if a row was removed, ``False`` if that game was not a member.
+        """
+        async with self._pool.connection() as conn, conn.cursor() as cur:
+            await cur.execute(
+                "DELETE FROM collection_definition_items WHERE definition_id = %s AND game_id = %s",
+                (definition_id, game_id),
+            )
+            return bool(cur.rowcount)
 
     @staticmethod
     def _to_item(row: Sequence[Any]) -> CollectionItem:

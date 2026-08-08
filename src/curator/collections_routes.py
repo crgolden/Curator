@@ -20,10 +20,10 @@ one path that deliberately does *not* touch membership.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Literal
 
 import psycopg
-from fastapi import APIRouter, Depends, HTTPException, Request, Response
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from pydantic import BaseModel
 
 from curator.catalog.repository import CatalogRepository
@@ -31,7 +31,12 @@ from curator.collections.collection_orchestrator import CollectionOrchestrator
 from curator.collections.collection_spec import CollectionSpec
 from curator.collections.filter_predicate import FilterPredicate, parse_predicate, predicate_to_dict
 from curator.collections.game_candidate import GameCandidate
-from curator.collections.repository import CollectionDefinition, CollectionItem, CollectionsRepository
+from curator.collections.repository import (
+    CollectionDefinition,
+    CollectionItem,
+    CollectionItemSortField,
+    CollectionsRepository,
+)
 from curator.deps import require_bearer
 from curator.token_validation import TokenClaims
 
@@ -227,6 +232,20 @@ class DefinitionDetailResponse(DefinitionResponse):
     items: list[CollectionItemResponse]
 
 
+DETAIL_PAGE_SIZE = 50
+
+
+class CollectionItemsPageResponse(BaseModel):
+    """One page of a collection's membership -- the ``GET /collections/{id}/items`` response body.
+
+    ``total`` counts every item matching the filters, not the page, so a caller can size its pager without
+    walking the whole collection.
+    """
+
+    items: list[CollectionItemResponse]
+    total: int
+
+
 class CollectionRunResponse(BaseModel):
     """The ``POST /collections/{definition_id}/runs`` response body: the persisted run plus its results."""
 
@@ -361,7 +380,9 @@ async def list_followed_collections(
 async def get_definition(
     request: Request, definition_id: str, claims: TokenClaims = Depends(require_bearer)
 ) -> DefinitionDetailResponse:
-    """Return one of the caller's collections together with its stored membership.
+    """Return one of the caller's collections together with the *first page* of its stored membership.
+
+    ``item_count`` carries the real total; ``GET /collections/{definition_id}/items`` serves every page.
 
     :returns: The :class:`DefinitionDetailResponse`, items in rank order.
     :raises fastapi.HTTPException: 404, if the collection doesn't exist or isn't the caller's own.
@@ -371,11 +392,65 @@ async def get_definition(
     if definition is None:
         raise HTTPException(status_code=404, detail="Collection definition not found.")
 
-    items = await collections_repository.list_definition_items(definition_id)
+    items, _ = await collections_repository.list_definition_items_page(definition_id, limit=DETAIL_PAGE_SIZE)
     return DefinitionDetailResponse(
         **_definition_to_response(definition).model_dump(),
         items=[_to_item_response(item) for item in items],
     )
+
+
+@router.get("/{definition_id}/items", response_model=CollectionItemsPageResponse)
+async def get_definition_items(
+    request: Request,
+    definition_id: str,
+    q: str | None = Query(default=None),
+    genre: str | None = Query(default=None),
+    sort: CollectionItemSortField = Query(default="rank"),
+    sort_dir: Literal["asc", "desc"] = Query(default="asc", alias="sortDir"),
+    limit: int = Query(default=50, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
+    claims: TokenClaims = Depends(require_bearer),
+) -> CollectionItemsPageResponse:
+    """Return one filtered, sorted page of a collection's membership.
+
+    Sorting by anything other than ``rank`` reorders a bin-packed set; it does not repack it.
+
+    :param q: Optional case-insensitive title substring filter.
+    :param genre: Optional exact-match resolved-genre filter.
+    :param sort: Which column to sort by; unresolved (``None``) values sort last in both directions.
+    :param sort_dir: Sort direction.
+    :param limit: Page size.
+    :param offset: Number of matching items to skip.
+    :raises fastapi.HTTPException: 404, if the collection doesn't exist or isn't the caller's own.
+    """
+    collections_repository: CollectionsRepository = request.app.state.collections_repository
+    definition = await collections_repository.get_definition(claims.sub, definition_id)
+    if definition is None:
+        raise HTTPException(status_code=404, detail="Collection definition not found.")
+
+    items, total = await collections_repository.list_definition_items_page(
+        definition_id, search=q, genre=genre, sort=sort, sort_dir=sort_dir, limit=limit, offset=offset
+    )
+    return CollectionItemsPageResponse(items=[_to_item_response(item) for item in items], total=total)
+
+
+@router.delete("/{definition_id}/items/{game_id}", status_code=204)
+async def remove_definition_item(
+    request: Request, definition_id: str, game_id: str, claims: TokenClaims = Depends(require_bearer)
+) -> Response:
+    """Remove one title from a collection, leaving the rest of its membership untouched.
+
+    :raises fastapi.HTTPException: 404, if the collection doesn't exist, isn't the caller's own, or doesn't
+        contain that game.
+    """
+    collections_repository: CollectionsRepository = request.app.state.collections_repository
+    definition = await collections_repository.get_definition(claims.sub, definition_id)
+    if definition is None:
+        raise HTTPException(status_code=404, detail="Collection definition not found.")
+
+    if not await collections_repository.remove_definition_item(definition_id, game_id):
+        raise HTTPException(status_code=404, detail="That title is not in this collection.")
+    return Response(status_code=204)
 
 
 @router.patch("/{definition_id}", response_model=DefinitionDetailResponse)
