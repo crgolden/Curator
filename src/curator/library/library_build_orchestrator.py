@@ -44,6 +44,11 @@ class EnrichDeltaResult:
         (401/403) during this call -- the run still reaches ``succeeded``; this is how the caller reports
         "finished, RAWG skipped" instead of failing the whole refresh. See :meth:`EnrichmentService
         .disable_provider`.
+    :param unavailable_providers: ``"rawg"``/``"opencritic"`` for every provider that became unreachable
+        during this call -- repeated connect/read failures rather than a rejection, so the key is
+        presumed fine and the host is not. Reported separately from ``rejected_providers`` because the
+        remedy differs: a rejected key needs the user to re-save it, an unreachable host needs nothing
+        but time. See :meth:`EnrichmentService._note_transport_failure`.
     """
 
     enriched_count: int
@@ -53,6 +58,7 @@ class EnrichDeltaResult:
     retry_after_seconds: float | None = None
     remaining_game_ids: list[str] = field(default_factory=list)
     rejected_providers: list[str] = field(default_factory=list)
+    unavailable_providers: list[str] = field(default_factory=list)
 
 
 @dataclass(frozen=True, slots=True)
@@ -96,6 +102,7 @@ class LibraryBuildResult:
     :param trophy_match: Summary of stage 5 (:meth:`LibraryBuildOrchestrator.match_trophies`) -- all-zero
         if ``build()`` was called with no ``trophy_client`` (``harvest_trophies`` disabled).
     :param rejected_providers: See :class:`EnrichDeltaResult`.
+    :param unavailable_providers: See :class:`EnrichDeltaResult`.
     """
 
     pull_id: str
@@ -108,6 +115,7 @@ class LibraryBuildResult:
     retry_after_seconds: float | None = None
     remaining_game_ids: list[str] = field(default_factory=list)
     rejected_providers: list[str] = field(default_factory=list)
+    unavailable_providers: list[str] = field(default_factory=list)
     trophy_match: TrophyMatchResult = field(
         default_factory=lambda: TrophyMatchResult(exact_matched_count=0, fuzzy_matched_count=0, attempted_count=0)
     )
@@ -175,6 +183,7 @@ async def enrich_games(
                 retry_after_seconds=exc.retry_after_seconds,
                 remaining_game_ids=[remaining_game_id for remaining_game_id, *_ in games[index:]],
                 rejected_providers=rejected_providers,
+                unavailable_providers=sorted(enrichment_service.transport_unavailable_providers),
             )
         except EnrichmentAuthError as exc:
             if exc.provider in rejected_providers:
@@ -198,6 +207,7 @@ async def enrich_games(
         rawg_enriched_titles=rawg_enriched_titles,
         opencritic_enriched_titles=opencritic_enriched_titles,
         rejected_providers=rejected_providers,
+        unavailable_providers=sorted(enrichment_service.transport_unavailable_providers),
     )
 
 
@@ -470,4 +480,5 @@ class LibraryBuildOrchestrator:
             remaining_game_ids=enrich_result.remaining_game_ids,
             trophy_match=trophy_match_result,
             rejected_providers=enrich_result.rejected_providers,
+            unavailable_providers=enrich_result.unavailable_providers,
         )

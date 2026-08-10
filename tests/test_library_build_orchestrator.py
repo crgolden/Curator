@@ -73,6 +73,7 @@ class FakeEnrichmentService:
         self._size = size
         self.enrich_calls: list[str] = []
         self.opencritic_topup_incomplete = False
+        self.transport_unavailable_providers: set[str] = set()
         self._rate_limit_on_title: str | None = None
         self._rate_limit_error: EnrichmentRateLimitError | None = None
         self._auth_reject_on_title: str | None = None

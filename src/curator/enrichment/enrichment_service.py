@@ -34,6 +34,7 @@ _AUTH_FAILURE_STATUS_CODES = (401, 403)
 _RATE_LIMIT_STATUS_CODE = 429
 _DEFAULT_RATE_LIMIT_RETRY_SECONDS = 3600.0
 _MAX_RATE_LIMIT_RETRY_SECONDS = 86400.0
+_TRANSPORT_FAILURE_LIMIT = 3
 
 
 def next_rate_limit_backoff_seconds(previous_retry_after_seconds: float) -> float:
@@ -173,6 +174,8 @@ class EnrichmentService:
         self._opencritic_topup_attempted = False
         self.opencritic_topup_incomplete = False
         self._next_rate_limit_backoff_seconds: dict[str, float] = dict(rate_limit_backoff_seconds or {})
+        self._consecutive_transport_failures: dict[str, int] = {}
+        self.transport_unavailable_providers: set[str] = set()
 
     @property
     def has_rawg_client(self) -> bool:
@@ -208,6 +211,31 @@ class EnrichmentService:
             self._rawg_client = None
         elif provider == "opencritic":
             self._opencritic_client = None
+
+    def _note_transport_failure(self, provider: str) -> None:
+        """Count a connect/read failure against ``provider`` and stop using it once they stack up.
+
+        A transport failure is not a rejection, so unlike :class:`EnrichmentAuthError` a single one is
+        never conclusive -- one game's request can time out against a provider that is otherwise healthy.
+        A run of them is different: when a host is down, every remaining game pays the full connect
+        timeout to learn the same thing. Three in a row is treated as "the provider is unreachable for
+        this run" and routed through :meth:`disable_provider`, so the rest of the run skips it silently
+        rather than paying that timeout once per game.
+
+        The counter resets on any success, so an intermittent provider is never disabled by failures
+        spread across an otherwise-working run.
+
+        :param provider: ``"rawg"`` or ``"opencritic"``.
+        """
+        failures = self._consecutive_transport_failures.get(provider, 0) + 1
+        self._consecutive_transport_failures[provider] = failures
+        if failures >= _TRANSPORT_FAILURE_LIMIT:
+            self.transport_unavailable_providers.add(provider)
+            self.disable_provider(provider)
+
+    def _note_transport_success(self, provider: str) -> None:
+        """Clear ``provider``'s consecutive-transport-failure count after a request that got through."""
+        self._consecutive_transport_failures.pop(provider, None)
 
     def _rate_limit_retry_after(self, provider: str, hinted_seconds: float | None) -> float:
         """Resolve how long to wait before retrying ``provider``, on a 429.
@@ -389,10 +417,13 @@ class EnrichmentService:
             if exc.status_code == _RATE_LIMIT_STATUS_CODE:
                 retry_after = self._rate_limit_retry_after("rawg", exc.retry_after_seconds)
                 raise EnrichmentRateLimitError("rawg", retry_after) from None
+            self._note_transport_success("rawg")
             return None
         except httpx.HTTPError:
+            self._note_transport_failure("rawg")
             return None
 
+        self._note_transport_success("rawg")
         match = find_rawg_match(title, candidates)
         if match is None:
             await self._repository.save_rawg_cache(title, rawg_game_id=None, raw=None)
@@ -406,10 +437,13 @@ class EnrichmentService:
             if exc.status_code == _RATE_LIMIT_STATUS_CODE:
                 retry_after = self._rate_limit_retry_after("rawg", exc.retry_after_seconds)
                 raise EnrichmentRateLimitError("rawg", retry_after) from None
+            self._note_transport_success("rawg")
             return None
         except httpx.HTTPError:
+            self._note_transport_failure("rawg")
             return None
 
+        self._note_transport_success("rawg")
         await self._repository.save_rawg_cache(title, rawg_game_id=match.rawg_game_id, raw=detail)
         return detail
 

@@ -638,6 +638,7 @@ def _rate_limited_result_summary(
     retry_after_seconds: float,
     remaining_count: int,
     rejected_providers: list[str],
+    unavailable_providers: list[str],
 ) -> dict[str, Any]:
     """Build the ``result_summary`` ``JobRunsRepository.mark_rate_limited`` records -- the same shape
     ``mark_succeeded`` gets, plus the three fields ``GET /library/refresh/{run_id}`` needs to answer "how
@@ -651,6 +652,7 @@ def _rate_limited_result_summary(
         "retry_after_seconds": retry_after_seconds,
         "remaining_count": remaining_count,
         "rejected_providers": rejected_providers,
+        "unavailable_providers": unavailable_providers,
     }
 
 
@@ -836,6 +838,7 @@ def _library_refresh_handler(
                 retry_after_seconds=result.retry_after_seconds,
                 remaining_count=len(result.remaining_game_ids),
                 rejected_providers=result.rejected_providers,
+                unavailable_providers=result.unavailable_providers,
             )
             new_seq = await job_runs_repository.mark_rate_limited(run_id, result_summary)
             await queue_publisher.publish_library_refresh_continuation(
@@ -853,6 +856,7 @@ def _library_refresh_handler(
             "opencritic_enriched_titles": result.opencritic_enriched_titles,
             "opencritic_topup_incomplete": result.opencritic_topup_incomplete,
             "rejected_providers": result.rejected_providers,
+            "unavailable_providers": result.unavailable_providers,
         }
 
     return handle
@@ -968,6 +972,9 @@ def _library_refresh_continuation_handler(
         merged_rejected_providers = sorted(
             {*existing_summary.get("rejected_providers", []), *enrich_result.rejected_providers}
         )
+        merged_unavailable_providers = sorted(
+            {*existing_summary.get("unavailable_providers", []), *enrich_result.unavailable_providers}
+        )
 
         if enrich_result.rate_limited_provider is not None:
             assert enrich_result.retry_after_seconds is not None
@@ -979,6 +986,7 @@ def _library_refresh_continuation_handler(
                 retry_after_seconds=enrich_result.retry_after_seconds,
                 remaining_count=len(enrich_result.remaining_game_ids),
                 rejected_providers=merged_rejected_providers,
+                unavailable_providers=merged_unavailable_providers,
             )
             new_seq = await job_runs_repository.mark_rate_limited(run_id, result_summary)
             await queue_publisher.publish_library_refresh_continuation(
@@ -996,6 +1004,7 @@ def _library_refresh_continuation_handler(
             "opencritic_enriched_titles": merged_opencritic_titles,
             "opencritic_topup_incomplete": opencritic_topup_incomplete,
             "rejected_providers": merged_rejected_providers,
+            "unavailable_providers": merged_unavailable_providers,
         }
 
     return handle

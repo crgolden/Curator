@@ -514,6 +514,75 @@ async def test_has_catalog_client_reflects_configured_client():
     assert service.has_catalog_client is False
 
 
+class SequencedRawgClient:
+    """A RAWG client whose search either raises or succeeds, per call, from a scripted sequence.
+
+    Distinct from :class:`FakeRawgClient`, whose ``search_raises`` is fixed for the instance's whole
+    lifetime -- the consecutive-failure breaker can only be exercised by a client that can fail, then
+    succeed, then fail again.
+    """
+
+    def __init__(self, outcomes):
+        self._outcomes = list(outcomes)
+        self.search_calls: list[str] = []
+
+    async def search_games(self, title, *, page_size=5):
+        self.search_calls.append(title)
+        outcome = self._outcomes.pop(0) if self._outcomes else None
+        if isinstance(outcome, Exception):
+            raise outcome
+        return []
+
+    async def fetch_detail(self, rawg_game_id):
+        return None
+
+
+async def _enrich(service, title):
+    return await service.enrich_game(
+        title,
+        title_id=None,
+        is_ps5=True,
+        genre_priorities=_GENRE_PRIORITIES,
+        publisher_tier_rules=_PUBLISHER_RULES,
+        size_estimates=_SIZE_ESTIMATES,
+    )
+
+
+async def test_repeated_rawg_transport_failures_stop_calling_rawg_for_the_rest_of_the_run():
+    timeout = httpx.ConnectTimeout("rawg is unreachable")
+    rawg_client = SequencedRawgClient([timeout, timeout, timeout, timeout])
+    service = _service(rawg_client=rawg_client, opencritic_client=None)
+
+    for title in ("One", "Two", "Three", "Four"):
+        result, _ = await _enrich(service, title)
+        assert result.rawg_enriched is False
+
+    assert rawg_client.search_calls == ["One", "Two", "Three"]
+    assert service.transport_unavailable_providers == {"rawg"}
+
+
+async def test_a_successful_rawg_call_resets_the_consecutive_transport_failure_count():
+    timeout = httpx.ConnectTimeout("rawg blipped")
+    rawg_client = SequencedRawgClient([timeout, timeout, None, timeout, timeout])
+    service = _service(rawg_client=rawg_client, opencritic_client=None)
+
+    for title in ("One", "Two", "Three", "Four", "Five"):
+        await _enrich(service, title)
+
+    assert rawg_client.search_calls == ["One", "Two", "Three", "Four", "Five"]
+    assert service.transport_unavailable_providers == set()
+
+
+async def test_rawg_transport_failure_does_not_raise_auth_or_rate_limit_errors():
+    rawg_client = SequencedRawgClient([httpx.ConnectTimeout("rawg is unreachable")])
+    service = _service(rawg_client=rawg_client, opencritic_client=None)
+
+    result, _ = await _enrich(service, "Some Game")
+
+    assert result.rawg_enriched is False
+    assert result.critical_score is None
+
+
 async def test_enrich_game_with_no_rawg_client_skips_rawg_signal_silently():
     service = _service(rawg_client=None)
 
