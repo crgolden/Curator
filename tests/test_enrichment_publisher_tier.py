@@ -25,9 +25,9 @@ def test_unknown_publisher_defaults_to_indie():
     assert classify_tier("Some Random Indie Studio", _RULES) == "Indie"
 
 
-def test_empty_publisher_returns_empty_string():
-    assert classify_tier("", _RULES) == ""
-    assert classify_tier(None, _RULES) == ""
+def test_no_publisher_to_classify_returns_none_not_a_tier():
+    assert classify_tier("", _RULES) is None
+    assert classify_tier(None, _RULES) is None
 
 
 def test_case_insensitive_matching():

@@ -41,6 +41,8 @@ class PsnCatalogCacheEntry:
     publisher: str | None
     release_date: str | None
     cover_image_url: str | None
+    content_rating: str | None = None
+    rating_authority: str | None = None
 
 
 class EnrichmentRepository:
@@ -65,9 +67,9 @@ class EnrichmentRepository:
 
         ``get_unenriched_game_ids`` means an already-enriched game is never revisited by the normal
         per-user refresh path -- without this, a game enriched before ``publisher_tiers`` was seeded
-        would stay misclassified (defaulted to ``"Indie"``) forever. No new RAWG/OpenCritic/PSN call
-        is needed: ``publisher``/``developer`` were already resolved and stored by the original
-        enrichment, so this just reclassifies already-known data.
+        would stay misclassified forever. No new RAWG/OpenCritic/PSN call is needed:
+        ``publisher``/``developer`` were already resolved and stored by the original enrichment, so this
+        just reclassifies already-known data.
 
         :param rules: Every publisher-tier classification rule (see :meth:`list_publisher_tier_rules`).
         :returns: The number of games whose ``aaa_tier`` changed.
@@ -81,7 +83,7 @@ class EnrichmentRepository:
 
             updated = 0
             for game_id, publisher, developer, current_tier in rows:
-                new_tier = classify_tier(publisher or "", rules) or classify_tier(developer or "", rules) or "Indie"
+                new_tier = classify_tier(publisher, rules) or classify_tier(developer, rules)
                 if new_tier != current_tier:
                     await cur.execute(
                         "UPDATE game_enrichment SET aaa_tier = %s WHERE game_id = %s",
@@ -261,7 +263,8 @@ class EnrichmentRepository:
         async with self._pool.connection() as conn, conn.cursor() as cur:
             await cur.execute(
                 """
-                SELECT title_id, concept_id, genres, star_rating, publisher, release_date, cover_image_url
+                SELECT title_id, concept_id, genres, star_rating, publisher, release_date, cover_image_url,
+                       content_rating, rating_authority
                 FROM psn_catalog_cache WHERE title_id = %s
                 """,
                 (title_id,),
@@ -277,6 +280,8 @@ class EnrichmentRepository:
             publisher=row[4],
             release_date=row[5],
             cover_image_url=row[6],
+            content_rating=row[7],
+            rating_authority=row[8],
         )
 
     async def save_psn_catalog_cache(self, entry: PsnCatalogCacheEntry) -> None:
@@ -285,8 +290,9 @@ class EnrichmentRepository:
             await cur.execute(
                 """
                 INSERT INTO psn_catalog_cache (title_id, concept_id, genres, star_rating, publisher,
-                                                release_date, cover_image_url)
-                VALUES (%s, %s, %s, %s, %s, %s, %s)
+                                                release_date, cover_image_url, content_rating,
+                                                rating_authority)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
                 ON CONFLICT (title_id) DO UPDATE SET
                     concept_id = EXCLUDED.concept_id,
                     genres = EXCLUDED.genres,
@@ -294,6 +300,8 @@ class EnrichmentRepository:
                     publisher = EXCLUDED.publisher,
                     release_date = EXCLUDED.release_date,
                     cover_image_url = EXCLUDED.cover_image_url,
+                    content_rating = EXCLUDED.content_rating,
+                    rating_authority = EXCLUDED.rating_authority,
                     fetched_at = now()
                 """,
                 (
@@ -304,6 +312,8 @@ class EnrichmentRepository:
                     entry.publisher,
                     entry.release_date,
                     entry.cover_image_url,
+                    entry.content_rating,
+                    entry.rating_authority,
                 ),
             )
 

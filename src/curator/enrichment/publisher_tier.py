@@ -36,19 +36,20 @@ def fingerprint_publisher_tier_rules(rules: list[PublisherTierRule]) -> str:
     return hashlib.sha256(json.dumps(canonical).encode()).hexdigest()
 
 
-def classify_tier(publisher: str, rules: list[PublisherTierRule]) -> str:
+def classify_tier(publisher: str | None, rules: list[PublisherTierRule]) -> str | None:
     """Classify a publisher (or developer, as a fallback signal) into AAA/AA/Indie.
 
-    :param publisher: The publisher (or developer) name; case-insensitive.
+    :param publisher: The publisher (or developer) name; case-insensitive. ``None``/empty means there is
+        nothing to classify, which is distinct from classifying something as ``"Indie"``.
     :param rules: Every publisher-tier rule, checked in ``"AAA"`` then ``"AA"`` priority order (a name
         matching both an AAA and an AA pattern is classified AAA, mirroring the legacy scripts' set-lookup
         order).
-    :returns: ``"AAA"``, ``"AA"``, or ``"Indie"`` (the default when nothing matches) -- or ``""`` if
-        ``publisher`` itself is empty (there's nothing to classify).
+    :returns: ``"AAA"``, ``"AA"``, or ``"Indie"`` (the default when a real name matches no rule) -- or
+        ``None`` when there was no name to classify at all.
     """
     lower = (publisher or "").lower()
     if not lower:
-        return ""
+        return None
 
     def _matches(rule: PublisherTierRule) -> bool:
         pattern = rule.pattern.lower()

@@ -213,6 +213,49 @@ async def test_a_rotated_persisted_query_hash_is_its_own_error():
     assert "refresh it" in str(excinfo.value), "the message must point at the fix, not just report failure"
 
 
+async def test_a_rotated_hash_falls_through_to_the_next_candidate():
+    tried = []
+
+    def handler(request):
+        sha = json.loads(request.url.params["extensions"])["persistedQuery"]["sha256Hash"]
+        tried.append(sha)
+        if sha == "dead":
+            return httpx.Response(400, json={"message": "Query dead not whitelisted"})
+        return httpx.Response(200, json=_grid([_product()], 1, is_last=True))
+
+    client = StoreCatalogClient(
+        httpx.AsyncClient(transport=httpx.MockTransport(handler)), query_hashes=("dead", "live")
+    )
+    page = await client.category_page("cat-1")
+
+    assert tried == ["dead", "live"], "candidates are tried in order, stopping at the first that works"
+    assert len(page.products) == 1
+
+
+async def test_the_rotated_error_only_surfaces_once_every_candidate_is_exhausted():
+    def handler(request):
+        return httpx.Response(400, json={"message": "Query x not whitelisted"})
+
+    client = StoreCatalogClient(
+        httpx.AsyncClient(transport=httpx.MockTransport(handler)), query_hashes=("one", "two")
+    )
+
+    with pytest.raises(StoreQueryRotatedError):
+        await client.category_page("cat-1")
+
+
+async def test_walks_in_ascending_release_date_so_a_new_release_cannot_shift_the_walk():
+    seen = {}
+
+    def handler(request):
+        seen["variables"] = json.loads(request.url.params["variables"])
+        return httpx.Response(200, json=_grid([], 0))
+
+    await _client(handler).category_page("cat-1")
+
+    assert seen["variables"]["sortBy"] == {"name": "productReleaseDate", "isAscending": True}
+
+
 async def test_other_graphql_errors_are_not_reported_as_a_rotated_hash():
     def handler(request):
         return httpx.Response(200, json={"errors": [{"message": "Category not found"}]})

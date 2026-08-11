@@ -82,7 +82,7 @@ from curator.psn.presence_client import PresenceClient, PresenceClientFactory
 from curator.psn.rate_limiter import RedisRateLimiter
 from curator.psn.session import PsnSession, RateLimiter
 from curator.psn.social_client import SocialClient, SocialClientFactory
-from curator.psn.store_client import StoreCatalogClient
+from curator.psn.store_client import CATEGORY_GRID_RETRIEVE_HASHES, StoreCatalogClient
 from curator.psn.trophy_cache import CachedTrophyClient
 from curator.psn.trophy_client import TrophyClient, TrophyClientFactory
 from curator.psn_routes import router as psn_router
@@ -240,7 +240,11 @@ def create_app(
     collections_repository = collections_repository or CollectionsRepository(shared_pool)
     collection_orchestrator = CollectionOrchestrator(collections_repository)
     store_backfill_service = StoreBackfillService(
-        StoreCatalogClient(httpx.AsyncClient(timeout=45.0)), catalog_repository
+        StoreCatalogClient(
+            httpx.AsyncClient(timeout=45.0),
+            query_hashes=(*settings.store_query_hashes, *CATEGORY_GRID_RETRIEVE_HASHES),
+        ),
+        catalog_repository,
     )
     job_runs_repository = job_runs_repository or JobRunsRepository(shared_pool)
     audit_repository = audit_repository or AccountActionLogRepository(shared_pool)

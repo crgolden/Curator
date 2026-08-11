@@ -7,17 +7,25 @@ See ``AGENTS/Curator.md`` for why this gateway is distinct from the authenticate
 from __future__ import annotations
 
 import json
+import logging
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any
 
 import httpx
 
+logger = logging.getLogger("curator")
+
 STORE_GRAPHQL_URL = "https://web.np.playstation.com/api/graphql/v1/op"
 
-CATEGORY_GRID_RETRIEVE = (
-    "categoryGridRetrieve",
+CATEGORY_GRID_RETRIEVE_OPERATION = "categoryGridRetrieve"
+
+CATEGORY_GRID_RETRIEVE_HASHES = (
     "9845afc0dbaab4965f6563fffc703f588c8e76792000e8610843b8d3ee9c4c09",
+    "4ce7d410a4db2c8b635a48c1dcec375906ff63b19dadd87e073f8fd0c0481d35",
 )
+
+INSERTION_IMMUNE_SORT = {"name": "productReleaseDate", "isAscending": True}
 
 
 class StoreCatalogError(Exception):
@@ -67,27 +75,47 @@ class StoreCatalogClient:
     :param locale: The storefront locale to read, e.g. ``"en-US"``.
     """
 
-    def __init__(self, client: httpx.AsyncClient, *, locale: str = "en-US") -> None:
+    def __init__(
+        self,
+        client: httpx.AsyncClient,
+        *,
+        locale: str = "en-US",
+        query_hashes: Sequence[str] = CATEGORY_GRID_RETRIEVE_HASHES,
+    ) -> None:
         self._client = client
         self._locale = locale
+        self._query_hashes = tuple(query_hashes) or CATEGORY_GRID_RETRIEVE_HASHES
 
     async def category_page(self, category_id: str, *, offset: int = 0, size: int = 100) -> StoreCategoryPage:
-        """Fetch one page of a storefront category.
+        """Fetch one page of a storefront category, trying each configured hash in turn.
 
         :param category_id: The storefront category id to walk.
         :param offset: How many products to skip.
         :param size: Page size.
-        :raises StoreQueryRotatedError: If the persisted-query hash is no longer whitelisted.
+        :raises StoreQueryRotatedError: If *every* configured hash is rejected as no longer whitelisted.
         :raises StoreCatalogError: On any other unusable response.
         """
-        operation_name, sha256_hash = CATEGORY_GRID_RETRIEVE
+        rotated: StoreQueryRotatedError | None = None
+        for sha256_hash in self._query_hashes:
+            try:
+                return await self._category_page(category_id, offset=offset, size=size, sha256_hash=sha256_hash)
+            except StoreQueryRotatedError as error:
+                rotated = error
+                logger.warning("Store persisted-query hash %s rejected; trying the next candidate", sha256_hash[:12])
+
+        raise rotated or StoreQueryRotatedError("No persisted-query hash is configured for categoryGridRetrieve.")
+
+    async def _category_page(
+        self, category_id: str, *, offset: int, size: int, sha256_hash: str
+    ) -> StoreCategoryPage:
+        operation_name = CATEGORY_GRID_RETRIEVE_OPERATION
         params = {
             "operationName": operation_name,
             "variables": json.dumps(
                 {
                     "id": category_id,
                     "pageArgs": {"size": size, "offset": offset},
-                    "sortBy": None,
+                    "sortBy": INSERTION_IMMUNE_SORT,
                     "filterBy": [],
                     "facetOptions": [],
                 }

@@ -27,6 +27,7 @@ _LOG_LEVEL_ENV_NAMES: tuple[str, ...] = ("LogLevel", "Logging__LogLevel__Default
 
 _RAWG_API_KEY_PREFIX = "RawgApiKey"
 _OPENCRITIC_RAPIDAPI_KEY_PREFIX = "OpenCriticRapidApiKey"
+_STORE_QUERY_HASH_PREFIX = "StoreQueryHash"
 _SERVICE_BUS_NAMESPACE_ENV_NAMES: tuple[str, ...] = ("ServiceBusNamespace",)
 _SERVICE_BUS_CONNECTION_ENV_NAMES: tuple[str, ...] = ("ServiceBusConnectionString",)
 
@@ -64,6 +65,9 @@ class Settings:
         ``OpenCriticRapidApiKey__0``, ``OpenCriticRapidApiKey__1``, ..., same admin-only multi-key rotation
         as ``rawg_api_keys`` (see ``curator.enrichment.opencritic_client.RotatingOpenCriticClient``); empty
         disables live OpenCritic enrichment lookups in that context.
+    :param store_query_hashes: Persisted-query hashes for the anonymous PlayStation Store gateway,
+        resolved from ``StoreQueryHash__0``, ``StoreQueryHash__1``, ...; tried before the built-in
+        defaults in ``curator.psn.store_client``. Empty (the normal case) uses the built-ins alone.
     :param service_bus_namespace: The fully-qualified Azure Service Bus namespace (e.g.
         ``crgolden.servicebus.windows.net``) backing the ``curator-library-refresh``/``curator-enrichment``
         job queues, authenticated via ``DefaultAzureCredential`` (managed identity in production). Takes
@@ -90,6 +94,7 @@ class Settings:
     log_level: str = "WARNING"
     rawg_api_keys: tuple[str, ...] = ()
     opencritic_rapidapi_keys: tuple[str, ...] = ()
+    store_query_hashes: tuple[str, ...] = ()
     service_bus_namespace: str | None = None
     service_bus_connection_string: str | None = None
     redis_host: str | None = None
@@ -128,6 +133,7 @@ class Settings:
         )
         rawg_api_keys = _resolve_indexed_keys(_RAWG_API_KEY_PREFIX, dotenv_path)
         opencritic_rapidapi_keys = _resolve_indexed_keys(_OPENCRITIC_RAPIDAPI_KEY_PREFIX, dotenv_path)
+        store_query_hashes = _resolve_indexed_keys(_STORE_QUERY_HASH_PREFIX, dotenv_path)
         service_bus_namespace = resolve_setting(
             None, env_names=_SERVICE_BUS_NAMESPACE_ENV_NAMES, dotenv_path=dotenv_path
         )
@@ -151,6 +157,7 @@ class Settings:
             log_level=(log_level or "WARNING").upper(),
             rawg_api_keys=rawg_api_keys,
             opencritic_rapidapi_keys=opencritic_rapidapi_keys,
+            store_query_hashes=store_query_hashes,
             service_bus_namespace=service_bus_namespace,
             service_bus_connection_string=service_bus_connection_string,
             redis_host=redis_host,

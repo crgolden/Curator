@@ -196,7 +196,7 @@ async def test_enrich_game_uses_cached_rawg_result_without_calling_client_again(
     assert rawg_client.search_calls == []
 
 
-async def test_enrich_game_no_rawg_match_caches_none_and_defaults_indie():
+async def test_enrich_game_no_rawg_match_caches_none_and_leaves_tier_unknown():
     rawg_client = FakeRawgClient(search_results=[])
     repository = FakeEnrichmentRepository()
     service = _service(rawg_client=rawg_client, repository=repository)
@@ -211,7 +211,7 @@ async def test_enrich_game_no_rawg_match_caches_none_and_defaults_indie():
     )
 
     assert result.genre == ""
-    assert result.aaa_tier == "Indie"
+    assert result.aaa_tier is None
     assert result.score_source is None
     assert size == 16
     from curator.enrichment.rawg_matcher import normalize
@@ -240,6 +240,118 @@ async def test_enrich_game_psn_genres_override_rawg_genres():
     assert result.genre == "Action"
     assert result.subgenre == "Adventure"
     assert catalog_client.title_concept_calls == ["p1"]
+
+
+async def test_enrich_game_psn_publisher_release_and_rating_beat_rawg():
+    from curator.enrichment.rawg_matcher import RawgCandidate
+
+    candidate = RawgCandidate(rawg_game_id=1, name="Some Game", platform_ids=frozenset({187}))
+    rawg_client = FakeRawgClient(
+        search_results=[candidate], detail=_rawg_detail(publishers=("Wrong Publisher",))
+    )
+    concept = TitleConcept(
+        concept_id="c1",
+        genres=("Action",),
+        publisher="Sony",
+        release_date="2018-10-05T04:00:00Z",
+        content_rating="ESRB Mature 17+",
+        rating_authority="ESRB",
+    )
+    service = _service(rawg_client=rawg_client, catalog_client=FakeCatalogClient(concept=concept))
+
+    result, _ = await service.enrich_game(
+        "Some Game",
+        title_id="p1",
+        is_ps5=True,
+        genre_priorities=_GENRE_PRIORITIES,
+        publisher_tier_rules=_PUBLISHER_RULES,
+        size_estimates=_SIZE_ESTIMATES,
+    )
+
+    assert result.publisher == "Sony"
+    assert result.release_year == 2018
+    assert result.esrb == "ESRB Mature 17+"
+    assert result.aaa_tier == "AAA", "tier must be classified from PSN's publisher, not RAWG's"
+
+
+async def test_enrich_game_falls_back_to_rawg_only_where_psn_is_silent():
+    from curator.enrichment.rawg_matcher import RawgCandidate
+
+    candidate = RawgCandidate(rawg_game_id=1, name="Some Game", platform_ids=frozenset({187}))
+    rawg_client = FakeRawgClient(search_results=[candidate], detail=_rawg_detail())
+    concept = TitleConcept(concept_id="c1", genres=("Action",))
+
+    service = _service(rawg_client=rawg_client, catalog_client=FakeCatalogClient(concept=concept))
+
+    result, _ = await service.enrich_game(
+        "Some Game",
+        title_id="p1",
+        is_ps5=True,
+        genre_priorities=_GENRE_PRIORITIES,
+        publisher_tier_rules=_PUBLISHER_RULES,
+        size_estimates=_SIZE_ESTIMATES,
+    )
+
+    assert result.publisher == "Sony"
+    assert result.release_year == 2020
+    assert result.esrb == "Mature"
+
+
+async def test_enrich_game_psn_precedence_survives_a_cache_hit():
+    from curator.enrichment.rawg_matcher import RawgCandidate
+
+    candidate = RawgCandidate(rawg_game_id=1, name="Some Game", platform_ids=frozenset({187}))
+    rawg_client = FakeRawgClient(
+        search_results=[candidate], detail=_rawg_detail(publishers=("Wrong Publisher",))
+    )
+    repository = FakeEnrichmentRepository()
+    repository.psn_cache["p1"] = PsnCatalogCacheEntry(
+        title_id="p1",
+        concept_id="c1",
+        genres=("Action",),
+        star_rating=4.5,
+        publisher="Sony",
+        release_date="2018-10-05T04:00:00Z",
+        cover_image_url=None,
+        content_rating="ESRB Mature 17+",
+        rating_authority="ESRB",
+    )
+    catalog_client = FakeCatalogClient()
+    service = _service(rawg_client=rawg_client, catalog_client=catalog_client, repository=repository)
+
+    result, _ = await service.enrich_game(
+        "Some Game",
+        title_id="p1",
+        is_ps5=True,
+        genre_priorities=_GENRE_PRIORITIES,
+        publisher_tier_rules=_PUBLISHER_RULES,
+        size_estimates=_SIZE_ESTIMATES,
+    )
+
+    assert catalog_client.title_concept_calls == [], "a cache hit must not re-fetch"
+    assert result.publisher == "Sony"
+    assert result.release_year == 2018
+    assert result.esrb == "ESRB Mature 17+"
+
+
+async def test_enrich_game_caches_psn_content_rating_for_later_runs():
+    concept = TitleConcept(
+        concept_id="c1", genres=("Action",), content_rating="ESRB Teen", rating_authority="ESRB"
+    )
+    repository = FakeEnrichmentRepository()
+    service = _service(catalog_client=FakeCatalogClient(concept=concept), repository=repository)
+
+    await service.enrich_game(
+        "Some Game",
+        title_id="p1",
+        is_ps5=True,
+        genre_priorities=_GENRE_PRIORITIES,
+        publisher_tier_rules=_PUBLISHER_RULES,
+        size_estimates=_SIZE_ESTIMATES,
+    )
+
+    assert repository.psn_cache["p1"].content_rating == "ESRB Teen"
+    assert repository.psn_cache["p1"].rating_authority == "ESRB"
 
 
 async def test_enrich_game_calls_catalog_client_with_title_id_not_product_id():

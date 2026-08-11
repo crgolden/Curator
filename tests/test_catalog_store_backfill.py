@@ -49,6 +49,61 @@ def _service(client, repository):
     return StoreBackfillService(client, repository, page_delay_seconds=0)
 
 
+async def test_a_delisting_mid_walk_is_measured_against_the_final_reported_total():
+    client = FakeStoreClient(
+        [
+            page([product("P1"), product("P2")], offset=0, total=4),
+            page([product("P4")], offset=2, total=3, is_last=True),
+        ]
+    )
+    repository = FakeCatalogRepository()
+
+    progress = await _service(client, repository).backfill_category("cat-1")
+
+    assert progress.completed
+    assert progress.distinct_products == 3
+    assert progress.reported_total == 3
+    assert progress.coverage_shortfall == 0, "the final total is what the walk is measured against"
+
+
+async def test_a_short_walk_against_a_larger_total_reports_the_gap():
+    client = FakeStoreClient([page([product("P1"), product("P2")], offset=0, total=5, is_last=True)])
+    repository = FakeCatalogRepository()
+
+    progress = await _service(client, repository).backfill_category("cat-1")
+
+    assert progress.completed
+    assert progress.distinct_products == 2
+    assert progress.coverage_shortfall == 3
+
+
+async def test_repeated_products_across_pages_are_not_double_counted_as_coverage():
+    client = FakeStoreClient(
+        [
+            page([product("P1"), product("P2")], offset=0, total=3),
+            page([product("P2"), product("P3")], offset=2, total=3, is_last=True),
+        ]
+    )
+    repository = FakeCatalogRepository()
+
+    progress = await _service(client, repository).backfill_category("cat-1")
+
+    assert progress.products_seen == 4, "raw count still reflects what was fetched"
+    assert progress.distinct_products == 3
+    assert progress.coverage_shortfall == 0
+
+
+async def test_a_walk_stopped_by_its_page_budget_reports_no_shortfall():
+    client = FakeStoreClient([page([product("P1")], offset=0, total=500)])
+    repository = FakeCatalogRepository()
+
+    progress = await _service(client, repository).backfill_category("cat-1", max_pages=1)
+
+    assert not progress.completed
+    assert progress.stopped_reason == "page_budget_exhausted"
+    assert progress.coverage_shortfall == 0
+
+
 async def test_walks_until_the_gateway_says_it_is_the_last_page():
     client = FakeStoreClient(
         [

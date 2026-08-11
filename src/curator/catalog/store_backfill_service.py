@@ -43,6 +43,15 @@ class BackfillProgress:
     games_created: int = 0
     covers_cached: int = 0
     stopped_reason: str | None = None
+    distinct_products: int = 0
+    reported_total: int | None = None
+
+    @property
+    def coverage_shortfall(self) -> int:
+        """How many products the category claimed to hold that a completed walk never saw."""
+        if self.reported_total is None or not self.completed:
+            return 0
+        return max(self.reported_total - self.distinct_products, 0)
 
 
 @dataclass
@@ -98,18 +107,23 @@ class StoreBackfillService:
         products_seen = 0
         games_created = 0
         covers_cached = 0
+        seen_product_ids: set[str] = set()
+        reported_total: int | None = None
 
         while max_pages is None or pages_read < max_pages:
             try:
                 page = await self._client.category_page(category_id, offset=offset, size=PAGE_SIZE)
             except StoreQueryRotatedError:
-                logger.exception("Store backfill halted: persisted-query hash rejected")
+                logger.exception("Store backfill halted: every persisted-query hash rejected")
                 return self._progress(
-                    category_id, offset, False, pages_read, products_seen, games_created, covers_cached, "query_rotated"
+                    category_id, offset, False, pages_read, products_seen, games_created, covers_cached,
+                    "query_rotated", seen_product_ids, reported_total
                 )
 
             pages_read += 1
             products_seen += len(page.products)
+            reported_total = page.total_count
+            seen_product_ids.update(product.product_id for product in page.products)
 
             full_games = [product for product in page.products if product.is_full_game]
             if full_games:
@@ -119,15 +133,27 @@ class StoreBackfillService:
 
             offset = self._next_offset(page, offset)
             if page.is_last or not page.products:
-                return self._progress(
-                    category_id, offset, True, pages_read, products_seen, games_created, covers_cached, None
+                progress = self._progress(
+                    category_id, offset, True, pages_read, products_seen, games_created, covers_cached, None,
+                    seen_product_ids, reported_total
                 )
+                if progress.coverage_shortfall:
+                    logger.warning(
+                        "Store backfill of category %s saw %d of %d products; %d were missed because the "
+                        "category changed mid-walk. Re-run to pick them up.",
+                        category_id,
+                        progress.distinct_products,
+                        progress.reported_total,
+                        progress.coverage_shortfall,
+                    )
+                return progress
 
             if self._page_delay_seconds:
                 await asyncio.sleep(self._page_delay_seconds)
 
         return self._progress(
-            category_id, offset, False, pages_read, products_seen, games_created, covers_cached, "page_budget_exhausted"
+            category_id, offset, False, pages_read, products_seen, games_created, covers_cached,
+            "page_budget_exhausted", seen_product_ids, reported_total
         )
 
     async def backfill(
@@ -157,6 +183,8 @@ class StoreBackfillService:
         games_created: int,
         covers_cached: int,
         stopped_reason: str | None,
+        seen_product_ids: set[str],
+        reported_total: int | None,
     ) -> BackfillProgress:
         return BackfillProgress(
             category_id=category_id,
@@ -167,4 +195,6 @@ class StoreBackfillService:
             games_created=games_created,
             covers_cached=covers_cached,
             stopped_reason=stopped_reason,
+            distinct_products=len(seen_product_ids),
+            reported_total=reported_total,
         )

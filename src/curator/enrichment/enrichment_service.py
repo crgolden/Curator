@@ -103,18 +103,33 @@ class EnrichmentResult:
     oc_percent_recommended: float | None
     psn_rating: float | None
     score_source: str | None
-    aaa_tier: str
+    aaa_tier: str | None
     rawg_enriched: bool
     opencritic_enriched: bool
 
 
 @dataclass(frozen=True, slots=True)
 class PsnCatalogLookup:
-    """The official-PSN-catalog signals resolved for one product id: its genres (used for genre
-    reconciliation) and its star rating (persisted as ``game_enrichment.psn_rating``)."""
+    """The official-PSN-catalog signals resolved for one product id.
+
+    Every field here takes precedence over its RAWG equivalent in :meth:`EnrichmentService.enrich_game`.
+    """
 
     genres: list[str]
     star_rating: float | None
+    publisher: str | None = None
+    release_date: str | None = None
+    content_rating: str | None = None
+
+
+def _release_year(released: str | None) -> int | None:
+    """Read a four-digit year off a leading ISO-8601 date, or ``None`` if there isn't one.
+
+    Accepts both shapes the two sources use: PSN's full timestamp (``2018-10-05T04:00:00Z``) and RAWG's
+    bare date (``2018-10-05``).
+    """
+    prefix = (released or "")[:4]
+    return int(prefix) if prefix.isdigit() else None
 
 
 def _score_source(critical_score: float | None, oc_score: float | None) -> str | None:
@@ -348,12 +363,9 @@ class EnrichmentService:
         developers = [d["name"] for d in (rawg_detail or {}).get("developers", [])]
         publishers = [p["name"] for p in (rawg_detail or {}).get("publishers", [])]
         developer = developers[0] if developers else None
-        publisher = publishers[0] if publishers else None
+        publisher = psn_catalog.publisher or (publishers[0] if publishers else None)
 
-        aaa_tier = classify_tier(publisher or "", publisher_tier_rules) or classify_tier(
-            developer or "", publisher_tier_rules
-        )
-        aaa_tier = aaa_tier or "Indie"
+        aaa_tier = classify_tier(publisher, publisher_tier_rules) or classify_tier(developer, publisher_tier_rules)
 
         tags = [tag["name"].lower() for tag in (rawg_detail or {}).get("tags", [])]
         multiplayer = any(keyword in tag for keyword in _MULTIPLAYER_KEYWORDS for tag in tags) if tags else None
@@ -366,10 +378,11 @@ class EnrichmentService:
         oc_tier = oc_game.tier if oc_game else None
         oc_percent = oc_game.percent_recommended if oc_game else None
 
-        released = (rawg_detail or {}).get("released") or ""
-        release_year = int(released[:4]) if released[:4].isdigit() else None
+        rawg_released = (rawg_detail or {}).get("released") or ""
+        release_year = _release_year(psn_catalog.release_date) or _release_year(rawg_released)
 
-        esrb = ((rawg_detail or {}).get("esrb_rating") or {}).get("name") if rawg_detail else None
+        rawg_esrb = ((rawg_detail or {}).get("esrb_rating") or {}).get("name") if rawg_detail else None
+        esrb = psn_catalog.content_rating or rawg_esrb
 
         result = EnrichmentResult(
             genre=genre,
@@ -389,7 +402,7 @@ class EnrichmentService:
             rawg_enriched=rawg_detail is not None,
             opencritic_enriched=oc_game is not None,
         )
-        estimated_size = estimate_install_size_gb(title, genre, is_ps5, aaa_tier, size_estimates)
+        estimated_size = estimate_install_size_gb(title, genre, is_ps5, aaa_tier or "Indie", size_estimates)
         return result, estimated_size
 
     async def _resolve_rawg(self, title: str) -> dict[str, Any] | None:
@@ -486,7 +499,7 @@ class EnrichmentService:
                 self.opencritic_topup_incomplete = True
 
     async def _resolve_psn_catalog(self, title_id: str | None) -> PsnCatalogLookup:
-        """Resolve a title id's official-PSN-catalog genres and star rating, cache-first.
+        """Resolve a title id's official-PSN-catalog signals, cache-first.
 
         :param title_id: The game's PSN store/content title id (npTitleId), or ``None`` if unknown. PSN's
             catalog "concepts" endpoint (:meth:`~curator.psn.catalog_client.CatalogClient.title_concept`)
@@ -497,7 +510,13 @@ class EnrichmentService:
             return PsnCatalogLookup(genres=[], star_rating=None)
         cached = await self._repository.get_psn_catalog_cache(title_id)
         if cached is not None:
-            return PsnCatalogLookup(genres=list(cached.genres), star_rating=cached.star_rating)
+            return PsnCatalogLookup(
+                genres=list(cached.genres),
+                star_rating=cached.star_rating,
+                publisher=cached.publisher,
+                release_date=cached.release_date,
+                content_rating=cached.content_rating,
+            )
 
         try:
             concept = await self._catalog_client.title_concept(title_id)
@@ -512,6 +531,14 @@ class EnrichmentService:
                 publisher=concept.publisher,
                 release_date=concept.release_date,
                 cover_image_url=concept.cover_image_url,
+                content_rating=concept.content_rating,
+                rating_authority=concept.rating_authority,
             )
         )
-        return PsnCatalogLookup(genres=list(concept.genres), star_rating=concept.star_rating)
+        return PsnCatalogLookup(
+            genres=list(concept.genres),
+            star_rating=concept.star_rating,
+            publisher=concept.publisher,
+            release_date=concept.release_date,
+            content_rating=concept.content_rating,
+        )

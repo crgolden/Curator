@@ -148,7 +148,11 @@ async def test_set_opencritic_cursor_upserts():
 
 
 async def test_get_psn_catalog_cache_maps_row():
-    pool = FakePool(fetchone_results=[("p1", "c1", ["Action", "RPG"], 4.5, "Sony", "2020-01-01", "cover.png")])
+    pool = FakePool(
+        fetchone_results=[
+            ("p1", "c1", ["Action", "RPG"], 4.5, "Sony", "2020-01-01", "cover.png", "ESRB Mature", "ESRB")
+        ]
+    )
     repo = EnrichmentRepository(pool)
 
     entry = await repo.get_psn_catalog_cache("p1")
@@ -161,6 +165,8 @@ async def test_get_psn_catalog_cache_maps_row():
         publisher="Sony",
         release_date="2020-01-01",
         cover_image_url="cover.png",
+        content_rating="ESRB Mature",
+        rating_authority="ESRB",
     )
 
 
@@ -235,6 +241,18 @@ async def test_reclassify_tier_falls_back_to_developer_and_then_indie():
     assert updated == 0
     conn = pool.connections[0]
     assert not any(call[0].startswith("UPDATE game_enrichment") for call in conn.executed)
+
+
+async def test_reclassify_tier_clears_a_tier_it_can_no_longer_justify():
+    pool = FakePool(fetchall_results=[[("id-1", "", "", "Indie")]])
+    repo = EnrichmentRepository(pool)
+
+    updated = await repo.reclassify_tier([])
+
+    assert updated == 1
+    conn = pool.connections[0]
+    update = next(call for call in conn.executed if call[0].startswith("UPDATE game_enrichment"))
+    assert update[1] == (None, "id-1")
 
 
 async def test_get_publisher_tier_rules_fingerprint_returns_none_when_no_row():
