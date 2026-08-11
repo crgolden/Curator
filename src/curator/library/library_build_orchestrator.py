@@ -40,11 +40,13 @@ logger = logging.getLogger(__name__)
 class EnrichDeltaResult:
     """Summary of one :meth:`LibraryBuildOrchestrator.enrich_delta` call.
 
-    :param rate_limited_provider: ``"rawg"``/``"opencritic"`` if a provider's rate limit stopped
-        enrichment early this call, else ``None``.
+    :param rate_limited_provider: ``"rawg"``/``"opencritic"`` if a provider was rate limited this call and
+        its share of the work still needs redoing, else ``None``. When both were, the one whose backoff is
+        longest, since that is when a resume is safe for either.
     :param retry_after_seconds: When it should be safe to resume, if ``rate_limited_provider`` is set.
-    :param remaining_game_ids: Every game id not yet attempted this call, including the one that hit the
-        rate limit (so it's retried first on resume) -- empty unless ``rate_limited_provider`` is set.
+    :param remaining_game_ids: Every game id enriched from the first rate limit onward -- enriched without
+        that provider's signal, so a continuation redoes them. Empty unless ``rate_limited_provider`` is
+        set.
     :param rejected_providers: ``"rawg"``/``"opencritic"`` for every provider whose key was rejected
         (401/403) during this call -- the run still reaches ``succeeded``; this is how the caller reports
         "finished, RAWG skipped" instead of failing the whole refresh. See :meth:`EnrichmentService
@@ -96,11 +98,12 @@ class LibraryBuildResult:
         ``curator.enrichment.enrichment_service.EnrichmentService._resolve_opencritic``) stopped early
         rather than exhausting the catalog -- a future refresh (by this user or any other, since the
         cache/cursor are shared) picks up where it left off.
-    :param rate_limited_provider: ``"rawg"``/``"opencritic"`` if a provider's rate limit stopped
-        enrichment early this run, else ``None`` -- see :class:`EnrichDeltaResult`.
+    :param rate_limited_provider: ``"rawg"``/``"opencritic"`` if a provider was rate limited this run,
+        else ``None`` -- see :class:`EnrichDeltaResult`.
     :param retry_after_seconds: When it should be safe to resume, if ``rate_limited_provider`` is set.
-    :param remaining_game_ids: Every game id not yet enriched this run, if ``rate_limited_provider`` is
-        set -- what the continuation job (``curator.app._library_refresh_continuation_handler``) resumes.
+    :param remaining_game_ids: Every game id enriched without the rate-limited provider this run, if
+        ``rate_limited_provider`` is set -- what the continuation job
+        (``curator.app._library_refresh_continuation_handler``) redoes.
     :param trophy_match: Summary of stage 5 (:meth:`LibraryBuildOrchestrator.match_trophies`) -- all-zero
         if ``build()`` was called with no ``trophy_client`` (``harvest_trophies`` disabled).
     :param rejected_providers: See :class:`EnrichDeltaResult`.
@@ -131,8 +134,8 @@ async def enrich_games(
     publisher_tier_rules: list[PublisherTierRule],
     size_estimates: list[SizeEstimate],
 ) -> EnrichDeltaResult:
-    """Enrich each ``(game_id, title, product_id, title_id, is_ps5)`` tuple in order, stopping early on a
-    provider rate limit -- but degrading, not stopping, on a rejected provider key.
+    """Enrich each ``(game_id, title, product_id, title_id, is_ps5)`` tuple in order, degrading past a
+    provider that becomes unusable rather than abandoning the games after it.
 
     A module-level function (not a :class:`LibraryBuildOrchestrator` method) so it's callable without
     building a full orchestrator -- shared by :meth:`LibraryBuildOrchestrator.enrich_delta` (freshly
@@ -140,18 +143,15 @@ async def enrich_games(
     (a DB-looked-up subset resumed after a rate limit, with no re-canonicalization/re-ingestion needed, and
     thus no need for the ingestion/catalog/library repositories an orchestrator would otherwise require).
 
-    A rejected key (:class:`~curator.enrichment.enrichment_service.EnrichmentAuthError`) is fundamentally
-    different from a rate limit: a rate-limited provider will work again later, so the whole call stops and
-    reports what's left to resume. A rejected key will never work again until the user re-saves it, so
-    aborting the run would also throw away every other provider's signal, and PSN ingestion/trophy-matching
-    downstream of enrichment, for every remaining game -- an optional signal taking down mandatory work.
-    Instead, :meth:`~curator.enrichment.enrichment_service.EnrichmentService.disable_provider` makes that
-    one provider behave like "not configured" for the rest of this call, and the *same* game is retried
-    once so it still gets a chance at its other signals, rather than being skipped along with everything
-    after it.
+    A rate limit and a rejected key both take the offending provider out via
+    :meth:`~curator.enrichment.enrichment_service.EnrichmentService.disable_provider` and retry the *same*
+    game, so every game still gets every other provider's signal. They differ in what happens afterwards: a
+    rejected key needs the user to re-save it, so it is only reported, while a rate limit will lift on its
+    own, so the games enriched without it are reported in ``remaining_game_ids`` for a continuation to
+    redo. Providers whose work already completed hit their caches on that second pass.
 
     :param games: Every game to attempt, in the order they should be enriched -- the order that ends up in
-        ``remaining_game_ids`` if a rate limit stops iteration early.
+        ``remaining_game_ids`` from the first rate limit onward.
     :param publisher_tier_rules: Every publisher-tier classification rule.
     :param size_estimates: Every install-size estimate row.
     :returns: The :class:`EnrichDeltaResult` summary.
@@ -164,6 +164,8 @@ async def enrich_games(
     rawg_enriched_titles: list[str] = []
     opencritic_enriched_titles: list[str] = []
     rejected_providers: list[str] = []
+    rate_limit_backoffs: dict[str, float] = {}
+    resume_from_index: int | None = None
     index = 0
     logger.info("Enrichment starting for %d game(s).", len(games))
     while index < len(games):
@@ -178,23 +180,20 @@ async def enrich_games(
                 size_estimates=size_estimates,
             )
         except EnrichmentRateLimitError as exc:
+            if exc.provider in rate_limit_backoffs:
+                break
+            rate_limit_backoffs[exc.provider] = exc.retry_after_seconds
+            if resume_from_index is None:
+                resume_from_index = index
+            enrichment_service.disable_provider(exc.provider)
             logger.info(
-                "Enrichment paused by %s rate limit after %d of %d game(s); resuming in %.0fs.",
+                "Enrichment continuing without %s from game %d of %d; it resumes in %.0fs.",
                 exc.provider,
-                index,
+                index + 1,
                 len(games),
                 exc.retry_after_seconds,
             )
-            return EnrichDeltaResult(
-                enriched_count=enriched_count,
-                rawg_enriched_titles=rawg_enriched_titles,
-                opencritic_enriched_titles=opencritic_enriched_titles,
-                rate_limited_provider=exc.provider,
-                retry_after_seconds=exc.retry_after_seconds,
-                remaining_game_ids=[remaining_game_id for remaining_game_id, *_ in games[index:]],
-                rejected_providers=rejected_providers,
-                unavailable_providers=sorted(enrichment_service.transport_unavailable_providers),
-            )
+            continue  # retry this same game now that the provider is disabled, don't advance index
         except EnrichmentAuthError as exc:
             if exc.provider in rejected_providers:
                 break
@@ -214,13 +213,31 @@ async def enrich_games(
         if index % _ENRICH_PROGRESS_EVERY == 0:
             logger.info("Enrichment progress: %d of %d game(s).", index, len(games))
 
+    rate_limited_provider, retry_after_seconds = _longest_rate_limit(rate_limit_backoffs)
     return EnrichDeltaResult(
         enriched_count=enriched_count,
         rawg_enriched_titles=rawg_enriched_titles,
         opencritic_enriched_titles=opencritic_enriched_titles,
+        rate_limited_provider=rate_limited_provider,
+        retry_after_seconds=retry_after_seconds,
+        remaining_game_ids=(
+            [] if resume_from_index is None else [remaining_id for remaining_id, *_ in games[resume_from_index:]]
+        ),
         rejected_providers=rejected_providers,
         unavailable_providers=sorted(enrichment_service.transport_unavailable_providers),
     )
+
+
+def _longest_rate_limit(backoffs: dict[str, float]) -> tuple[str | None, float | None]:
+    """Pick the rate-limited provider with the longest backoff, which is when a resume is safe for all.
+
+    :param backoffs: Retry-after seconds keyed by provider; empty when nothing was rate limited.
+    :returns: ``(provider, retry_after_seconds)``, or ``(None, None)`` for an empty mapping.
+    """
+    if not backoffs:
+        return None, None
+    provider, retry_after_seconds = max(backoffs.items(), key=lambda item: item[1])
+    return provider, retry_after_seconds
 
 
 class LibraryBuildOrchestrator:

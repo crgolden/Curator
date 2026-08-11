@@ -93,7 +93,6 @@ _es_logging_lock = threading.Lock()
 _es_logging_configured = False
 
 
-
 def configure_telemetry(app: FastAPI, settings: Settings) -> None:
     """Wire up Curator's telemetry legs, never allowing a telemetry failure to prevent app startup.
 
@@ -220,7 +219,8 @@ def _configure_elasticsearch_logging(settings: Settings) -> None:
         logging.getLogger("elastic_transport").propagate = False
         logging.getLogger("elasticsearch").propagate = False
 
-        level = logging.getLevelNamesMapping().get(settings.log_level, logging.WARNING)
+        named_level = logging.getLevelName(settings.log_level)
+        level = named_level if isinstance(named_level, int) else logging.WARNING
 
         log_queue: SimpleQueue[logging.LogRecord] = SimpleQueue()
         queue_handler = QueueHandler(log_queue)

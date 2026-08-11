@@ -960,11 +960,17 @@ def _library_refresh_continuation_handler(
 
         existing_run = await job_runs_repository.get(run_id)
         existing_summary = (existing_run.result_summary if existing_run is not None else None) or {}
-        merged_rawg_titles = [*existing_summary.get("rawg_enriched_titles", []), *enrich_result.rawg_enriched_titles]
-        merged_opencritic_titles = [
-            *existing_summary.get("opencritic_enriched_titles", []),
-            *enrich_result.opencritic_enriched_titles,
-        ]
+        merged_rawg_titles = list(
+            dict.fromkeys([*existing_summary.get("rawg_enriched_titles", []), *enrich_result.rawg_enriched_titles])
+        )
+        merged_opencritic_titles = list(
+            dict.fromkeys(
+                [
+                    *existing_summary.get("opencritic_enriched_titles", []),
+                    *enrich_result.opencritic_enriched_titles,
+                ]
+            )
+        )
         opencritic_topup_incomplete = (
             existing_summary.get("opencritic_topup_incomplete", False)
             or per_user_enrichment_service.opencritic_topup_incomplete

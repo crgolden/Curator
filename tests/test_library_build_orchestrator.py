@@ -74,16 +74,22 @@ class FakeEnrichmentService:
         self.enrich_calls: list[str] = []
         self.opencritic_topup_incomplete = False
         self.transport_unavailable_providers: set[str] = set()
-        self._rate_limit_on_title: str | None = None
-        self._rate_limit_error: EnrichmentRateLimitError | None = None
+        self._rate_limits: list[tuple[str, EnrichmentRateLimitError]] = []
+        self._keep_limiting_after_disable = False
         self._auth_reject_on_title: str | None = None
         self._auth_error: EnrichmentAuthError | None = None
         self._keep_rejecting_after_disable = False
         self.disabled_providers: list[str] = []
 
-    def rate_limit_on(self, title: str, error: EnrichmentRateLimitError) -> None:
-        self._rate_limit_on_title = title
-        self._rate_limit_error = error
+    def rate_limit_on(
+        self, title: str, error: EnrichmentRateLimitError, *, keep_limiting_after_disable: bool = False
+    ) -> None:
+        """Simulate a rate limit on ``title``. By default, stops raising once ``disable_provider`` is
+        called for the error's provider -- mirroring the real EnrichmentService, whose disabled client
+        serves from cache instead of calling the provider again.
+        """
+        self._rate_limits.append((title, error))
+        self._keep_limiting_after_disable = keep_limiting_after_disable
 
     def reject_with_auth_error(
         self, title: str, error: EnrichmentAuthError, *, keep_rejecting_after_disable: bool = False
@@ -102,9 +108,11 @@ class FakeEnrichmentService:
 
     async def enrich_game(self, title, *, title_id, is_ps5, genre_priorities, publisher_tier_rules, size_estimates):
         self.enrich_calls.append(title)
-        if title == self._rate_limit_on_title:
-            assert self._rate_limit_error is not None
-            raise self._rate_limit_error
+        for limited_title, error in self._rate_limits:
+            if title == limited_title and (
+                self._keep_limiting_after_disable or error.provider not in self.disabled_providers
+            ):
+                raise error
         if (
             title == self._auth_reject_on_title
             and self._auth_error is not None
@@ -336,7 +344,7 @@ async def test_enrich_delta_resolves_genre_id_from_active_genres():
     assert subgenre_id is None
 
 
-async def test_enrich_delta_stops_early_on_rate_limit_and_reports_remaining_game_ids_in_order():
+async def test_enrich_delta_finishes_every_game_after_a_rate_limit_and_reports_the_ones_it_redoes():
     enrichment_service = FakeEnrichmentService()
     enrichment_service.rate_limit_on("Game B", EnrichmentRateLimitError("rawg", 120.0))
     orchestrator = _orchestrator(enrichment_service=enrichment_service)
@@ -346,12 +354,63 @@ async def test_enrich_delta_stops_early_on_rate_limit_and_reports_remaining_game
         games, ["game-1", "game-2", "game-3"], publisher_tier_rules=[], size_estimates=[]
     )
 
-    assert result.enriched_count == 1  # Game A succeeded before the rate limit hit
+    assert result.enriched_count == 3
     assert result.rate_limited_provider == "rawg"
     assert result.retry_after_seconds == 120.0
+    assert enrichment_service.disabled_providers == ["rawg"]
 
     assert result.remaining_game_ids == ["game-2", "game-3"]
-    assert enrichment_service.enrich_calls == ["Game A", "Game B"]  # never reached Game C
+    assert enrichment_service.enrich_calls == ["Game A", "Game B", "Game B", "Game C"]
+
+
+async def test_enrich_delta_still_enriches_every_game_when_the_very_first_one_is_rate_limited():
+    enrichment_service = FakeEnrichmentService()
+    enrichment_service.rate_limit_on("Game A", EnrichmentRateLimitError("opencritic", 3600.0))
+    orchestrator = _orchestrator(enrichment_service=enrichment_service)
+    games = [_fake_canonical("Game A"), _fake_canonical("Game B"), _fake_canonical("Game C")]
+
+    result = await orchestrator.enrich_delta(
+        games, ["game-1", "game-2", "game-3"], publisher_tier_rules=[], size_estimates=[]
+    )
+
+    assert result.enriched_count == 3
+    assert result.remaining_game_ids == ["game-1", "game-2", "game-3"]
+
+
+async def test_enrich_delta_reports_the_longest_backoff_when_both_providers_are_rate_limited():
+    enrichment_service = FakeEnrichmentService()
+    enrichment_service.rate_limit_on("Game A", EnrichmentRateLimitError("rawg", 120.0))
+    enrichment_service.rate_limit_on("Game C", EnrichmentRateLimitError("opencritic", 3600.0))
+    orchestrator = _orchestrator(enrichment_service=enrichment_service)
+    games = [_fake_canonical("Game A"), _fake_canonical("Game B"), _fake_canonical("Game C")]
+
+    result = await orchestrator.enrich_delta(
+        games, ["game-1", "game-2", "game-3"], publisher_tier_rules=[], size_estimates=[]
+    )
+
+    assert result.enriched_count == 3
+    assert result.rate_limited_provider == "opencritic"
+    assert result.retry_after_seconds == 3600.0
+    assert sorted(enrichment_service.disabled_providers) == ["opencritic", "rawg"]
+
+    assert result.remaining_game_ids == ["game-1", "game-2", "game-3"]
+
+
+async def test_enrich_delta_stops_when_a_rate_limited_provider_keeps_limiting_after_being_disabled():
+    enrichment_service = FakeEnrichmentService()
+    enrichment_service.rate_limit_on(
+        "Game B", EnrichmentRateLimitError("rawg", 120.0), keep_limiting_after_disable=True
+    )
+    orchestrator = _orchestrator(enrichment_service=enrichment_service)
+    games = [_fake_canonical("Game A"), _fake_canonical("Game B"), _fake_canonical("Game C")]
+
+    result = await orchestrator.enrich_delta(
+        games, ["game-1", "game-2", "game-3"], publisher_tier_rules=[], size_estimates=[]
+    )
+
+    assert result.enriched_count == 1
+    assert result.rate_limited_provider == "rawg"
+    assert result.remaining_game_ids == ["game-2", "game-3"]
 
 
 async def test_enrich_delta_no_rate_limit_leaves_new_fields_at_their_defaults():
