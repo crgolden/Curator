@@ -7,7 +7,7 @@ from pydantic import BaseModel
 
 from curator.catalog.repository import CatalogRepository, GameSummary
 from curator.catalog.store_backfill_service import StoreBackfillService
-from curator.deps import require_admin, require_bearer
+from curator.deps import require_admin
 from curator.token_validation import TokenClaims
 
 router = APIRouter(prefix="/catalog", tags=["catalog"])
@@ -23,6 +23,9 @@ class GameSummaryResponse(BaseModel):
     aaa_tier: str | None
     cover_image_url: str | None = None
     store_product_id: str | None = None
+    critical_score: float | None = None
+    oc_score: float | None = None
+    psn_rating: float | None = None
 
 
 class CatalogGamesResponse(BaseModel):
@@ -59,6 +62,7 @@ class CatalogBackfillRequest(BaseModel):
 
     category_ids: list[str]
     max_pages_per_category: int | None = 20
+    start_offsets: dict[str, int] = {}
 
 
 @router.get("/games", response_model=CatalogGamesResponse)
@@ -70,7 +74,6 @@ async def list_games(
     aaa_tier: str | None = Query(default=None, alias="aaaTier"),
     limit: int = Query(default=50, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
-    _claims: TokenClaims = Depends(require_bearer),
 ) -> CatalogGamesResponse:
     """Browse the shared game catalog, optionally filtered by title, franchise, genre, or publisher tier.
 
@@ -92,6 +95,9 @@ async def list_games(
                 aaa_tier=game.aaa_tier,
                 cover_image_url=game.cover_image_url,
                 store_product_id=game.store_product_id,
+                critical_score=game.critical_score,
+                oc_score=game.oc_score,
+                psn_rating=game.psn_rating,
             )
             for game in games
         ],
@@ -114,7 +120,11 @@ async def backfill_catalog(
     if backfill_service is None:
         raise HTTPException(status_code=503, detail="PlayStation Store catalog client is not configured.")
 
-    summary = await backfill_service.backfill(body.category_ids, max_pages_per_category=body.max_pages_per_category)
+    summary = await backfill_service.backfill(
+        body.category_ids,
+        max_pages_per_category=body.max_pages_per_category,
+        start_offsets=body.start_offsets,
+    )
     return CatalogBackfillResponse(
         completed=summary.completed,
         games_created=summary.games_created,

@@ -26,6 +26,7 @@ from curator.link_service import link as link_account
 from curator.link_service import unlink as unlink_account
 from curator.me_routes import PsnSummary
 from curator.persistence.crypto import TokenCrypto
+from curator.persistence.refresh_schedules_repository import RefreshSchedulesRepository
 from curator.persistence.repository import Repository
 from curator.reverify import reverify_link
 from curator.token_validation import TokenClaims
@@ -136,6 +137,8 @@ async def psn_unlink(
     )
     await unlink_account(claims.sub, repository=repository, token_crypto=token_crypto, redis=redis_adapter)
     await library_repository.clear_trophy_progress(claims.sub)
+    refresh_schedules_repository: RefreshSchedulesRepository = request.app.state.refresh_schedules_repository
+    await refresh_schedules_repository.delete(claims.sub)
     await _log(audit_repository, claims.sub, ACTION_UNLINKED)
     return Response(status_code=204)
 

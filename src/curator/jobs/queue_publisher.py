@@ -39,6 +39,8 @@ class QueuePublisher:
     :param library_refresh_continuation_sender: A sender bound to the
         ``curator-library-refresh-continuation`` queue.
     :param enrichment_sender: A sender bound to the ``curator-enrichment`` queue.
+    :param scheduled_refresh_sender: A sender bound to the ``curator-scheduled-refresh`` queue, or
+        ``None`` where that queue is not provisioned.
     :param job_runs_repository: Records each published run's ``queued`` status.
     """
 
@@ -49,10 +51,12 @@ class QueuePublisher:
         library_refresh_continuation_sender: MessageSender,
         enrichment_sender: MessageSender,
         job_runs_repository: JobRunsRepository,
+        scheduled_refresh_sender: MessageSender | None = None,
     ) -> None:
         self._library_refresh_sender = library_refresh_sender
         self._library_refresh_continuation_sender = library_refresh_continuation_sender
         self._enrichment_sender = enrichment_sender
+        self._scheduled_refresh_sender = scheduled_refresh_sender
         self._job_runs_repository = job_runs_repository
 
     async def publish_library_refresh(self, identity_sub: str) -> str:
@@ -109,6 +113,31 @@ class QueuePublisher:
         )
         schedule_time_utc = datetime.now(timezone.utc) + timedelta(seconds=retry_after_seconds)
         await self._library_refresh_continuation_sender.schedule_messages(ServiceBusMessage(body), schedule_time_utc)
+
+    async def publish_scheduled_library_refresh(self, identity_sub: str, scheduled_for: datetime) -> None:
+        """Defer a library refresh until ``scheduled_for``, for a user who opted in to a recurring schedule.
+
+        Creates no ``job_runs`` row. The other publish methods create one immediately because their work
+        starts immediately, but a scheduled message can sit invisible for a month, and a ``queued`` row is
+        non-terminal to
+        :meth:`~curator.jobs.repository.JobRunsRepository.find_active_run` -- so a row created here would
+        make ``POST /library/refresh``'s duplicate-run guard hand the user this pending run instead of
+        starting a real one, for as long as the wait lasts. The processing runtime creates the row when it
+        actually begins.
+
+        ``scheduled_for`` is echoed in the body so the processor can compare it against the row's current
+        ``next_run_at`` and discard a superseded message: re-saving a schedule publishes a new message
+        without cancelling the old one, the same staleness-checkpoint approach ``seq`` already gives the
+        rate-limit continuation chain.
+
+        :param identity_sub: The Curator user id (Identity's ``sub``) to refresh.
+        :param scheduled_for: When the refresh should become visible to the processor.
+        :raises RuntimeError: If no scheduled-refresh sender is configured.
+        """
+        if self._scheduled_refresh_sender is None:
+            raise RuntimeError("No scheduled-refresh queue is configured.")
+        body = json.dumps({"identity_sub": identity_sub, "scheduled_for": scheduled_for.isoformat()})
+        await self._scheduled_refresh_sender.schedule_messages(ServiceBusMessage(body), scheduled_for)
 
     async def publish_enrichment_run(self) -> str:
         """Publish a global enrichment-catalog re-scrape job.

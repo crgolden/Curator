@@ -48,10 +48,12 @@ def _build(catalog_repository=None, *, backfill_service=None, omit_backfill_serv
 class FakeBackfillService:
     def __init__(self, summary=None):
         self.calls: list[tuple[list[str], int | None]] = []
+        self.start_offsets: list[dict[str, int]] = []
         self._summary = summary or BackfillSummary()
 
-    async def backfill(self, category_ids, *, max_pages_per_category=None):
+    async def backfill(self, category_ids, *, max_pages_per_category=None, start_offsets=None):
         self.calls.append((list(category_ids), max_pages_per_category))
+        self.start_offsets.append(dict(start_offsets or {}))
         return self._summary
 
 
@@ -70,10 +72,47 @@ def _progress(category_id="cat-1", **overrides):
     return BackfillProgress(**fields)
 
 
-def test_requires_bearer_token():
-    client, _validator = _build()
+def test_browsing_the_catalog_needs_no_token():
+    catalog_repository = FakeCatalogRepository(
+        [GameSummary(game_id="g1", canonical_title="Bloodborne", franchise=None, genre="Action", aaa_tier="AAA")]
+    )
+    client, _validator = _build(catalog_repository)
 
     response = client.get("/catalog/games")
+
+    assert response.status_code == 200
+    assert response.json()["games"][0]["canonical_title"] == "Bloodborne"
+
+
+def test_catalog_carries_ratings_and_the_derived_tier():
+    catalog_repository = FakeCatalogRepository(
+        [
+            GameSummary(
+                game_id="g1",
+                canonical_title="Bloodborne",
+                franchise=None,
+                genre="Action",
+                aaa_tier="AAA",
+                critical_score=92.0,
+                oc_score=91.5,
+                psn_rating=4.7,
+            )
+        ]
+    )
+    client, _validator = _build(catalog_repository)
+
+    game = client.get("/catalog/games").json()["games"][0]
+
+    assert game["critical_score"] == 92.0
+    assert game["oc_score"] == 91.5
+    assert game["psn_rating"] == 4.7
+    assert game["aaa_tier"] == "AAA"
+
+
+def test_backfill_still_requires_admin_now_that_browsing_is_anonymous():
+    client, _validator = _build()
+
+    response = client.post("/catalog/backfill", json={"category_ids": ["cat-1"]})
 
     assert response.status_code == 401
 
@@ -116,6 +155,30 @@ def test_backfill_reports_progress_and_totals():
     assert service.calls == [(["cat-1", "cat-2"], 5)]
 
 
+def test_backfill_resumes_a_category_from_the_offset_a_previous_run_reported():
+    service = FakeBackfillService()
+    client, validator = _build(backfill_service=service)
+    validator.register("admin-token", _claims(is_admin=True))
+
+    client.post(
+        "/catalog/backfill",
+        json={"category_ids": ["cat-1"], "start_offsets": {"cat-1": 1200}},
+        headers=_bearer("admin-token"),
+    )
+
+    assert service.start_offsets == [{"cat-1": 1200}]
+
+
+def test_backfill_starts_from_zero_when_no_offset_is_given():
+    service = FakeBackfillService()
+    client, validator = _build(backfill_service=service)
+    validator.register("admin-token", _claims(is_admin=True))
+
+    client.post("/catalog/backfill", json={"category_ids": ["cat-1"]}, headers=_bearer("admin-token"))
+
+    assert service.start_offsets == [{}]
+
+
 def test_backfill_returns_503_when_the_store_client_is_not_configured():
     client, validator = _build(backfill_service=None, omit_backfill_service=True)
     validator.register("admin-token", _claims(is_admin=True))
@@ -146,6 +209,9 @@ def test_returns_games_from_repository():
             "aaa_tier": "AAA",
             "cover_image_url": None,
             "store_product_id": None,
+            "critical_score": None,
+            "oc_score": None,
+            "psn_rating": None,
         }
     ]
     assert body["total"] == 1

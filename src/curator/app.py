@@ -54,7 +54,12 @@ from curator.enrichment.repository import EnrichmentRepository
 from curator.enrichment_keys_routes import router as enrichment_keys_router
 from curator.enrichment_routes import router as enrichment_router
 from curator.identity_routes import router as identity_router
-from curator.jobs import ENRICHMENT_QUEUE, LIBRARY_REFRESH_CONTINUATION_QUEUE, LIBRARY_REFRESH_QUEUE
+from curator.jobs import (
+    ENRICHMENT_QUEUE,
+    LIBRARY_REFRESH_CONTINUATION_QUEUE,
+    LIBRARY_REFRESH_QUEUE,
+    SCHEDULED_REFRESH_QUEUE,
+)
 from curator.jobs.queue_consumer import QueueConsumer, RateLimitRetryScheduled
 from curator.jobs.queue_depth_monitor import QueueDepthMonitor
 from curator.jobs.queue_publisher import QueuePublisher
@@ -71,6 +76,7 @@ from curator.persistence.db_token_store import DbTokenStore
 from curator.persistence.enrichment_keys_repository import EnrichmentKeysRepository
 from curator.persistence.follow_repository import FollowRepository
 from curator.persistence.profile_repository import ProfileRepository
+from curator.persistence.refresh_schedules_repository import RefreshSchedulesRepository
 from curator.persistence.repository import Repository
 from curator.preferences_routes import router as preferences_router
 from curator.presence_routes import router as presence_router
@@ -88,6 +94,7 @@ from curator.psn.trophy_client import TrophyClient, TrophyClientFactory
 from curator.psn_routes import router as psn_router
 from curator.public_collections_routes import router as public_collections_router
 from curator.redis_client import RedisAdapter, build_redis_client
+from curator.refresh_schedules_routes import router as refresh_schedules_router
 from curator.settings import Settings
 from curator.storage_devices_routes import router as storage_devices_router
 from curator.telemetry import configure_telemetry, shutdown_telemetry
@@ -136,6 +143,7 @@ def create_app(
     enrichment_keys_repository: EnrichmentKeysRepository | None = None,
     profile_repository: ProfileRepository | None = None,
     follow_repository: FollowRepository | None = None,
+    refresh_schedules_repository: RefreshSchedulesRepository | None = None,
     redis_client: Redis | None = None,
     trophy_client_factory: TrophyClientFactory | None = None,
     identity_client_factory: AccountClientFactory | None = None,
@@ -251,6 +259,7 @@ def create_app(
     enrichment_keys_repository = enrichment_keys_repository or EnrichmentKeysRepository(shared_pool)
     profile_repository = profile_repository or ProfileRepository(shared_pool)
     follow_repository = follow_repository or FollowRepository(shared_pool)
+    refresh_schedules_repository = refresh_schedules_repository or RefreshSchedulesRepository(shared_pool)
 
     owns_http_client = http_client is None
     http_client = http_client or httpx.AsyncClient(timeout=httpx.Timeout(10.0, connect=5.0))
@@ -301,6 +310,7 @@ def create_app(
             library_refresh_sender=service_bus_client.get_queue_sender(LIBRARY_REFRESH_QUEUE),
             library_refresh_continuation_sender=service_bus_client.get_queue_sender(LIBRARY_REFRESH_CONTINUATION_QUEUE),
             enrichment_sender=service_bus_client.get_queue_sender(ENRICHMENT_QUEUE),
+            scheduled_refresh_sender=service_bus_client.get_queue_sender(SCHEDULED_REFRESH_QUEUE),
             job_runs_repository=job_runs_repository,
         )
         lock_renewer = ServiceBusLockRenewer(max_lock_renewal_duration=900)
@@ -399,6 +409,7 @@ def create_app(
     app.state.enrichment_keys_repository = enrichment_keys_repository
     app.state.profile_repository = profile_repository
     app.state.follow_repository = follow_repository
+    app.state.refresh_schedules_repository = refresh_schedules_repository
     app.state.queue_publisher = queue_publisher
     app.state.queue_consumer = queue_consumer
     app.state.queue_depth_monitor = queue_depth_monitor
@@ -419,6 +430,7 @@ def create_app(
     app.include_router(devices_router)
     app.include_router(enrichment_keys_router)
     app.include_router(profile_router)
+    app.include_router(refresh_schedules_router)
     app.include_router(public_collections_router)
 
     @app.get("/health")

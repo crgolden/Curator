@@ -265,6 +265,20 @@ class FakeLibraryRepository:
         return 0
 
 
+class FakeRefreshSchedulesRepository:
+    """Stands in for the real ``RefreshSchedulesRepository`` on ``app.state``.
+
+    Only ``delete`` is needed here, and only its call log is asserted -- ``DELETE /psn/link`` is the one
+    route in this module that touches a schedule.
+    """
+
+    def __init__(self):
+        self.delete_calls: list[str] = []
+
+    async def delete(self, identity_sub: str) -> None:
+        self.delete_calls.append(identity_sub)
+
+
 class FakeTokenValidator:
     """Stands in for JwtValidator: maps known token strings to canned TokenClaims; anything else raises
     TokenError, exactly like a real signature/issuer/expiry failure would."""
@@ -315,6 +329,7 @@ def _build(repository=None, token_crypto=None, agent_factory=None, token_validat
     )
 
     app.state.library_repository = FakeLibraryRepository()
+    app.state.refresh_schedules_repository = FakeRefreshSchedulesRepository()
     client = TestClient(app)
     return client, repository, token_crypto, agent_factory, token_validator, audit_repository
 
@@ -763,6 +778,25 @@ def test_psn_unlink_clears_stored_trophy_progress():
 
     assert response.status_code == 204
     assert client.app.state.library_repository.clear_trophy_progress_calls == [SUB]
+
+
+def test_psn_unlink_deletes_any_recurring_refresh_schedule():
+    """A schedule is consent to use a stored PSN token unattended; unlinking withdraws exactly that, and a
+    schedule left pointing at a deleted token would keep firing against a credential that cannot work.
+    """
+    repo = FakeRepository()
+    crypto = TokenCrypto(Fernet.generate_key())
+    agent_factory = FakeAgentFactory(repo, crypto)
+    agent_factory.email_info = (EMAIL, True)
+    _seed_link(repo, crypto, SUB)
+    validator = FakeTokenValidator()
+    validator.register("valid-token", _claims())
+    client, *_ = _build(repository=repo, token_crypto=crypto, agent_factory=agent_factory, token_validator=validator)
+
+    response = client.delete("/psn/link", headers=_bearer("valid-token"))
+
+    assert response.status_code == 204
+    assert client.app.state.refresh_schedules_repository.delete_calls == [SUB]
 
 
 def test_psn_unlink_without_bearer_token_is_401():

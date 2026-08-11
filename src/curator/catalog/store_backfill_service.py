@@ -7,13 +7,15 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Protocol
 
 from curator.psn.store_client import (
+    FULL_GAME_FILTER,
     StoreCatalogClient,
     StoreCategoryPage,
+    StoreFilterIgnoredError,
     StoreProduct,
     StoreQueryRotatedError,
 )
@@ -23,6 +25,8 @@ logger = logging.getLogger("curator")
 PAGE_SIZE = 100
 
 DEFAULT_PAGE_DELAY_SECONDS = 0.5
+
+_CATEGORY_INDEPENDENT_STOPS = frozenset({"query_rotated", "filter_not_applied"})
 
 
 class CatalogBackfillWriter(Protocol):
@@ -45,13 +49,19 @@ class BackfillProgress:
     stopped_reason: str | None = None
     distinct_products: int = 0
     reported_total: int | None = None
+    start_offset: int = 0
 
     @property
     def coverage_shortfall(self) -> int:
-        """How many products the category claimed to hold that a completed walk never saw."""
+        """How many products a completed walk never saw, over the span it actually covered.
+
+        A walk resumed from ``start_offset`` is only accountable for what lies beyond it, not for the
+        products an earlier run already read.
+        """
         if self.reported_total is None or not self.completed:
             return 0
-        return max(self.reported_total - self.distinct_products, 0)
+        expected = max(self.reported_total - self.start_offset, 0)
+        return max(expected - self.distinct_products, 0)
 
 
 @dataclass
@@ -95,7 +105,10 @@ class StoreBackfillService:
     async def backfill_category(
         self, category_id: str, *, start_offset: int = 0, max_pages: int | None = None
     ) -> BackfillProgress:
-        """Walk one category from ``start_offset``, writing each page as it is read.
+        """Walk one category's full games from ``start_offset``, writing each page as it is read.
+
+        Filtered to :data:`~curator.psn.store_client.FULL_GAME_FILTER` where the category supports it, so
+        ``reported_total`` and ``coverage_shortfall`` count full games rather than the whole category.
 
         :param category_id: The storefront category to walk.
         :param start_offset: Where to resume from.
@@ -112,7 +125,9 @@ class StoreBackfillService:
 
         while max_pages is None or pages_read < max_pages:
             try:
-                page = await self._client.category_page(category_id, offset=offset, size=PAGE_SIZE)
+                page = await self._client.category_page(
+                    category_id, offset=offset, size=PAGE_SIZE, filter_by=(FULL_GAME_FILTER,)
+                )
             except StoreQueryRotatedError:
                 logger.exception("Store backfill halted: every persisted-query hash rejected")
                 return self._progress(
@@ -126,6 +141,22 @@ class StoreBackfillService:
                     "query_rotated",
                     seen_product_ids,
                     reported_total,
+                    start_offset,
+                )
+            except StoreFilterIgnoredError:
+                logger.exception("Store backfill halted: the full-game filter was not honoured")
+                return self._progress(
+                    category_id,
+                    offset,
+                    False,
+                    pages_read,
+                    products_seen,
+                    games_created,
+                    covers_cached,
+                    "filter_not_applied",
+                    seen_product_ids,
+                    reported_total,
+                    start_offset,
                 )
 
             pages_read += 1
@@ -152,6 +183,7 @@ class StoreBackfillService:
                     None,
                     seen_product_ids,
                     reported_total,
+                    start_offset,
                 )
                 if progress.coverage_shortfall:
                     logger.warning(
@@ -178,17 +210,30 @@ class StoreBackfillService:
             "page_budget_exhausted",
             seen_product_ids,
             reported_total,
+            start_offset,
         )
 
     async def backfill(
-        self, category_ids: Sequence[str], *, max_pages_per_category: int | None = None
+        self,
+        category_ids: Sequence[str],
+        *,
+        max_pages_per_category: int | None = None,
+        start_offsets: Mapping[str, int] | None = None,
     ) -> BackfillSummary:
-        """Walk several categories in sequence, one at a time."""
+        """Walk several categories in sequence, one at a time, stopping early on a category-independent
+        failure.
+
+        :param start_offsets: Per-category offset to resume from, keyed by category id; absent categories
+            start at 0. Hand back the ``next_offset`` a previous run reported for that category.
+        """
+        offsets = start_offsets or {}
         summary = BackfillSummary()
         for category_id in category_ids:
-            progress = await self.backfill_category(category_id, max_pages=max_pages_per_category)
+            progress = await self.backfill_category(
+                category_id, start_offset=offsets.get(category_id, 0), max_pages=max_pages_per_category
+            )
             summary.categories.append(progress)
-            if progress.stopped_reason == "query_rotated":
+            if progress.stopped_reason in _CATEGORY_INDEPENDENT_STOPS:
                 break
         return summary
 
@@ -209,6 +254,7 @@ class StoreBackfillService:
         stopped_reason: str | None,
         seen_product_ids: set[str],
         reported_total: int | None,
+        start_offset: int,
     ) -> BackfillProgress:
         return BackfillProgress(
             category_id=category_id,
@@ -221,4 +267,5 @@ class StoreBackfillService:
             stopped_reason=stopped_reason,
             distinct_products=len(seen_product_ids),
             reported_total=reported_total,
+            start_offset=start_offset,
         )

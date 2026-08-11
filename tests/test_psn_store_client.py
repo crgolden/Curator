@@ -8,22 +8,29 @@ import httpx
 import pytest
 
 from curator.psn.store_client import (
+    FULL_GAME_FILTER,
     STORE_GRAPHQL_URL,
     StoreCatalogClient,
     StoreCatalogError,
+    StoreFilterIgnoredError,
     StoreQueryRotatedError,
 )
 
 
-def _grid(products, total, *, offset=0, is_last=False):
-    return {
-        "data": {
-            "categoryGridRetrieve": {
-                "products": products,
-                "pageInfo": {"totalCount": total, "offset": offset, "size": len(products), "isLast": is_last},
-            }
-        }
+def _grid(products, total, *, offset=0, is_last=False, facets=None):
+    grid = {
+        "products": products,
+        "pageInfo": {"totalCount": total, "offset": offset, "size": len(products), "isLast": is_last},
     }
+    if facets is not None:
+        grid["facetOptions"] = [
+            {"name": name, "values": [{"key": key, "count": count} for key, count in values.items()]}
+            for name, values in facets.items()
+        ]
+    return {"data": {"categoryGridRetrieve": grid}}
+
+
+_CLASSIFICATION_FACETS = {"storeDisplayClassification": {"FULL_GAME": 6952, "GAME_BUNDLE": 1397}}
 
 
 def _product(
@@ -252,6 +259,84 @@ async def test_walks_in_ascending_release_date_so_a_new_release_cannot_shift_the
     await _client(handler).category_page("cat-1")
 
     assert seen["variables"]["sortBy"] == {"name": "productReleaseDate", "isAscending": True}
+
+
+async def test_requested_filters_reach_the_gateway():
+    seen = {}
+
+    def handler(request):
+        seen["variables"] = json.loads(request.url.params["variables"])
+        return httpx.Response(200, json=_grid([], 6952, facets=_CLASSIFICATION_FACETS))
+
+    await _client(handler).category_page("cat-1", filter_by=(FULL_GAME_FILTER,))
+
+    assert seen["variables"]["filterBy"] == ["storeDisplayClassification:FULL_GAME"]
+
+
+async def test_a_filter_that_narrowed_to_its_facet_count_is_accepted():
+    def handler(request):
+        return httpx.Response(200, json=_grid([_product()], 6952, facets=_CLASSIFICATION_FACETS))
+
+    page = await _client(handler).category_page("cat-1", filter_by=(FULL_GAME_FILTER,))
+
+    assert page.total_count == 6952
+
+
+async def test_a_silently_ignored_filter_is_rejected_rather_than_trusted():
+    def handler(request):
+        return httpx.Response(200, json=_grid([_product()], 9190, facets=_CLASSIFICATION_FACETS))
+
+    with pytest.raises(StoreFilterIgnoredError) as excinfo:
+        await _client(handler).category_page("cat-1", filter_by=(FULL_GAME_FILTER,))
+
+    message = str(excinfo.value)
+    assert "6952" in message, "the message must name what the category says the facet holds"
+    assert "9190" in message, "the message must name what the filtered query actually returned"
+
+
+async def test_a_filter_matching_nothing_is_rejected_rather_than_ending_the_walk():
+    def handler(request):
+        return httpx.Response(200, json=_grid([], 0, is_last=True, facets=_CLASSIFICATION_FACETS))
+
+    with pytest.raises(StoreFilterIgnoredError) as excinfo:
+        await _client(handler).category_page("cat-1", filter_by=("storeDisplayClassification:NOT_REAL",))
+
+    assert "publishes no 'NOT_REAL' value" in str(excinfo.value)
+
+
+async def test_a_zero_result_on_a_published_key_is_rejected_too():
+    def handler(request):
+        return httpx.Response(200, json=_grid([], 0, is_last=True, facets=_CLASSIFICATION_FACETS))
+
+    with pytest.raises(StoreFilterIgnoredError):
+        await _client(handler).category_page("cat-1", filter_by=(FULL_GAME_FILTER,))
+
+
+async def test_an_unfiltered_page_is_never_checked_against_facets():
+    def handler(request):
+        return httpx.Response(200, json=_grid([_product()], 9190, facets=_CLASSIFICATION_FACETS))
+
+    page = await _client(handler).category_page("cat-1")
+
+    assert page.total_count == 9190
+
+
+async def test_a_category_publishing_no_census_for_the_facet_is_allowed_through():
+    def handler(request):
+        return httpx.Response(200, json=_grid([_product()], 143, facets={"targetPlatforms": {"PS5": 143}}))
+
+    page = await _client(handler).category_page("cat-1", filter_by=(FULL_GAME_FILTER,))
+
+    assert page.total_count == 143
+
+
+async def test_a_response_without_any_facets_cannot_disprove_the_filter_so_is_allowed():
+    def handler(request):
+        return httpx.Response(200, json=_grid([_product()], 6952))
+
+    page = await _client(handler).category_page("cat-1", filter_by=(FULL_GAME_FILTER,))
+
+    assert page.total_count == 6952
 
 
 async def test_other_graphql_errors_are_not_reported_as_a_rotated_hash():

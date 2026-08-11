@@ -23,6 +23,7 @@ from curator.persistence.repository import LinkRecord
 from test_routes import (
     FakeAgentFactory,
     FakeLibraryRepository,
+    FakeRefreshSchedulesRepository,
     FakeRepository,
     FakeTokenValidator,
     _bearer,
@@ -178,6 +179,7 @@ def test_cross_user_isolation_between_two_established_callers():
         token_validator=validator,
     )
     app.state.library_repository = FakeLibraryRepository()
+    app.state.refresh_schedules_repository = FakeRefreshSchedulesRepository()
     client = TestClient(app)
 
     me_response = client.get("/me", headers=_bearer("token-a"))

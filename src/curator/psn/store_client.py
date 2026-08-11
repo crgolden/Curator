@@ -27,6 +27,12 @@ CATEGORY_GRID_RETRIEVE_HASHES = (
 
 INSERTION_IMMUNE_SORT = {"name": "productReleaseDate", "isAscending": True}
 
+CLASSIFICATION_FACET = "storeDisplayClassification"
+
+FULL_GAME_FACET_KEY = "FULL_GAME"
+
+FULL_GAME_FILTER = f"{CLASSIFICATION_FACET}:{FULL_GAME_FACET_KEY}"
+
 
 class StoreCatalogError(Exception):
     """Raised on a store-gateway response the caller cannot use."""
@@ -34,6 +40,10 @@ class StoreCatalogError(Exception):
 
 class StoreQueryRotatedError(StoreCatalogError):
     """Raised when the gateway no longer whitelists the persisted-query hash."""
+
+
+class StoreFilterIgnoredError(StoreCatalogError):
+    """Raised when a requested ``filterBy`` provably did not take effect."""
 
 
 _COVER_ART_ROLE_PREFERENCE = ("GAMEHUB_COVER_ART", "EDITION_KEY_ART", "PORTRAIT_BANNER", "BACKGROUND")
@@ -86,26 +96,35 @@ class StoreCatalogClient:
         self._locale = locale
         self._query_hashes = tuple(query_hashes) or CATEGORY_GRID_RETRIEVE_HASHES
 
-    async def category_page(self, category_id: str, *, offset: int = 0, size: int = 100) -> StoreCategoryPage:
+    async def category_page(
+        self, category_id: str, *, offset: int = 0, size: int = 100, filter_by: Sequence[str] = ()
+    ) -> StoreCategoryPage:
         """Fetch one page of a storefront category, trying each configured hash in turn.
 
         :param category_id: The storefront category id to walk.
         :param offset: How many products to skip.
         :param size: Page size.
+        :param filter_by: Storefront facet filters as ``"facetName:FACET_KEY"`` strings, e.g.
+            :data:`FULL_GAME_FILTER`. Each is verified against the response's own facet census.
         :raises StoreQueryRotatedError: If *every* configured hash is rejected as no longer whitelisted.
+        :raises StoreFilterIgnoredError: If a requested filter did not take effect.
         :raises StoreCatalogError: On any other unusable response.
         """
         rotated: StoreQueryRotatedError | None = None
         for sha256_hash in self._query_hashes:
             try:
-                return await self._category_page(category_id, offset=offset, size=size, sha256_hash=sha256_hash)
+                return await self._category_page(
+                    category_id, offset=offset, size=size, sha256_hash=sha256_hash, filter_by=tuple(filter_by)
+                )
             except StoreQueryRotatedError as error:
                 rotated = error
                 logger.warning("Store persisted-query hash %s rejected; trying the next candidate", sha256_hash[:12])
 
         raise rotated or StoreQueryRotatedError("No persisted-query hash is configured for categoryGridRetrieve.")
 
-    async def _category_page(self, category_id: str, *, offset: int, size: int, sha256_hash: str) -> StoreCategoryPage:
+    async def _category_page(
+        self, category_id: str, *, offset: int, size: int, sha256_hash: str, filter_by: tuple[str, ...]
+    ) -> StoreCategoryPage:
         operation_name = CATEGORY_GRID_RETRIEVE_OPERATION
         params = {
             "operationName": operation_name,
@@ -114,7 +133,7 @@ class StoreCatalogClient:
                     "id": category_id,
                     "pageArgs": {"size": size, "offset": offset},
                     "sortBy": INSERTION_IMMUNE_SORT,
-                    "filterBy": [],
+                    "filterBy": list(filter_by),
                     "facetOptions": [],
                 }
             ),
@@ -135,12 +154,57 @@ class StoreCatalogClient:
 
         grid = (payload.get("data") or {}).get("categoryGridRetrieve") or {}
         page_info = grid.get("pageInfo") or {}
+        total_count = int(page_info.get("totalCount") or 0)
+        _raise_for_ignored_filters(grid, filter_by, total_count, category_id)
         return StoreCategoryPage(
             products=tuple(_to_product(raw) for raw in (grid.get("products") or []) if raw.get("id")),
-            total_count=int(page_info.get("totalCount") or 0),
+            total_count=total_count,
             offset=int(page_info.get("offset", offset)),
             is_last=bool(page_info.get("isLast")),
         )
+
+
+def _facet_census(grid: dict[str, Any], facet_name: str) -> dict[str, int] | None:
+    """Return ``{facetKey: count}`` for one facet, or ``None`` if this category doesn't publish it."""
+    for facet in grid.get("facetOptions") or []:
+        if facet.get("name") == facet_name:
+            return {
+                str(value.get("key")): int(value.get("count") or 0)
+                for value in facet.get("values") or []
+                if value.get("key") is not None
+            }
+    return None
+
+
+def _raise_for_ignored_filters(
+    grid: dict[str, Any], filter_by: tuple[str, ...], total_count: int, category_id: str
+) -> None:
+    """Verify each requested filter narrowed the result to that facet's own count.
+
+    A category publishing no census for the facet is allowed through unchecked.
+    """
+    for filter_expression in filter_by:
+        facet_name, _, facet_key = filter_expression.partition(":")
+        census = _facet_census(grid, facet_name)
+        if census is None:
+            continue
+
+        if facet_key not in census:
+            raise StoreFilterIgnoredError(
+                f"PlayStation Store cannot honour filter '{filter_expression}' on category {category_id}: "
+                f"that category publishes no '{facet_key}' value for facet '{facet_name}' (it offers "
+                f"{sorted(census)}). Filtering on it returns nothing, which would otherwise end the walk "
+                f"immediately and look like success."
+            )
+
+        expected = census[facet_key]
+        if expected != total_count:
+            raise StoreFilterIgnoredError(
+                f"PlayStation Store ignored filter '{filter_expression}' on category {category_id}: the "
+                f"category reports {expected} products for that facet but the filtered query returned "
+                f"{total_count}. The gateway answers 200 for a filter it does not honour, so this is "
+                f"checked rather than trusted."
+            )
 
 
 def _raise_for_store_errors(payload: dict[str, Any], operation_name: str) -> None:

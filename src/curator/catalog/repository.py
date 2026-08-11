@@ -33,6 +33,9 @@ class GameSummary:
     aaa_tier: str | None
     cover_image_url: str | None = None
     store_product_id: str | None = None
+    critical_score: float | None = None
+    oc_score: float | None = None
+    psn_rating: float | None = None
 
 
 class CatalogRepository:
@@ -102,7 +105,8 @@ class CatalogRepository:
                        (
                            SELECT pcc.store_product_id FROM psn_catalog_cache pcc
                            WHERE pcc.game_id = g.game_id AND pcc.store_product_id IS NOT NULL LIMIT 1
-                       ) AS store_product_id
+                       ) AS store_product_id,
+                       ge.critical_score, ge.oc_score, ge.psn_rating
                 {base_query}
                 ORDER BY g.canonical_title, g.game_id
                 LIMIT %s OFFSET %s
@@ -119,6 +123,9 @@ class CatalogRepository:
                 aaa_tier=row[4],
                 cover_image_url=row[5],
                 store_product_id=row[6],
+                critical_score=row[7],
+                oc_score=row[8],
+                psn_rating=row[9],
             )
             for row in rows
         ], total

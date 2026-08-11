@@ -147,6 +147,7 @@ module = [
     "test_psn_rate_limiter",
     "test_psn_repository",
     "test_redis_client",
+    "test_refresh_schedules",
     "test_trophy_completion",
     "test_trophy_routes",
     "test_psn_safety",

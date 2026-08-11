@@ -3,7 +3,13 @@
 from __future__ import annotations
 
 from curator.catalog.store_backfill_service import StoreBackfillService
-from curator.psn.store_client import StoreCategoryPage, StoreProduct, StoreQueryRotatedError
+from curator.psn.store_client import (
+    FULL_GAME_FILTER,
+    StoreCategoryPage,
+    StoreFilterIgnoredError,
+    StoreProduct,
+    StoreQueryRotatedError,
+)
 
 
 def product(product_id="P1", name="Bloodborne", np_title_id="CUSA00207_00", cover="cover.jpg", cls="Full Game"):
@@ -22,9 +28,11 @@ class FakeStoreClient:
         self._pages = list(pages)
         self._error = error
         self.calls: list[tuple[str, int, int]] = []
+        self.filters: list[tuple[str, ...]] = []
 
-    async def category_page(self, category_id, *, offset=0, size=100):
+    async def category_page(self, category_id, *, offset=0, size=100, filter_by=()):
         self.calls.append((category_id, offset, size))
+        self.filters.append(tuple(filter_by))
         if self._error is not None:
             raise self._error
         if not self._pages:
@@ -49,6 +57,60 @@ def _service(client, repository):
     return StoreBackfillService(client, repository, page_delay_seconds=0)
 
 
+async def test_backfill_resumes_each_category_from_its_own_start_offset():
+    client = FakeStoreClient([page([product("p1")], offset=1200, is_last=True)])
+    service = _service(client, FakeCatalogRepository())
+
+    await service.backfill(["cat-1"], start_offsets={"cat-1": 1200})
+
+    assert client.calls[0] == ("cat-1", 1200, 100)
+
+
+async def test_backfill_starts_a_category_at_zero_when_it_has_no_start_offset():
+    client = FakeStoreClient([page([product("p1")], is_last=True), page([product("p2")], offset=500, is_last=True)])
+    service = _service(client, FakeCatalogRepository())
+
+    await service.backfill(["cat-1", "cat-2"], start_offsets={"cat-2": 500})
+
+    assert [(category, offset) for category, offset, _ in client.calls] == [("cat-1", 0), ("cat-2", 500)]
+
+
+async def test_a_resumed_walk_is_not_blamed_for_products_an_earlier_run_already_read():
+    client = FakeStoreClient([page([product("p1")], offset=900, is_last=True, total=1000)])
+    service = _service(client, FakeCatalogRepository())
+
+    summary = await service.backfill(["cat-1"], start_offsets={"cat-1": 900})
+
+    assert summary.categories[0].coverage_shortfall == 99
+
+
+async def test_asks_the_gateway_for_full_games_only():
+    client = FakeStoreClient([page([product("P1")], offset=0, is_last=True)])
+
+    await _service(client, FakeCatalogRepository()).backfill_category("cat-1")
+
+    assert client.filters == [(FULL_GAME_FILTER,)]
+
+
+async def test_an_unhonoured_filter_stops_the_walk_instead_of_seeding_a_wrong_catalog():
+    client = FakeStoreClient([], error=StoreFilterIgnoredError("ignored"))
+    repository = FakeCatalogRepository()
+
+    progress = await _service(client, repository).backfill_category("cat-1")
+
+    assert not progress.completed
+    assert progress.stopped_reason == "filter_not_applied"
+    assert repository.written == []
+
+
+async def test_an_unhonoured_filter_stops_every_remaining_category_too():
+    client = FakeStoreClient([], error=StoreFilterIgnoredError("ignored"))
+
+    summary = await _service(client, FakeCatalogRepository()).backfill(["cat-1", "cat-2", "cat-3"])
+
+    assert [p.category_id for p in summary.categories] == ["cat-1"]
+
+
 async def test_a_delisting_mid_walk_is_measured_against_the_final_reported_total():
     client = FakeStoreClient(
         [
@@ -64,6 +126,25 @@ async def test_a_delisting_mid_walk_is_measured_against_the_final_reported_total
     assert progress.distinct_products == 3
     assert progress.reported_total == 3
     assert progress.coverage_shortfall == 0, "the final total is what the walk is measured against"
+
+
+async def test_a_resumed_walk_is_only_accountable_for_the_span_beyond_its_start_offset():
+    client = FakeStoreClient([page([product("P7"), product("P8")], offset=6, total=8, is_last=True)])
+
+    progress = await _service(client, FakeCatalogRepository()).backfill_category("cat-1", start_offset=6)
+
+    assert progress.completed
+    assert progress.distinct_products == 2
+    assert progress.reported_total == 8
+    assert progress.coverage_shortfall == 0
+
+
+async def test_a_resumed_walk_still_reports_a_real_gap_within_its_own_span():
+    client = FakeStoreClient([page([product("P7")], offset=6, total=9, is_last=True)])
+
+    progress = await _service(client, FakeCatalogRepository()).backfill_category("cat-1", start_offset=6)
+
+    assert progress.coverage_shortfall == 2
 
 
 async def test_a_short_walk_against_a_larger_total_reports_the_gap():

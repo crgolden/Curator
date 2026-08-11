@@ -13,6 +13,10 @@ workspace.
 feature (``schedule_messages``) -- a rate limit hit part-way through a refresh republishes the remaining
 games with a future ``schedule_time_utc`` so it isn't picked up again until the limit should have lifted,
 mirroring the same run id (see ``curator.jobs.queue_publisher.QueuePublisher.publish_library_refresh_continuation``).
+
+``SCHEDULED_REFRESH_QUEUE`` is published to by this app and consumed by a different runtime entirely
+(``Functions/``); :class:`curator.jobs.queue_consumer.QueueConsumer` deliberately does not drain it, so the
+two never race for the same message.
 """
 
 from __future__ import annotations
@@ -20,3 +24,4 @@ from __future__ import annotations
 LIBRARY_REFRESH_QUEUE = "curator-library-refresh"
 LIBRARY_REFRESH_CONTINUATION_QUEUE = "curator-library-refresh-continuation"
 ENRICHMENT_QUEUE = "curator-enrichment"
+SCHEDULED_REFRESH_QUEUE = "curator-scheduled-refresh"
