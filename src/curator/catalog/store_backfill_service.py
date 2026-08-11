@@ -116,8 +116,16 @@ class StoreBackfillService:
             except StoreQueryRotatedError:
                 logger.exception("Store backfill halted: every persisted-query hash rejected")
                 return self._progress(
-                    category_id, offset, False, pages_read, products_seen, games_created, covers_cached,
-                    "query_rotated", seen_product_ids, reported_total
+                    category_id,
+                    offset,
+                    False,
+                    pages_read,
+                    products_seen,
+                    games_created,
+                    covers_cached,
+                    "query_rotated",
+                    seen_product_ids,
+                    reported_total,
                 )
 
             pages_read += 1
@@ -134,8 +142,16 @@ class StoreBackfillService:
             offset = self._next_offset(page, offset)
             if page.is_last or not page.products:
                 progress = self._progress(
-                    category_id, offset, True, pages_read, products_seen, games_created, covers_cached, None,
-                    seen_product_ids, reported_total
+                    category_id,
+                    offset,
+                    True,
+                    pages_read,
+                    products_seen,
+                    games_created,
+                    covers_cached,
+                    None,
+                    seen_product_ids,
+                    reported_total,
                 )
                 if progress.coverage_shortfall:
                     logger.warning(
@@ -152,8 +168,16 @@ class StoreBackfillService:
                 await asyncio.sleep(self._page_delay_seconds)
 
         return self._progress(
-            category_id, offset, False, pages_read, products_seen, games_created, covers_cached,
-            "page_budget_exhausted", seen_product_ids, reported_total
+            category_id,
+            offset,
+            False,
+            pages_read,
+            products_seen,
+            games_created,
+            covers_cached,
+            "page_budget_exhausted",
+            seen_product_ids,
+            reported_total,
         )
 
     async def backfill(

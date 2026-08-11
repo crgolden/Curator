@@ -246,9 +246,7 @@ async def test_enrich_game_psn_publisher_release_and_rating_beat_rawg():
     from curator.enrichment.rawg_matcher import RawgCandidate
 
     candidate = RawgCandidate(rawg_game_id=1, name="Some Game", platform_ids=frozenset({187}))
-    rawg_client = FakeRawgClient(
-        search_results=[candidate], detail=_rawg_detail(publishers=("Wrong Publisher",))
-    )
+    rawg_client = FakeRawgClient(search_results=[candidate], detail=_rawg_detail(publishers=("Wrong Publisher",)))
     concept = TitleConcept(
         concept_id="c1",
         genres=("Action",),
@@ -301,9 +299,7 @@ async def test_enrich_game_psn_precedence_survives_a_cache_hit():
     from curator.enrichment.rawg_matcher import RawgCandidate
 
     candidate = RawgCandidate(rawg_game_id=1, name="Some Game", platform_ids=frozenset({187}))
-    rawg_client = FakeRawgClient(
-        search_results=[candidate], detail=_rawg_detail(publishers=("Wrong Publisher",))
-    )
+    rawg_client = FakeRawgClient(search_results=[candidate], detail=_rawg_detail(publishers=("Wrong Publisher",)))
     repository = FakeEnrichmentRepository()
     repository.psn_cache["p1"] = PsnCatalogCacheEntry(
         title_id="p1",
@@ -335,9 +331,7 @@ async def test_enrich_game_psn_precedence_survives_a_cache_hit():
 
 
 async def test_enrich_game_caches_psn_content_rating_for_later_runs():
-    concept = TitleConcept(
-        concept_id="c1", genres=("Action",), content_rating="ESRB Teen", rating_authority="ESRB"
-    )
+    concept = TitleConcept(concept_id="c1", genres=("Action",), content_rating="ESRB Teen", rating_authority="ESRB")
     repository = FakeEnrichmentRepository()
     service = _service(catalog_client=FakeCatalogClient(concept=concept), repository=repository)
 

@@ -105,9 +105,7 @@ class StoreCatalogClient:
 
         raise rotated or StoreQueryRotatedError("No persisted-query hash is configured for categoryGridRetrieve.")
 
-    async def _category_page(
-        self, category_id: str, *, offset: int, size: int, sha256_hash: str
-    ) -> StoreCategoryPage:
+    async def _category_page(self, category_id: str, *, offset: int, size: int, sha256_hash: str) -> StoreCategoryPage:
         operation_name = CATEGORY_GRID_RETRIEVE_OPERATION
         params = {
             "operationName": operation_name,

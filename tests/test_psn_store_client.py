@@ -236,9 +236,7 @@ async def test_the_rotated_error_only_surfaces_once_every_candidate_is_exhausted
     def handler(request):
         return httpx.Response(400, json={"message": "Query x not whitelisted"})
 
-    client = StoreCatalogClient(
-        httpx.AsyncClient(transport=httpx.MockTransport(handler)), query_hashes=("one", "two")
-    )
+    client = StoreCatalogClient(httpx.AsyncClient(transport=httpx.MockTransport(handler)), query_hashes=("one", "two"))
 
     with pytest.raises(StoreQueryRotatedError):
         await client.category_page("cat-1")
