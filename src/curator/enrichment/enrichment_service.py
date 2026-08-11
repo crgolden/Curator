@@ -213,17 +213,8 @@ class EnrichmentService:
             self._opencritic_client = None
 
     def _note_transport_failure(self, provider: str) -> None:
-        """Count a connect/read failure against ``provider`` and stop using it once they stack up.
-
-        A transport failure is not a rejection, so unlike :class:`EnrichmentAuthError` a single one is
-        never conclusive -- one game's request can time out against a provider that is otherwise healthy.
-        A run of them is different: when a host is down, every remaining game pays the full connect
-        timeout to learn the same thing. Three in a row is treated as "the provider is unreachable for
-        this run" and routed through :meth:`disable_provider`, so the rest of the run skips it silently
-        rather than paying that timeout once per game.
-
-        The counter resets on any success, so an intermittent provider is never disabled by failures
-        spread across an otherwise-working run.
+        """Count a connect/read failure against ``provider``, disabling it at
+        :data:`_TRANSPORT_FAILURE_LIMIT` consecutive failures.
 
         :param provider: ``"rawg"`` or ``"opencritic"``.
         """

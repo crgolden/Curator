@@ -23,6 +23,7 @@ _ALLOY_ENDPOINT_ENV_NAMES: tuple[str, ...] = ("AlloyEndpoint",)
 _ELASTICSEARCH_NODE_ENV_NAMES: tuple[str, ...] = ("ElasticsearchNode",)
 _ELASTICSEARCH_USERNAME_ENV_NAMES: tuple[str, ...] = ("ElasticsearchUsername",)
 _ELASTICSEARCH_PASSWORD_ENV_NAMES: tuple[str, ...] = ("ElasticsearchPassword",)
+_LOG_LEVEL_ENV_NAMES: tuple[str, ...] = ("LogLevel", "Logging__LogLevel__Default")
 
 _RAWG_API_KEY_PREFIX = "RawgApiKey"
 _OPENCRITIC_RAPIDAPI_KEY_PREFIX = "OpenCriticRapidApiKey"
@@ -50,6 +51,9 @@ class Settings:
         either credential being absent) disables that telemetry leg entirely.
     :param elasticsearch_username: Basic-auth username for ``elasticsearch_node``.
     :param elasticsearch_password: Basic-auth password for ``elasticsearch_node``.
+    :param log_level: Threshold for what reaches Elasticsearch, as a standard level name
+        (``DEBUG``/``INFO``/``WARNING``/``ERROR``), from ``LogLevel`` or
+        ``Logging__LogLevel__Default``; defaults to ``WARNING``.
     :param rawg_api_keys: RAWG API keys for the admin catalog-wide re-scrape (``POST /enrichment/runs``),
         resolved from indexed env vars ``RawgApiKey__0``, ``RawgApiKey__1``, ...; empty disables live RAWG
         enrichment lookups in that context. More than one key lets the admin singleton rotate to the next
@@ -83,6 +87,7 @@ class Settings:
     elasticsearch_node: str | None = None
     elasticsearch_username: str | None = None
     elasticsearch_password: str | None = None
+    log_level: str = "WARNING"
     rawg_api_keys: tuple[str, ...] = ()
     opencritic_rapidapi_keys: tuple[str, ...] = ()
     service_bus_namespace: str | None = None
@@ -114,6 +119,7 @@ class Settings:
 
         alloy_endpoint = resolve_setting(None, env_names=_ALLOY_ENDPOINT_ENV_NAMES, dotenv_path=dotenv_path)
         elasticsearch_node = resolve_setting(None, env_names=_ELASTICSEARCH_NODE_ENV_NAMES, dotenv_path=dotenv_path)
+        log_level = resolve_setting(None, env_names=_LOG_LEVEL_ENV_NAMES, dotenv_path=dotenv_path)
         elasticsearch_username = resolve_setting(
             None, env_names=_ELASTICSEARCH_USERNAME_ENV_NAMES, dotenv_path=dotenv_path
         )
@@ -142,6 +148,7 @@ class Settings:
             elasticsearch_node=elasticsearch_node,
             elasticsearch_username=elasticsearch_username,
             elasticsearch_password=elasticsearch_password,
+            log_level=(log_level or "WARNING").upper(),
             rawg_api_keys=rawg_api_keys,
             opencritic_rapidapi_keys=opencritic_rapidapi_keys,
             service_bus_namespace=service_bus_namespace,

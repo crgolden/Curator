@@ -93,6 +93,7 @@ _es_logging_lock = threading.Lock()
 _es_logging_configured = False
 
 
+
 def configure_telemetry(app: FastAPI, settings: Settings) -> None:
     """Wire up Curator's telemetry legs, never allowing a telemetry failure to prevent app startup.
 
@@ -199,8 +200,8 @@ def _configure_elasticsearch_logging(settings: Settings) -> None:
     treated the same as an absent one (disabled), never a startup error. Guarded by
     :data:`_es_logging_configured` so repeated calls never attach a second handler.
 
-    :param settings: The resolved settings; ``elasticsearch_node``, ``elasticsearch_username``, and
-        ``elasticsearch_password`` are consulted.
+    :param settings: The resolved settings; ``elasticsearch_node``, ``elasticsearch_username``,
+        ``elasticsearch_password``, and ``log_level`` are consulted.
     """
     if not (settings.elasticsearch_node and settings.elasticsearch_username and settings.elasticsearch_password):
         return
@@ -219,15 +220,17 @@ def _configure_elasticsearch_logging(settings: Settings) -> None:
         logging.getLogger("elastic_transport").propagate = False
         logging.getLogger("elasticsearch").propagate = False
 
+        level = logging.getLevelNamesMapping().get(settings.log_level, logging.WARNING)
+
         log_queue: SimpleQueue[logging.LogRecord] = SimpleQueue()
         queue_handler = QueueHandler(log_queue)
-        queue_handler.setLevel(logging.WARNING)
+        queue_handler.setLevel(level)
         listener = QueueListener(log_queue, handler, respect_handler_level=True)
         listener.start()
 
         root_logger = logging.getLogger()
         root_logger.addHandler(queue_handler)
-        root_logger.setLevel(logging.INFO)
+        root_logger.setLevel(min(level, logging.INFO))
 
         _es_logging_configured = True
 

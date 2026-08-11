@@ -10,6 +10,7 @@ applied live at collection-generation time (:mod:`curator.collections`), not per
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
@@ -30,6 +31,10 @@ if TYPE_CHECKING:
 
 _PS4_TITLE_ID_PREFIX = "CUSA"
 
+_ENRICH_PROGRESS_EVERY = 25
+
+logger = logging.getLogger(__name__)
+
 
 @dataclass(frozen=True, slots=True)
 class EnrichDeltaResult:
@@ -45,10 +50,7 @@ class EnrichDeltaResult:
         "finished, RAWG skipped" instead of failing the whole refresh. See :meth:`EnrichmentService
         .disable_provider`.
     :param unavailable_providers: ``"rawg"``/``"opencritic"`` for every provider that became unreachable
-        during this call -- repeated connect/read failures rather than a rejection, so the key is
-        presumed fine and the host is not. Reported separately from ``rejected_providers`` because the
-        remedy differs: a rejected key needs the user to re-save it, an unreachable host needs nothing
-        but time. See :meth:`EnrichmentService._note_transport_failure`.
+        (repeated connect/read failures, not a rejection) during this call.
     """
 
     enriched_count: int
@@ -163,6 +165,7 @@ async def enrich_games(
     opencritic_enriched_titles: list[str] = []
     rejected_providers: list[str] = []
     index = 0
+    logger.info("Enrichment starting for %d game(s).", len(games))
     while index < len(games):
         game_id, title, _product_id, title_id, is_ps5 = games[index]
         try:
@@ -175,6 +178,13 @@ async def enrich_games(
                 size_estimates=size_estimates,
             )
         except EnrichmentRateLimitError as exc:
+            logger.info(
+                "Enrichment paused by %s rate limit after %d of %d game(s); resuming in %.0fs.",
+                exc.provider,
+                index,
+                len(games),
+                exc.retry_after_seconds,
+            )
             return EnrichDeltaResult(
                 enriched_count=enriched_count,
                 rawg_enriched_titles=rawg_enriched_titles,
@@ -201,6 +211,8 @@ async def enrich_games(
         if result.opencritic_enriched:
             opencritic_enriched_titles.append(title)
         index += 1
+        if index % _ENRICH_PROGRESS_EVERY == 0:
+            logger.info("Enrichment progress: %d of %d game(s).", index, len(games))
 
     return EnrichDeltaResult(
         enriched_count=enriched_count,
