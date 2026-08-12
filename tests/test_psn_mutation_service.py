@@ -69,14 +69,34 @@ class FakeTestAccountRepository:
         self.pinned = psn_account_id
 
 
-def _service(session, *, pinned="pinned-acct"):
-    guard = MutationGuard("sub-1", FakeTestAccountRepository(pinned_account_id=pinned))
+class FakeLink:
+    def __init__(self, psn_account_id, *, allow_friend_writes=True, allow_chat_writes=True):
+        self.psn_account_id = psn_account_id
+        self.allow_friend_writes = allow_friend_writes
+        self.allow_chat_writes = allow_chat_writes
+
+
+class FakeLinkReader:
+    def __init__(self, link):
+        self.link = link
+
+    async def get_link(self, sub):
+        return self.link
+
+
+def _service(session, *, linked="pinned-acct", allow_friend_writes=True, allow_chat_writes=True):
+    link = (
+        None
+        if linked is None
+        else FakeLink(linked, allow_friend_writes=allow_friend_writes, allow_chat_writes=allow_chat_writes)
+    )
+    guard = MutationGuard("sub-1", FakeTestAccountRepository(), links=FakeLinkReader(link))
     return MutationService(session, guard)
 
 
-async def test_create_group_rejected_when_not_pinned_account():
+async def test_create_group_rejected_when_not_the_linked_account():
     session = FakeSession(own_account_id="some-other-account")
-    service = _service(session, pinned="pinned-acct")
+    service = _service(session, linked="pinned-acct")
 
     with pytest.raises(MutationNotAllowedError):
         await service.create_group(account_ids=["999"])
@@ -84,7 +104,37 @@ async def test_create_group_rejected_when_not_pinned_account():
     assert session.post_calls == []
 
 
-async def test_create_group_succeeds_for_pinned_account():
+async def test_create_group_rejected_when_chat_writes_not_consented():
+    session = FakeSession(own_account_id="pinned-acct")
+    service = _service(session, allow_chat_writes=False)
+
+    with pytest.raises(MutationNotAllowedError, match="allow_chat_writes"):
+        await service.create_group(account_ids=["999"])
+
+    assert session.post_calls == []
+
+
+async def test_friend_mutation_rejected_when_only_chat_writes_consented():
+    session = FakeSession(own_account_id="pinned-acct")
+    service = _service(session, allow_friend_writes=False, allow_chat_writes=True)
+
+    with pytest.raises(MutationNotAllowedError, match="allow_friend_writes"):
+        await service.accept_friend(account_id="999")
+
+    assert session.put_calls == []
+
+
+async def test_mutation_rejected_when_no_psn_account_is_linked():
+    session = FakeSession(own_account_id="pinned-acct")
+    service = _service(session, linked=None)
+
+    with pytest.raises(MutationNotAllowedError, match="No PSN account is linked"):
+        await service.create_group(account_ids=["999"])
+
+    assert session.post_calls == []
+
+
+async def test_create_group_succeeds_for_linked_and_consented_account():
     session = FakeSession(own_account_id="pinned-acct")
     session._post_response = {"groupId": "new-group"}
     service = _service(session)
@@ -127,6 +177,24 @@ async def test_invite_to_group_resolves_online_ids_to_account_ids():
     assert invitee_account_ids  # resolved via the profile2 lookup in FakeSession.get
 
 
+async def test_invite_to_group_posts_to_the_named_group_not_the_create_group_endpoint():
+    session = FakeSession()
+    service = _service(session)
+
+    await service.invite_to_group("g1", account_ids=["999"])
+
+    assert session.post_calls[0][0].endswith("/groups/g1/invitees")
+
+
+async def test_create_group_posts_to_the_collection_so_psn_allocates_a_new_group():
+    session = FakeSession()
+    service = _service(session)
+
+    await service.create_group(account_ids=["999"])
+
+    assert session.post_calls[0][0].endswith("/groups")
+
+
 async def test_kick_from_group_sends_delete():
     session = FakeSession()
     service = _service(session)
@@ -163,9 +231,9 @@ async def test_remove_friend_sends_delete():
     assert session.delete_calls == ["https://m.np.playstation.com/api/userProfile/v1/internal/users/me/friends/999"]
 
 
-async def test_every_mutation_checks_pinned_account_before_acting():
+async def test_every_mutation_checks_the_live_account_before_acting():
     session = FakeSession(own_account_id="wrong-account")
-    service = _service(session, pinned="pinned-acct")
+    service = _service(session, linked="pinned-acct")
 
     for coro in (
         service.rename_group("g1", "x"),

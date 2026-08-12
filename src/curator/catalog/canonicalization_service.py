@@ -162,7 +162,6 @@ def canonicalize(
 
     canonical: list[CanonicalGame] = []
     for entries in merged_groups.values():
-        has_ps5 = any(e.package_type == "PSGD" for e in entries)
         has_ps4 = any(e.package_type == "PS4GD" for e in entries)
         winner = min(
             entries,
@@ -176,7 +175,7 @@ def canonicalize(
             CanonicalGame(
                 canonical_title=winner.name,
                 native_ps5=winner.package_type == "PSGD",
-                ps4_eligible=has_ps4 or not has_ps5,
+                ps4_eligible=has_ps4,
                 franchise=assign_franchise(winner.name, franchise_rules),
                 product_id=winner.product_id,
                 concept_ids=tuple(sorted({e.concept_id for e in entries if e.concept_id})),

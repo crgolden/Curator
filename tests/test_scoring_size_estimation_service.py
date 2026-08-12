@@ -112,3 +112,47 @@ def test_ps5_and_ps4_use_independent_bands():
 
 def test_empty_estimates_returns_none():
     assert estimate_install_size_gb("Anything", "Action", is_ps5=True, aaa_tier="AAA", estimates=[]) is None
+
+
+_LAST_OF_US_ESTIMATES = [
+    SizeEstimate(
+        estimate_id="1",
+        title_pattern="the last of us part i",
+        aaa_tier=None,
+        genre_class=None,
+        platform="PS5",
+        size_gb=80,
+    ),
+    SizeEstimate(
+        estimate_id="2",
+        title_pattern="the last of us part ii remastered",
+        aaa_tier=None,
+        genre_class=None,
+        platform="PS5",
+        size_gb=80,
+    ),
+    SizeEstimate(
+        estimate_id="3",
+        title_pattern="the last of us part ii",
+        aaa_tier=None,
+        genre_class=None,
+        platform="PS5",
+        size_gb=78,
+    ),
+]
+
+
+def test_part_ii_resolves_to_its_own_size_not_the_part_i_prefix_that_also_matches():
+    result = estimate_install_size_gb(
+        "The Last of Us Part II", "Action", is_ps5=True, aaa_tier="AAA", estimates=_LAST_OF_US_ESTIMATES
+    )
+
+    assert result == 78
+
+
+def test_part_ii_remastered_resolves_over_both_shorter_prefixes():
+    result = estimate_install_size_gb(
+        "The Last of Us Part II Remastered", "Action", is_ps5=True, aaa_tier="AAA", estimates=_LAST_OF_US_ESTIMATES
+    )
+
+    assert result == 80

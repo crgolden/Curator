@@ -39,7 +39,14 @@ from curator.token_validation import TokenClaims, TokenError, TokenValidatorLike
 
 _CURATOR_SCOPE = "curator"
 
-_HARVEST_CATEGORIES = {"harvest_trophies", "harvest_identity", "harvest_presence", "harvest_devices"}
+_PSN_CAPABILITIES = {
+    "harvest_trophies",
+    "harvest_identity",
+    "harvest_presence",
+    "harvest_devices",
+    "allow_friend_writes",
+    "allow_chat_writes",
+}
 
 
 async def require_bearer(request: Request) -> TokenClaims:
@@ -82,6 +89,20 @@ async def require_bearer(request: Request) -> TokenClaims:
     return claims
 
 
+async def optional_bearer(request: Request) -> TokenClaims | None:
+    """Resolve the caller's bearer token on a route that also serves anonymous visitors.
+
+    :param request: The incoming request.
+    :returns: The validated claims, or ``None`` when the request carries no ``Authorization`` header.
+    :raises fastapi.HTTPException: 401/403 on the same terms as :func:`require_bearer`, when a token is
+        present but invalid or out of scope. A supplied token that cannot be honoured is an error, not a
+        reason to silently serve the anonymous response.
+    """
+    if _extract_bearer_token(request) is None:
+        return None
+    return await require_bearer(request)
+
+
 def require_verified_caller(claims: TokenClaims = Depends(require_bearer)) -> TokenClaims:
     """Require an authenticated, in-scope caller whose token also carries a verified Identity email.
 
@@ -113,7 +134,7 @@ def require_admin(claims: TokenClaims = Depends(require_bearer)) -> TokenClaims:
 
 
 async def require_preference(request: Request, sub: str, category: str) -> LinkRecord:
-    """Require that ``sub`` has a PSN link with the named data-harvest ``category`` flag enabled.
+    """Require that ``sub`` has a PSN link with the named PSN capability flag enabled.
 
     Called from inside a route handler body (not as a nested ``Depends``) once the caller is already
     resolved via :func:`require_bearer` -- mirrors how ``curator.trophy_routes`` does its own inline
@@ -122,12 +143,12 @@ async def require_preference(request: Request, sub: str, category: str) -> LinkR
     :param request: The incoming request (used to reach ``request.app.state.repository``).
     :param sub: The Identity ``sub`` claim of the caller whose preference is being checked.
     :param category: One of ``"harvest_trophies"``, ``"harvest_identity"``, ``"harvest_presence"``,
-        ``"harvest_devices"``.
+        ``"harvest_devices"``, ``"allow_friend_writes"``, ``"allow_chat_writes"``.
     :returns: The caller's :class:`~curator.persistence.repository.LinkRecord`.
     :raises fastapi.HTTPException: 404, if the caller has no PSN link; 403, if the named category flag is
         not enabled for this user.
     """
-    assert category in _HARVEST_CATEGORIES, f"unknown harvest category: {category!r}"
+    assert category in _PSN_CAPABILITIES, f"unknown PSN capability: {category!r}"
 
     repository: Repository = request.app.state.repository
     link = await repository.get_link(sub)

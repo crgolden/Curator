@@ -77,6 +77,7 @@ jobs:
             -Dsonar.sources=src
             -Dsonar.tests=tests
             -Dsonar.python.coverage.reportPaths=coverage.xml
+            -Dsonar.python.version=3.10,3.11,3.12,3.13,3.14
             -Dsonar.exclusions=**/__pycache__/**,**/*.pyc,.venv/**
             -Dsonar.scanner.skipJreProvisioning=true
 

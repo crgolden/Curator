@@ -109,6 +109,8 @@ async def test_get_link_maps_row_to_link_record():
         False,
         False,
         False,
+        False,
+        False,
     )
     pool = FakePool(fetchone_result=row)
     repo = Repository(pool)
@@ -127,10 +129,13 @@ async def test_get_link_maps_row_to_link_record():
         harvest_identity=False,
         harvest_presence=False,
         harvest_devices=False,
+        allow_friend_writes=False,
+        allow_chat_writes=False,
     )
     sql, params = pool.connections[0].executed[0]
     assert "SELECT" in sql
     assert "harvest_trophies, harvest_identity, harvest_presence, harvest_devices" in sql
+    assert "allow_friend_writes, allow_chat_writes" in sql
     assert "FROM psn_links WHERE identity_sub = %s" in sql
     assert params == ("sub-1",)
 
@@ -150,6 +155,8 @@ async def test_get_link_maps_harvest_flags_when_some_are_true():
         False,
         True,
         False,
+        False,
+        True,
     )
     pool = FakePool(fetchone_result=row)
     repo = Repository(pool)
@@ -161,6 +168,8 @@ async def test_get_link_maps_harvest_flags_when_some_are_true():
     assert result.harvest_identity is False
     assert result.harvest_presence is True
     assert result.harvest_devices is False
+    assert result.allow_friend_writes is False
+    assert result.allow_chat_writes is True
 
 
 async def test_touch_link_verified_executes_update():
@@ -220,7 +229,7 @@ async def test_set_link_account_executes_update():
     assert params == ("psn-account-1", "sub-1")
 
 
-async def test_set_psn_preferences_executes_update_with_all_four_flags():
+async def test_set_psn_preferences_executes_update_with_every_capability_flag():
     pool = FakePool()
     repo = Repository(pool)
 
@@ -230,13 +239,32 @@ async def test_set_psn_preferences_executes_update_with_all_four_flags():
         harvest_identity=False,
         harvest_presence=True,
         harvest_devices=False,
+        allow_friend_writes=True,
+        allow_chat_writes=False,
     )
 
     conn = pool.connections[0]
     sql, params = conn.executed[0]
     assert "UPDATE psn_links SET harvest_trophies = %s, harvest_identity = %s" in sql
-    assert "harvest_presence = %s, harvest_devices = %s, updated_at = now() WHERE identity_sub = %s" in sql
-    assert params == (True, False, True, False, "sub-1")
+    assert "harvest_presence = %s, harvest_devices = %s, allow_friend_writes = %s" in sql
+    assert "allow_chat_writes = %s, updated_at = now() WHERE identity_sub = %s" in sql
+    assert params == (True, False, True, False, True, False, "sub-1")
+
+
+async def test_set_psn_preferences_defaults_write_flags_off_when_caller_omits_them():
+    pool = FakePool()
+    repo = Repository(pool)
+
+    await repo.set_psn_preferences(
+        "sub-1",
+        harvest_trophies=True,
+        harvest_identity=True,
+        harvest_presence=True,
+        harvest_devices=True,
+    )
+
+    _, params = pool.connections[0].executed[0]
+    assert params == (True, True, True, True, False, False, "sub-1")
 
 
 async def test_set_psn_preferences_noops_without_raising_when_unlinked():

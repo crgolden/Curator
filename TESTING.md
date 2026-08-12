@@ -154,3 +154,34 @@ The `test` job runs, in order: Ruff lint, Ruff format check, mypy, then the unit
 (`--cov=src/curator --cov-report=xml:coverage.xml`), then a SonarCloud analysis over `coverage.xml`. Each
 lint/type-check step is its own named step so a failure is attributable at a glance. `CURATOR_TEST_DATABASE_URL`
 is never set in the workflow, so `test_schema.py` auto-skips; there is no PostgreSQL service in this job.
+
+## Local SonarCloud analysis
+
+Coverage has to exist before the scanner runs — it reads `coverage.xml`, it does not produce it. Run both
+from the repo root:
+
+```powershell
+python -m pytest --cov=src/curator --cov-report=xml:coverage.xml -q
+
+sonar-scanner `
+  "-Dsonar.projectKey=crgolden_Curator" `
+  "-Dsonar.organization=crgolden" `
+  "-Dsonar.sources=src" `
+  "-Dsonar.tests=tests" `
+  "-Dsonar.python.coverage.reportPaths=coverage.xml" `
+  "-Dsonar.python.version=3.10,3.11,3.12,3.13,3.14" `
+  "-Dsonar.exclusions=**/__pycache__/**,**/*.pyc,.venv/**"
+```
+
+`sonar.python.version` mirrors `pyproject.toml`'s `requires-python = ">=3.10,<4.0"`. Without it every
+analysis warns that the code is being checked against *all* Python 3 versions, which both weakens
+version-specific rules and hides ones that only apply to the floor. Note CI installs 3.14 only, so the
+declared 3.10 floor is analysed but never actually executed — narrow `requires-python` or add a matrix if
+that floor is meant to be a real promise.
+
+`sonar.host.url` and `sonar.scanner.skipJreProvisioning=true` are already set in the scanner's global
+`conf/sonar-scanner.properties`, so neither belongs on the command line: the CLI ships its own JRE 21 and
+uses it even though `java` is not on PATH.
+
+Reading the resulting quality gate — and why a green CI run and a just-scanned project both mislead — is
+fleet-wide, and lives in the workspace `AGENTS/TOOLING.md`'s SonarScanner CLI section.

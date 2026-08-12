@@ -38,6 +38,9 @@ class LinkRecord:
         presence data.
     :param harvest_devices: Whether the user has opted in to Curator harvesting/displaying their PSN
         device data.
+    :param allow_friend_writes: Whether Curator may add/remove friends on the user's PSN account.
+    :param allow_chat_writes: Whether Curator may create/rename chat groups and change their membership
+        on the user's PSN account.
     """
 
     psn_account_id: str | None
@@ -51,6 +54,8 @@ class LinkRecord:
     harvest_identity: bool = False
     harvest_presence: bool = False
     harvest_devices: bool = False
+    allow_friend_writes: bool = False
+    allow_chat_writes: bool = False
 
 
 class Repository:
@@ -111,7 +116,8 @@ class Repository:
         sql = (
             "SELECT psn_account_id, token_response_enc, access_token_expires_at, "
             "refresh_token_expires_at, linked_at, updated_at, last_verified_at, "
-            "harvest_trophies, harvest_identity, harvest_presence, harvest_devices "
+            "harvest_trophies, harvest_identity, harvest_presence, harvest_devices, "
+            "allow_friend_writes, allow_chat_writes "
             "FROM psn_links WHERE identity_sub = %s"
         )
         async with self._pool.connection() as conn, conn.cursor() as cur:
@@ -132,6 +138,8 @@ class Repository:
             harvest_identity=row[8],
             harvest_presence=row[9],
             harvest_devices=row[10],
+            allow_friend_writes=row[11],
+            allow_chat_writes=row[12],
         )
 
     async def upsert_link(
@@ -193,8 +201,10 @@ class Repository:
         harvest_identity: bool,
         harvest_presence: bool,
         harvest_devices: bool,
+        allow_friend_writes: bool = False,
+        allow_chat_writes: bool = False,
     ) -> None:
-        """Set all four PSN data-harvest preference flags for ``sub`` in one atomic update.
+        """Set every PSN capability flag for ``sub`` in one atomic update.
 
         A no-op (0 rows affected, no exception) if the user has no ``psn_links`` row -- callers are
         expected to check :meth:`get_link` first and 404 themselves, matching every other write in this
@@ -205,12 +215,23 @@ class Repository:
         :param harvest_identity: Whether Curator may harvest/display the user's PSN identity data.
         :param harvest_presence: Whether Curator may harvest/display the user's PSN presence data.
         :param harvest_devices: Whether Curator may harvest/display the user's PSN device data.
+        :param allow_friend_writes: Whether Curator may add/remove friends on the user's PSN account.
+        :param allow_chat_writes: Whether Curator may create/rename chat groups and change membership.
         """
         sql = (
             "UPDATE psn_links SET harvest_trophies = %s, harvest_identity = %s, "
-            "harvest_presence = %s, harvest_devices = %s, updated_at = now() WHERE identity_sub = %s"
+            "harvest_presence = %s, harvest_devices = %s, allow_friend_writes = %s, "
+            "allow_chat_writes = %s, updated_at = now() WHERE identity_sub = %s"
         )
-        params = (harvest_trophies, harvest_identity, harvest_presence, harvest_devices, sub)
+        params = (
+            harvest_trophies,
+            harvest_identity,
+            harvest_presence,
+            harvest_devices,
+            allow_friend_writes,
+            allow_chat_writes,
+            sub,
+        )
         async with self._pool.connection() as conn, conn.cursor() as cur:
             await cur.execute(sql, params)
 

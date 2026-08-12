@@ -84,8 +84,11 @@ from curator.profile_routes import router as profile_router
 from curator.psn.account_client import AccountClient, AccountClientFactory
 from curator.psn.catalog_client import CatalogClient
 from curator.psn.library_client import LibraryClient
+from curator.psn.mutation_service import MutationService, MutationServiceFactory
 from curator.psn.presence_client import PresenceClient, PresenceClientFactory
 from curator.psn.rate_limiter import RedisRateLimiter
+from curator.psn.repository import TestAccountRepository
+from curator.psn.safety import MutationGuard
 from curator.psn.session import PsnSession, RateLimiter
 from curator.psn.social_client import SocialClient, SocialClientFactory
 from curator.psn.store_client import CATEGORY_GRID_RETRIEVE_HASHES, StoreCatalogClient
@@ -96,6 +99,7 @@ from curator.public_collections_routes import router as public_collections_route
 from curator.redis_client import RedisAdapter, build_redis_client
 from curator.refresh_schedules_routes import router as refresh_schedules_router
 from curator.settings import Settings
+from curator.social_routes import router as social_router
 from curator.storage_devices_routes import router as storage_devices_router
 from curator.telemetry import configure_telemetry, shutdown_telemetry
 from curator.token_validation import JwtValidator, TokenValidatorLike
@@ -149,6 +153,7 @@ def create_app(
     identity_client_factory: AccountClientFactory | None = None,
     presence_client_factory: PresenceClientFactory | None = None,
     social_client_factory: SocialClientFactory | None = None,
+    mutation_service_factory: MutationServiceFactory | None = None,
     http_client: httpx.AsyncClient | None = None,
 ) -> FastAPI:
     """Build a configured Curator :class:`~fastapi.FastAPI` app.
@@ -205,6 +210,9 @@ def create_app(
     :param presence_client_factory: Builds a :class:`~curator.psn.presence_client.PresenceClient` for a
         given (already-linked) ``sub``; defaults to :func:`_default_presence_client_factory`. Never cached
         -- presence is live-only.
+    :param mutation_service_factory: Builds a :class:`~curator.psn.mutation_service.MutationService` for a
+        given (already-linked) ``sub``; defaults to :func:`_default_mutation_service_factory`. Never cached.
+        Backs ``curator.social_routes``.
     :param social_client_factory: Builds a :class:`~curator.psn.social_client.SocialClient` for a given
         (already-linked) ``sub``; defaults to :func:`_default_social_client_factory`. Never cached. Backs
         both ``curator.devices_routes``'s self-only ``devices()`` call and ``curator.profile_routes``'s
@@ -260,6 +268,9 @@ def create_app(
     profile_repository = profile_repository or ProfileRepository(shared_pool)
     follow_repository = follow_repository or FollowRepository(shared_pool)
     refresh_schedules_repository = refresh_schedules_repository or RefreshSchedulesRepository(shared_pool)
+    mutation_service_factory = mutation_service_factory or _default_mutation_service_factory(
+        repository, token_crypto, rate_limiter, redis_adapter, shared_pool, audit_repository
+    )
 
     owns_http_client = http_client is None
     http_client = http_client or httpx.AsyncClient(timeout=httpx.Timeout(10.0, connect=5.0))
@@ -410,6 +421,7 @@ def create_app(
     app.state.profile_repository = profile_repository
     app.state.follow_repository = follow_repository
     app.state.refresh_schedules_repository = refresh_schedules_repository
+    app.state.mutation_service_factory = mutation_service_factory
     app.state.queue_publisher = queue_publisher
     app.state.queue_consumer = queue_consumer
     app.state.queue_depth_monitor = queue_depth_monitor
@@ -431,6 +443,7 @@ def create_app(
     app.include_router(enrichment_keys_router)
     app.include_router(profile_router)
     app.include_router(refresh_schedules_router)
+    app.include_router(social_router)
     app.include_router(public_collections_router)
 
     @app.get("/health")
@@ -1141,6 +1154,36 @@ def _default_presence_client_factory(
 
         session = await PsnSession.restore(None, token_store, rate_limiter=rate_limiter)
         return PresenceClient(session)
+
+    return factory
+
+
+def _default_mutation_service_factory(
+    repository: Repository,
+    token_crypto: TokenCrypto,
+    rate_limiter: RateLimiter | None,
+    redis_adapter: RedisAdapter | None,
+    pool: AsyncConnectionPool,
+    audit_repository: AccountActionLogRepository,
+) -> MutationServiceFactory:
+    """Build the production ``mutation_service_factory``: a real
+    :class:`~curator.psn.mutation_service.MutationService` per call, guarded by a
+    :class:`~curator.psn.safety.MutationGuard` reading the caller's live PSN link and mutation count.
+
+    :param rate_limiter: The shared distributed PSN rate limiter (``None`` throttles nothing).
+    :param redis_adapter: The shared Redis adapter (``None`` disables the access-token cache).
+    :raises RuntimeError: If the caller has no stored PSN link (mirrors ``_default_social_client_factory``).
+    """
+
+    async def factory(sub: str) -> MutationService:
+        token_store = DbTokenStore(sub, repository, token_crypto, redis_adapter)
+        saved = await token_store.load()
+        if saved is None:
+            raise RuntimeError(f"No PSN link for user {sub!r}; cannot build a mutation service.")
+
+        session = await PsnSession.restore(None, token_store, rate_limiter=rate_limiter)
+        guard = MutationGuard(sub, TestAccountRepository(pool), repository, audit_repository)
+        return MutationService(session, guard)
 
     return factory
 

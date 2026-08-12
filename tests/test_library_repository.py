@@ -85,6 +85,77 @@ async def test_upsert_entry_executes_upsert():
     assert params == ("sub-1", "game-1", True, False, "God of War", "e1", "p1", "t1", True)
 
 
+async def test_upsert_entry_records_each_owned_platform_in_the_join_table():
+    pool = FakePool()
+    repo = LibraryRepository(pool)
+
+    await repo.upsert_entry(
+        "sub-1",
+        "game-1",
+        native_ps5=True,
+        ps4_eligible=True,
+        owned_edition="Cross-gen",
+        winning_entitlement_id="e1",
+        product_id="p1",
+        title_id="t1",
+    )
+
+    insert_sql, insert_params = pool.connections[0].executed[2]
+    assert "INSERT INTO library_entry_platforms" in insert_sql
+    assert insert_params == ("sub-1", "game-1", ["PS5", "PS4"])
+
+
+async def test_upsert_entry_drops_a_platform_the_user_no_longer_owns():
+    pool = FakePool()
+    repo = LibraryRepository(pool)
+
+    await repo.upsert_entry(
+        "sub-1",
+        "game-1",
+        native_ps5=True,
+        ps4_eligible=False,
+        owned_edition="PS5 only now",
+        winning_entitlement_id="e1",
+        product_id="p1",
+        title_id="t1",
+    )
+
+    delete_sql, delete_params = pool.connections[0].executed[1]
+    assert "DELETE FROM library_entry_platforms" in delete_sql
+    assert delete_params == ("sub-1", "game-1", ["PS5"])
+
+
+async def test_upsert_entry_owning_neither_platform_clears_every_join_row():
+    pool = FakePool()
+    repo = LibraryRepository(pool)
+
+    await repo.upsert_entry(
+        "sub-1",
+        "game-1",
+        native_ps5=False,
+        ps4_eligible=False,
+        owned_edition="Neither",
+        winning_entitlement_id="e1",
+        product_id="p1",
+        title_id="t1",
+    )
+
+    executed = pool.connections[0].executed
+    assert "DELETE FROM library_entry_platforms" in executed[1][0]
+    assert executed[1][1] == ("sub-1", "game-1", [])
+    assert not any("INSERT INTO library_entry_platforms" in sql for sql, _ in executed)
+
+
+async def test_upsert_manual_entry_records_platforms_only_when_a_row_was_written():
+    pool = FakePool(rowcount=0)
+    repo = LibraryRepository(pool)
+
+    await repo.upsert_manual_entry("sub-1", "game-1", native_ps5=True, ps4_eligible=False, owned_edition=None)
+
+    executed = pool.connections[0].executed
+    assert not any("library_entry_platforms" in sql for sql, _ in executed)
+
+
 async def test_upsert_entry_refreshes_is_active_on_conflict():
     """A lapsed title must flip to inactive on the next build, not keep its old value.
 

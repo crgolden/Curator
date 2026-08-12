@@ -59,6 +59,8 @@ def test_get_psn_preferences_happy_path():
         "harvest_identity": False,
         "harvest_presence": True,
         "harvest_devices": False,
+        "allow_friend_writes": False,
+        "allow_chat_writes": False,
     }
 
 
@@ -72,6 +74,8 @@ def test_get_psn_preferences_defaults_all_false():
         "harvest_identity": False,
         "harvest_presence": False,
         "harvest_devices": False,
+        "allow_friend_writes": False,
+        "allow_chat_writes": False,
     }
 
 
@@ -101,7 +105,7 @@ def test_put_psn_preferences_happy_path():
     response = client.put("/me/psn-preferences", json=body, headers=_bearer("valid-token"))
 
     assert response.status_code == 200
-    assert response.json() == body
+    assert response.json() == {**body, "allow_friend_writes": False, "allow_chat_writes": False}
     assert repository.set_psn_preferences_calls == [(SUB, True, False, True, False)]
     assert repository.links[SUB].harvest_trophies is True
     assert repository.links[SUB].harvest_presence is True

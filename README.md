@@ -7,8 +7,13 @@
 A multi-user PlayStation library curation API. Every user authenticates elsewhere — through Duende
 IdentityServer — and identifies themselves to Curator with a bearer access token; Curator itself is a
 **JWT Bearer resource server**, matching how the workspace's `Directory` API interacts with Identity, with
-exactly one deliberate exception: `GET /public/collections/{shareSlug}` is anonymous, so a collection's
-owner can hand out a link that works for someone who has never signed in to Curator at all.
+three deliberate exceptions. `GET /public/collections/{shareSlug}` is anonymous so a collection's owner can
+hand out a link that works for someone who has never signed in to Curator at all. `GET /catalog/games` and
+`GET /catalog/games/{gameId}` are anonymous because the shared game catalog is public content — it holds no
+per-user data, and requiring a login to browse it would keep it out of search engines entirely. The detail
+route reads the caller's token when one is present (`curator.deps.optional_bearer`) purely to add that
+user's own trophy progress; with no token it serves the same public response, and a token that *is*
+supplied but invalid is a 401 rather than being silently downgraded to anonymous.
 Once authenticated, a user links their PSN account through Curator's own in-repo `curator.psn` client
 (`curator.psn.session.PsnSession` and friends), and Curator ingests their entitlements, merges them into a
 shared game catalog, enriches that catalog (RAWG, OpenCritic, PS Store), and derives a per-user library,

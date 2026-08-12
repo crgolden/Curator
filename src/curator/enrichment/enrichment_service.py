@@ -10,6 +10,7 @@ a real, durable "looked, found nothing" result, not "never looked").
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import date
 from typing import Any
 
 import httpx
@@ -122,12 +123,14 @@ class PsnCatalogLookup:
     content_rating: str | None = None
 
 
-def _release_year(released: str | None) -> int | None:
-    """Read a four-digit year off a leading ISO-8601 date, or ``None`` if there isn't one.
+def _release_year(released: str | date | None) -> int | None:
+    """Read a four-digit year off a release date, or ``None`` if there isn't one.
 
-    Accepts both shapes the two sources use: PSN's full timestamp (``2018-10-05T04:00:00Z``) and RAWG's
-    bare date (``2018-10-05``).
+    Accepts every shape the sources use: a ``date``/``datetime`` from the storefront gateway, PSN's full
+    timestamp (``2018-10-05T04:00:00Z``), and RAWG's bare date (``2018-10-05``).
     """
+    if isinstance(released, date):
+        return released.year
     prefix = (released or "")[:4]
     return int(prefix) if prefix.isdigit() else None
 

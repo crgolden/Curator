@@ -20,10 +20,15 @@ class FakeCatalogRepository:
     def __init__(self, games=None):
         self._games = games or []
         self.list_games_calls = []
+        self.get_game_calls = []
 
     async def list_games(self, *, search=None, franchise=None, genre=None, aaa_tier=None, limit=50, offset=0):
         self.list_games_calls.append((search, franchise, genre, aaa_tier, limit, offset))
         return self._games, len(self._games)
+
+    async def get_game(self, game_id, identity_sub=None):
+        self.get_game_calls.append((game_id, identity_sub))
+        return next((game for game in self._games if game.game_id == game_id), None)
 
 
 def _build(catalog_repository=None, *, backfill_service=None, omit_backfill_service=False):
@@ -155,6 +160,85 @@ def test_backfill_reports_progress_and_totals():
     assert service.calls == [(["cat-1", "cat-2"], 5)]
 
 
+def test_reading_one_game_needs_no_token():
+    catalog_repository = FakeCatalogRepository(
+        [
+            GameSummary(
+                game_id="g1",
+                canonical_title="Bloodborne",
+                franchise=None,
+                genre="Action",
+                aaa_tier="AAA",
+                psn_rating=4.7,
+            )
+        ]
+    )
+    client, _validator = _build(catalog_repository)
+
+    response = client.get("/catalog/games/g1")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["canonical_title"] == "Bloodborne"
+    assert body["psn_rating"] == 4.7
+
+
+def test_an_anonymous_visitor_gets_no_trophy_progress_on_a_game_page():
+    catalog_repository = FakeCatalogRepository(
+        [GameSummary(game_id="g1", canonical_title="Bloodborne", franchise=None, genre="RPG", aaa_tier="AAA")]
+    )
+    client, _validator = _build(catalog_repository)
+
+    response = client.get("/catalog/games/g1")
+
+    assert response.status_code == 200
+    assert response.json()["percent_completed"] is None
+    assert catalog_repository.get_game_calls == [("g1", None)]
+
+
+def test_a_signed_in_caller_gets_their_own_trophy_progress_on_a_game_page():
+    catalog_repository = FakeCatalogRepository(
+        [
+            GameSummary(
+                game_id="g1",
+                canonical_title="Bloodborne",
+                franchise=None,
+                genre="RPG",
+                aaa_tier="AAA",
+                percent_completed=64,
+            )
+        ]
+    )
+    client, validator = _build(catalog_repository)
+    claims = _claims()
+    validator.register("token-a", claims)
+
+    response = client.get("/catalog/games/g1", headers=_bearer("token-a"))
+
+    assert response.status_code == 200
+    assert response.json()["percent_completed"] == 64
+    assert catalog_repository.get_game_calls == [("g1", claims.sub)]
+
+
+def test_a_game_page_rejects_a_supplied_token_that_is_invalid_rather_than_serving_it_anonymously():
+    catalog_repository = FakeCatalogRepository(
+        [GameSummary(game_id="g1", canonical_title="Bloodborne", franchise=None, genre="RPG", aaa_tier="AAA")]
+    )
+    client, _validator = _build(catalog_repository)
+
+    response = client.get("/catalog/games/g1", headers=_bearer("not-a-real-token"))
+
+    assert response.status_code == 401
+
+
+def test_reading_an_unknown_game_is_a_404_not_an_empty_body():
+    client, _validator = _build(FakeCatalogRepository([]))
+
+    response = client.get("/catalog/games/missing")
+
+    assert response.status_code == 404
+
+
 def test_backfill_resumes_a_category_from_the_offset_a_previous_run_reported():
     service = FakeBackfillService()
     client, validator = _build(backfill_service=service)
@@ -212,6 +296,7 @@ def test_returns_games_from_repository():
             "critical_score": None,
             "oc_score": None,
             "psn_rating": None,
+            "percent_completed": None,
         }
     ]
     assert body["total"] == 1

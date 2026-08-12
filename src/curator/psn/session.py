@@ -42,6 +42,17 @@ _DEFAULT_USER_AGENT = (
 RATE_LIMIT_MAX_REQUESTS = 300
 RATE_LIMIT_WINDOW_SECONDS = 15 * 60
 
+_ALLOWED_HOSTS: frozenset[str] = frozenset(
+    {
+        "ca.account.sony.com",
+        "m.np.playstation.com",
+        "web.np.playstation.com",
+        "accounts.api.playstation.com",
+        "dms.api.playstation.com",
+        "us-prof.np.community.playstation.net",
+    }
+)
+
 
 class TokenStore(Protocol):
     """Duck-typed async token cache contract, satisfied by :class:`curator.persistence.db_token_store.DbTokenStore`."""
@@ -72,7 +83,6 @@ class NullRateLimiter:
 
     async def acquire(self) -> None:
         """Never throttle."""
-        return
 
 
 class PsnSession:
@@ -331,6 +341,24 @@ class PsnSession:
         response.raise_for_status()
         return response
 
+    @staticmethod
+    def _verified_url(url: str) -> str:
+        """Return ``url`` if it addresses a known PSN host over HTTPS with no traversal segment.
+
+        :param url: The absolute request URL.
+        :returns: ``url``, unchanged.
+        :raises ValueError: If the scheme is not HTTPS, the host is not a PSN host, or the path contains
+            a ``..`` segment. Callers build these URLs by interpolating PSN identifiers -- online ids,
+            account ids, group ids -- that originate with a user, so neither the host nor the path shape
+            is guaranteed by construction.
+        """
+        parsed = urlparse(url)
+        if parsed.scheme != "https" or parsed.hostname not in _ALLOWED_HOSTS:
+            raise ValueError(f"Refusing a PSN request to a non-PSN URL: {parsed.scheme}://{parsed.hostname}")
+        if ".." in parsed.path.split("/"):
+            raise ValueError("Refusing a PSN request whose path contains a traversal segment.")
+        return url
+
     async def _throttled_request(self, method: str, url: str, **kwargs: Any) -> httpx.Response:
         """Acquire the distributed rate-limit budget, then make the request.
 
@@ -339,5 +367,6 @@ class PsnSession:
         when Curator scales out across multiple App Service instances, so the budget is enforced correctly
         fleet-wide, not per-process.
         """
+        verified = self._verified_url(url)
         await self._rate_limiter.acquire()
-        return await self._client.request(method, url, **kwargs)
+        return await self._client.request(method, verified, **kwargs)

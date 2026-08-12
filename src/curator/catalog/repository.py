@@ -36,6 +36,7 @@ class GameSummary:
     critical_score: float | None = None
     oc_score: float | None = None
     psn_rating: float | None = None
+    percent_completed: int | None = None
 
 
 class CatalogRepository:
@@ -129,6 +130,65 @@ class CatalogRepository:
             )
             for row in rows
         ], total
+
+    async def get_game(self, game_id: str, identity_sub: str | None = None) -> GameSummary | None:
+        """Return one catalogued game, or ``None`` if no such game exists.
+
+        :param game_id: The game's id.
+        :param identity_sub: When given, populates ``percent_completed`` with that user's own trophy
+            progress for this game; ``None`` leaves it unset, which is what an anonymous visitor sees.
+        """
+        async with self._pool.connection() as conn, conn.cursor() as cur:
+            await cur.execute(
+                """
+                SELECT g.game_id, g.canonical_title, g.franchise, gen.name, ge.aaa_tier,
+                       COALESCE(
+                           (
+                               SELECT pcc.cover_image_url FROM psn_catalog_cache pcc
+                               WHERE pcc.game_id = g.game_id AND pcc.cover_image_url IS NOT NULL LIMIT 1
+                           ),
+                           (
+                               SELECT COALESCE(es.title_image_url, es.concept_icon_url, es.game_icon_url)
+                               FROM entitlement_snapshots es
+                               JOIN library_entries le ON le.title_id = es.title_id
+                               WHERE le.game_id = g.game_id
+                                 AND COALESCE(es.title_image_url, es.concept_icon_url, es.game_icon_url) IS NOT NULL
+                               LIMIT 1
+                           )
+                       ) AS cover_image_url,
+                       (
+                           SELECT pcc.store_product_id FROM psn_catalog_cache pcc
+                           WHERE pcc.game_id = g.game_id AND pcc.store_product_id IS NOT NULL LIMIT 1
+                       ) AS store_product_id,
+                       ge.critical_score, ge.oc_score, ge.psn_rating,
+                       (
+                           SELECT le.trophy_percent_completed FROM library_entries le
+                           WHERE le.game_id = g.game_id AND le.identity_sub = %s
+                       ) AS percent_completed
+                FROM games g
+                LEFT JOIN game_enrichment ge ON ge.game_id = g.game_id
+                LEFT JOIN genres gen ON gen.genre_id = ge.genre_id
+                WHERE g.game_id = %s
+                """,
+                (identity_sub, game_id),
+            )
+            row = await cur.fetchone()
+
+        if row is None:
+            return None
+        return GameSummary(
+            game_id=str(row[0]),
+            canonical_title=row[1],
+            franchise=row[2],
+            genre=row[3],
+            aaa_tier=row[4],
+            cover_image_url=row[5],
+            store_product_id=row[6],
+            critical_score=row[7],
+            oc_score=row[8],
+            psn_rating=row[9],
+            percent_completed=row[10],
+        )
 
     async def list_exclusion_rules(self) -> list[ExclusionRule]:
         """Return every exclusion rule."""

@@ -117,7 +117,17 @@ class FakeRepository:
                 harvest_devices=existing.harvest_devices,
             )
 
-    async def set_psn_preferences(self, sub, *, harvest_trophies, harvest_identity, harvest_presence, harvest_devices):
+    async def set_psn_preferences(
+        self,
+        sub,
+        *,
+        harvest_trophies,
+        harvest_identity,
+        harvest_presence,
+        harvest_devices,
+        allow_friend_writes=False,
+        allow_chat_writes=False,
+    ):
         self.set_psn_preferences_calls.append(
             (sub, harvest_trophies, harvest_identity, harvest_presence, harvest_devices)
         )
@@ -135,6 +145,8 @@ class FakeRepository:
                 harvest_identity=harvest_identity,
                 harvest_presence=harvest_presence,
                 harvest_devices=harvest_devices,
+                allow_friend_writes=allow_friend_writes,
+                allow_chat_writes=allow_chat_writes,
             )
 
     async def delete_link(self, sub):
@@ -177,6 +189,8 @@ def _seed_link(
     harvest_identity: bool = False,
     harvest_presence: bool = False,
     harvest_devices: bool = False,
+    allow_friend_writes: bool = False,
+    allow_chat_writes: bool = False,
 ) -> None:
     """Seed a pre-existing PSN link, as if a previous /psn/link call (or DbTokenStore.save) had run."""
     encrypted = crypto.encrypt(b'{"access_token": "AT", "refresh_token": "RT"}')
@@ -192,6 +206,8 @@ def _seed_link(
         harvest_identity=harvest_identity,
         harvest_presence=harvest_presence,
         harvest_devices=harvest_devices,
+        allow_friend_writes=allow_friend_writes,
+        allow_chat_writes=allow_chat_writes,
     )
 
 

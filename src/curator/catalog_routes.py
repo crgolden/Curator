@@ -7,7 +7,7 @@ from pydantic import BaseModel
 
 from curator.catalog.repository import CatalogRepository, GameSummary
 from curator.catalog.store_backfill_service import StoreBackfillService
-from curator.deps import require_admin
+from curator.deps import optional_bearer, require_admin
 from curator.token_validation import TokenClaims
 
 router = APIRouter(prefix="/catalog", tags=["catalog"])
@@ -26,6 +26,7 @@ class GameSummaryResponse(BaseModel):
     critical_score: float | None = None
     oc_score: float | None = None
     psn_rating: float | None = None
+    percent_completed: int | None = None
 
 
 class CatalogGamesResponse(BaseModel):
@@ -102,6 +103,34 @@ async def list_games(
             for game in games
         ],
         total=total,
+    )
+
+
+@router.get("/games/{game_id}", response_model=GameSummaryResponse)
+async def get_game(
+    request: Request, game_id: str, claims: TokenClaims | None = Depends(optional_bearer)
+) -> GameSummaryResponse:
+    """Read one catalogued game, including the caller's own trophy progress when they are signed in.
+
+    :raises fastapi.HTTPException: 404, if no game has that id.
+    """
+    repository: CatalogRepository = request.app.state.catalog_repository
+    game = await repository.get_game(game_id, claims.sub if claims else None)
+    if game is None:
+        raise HTTPException(status_code=404, detail="No such game.")
+
+    return GameSummaryResponse(
+        game_id=game.game_id,
+        canonical_title=game.canonical_title,
+        franchise=game.franchise,
+        genre=game.genre,
+        aaa_tier=game.aaa_tier,
+        cover_image_url=game.cover_image_url,
+        store_product_id=game.store_product_id,
+        critical_score=game.critical_score,
+        oc_score=game.oc_score,
+        psn_rating=game.psn_rating,
+        percent_completed=game.percent_completed,
     )
 
 

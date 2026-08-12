@@ -33,8 +33,11 @@ flowchart LR
     Curator -->|"unauthenticated read"| Browser
 ```
 
-The last edge is `GET /public/collections/{share_slug}` — the one route with no `Authorization` header at
-all, serving a collection's public share link to anyone with the link, signed in or not.
+The last edge covers the three routes that take no `Authorization` header at all:
+`GET /public/collections/{share_slug}`, serving a collection's public share link to anyone with the link,
+and `GET /catalog/games` / `GET /catalog/games/{gameId}`, the shared game catalog. The catalog is public
+content with no per-user data in it, and Librarian publishes a `/sitemap.xml` covering every game's detail
+page — so those two routes have to answer without a session for the pages to be indexable at all.
 
 ## Sign-in
 

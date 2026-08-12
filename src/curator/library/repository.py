@@ -9,6 +9,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Literal
 
+from psycopg import AsyncCursor
 from psycopg_pool import AsyncConnectionPool
 
 LibrarySortField = Literal["title", "category", "rawg_rating", "opencritic_rating", "psn_rating", "percent_completed"]
@@ -139,6 +140,36 @@ class LibraryRepository:
                     is_active,
                 ),
             )
+            await self._sync_entry_platforms(
+                cur, identity_sub, game_id, native_ps5=native_ps5, ps4_eligible=ps4_eligible
+            )
+
+    @staticmethod
+    async def _sync_entry_platforms(
+        cur: AsyncCursor[Any], identity_sub: str, game_id: str, *, native_ps5: bool, ps4_eligible: bool
+    ) -> None:
+        """Reconcile ``library_entry_platforms`` to match the entry's boolean pair.
+
+        :param native_ps5: Whether the entry owns the PS5 platform.
+        :param ps4_eligible: Whether the entry owns the PS4 platform.
+        """
+        platforms = [platform for platform, owned in (("PS5", native_ps5), ("PS4", ps4_eligible)) if owned]
+        await cur.execute(
+            """
+            DELETE FROM library_entry_platforms
+            WHERE identity_sub = %s AND game_id = %s AND NOT (platform = ANY(%s))
+            """,
+            (identity_sub, game_id, platforms),
+        )
+        if platforms:
+            await cur.execute(
+                """
+                INSERT INTO library_entry_platforms (identity_sub, game_id, platform)
+                SELECT %s, %s, unnest(%s::text[])
+                ON CONFLICT DO NOTHING
+                """,
+                (identity_sub, game_id, platforms),
+            )
 
     async def upsert_manual_entry(
         self, identity_sub: str, game_id: str, *, native_ps5: bool, ps4_eligible: bool, owned_edition: str | None
@@ -160,6 +191,10 @@ class LibraryRepository:
                 """,
                 (identity_sub, game_id, native_ps5, ps4_eligible, owned_edition),
             )
+            if cur.rowcount:
+                await self._sync_entry_platforms(
+                    cur, identity_sub, game_id, native_ps5=native_ps5, ps4_eligible=ps4_eligible
+                )
 
     async def delete_manual_entry(self, identity_sub: str, game_id: str) -> bool:
         """Remove a manually-added game, never a PSN-sourced one.

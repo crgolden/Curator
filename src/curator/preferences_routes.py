@@ -24,12 +24,18 @@ _NO_LINK_DETAIL = "PSN account not linked."
 
 
 class PsnPreferences(BaseModel):
-    """The caller's four PSN data-harvest opt-in flags."""
+    """The caller's PSN capability opt-in flags: four harvest categories and two write categories.
+
+    The write flags default to ``False`` so an existing client that omits them cannot silently enable a
+    state-changing capability on PSN.
+    """
 
     harvest_trophies: bool
     harvest_identity: bool
     harvest_presence: bool
     harvest_devices: bool
+    allow_friend_writes: bool = False
+    allow_chat_writes: bool = False
 
 
 @router.get("/me/psn-preferences", response_model=PsnPreferences)
@@ -66,6 +72,8 @@ async def set_psn_preferences(
         harvest_identity=body.harvest_identity,
         harvest_presence=body.harvest_presence,
         harvest_devices=body.harvest_devices,
+        allow_friend_writes=body.allow_friend_writes,
+        allow_chat_writes=body.allow_chat_writes,
     )
 
     if link.harvest_trophies and not body.harvest_trophies:
@@ -81,4 +89,6 @@ def _response(link: LinkRecord) -> PsnPreferences:
         harvest_identity=link.harvest_identity,
         harvest_presence=link.harvest_presence,
         harvest_devices=link.harvest_devices,
+        allow_friend_writes=link.allow_friend_writes,
+        allow_chat_writes=link.allow_chat_writes,
     )

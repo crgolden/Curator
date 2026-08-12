@@ -291,6 +291,15 @@ def test_ps4_not_eligible_when_psgd_only():
     assert _canonicalize(data)[0].ps4_eligible is False
 
 
+def test_a_non_ps4_non_ps5_package_type_is_neither_rather_than_filed_as_ps4():
+    data = [_snapshot("Persona 4 Golden", "PSVITAGD", concept_id="9")]
+
+    game = _canonicalize(data)[0]
+
+    assert game.native_ps5 is False
+    assert game.ps4_eligible is False
+
+
 def test_franchise_assigned():
     data = [_snapshot("God of War", "PS4GD")]
     assert _canonicalize(data)[0].franchise == "God of War"

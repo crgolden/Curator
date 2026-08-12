@@ -208,12 +208,12 @@ async def test_get_attaches_bearer_and_ensures_fresh_token():
         client=httpx.AsyncClient(transport=httpx.MockTransport(recorder)),
     )
 
-    response = await session.get("https://example.test/api/thing", params={"a": "1"})
+    response = await session.get("https://m.np.playstation.com/api/thing", params={"a": "1"})
 
     assert response.json() == {"ok": True}
     request = recorder.requests[0]
     assert request.method == "GET"
-    assert str(request.url) == "https://example.test/api/thing?a=1"
+    assert str(request.url) == "https://m.np.playstation.com/api/thing?a=1"
     assert request.headers["Authorization"] == "Bearer AT1"
 
 
@@ -227,7 +227,7 @@ async def test_post_raises_psn_auth_error_on_401():
     )
 
     with pytest.raises(PsnAuthError, match="401"):
-        await session.post("https://example.test/api/thing", json={"x": 1})
+        await session.post("https://m.np.playstation.com/api/thing", json={"x": 1})
 
 
 async def test_patch_put_delete_attach_bearer():
@@ -245,9 +245,9 @@ async def test_patch_put_delete_attach_bearer():
         client=httpx.AsyncClient(transport=httpx.MockTransport(recorder)),
     )
 
-    await session.patch("https://example.test/api/thing", json={"a": 1})
-    await session.put("https://example.test/api/thing")
-    await session.delete("https://example.test/api/thing")
+    await session.patch("https://m.np.playstation.com/api/thing", json={"a": 1})
+    await session.put("https://m.np.playstation.com/api/thing")
+    await session.delete("https://m.np.playstation.com/api/thing")
 
     assert [r.method for r in recorder.requests] == ["PATCH", "PUT", "DELETE"]
     assert all(r.headers["Authorization"] == "Bearer AT1" for r in recorder.requests)
@@ -263,7 +263,53 @@ async def test_get_raises_for_other_http_errors():
     )
 
     with pytest.raises(httpx.HTTPStatusError):
-        await session.get("https://example.test/api/thing")
+        await session.get("https://m.np.playstation.com/api/thing")
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://attacker.example/api/thing",
+        "https://m.np.playstation.com.attacker.example/api/thing",
+        "http://m.np.playstation.com/api/thing",
+    ],
+)
+async def test_a_request_to_anything_but_a_psn_host_over_https_is_refused(url: str):
+    recorder = RequestRecorder([httpx.Response(200, json={"ok": True})])
+    store = FakeTokenStore(saved=_fake_token_response(access_token_expires_at=time.time() + 3600))
+    session = await PsnSession.restore(
+        None, store, client=httpx.AsyncClient(transport=httpx.MockTransport(recorder))
+    )
+
+    with pytest.raises(ValueError):
+        await session.get(url)
+
+    assert recorder.requests == []
+
+
+async def test_a_path_that_escapes_its_endpoint_is_refused():
+    recorder = RequestRecorder([httpx.Response(200, json={"ok": True})])
+    store = FakeTokenStore(saved=_fake_token_response(access_token_expires_at=time.time() + 3600))
+    session = await PsnSession.restore(
+        None, store, client=httpx.AsyncClient(transport=httpx.MockTransport(recorder))
+    )
+
+    with pytest.raises(ValueError):
+        await session.get("https://m.np.playstation.com/api/groups/../../admin")
+
+    assert recorder.requests == []
+
+
+async def test_every_psn_host_the_clients_use_is_allowed():
+    for host in (
+        "ca.account.sony.com",
+        "m.np.playstation.com",
+        "web.np.playstation.com",
+        "accounts.api.playstation.com",
+        "dms.api.playstation.com",
+        "us-prof.np.community.playstation.net",
+    ):
+        assert PsnSession._verified_url(f"https://{host}/api/thing") == f"https://{host}/api/thing"
 
 
 async def test_every_request_acquires_the_rate_limiter():
@@ -277,7 +323,7 @@ async def test_every_request_acquires_the_rate_limiter():
         client=httpx.AsyncClient(transport=httpx.MockTransport(recorder)),
     )
 
-    await session.get("https://example.test/api/thing")
+    await session.get("https://m.np.playstation.com/api/thing")
 
     assert rate_limiter.acquire_calls == 1
 
@@ -298,7 +344,7 @@ async def test_run_with_reauth_reboostraps_once_on_auth_error_then_succeeds():
     session.token_response = _fake_token_response(access_token_expires_at=time.time() + 3600)
 
     async def operation():
-        return await session.get("https://example.test/api/thing")
+        return await session.get("https://m.np.playstation.com/api/thing")
 
     response = await session.run_with_reauth(operation)
 

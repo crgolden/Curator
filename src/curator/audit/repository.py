@@ -26,6 +26,19 @@ ACTION_ENRICHMENT_KEY_REMOVED = "enrichment_key_removed"
 ACTION_ENRICHMENT_KEY_REJECTED = "enrichment_key_rejected"
 ACTION_FOLLOWED = "followed"
 ACTION_UNFOLLOWED = "unfollowed"
+ACTION_FRIEND_ADDED = "friend_added"
+ACTION_FRIEND_REMOVED = "friend_removed"
+ACTION_CHAT_GROUP_CREATED = "chat_group_created"
+ACTION_CHAT_MESSAGE_SENT = "chat_message_sent"
+ACTION_CHAT_MEMBERSHIP_CHANGED = "chat_membership_changed"
+
+PSN_MUTATION_ACTIONS: tuple[str, ...] = (
+    ACTION_FRIEND_ADDED,
+    ACTION_FRIEND_REMOVED,
+    ACTION_CHAT_GROUP_CREATED,
+    ACTION_CHAT_MESSAGE_SENT,
+    ACTION_CHAT_MEMBERSHIP_CHANGED,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -85,6 +98,27 @@ class AccountActionLogRepository:
             )
             for row in rows
         ]
+
+    async def count_since(self, identity_sub: str, actions: tuple[str, ...], since: datetime) -> int:
+        """Count this user's logged ``actions`` at or after ``since``.
+
+        Backs the per-user daily cap on PSN mutations -- the audit trail doubles as the meter, since a row
+        is written precisely when a mutation succeeded. The count is best-effort in one direction only: a
+        failed audit write leaves a real mutation uncounted (``curator.social_routes`` will not fail a
+        mutation that already landed on PSN just because the log write did), so the cap can undercount but
+        never overcount.
+
+        :param identity_sub: The Identity ``sub`` claim of the affected user.
+        :param actions: The action names to count.
+        :param since: Only rows with ``occurred_at`` at or after this timestamp are counted.
+        """
+        sql = (
+            "SELECT COUNT(*) FROM account_action_log WHERE identity_sub = %s AND action = ANY(%s) AND occurred_at >= %s"
+        )
+        async with self._pool.connection() as conn, conn.cursor() as cur:
+            await cur.execute(sql, (identity_sub, list(actions), since))
+            row = await cur.fetchone()
+        return int(row[0]) if row else 0
 
     async def purge_older_than(self, cutoff: datetime) -> int:
         """Delete every row older than ``cutoff``, returning the number of rows removed.
