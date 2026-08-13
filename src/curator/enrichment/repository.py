@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
+from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
 from psycopg_pool import AsyncConnectionPool
@@ -32,7 +33,12 @@ class RawgCacheEntry:
 
 @dataclass(frozen=True, slots=True)
 class PsnCatalogCacheEntry:
-    """One row from ``psn_catalog_cache``."""
+    """One row from ``psn_catalog_cache``.
+
+    ``concept_fetched_at is None`` marks a row seeded by a storefront sweep to carry cover art, whose
+    concepts lookup has never run: its genres/star_rating/publisher/release_date are absent rather than
+    known-empty. Only a row with a timestamp here is a completed catalog lookup.
+    """
 
     title_id: str
     concept_id: str | None
@@ -43,6 +49,8 @@ class PsnCatalogCacheEntry:
     cover_image_url: str | None
     content_rating: str | None = None
     rating_authority: str | None = None
+    multiplayer: bool | None = None
+    concept_fetched_at: datetime | None = None
 
 
 class EnrichmentRepository:
@@ -259,12 +267,15 @@ class EnrichmentRepository:
             await cur.execute(sql, (platform, next_skip))
 
     async def get_psn_catalog_cache(self, title_id: str) -> PsnCatalogCacheEntry | None:
-        """Return the cached official-PSN-catalog lookup for a title id, or ``None`` if never looked up."""
+        """Return the ``psn_catalog_cache`` row for a title id, or ``None`` if there is no row.
+
+        A returned row is not necessarily a completed catalog lookup -- check ``concept_fetched_at``.
+        """
         async with self._pool.connection() as conn, conn.cursor() as cur:
             await cur.execute(
                 """
                 SELECT title_id, concept_id, genres, star_rating, publisher, release_date, cover_image_url,
-                       content_rating, rating_authority
+                       content_rating, rating_authority, multiplayer, concept_fetched_at
                 FROM psn_catalog_cache WHERE title_id = %s
                 """,
                 (title_id,),
@@ -282,6 +293,8 @@ class EnrichmentRepository:
             cover_image_url=row[6],
             content_rating=row[7],
             rating_authority=row[8],
+            multiplayer=row[9],
+            concept_fetched_at=row[10],
         )
 
     async def save_psn_catalog_cache(self, entry: PsnCatalogCacheEntry) -> None:
@@ -291,17 +304,19 @@ class EnrichmentRepository:
                 """
                 INSERT INTO psn_catalog_cache (title_id, concept_id, genres, star_rating, publisher,
                                                 release_date, cover_image_url, content_rating,
-                                                rating_authority)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                                                rating_authority, multiplayer, concept_fetched_at)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, now())
                 ON CONFLICT (title_id) DO UPDATE SET
                     concept_id = EXCLUDED.concept_id,
                     genres = EXCLUDED.genres,
                     star_rating = EXCLUDED.star_rating,
                     publisher = EXCLUDED.publisher,
                     release_date = EXCLUDED.release_date,
-                    cover_image_url = EXCLUDED.cover_image_url,
+                    cover_image_url = COALESCE(EXCLUDED.cover_image_url, psn_catalog_cache.cover_image_url),
                     content_rating = EXCLUDED.content_rating,
                     rating_authority = EXCLUDED.rating_authority,
+                    multiplayer = EXCLUDED.multiplayer,
+                    concept_fetched_at = now(),
                     fetched_at = now()
                 """,
                 (
@@ -314,6 +329,7 @@ class EnrichmentRepository:
                     entry.cover_image_url,
                     entry.content_rating,
                     entry.rating_authority,
+                    entry.multiplayer,
                 ),
             )
 

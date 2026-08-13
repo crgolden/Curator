@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
+
 from curator.enrichment.opencritic_matcher import OpenCriticGame
 from curator.enrichment.publisher_tier import PublisherTierRule
 from curator.enrichment.repository import EnrichmentRepository, PsnCatalogCacheEntry
@@ -148,9 +150,13 @@ async def test_set_opencritic_cursor_upserts():
 
 
 async def test_get_psn_catalog_cache_maps_row():
+    resolved_at = datetime(2026, 1, 1, tzinfo=timezone.utc)
     pool = FakePool(
         fetchone_results=[
-            ("p1", "c1", ["Action", "RPG"], 4.5, "Sony", "2020-01-01", "cover.png", "ESRB Mature", "ESRB")
+            (
+                "p1", "c1", ["Action", "RPG"], 4.5, "Sony", "2020-01-01", "cover.png", "ESRB_MATURE", "ESRB",
+                True, resolved_at,
+            )
         ]
     )
     repo = EnrichmentRepository(pool)
@@ -165,8 +171,10 @@ async def test_get_psn_catalog_cache_maps_row():
         publisher="Sony",
         release_date="2020-01-01",
         cover_image_url="cover.png",
-        content_rating="ESRB Mature",
+        content_rating="ESRB_MATURE",
         rating_authority="ESRB",
+        multiplayer=True,
+        concept_fetched_at=resolved_at,
     )
 
 
@@ -194,6 +202,49 @@ async def test_save_psn_catalog_cache_executes_upsert():
     sql, params = pool.connections[0].executed[0]
     assert "INSERT INTO psn_catalog_cache" in sql
     assert params is not None
+
+
+async def test_save_psn_catalog_cache_stamps_concept_fetched_at_on_both_upsert_branches():
+    pool = FakePool()
+    repo = EnrichmentRepository(pool)
+
+    await repo.save_psn_catalog_cache(
+        PsnCatalogCacheEntry(
+            title_id="p1",
+            concept_id="c1",
+            genres=("Action",),
+            star_rating=4.0,
+            publisher="Sony",
+            release_date="2020-01-01",
+            cover_image_url=None,
+        )
+    )
+
+    sql, _ = pool.connections[0].executed[0]
+    insert_clause, update_clause = sql.split("DO UPDATE SET")
+    assert "concept_fetched_at" in insert_clause
+    assert "concept_fetched_at = now()" in update_clause
+
+
+async def test_save_psn_catalog_cache_keeps_a_seeded_cover_when_the_concept_carries_none():
+    pool = FakePool()
+    repo = EnrichmentRepository(pool)
+
+    await repo.save_psn_catalog_cache(
+        PsnCatalogCacheEntry(
+            title_id="p1",
+            concept_id="c1",
+            genres=("Action",),
+            star_rating=4.0,
+            publisher="Sony",
+            release_date="2020-01-01",
+            cover_image_url=None,
+        )
+    )
+
+    sql, _ = pool.connections[0].executed[0]
+    _, update_clause = sql.split("DO UPDATE SET")
+    assert "cover_image_url = COALESCE(EXCLUDED.cover_image_url, psn_catalog_cache.cover_image_url)" in update_clause
     assert params[0] == "p1"
     assert params[2] == ["Action"]
 

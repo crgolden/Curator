@@ -49,7 +49,7 @@ async def test_title_concept_maps_fields():
         "publisherName": "Sony Interactive Entertainment",
         "releaseDate": {"date": "2015-03-24"},
         "minimumAge": 17,
-        "contentRating": {"description": "Blood and Gore", "authority": "ESRB"},
+        "contentRating": {"name": "ESRB_MATURE_17", "description": "ESRB Mature 17+", "authority": "ESRB"},
         "starRating": {"score": "4.5"},
         "genres": ["Action", "RPG"],
         "titleIds": ["CUSA00900_00"],
@@ -66,13 +66,47 @@ async def test_title_concept_maps_fields():
         publisher="Sony Interactive Entertainment",
         release_date="2015-03-24",
         minimum_age=17,
-        content_rating="Blood and Gore",
+        content_rating="ESRB_MATURE_17",
         rating_authority="ESRB",
         star_rating=4.5,
         genres=("Action", "RPG"),
         title_ids=("CUSA00900_00",),
         cover_image_url="master.png",
     )
+
+
+async def test_title_concept_reads_multiplayer_from_psns_network_player_count():
+    concept = {
+        "id": "1",
+        "compatibilityNotices": [
+            {"type": "NO_OF_PLAYERS", "value": "1"},
+            {"type": "REMOTE_PLAY_SUPPORTED", "value": "true"},
+            {"type": "NO_OF_NETWORK_PLAYERS", "value": "64"},
+        ],
+    }
+    client = CatalogClient(FakeSession(concept_details=[concept]))
+
+    result = await client.title_concept("CUSA00900_00")
+
+    assert result.multiplayer is True
+
+
+async def test_title_concept_reads_single_player_from_psns_local_player_count():
+    concept = {"id": "1", "compatibilityNotices": [{"type": "NO_OF_PLAYERS", "value": "1"}]}
+    client = CatalogClient(FakeSession(concept_details=[concept]))
+
+    result = await client.title_concept("CUSA00900_00")
+
+    assert result.multiplayer is False
+
+
+async def test_title_concept_reports_no_multiplayer_opinion_when_psn_publishes_no_player_count():
+    concept = {"id": "1", "compatibilityNotices": [{"type": "REMOTE_PLAY_SUPPORTED", "value": "true"}]}
+    client = CatalogClient(FakeSession(concept_details=[concept]))
+
+    result = await client.title_concept("CUSA00900_00")
+
+    assert result.multiplayer is None
 
 
 async def test_title_concept_prefers_gamehub_cover_art_over_master():

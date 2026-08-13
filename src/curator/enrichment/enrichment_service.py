@@ -123,6 +123,7 @@ class PsnCatalogLookup:
     release_date: str | None = None
     content_rating: str | None = None
     rating_authority: str | None = None
+    multiplayer: bool | None = None
 
 
 def _release_year(released: str | date | None) -> int | None:
@@ -380,7 +381,8 @@ class EnrichmentService:
         aaa_tier = classify_tier(publisher, publisher_tier_rules) or classify_tier(developer, publisher_tier_rules)
 
         tags = [tag["name"].lower() for tag in (rawg_detail or {}).get("tags", [])]
-        multiplayer = any(keyword in tag for keyword in _MULTIPLAYER_KEYWORDS for tag in tags) if tags else None
+        rawg_multiplayer = any(keyword in tag for keyword in _MULTIPLAYER_KEYWORDS for tag in tags) if tags else None
+        multiplayer = psn_catalog.multiplayer if psn_catalog.multiplayer is not None else rawg_multiplayer
 
         metacritic = (rawg_detail or {}).get("metacritic")
         critical_score = float(metacritic) if metacritic else None
@@ -521,7 +523,7 @@ class EnrichmentService:
         if title_id is None or self._catalog_client is None:
             return PsnCatalogLookup(genres=[], star_rating=None)
         cached = await self._repository.get_psn_catalog_cache(title_id)
-        if cached is not None:
+        if cached is not None and cached.concept_fetched_at is not None:
             return PsnCatalogLookup(
                 genres=list(cached.genres),
                 star_rating=cached.star_rating,
@@ -529,6 +531,7 @@ class EnrichmentService:
                 release_date=cached.release_date,
                 content_rating=cached.content_rating,
                 rating_authority=cached.rating_authority,
+                multiplayer=cached.multiplayer,
             )
 
         try:
@@ -546,6 +549,7 @@ class EnrichmentService:
                 cover_image_url=concept.cover_image_url,
                 content_rating=concept.content_rating,
                 rating_authority=concept.rating_authority,
+                multiplayer=concept.multiplayer,
             )
         )
         return PsnCatalogLookup(
@@ -555,4 +559,5 @@ class EnrichmentService:
             release_date=concept.release_date,
             content_rating=concept.content_rating,
             rating_authority=concept.rating_authority,
+            multiplayer=concept.multiplayer,
         )

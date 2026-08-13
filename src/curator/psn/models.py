@@ -143,6 +143,7 @@ class TitleConcept:
     genres: tuple[str, ...] = ()
     title_ids: tuple[str, ...] = ()
     cover_image_url: str | None = None
+    multiplayer: bool | None = None
 
 
 @dataclass(frozen=True, slots=True)

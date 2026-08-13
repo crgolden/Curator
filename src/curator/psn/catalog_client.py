@@ -63,6 +63,26 @@ def _cover_image_url(media: Any) -> str | None:
     return next((img.get("url") for img in images if isinstance(img, dict) and img.get("url")), None)
 
 
+_LOCAL_PLAYER_COUNT_NOTICE = "NO_OF_PLAYERS"
+
+_ONLINE_PLAYER_COUNT_NOTICES = ("NO_OF_NETWORK_PLAYERS", "NO_OF_NETWORK_PLAYERS_PS_PLUS")
+
+
+def _multiplayer(concept: dict[str, Any]) -> bool | None:
+    """Whether PSN's compatibility notices state a player count above one, or ``None`` if it states none."""
+    counts: list[int] = []
+    for notice in concept.get("compatibilityNotices") or []:
+        if not isinstance(notice, dict):
+            continue
+        if notice.get("type") in (_LOCAL_PLAYER_COUNT_NOTICE, *_ONLINE_PLAYER_COUNT_NOTICES):
+            value = str(notice.get("value") or "")
+            if value.isdigit():
+                counts.append(int(value))
+    if not counts:
+        return None
+    return max(counts) > 1
+
+
 def _parse_title_concept(concept: dict[str, Any]) -> TitleConcept:
     """Map a raw PSN store concept payload (from :meth:`CatalogClient.title_concept`) to :class:`TitleConcept`."""
     release = _opt_dict(concept.get("releaseDate"))
@@ -76,12 +96,13 @@ def _parse_title_concept(concept: dict[str, Any]) -> TitleConcept:
         publisher=concept.get("publisherName"),
         release_date=release.get("date"),
         minimum_age=concept.get("minimumAge"),
-        content_rating=rating.get("description"),
+        content_rating=rating.get("name"),
         rating_authority=rating.get("authority"),
         star_rating=_to_float(star.get("score")),
         genres=tuple(concept.get("genres") or ()),
         title_ids=tuple(concept.get("titleIds") or ()),
         cover_image_url=_cover_image_url(concept.get("media")),
+        multiplayer=_multiplayer(concept),
     )
 
 
