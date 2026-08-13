@@ -298,12 +298,22 @@ async def test_upsert_game_with_no_concept_ids_skips_concept_lookup():
 
 
 async def test_list_all_game_ids_and_titles_maps_rows():
-    pool = FakePool(fetchall_results=[[("id-1", "God of War"), ("id-2", "Horizon Zero Dawn")]])
+    pool = FakePool(fetchall_results=[[("id-1", "God of War", "CUSA07408_00"), ("id-2", "Horizon Zero Dawn", None)]])
     repo = CatalogRepository(pool)
 
     games = await repo.list_all_game_ids_and_titles()
 
-    assert games == [("id-1", "God of War"), ("id-2", "Horizon Zero Dawn")]
+    assert games == [("id-1", "God of War", "CUSA07408_00"), ("id-2", "Horizon Zero Dawn", None)]
+
+
+async def test_list_all_game_ids_and_titles_prefers_the_store_catalog_title_id_over_a_library_entry():
+    pool = FakePool(fetchall_results=[[("id-1", "God of War", "CUSA07408_00")]])
+    repo = CatalogRepository(pool)
+
+    await repo.list_all_game_ids_and_titles()
+
+    sql = pool.connections[0].executed[0][0]
+    assert sql.index("psn_catalog_cache") < sql.index("library_entries"), "COALESCE order decides precedence"
 
 
 async def test_reclassify_franchise_updates_only_changed_rows():

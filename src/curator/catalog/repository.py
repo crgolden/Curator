@@ -208,12 +208,29 @@ class CatalogRepository:
             rows = await cur.fetchall()
         return [FranchiseRule(rule_id=str(row[0]), pattern=row[1], franchise=row[2], priority=row[3]) for row in rows]
 
-    async def list_all_game_ids_and_titles(self) -> list[tuple[str, str]]:
-        """Return every game's ``(game_id, canonical_title)``, for a catalog-wide admin pass."""
+    async def list_all_game_ids_and_titles(self) -> list[tuple[str, str, str | None]]:
+        """Return every game's ``(game_id, canonical_title, title_id)``, for a catalog-wide admin pass.
+
+        ``title_id`` is the npTitleId the PSN catalog lookup requires, resolved from the store-backfilled
+        catalog first and from any user's library entry second. It is ``None`` only when neither knows one.
+        """
         async with self._pool.connection() as conn, conn.cursor() as cur:
-            await cur.execute("SELECT game_id, canonical_title FROM games")
+            await cur.execute(
+                """
+                SELECT g.game_id,
+                       g.canonical_title,
+                       COALESCE(
+                           (SELECT c.title_id FROM psn_catalog_cache c
+                             WHERE c.game_id = g.game_id ORDER BY c.title_id LIMIT 1),
+                           (SELECT l.title_id FROM library_entries l
+                             WHERE l.game_id = g.game_id AND l.title_id IS NOT NULL
+                             ORDER BY l.title_id LIMIT 1)
+                       )
+                FROM games g
+                """
+            )
             rows = await cur.fetchall()
-        return [(str(row[0]), row[1]) for row in rows]
+        return [(str(row[0]), row[1], row[2]) for row in rows]
 
     async def backfill_store_products(self, products: Sequence[StoreProduct]) -> tuple[int, int]:
         """Seed the shared catalog from a storefront page: create missing ``games``, cache cover art.

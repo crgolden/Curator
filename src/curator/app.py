@@ -537,7 +537,7 @@ async def _run_enrichment_pass(
     }
 
     all_games = await catalog_repository.list_all_game_ids_and_titles()
-    unenriched = set(await enrichment_repository.get_unenriched_game_ids([game_id for game_id, _ in all_games]))
+    unenriched = set(await enrichment_repository.get_unenriched_game_ids([game_id for game_id, _, _ in all_games]))
     if not unenriched:
         return {
             "providers": providers,
@@ -556,13 +556,13 @@ async def _run_enrichment_pass(
     enriched_count = 0
     stopped_provider: str | None = None
     stopped_reason: str | None = None
-    for game_id, title in all_games:
+    for game_id, title, title_id in all_games:
         if game_id not in unenriched:
             continue
         try:
             result, _size = await enrichment_service.enrich_game(
                 title,
-                title_id=None,
+                title_id=title_id,
                 is_ps5=False,
                 genre_priorities=genre_priorities,
                 publisher_tier_rules=publisher_tier_rules,

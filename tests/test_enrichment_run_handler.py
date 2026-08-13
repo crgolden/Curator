@@ -175,7 +175,7 @@ async def test_handle_reclassifies_tier_for_already_enriched_games():
 
 
 async def test_handle_enriches_only_still_unenriched_games():
-    catalog_repository = FakeCatalogRepository(all_games=[("id-1", "Title A"), ("id-2", "Title B")])
+    catalog_repository = FakeCatalogRepository(all_games=[("id-1", "Title A", None), ("id-2", "Title B", None)])
     enrichment_repository = FakeEnrichmentRepository(unenriched=["id-2"])
     enrichment_service = FakeEnrichmentService()
     handle = _enrichment_run_handler(enrichment_service, catalog_repository, enrichment_repository)
@@ -188,7 +188,7 @@ async def test_handle_enriches_only_still_unenriched_games():
 
 
 async def test_handle_skips_enrichment_pass_when_nothing_unenriched():
-    catalog_repository = FakeCatalogRepository(all_games=[("id-1", "Title A")])
+    catalog_repository = FakeCatalogRepository(all_games=[("id-1", "Title A", None)])
     enrichment_repository = FakeEnrichmentRepository(unenriched=[])
     enrichment_service = FakeEnrichmentService()
     handle = _enrichment_run_handler(enrichment_service, catalog_repository, enrichment_repository)
@@ -300,7 +300,7 @@ async def test_handle_runs_tier_reclassification_when_rules_changed():
 
 
 async def test_handle_stops_enrichment_pass_on_provider_error_but_reports_partial_progress():
-    catalog_repository = FakeCatalogRepository(all_games=[("id-1", "Title A"), ("id-2", "Title B")])
+    catalog_repository = FakeCatalogRepository(all_games=[("id-1", "Title A", None), ("id-2", "Title B", None)])
     enrichment_repository = FakeEnrichmentRepository(unenriched=["id-1", "id-2"])
     enrichment_service = FakeEnrichmentService(
         enrich_game_error=EnrichmentAuthError("rawg", "bad key"), enrich_game_error_at_call=1
