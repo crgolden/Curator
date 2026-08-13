@@ -154,8 +154,17 @@ async def test_get_psn_catalog_cache_maps_row():
     pool = FakePool(
         fetchone_results=[
             (
-                "p1", "c1", ["Action", "RPG"], 4.5, "Sony", "2020-01-01", "cover.png", "ESRB_MATURE", "ESRB",
-                True, resolved_at,
+                "p1",
+                "c1",
+                ["Action", "RPG"],
+                4.5,
+                "Sony",
+                "2020-01-01",
+                "cover.png",
+                "ESRB_MATURE",
+                "ESRB",
+                True,
+                resolved_at,
             )
         ]
     )
@@ -202,6 +211,8 @@ async def test_save_psn_catalog_cache_executes_upsert():
     sql, params = pool.connections[0].executed[0]
     assert "INSERT INTO psn_catalog_cache" in sql
     assert params is not None
+    assert params[0] == "p1"
+    assert params[2] == ["Action"]
 
 
 async def test_save_psn_catalog_cache_stamps_concept_fetched_at_on_both_upsert_branches():
@@ -245,8 +256,6 @@ async def test_save_psn_catalog_cache_keeps_a_seeded_cover_when_the_concept_carr
     sql, _ = pool.connections[0].executed[0]
     _, update_clause = sql.split("DO UPDATE SET")
     assert "cover_image_url = COALESCE(EXCLUDED.cover_image_url, psn_catalog_cache.cover_image_url)" in update_clause
-    assert params[0] == "p1"
-    assert params[2] == ["Action"]
 
 
 async def test_get_active_genres_maps_rows():

@@ -82,7 +82,7 @@ from curator.preferences_routes import router as preferences_router
 from curator.presence_routes import router as presence_router
 from curator.profile_routes import router as profile_router
 from curator.psn.account_client import AccountClient, AccountClientFactory
-from curator.psn.catalog_client import CatalogClient
+from curator.psn.catalog_client import CatalogClient, InMemoryTokenStore, RotatingCatalogClient
 from curator.psn.library_client import LibraryClient
 from curator.psn.mutation_service import MutationService, MutationServiceFactory
 from curator.psn.presence_client import PresenceClient, PresenceClientFactory
@@ -289,6 +289,7 @@ def create_app(
         rawg_client=admin_rawg_client,
         opencritic_client=None,
         opencritic_admin_clients=tuple(admin_opencritic_clients),
+        catalog_client=_admin_catalog_client(settings.psn_npsso_tokens, rate_limiter),
         repository=enrichment_repository,
     )
 
@@ -652,6 +653,24 @@ def _enrichment_run_handler(
         }
 
     return handle
+
+
+def _admin_catalog_client(
+    npsso_tokens: tuple[str, ...], rate_limiter: RateLimiter | None
+) -> RotatingCatalogClient | None:
+    """Build the catalog-wide pass's PSN catalog client, or ``None`` when no npsso is configured.
+
+    :param npsso_tokens: The configured ``PsnNpsso__N`` values, in rotation order.
+    :param rate_limiter: The shared distributed PSN throttle.
+    """
+    if not npsso_tokens:
+        return None
+    return RotatingCatalogClient(
+        [
+            CatalogClient(PsnSession(npsso, token_store=InMemoryTokenStore(), rate_limiter=rate_limiter))
+            for npsso in npsso_tokens
+        ]
+    )
 
 
 _RAWG_USER_MAX_REQUESTS = 1

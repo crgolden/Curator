@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import datetime, timezone
 
 import httpx
@@ -113,7 +114,7 @@ class FakeEnrichmentRepository:
         return self.psn_cache.get(title_id)
 
     async def save_psn_catalog_cache(self, entry):
-        self.psn_cache[entry.title_id] = entry
+        self.psn_cache[entry.title_id] = replace(entry, concept_fetched_at=_RESOLVED_AT)
 
     async def get_opencritic_cursor(self, platform):
         return self.opencritic_cursors.get(platform, 0)

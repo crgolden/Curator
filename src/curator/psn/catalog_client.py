@@ -9,11 +9,18 @@ signal.
 
 from __future__ import annotations
 
-from typing import Any
+import logging
+from collections.abc import Callable, Coroutine, Sequence
+from typing import Any, Protocol, TypeVar
 
 from curator.psn._graphql import run_persisted_query
+from curator.psn.errors import PsnAuthError
 from curator.psn.models import GameSearchResult, TitleConcept
 from curator.psn.session import PsnSession
+
+logger = logging.getLogger("curator")
+
+_T = TypeVar("_T")
 
 _GAME_TITLES_URI = "https://m.np.playstation.com/api/catalog/v2/titles"
 
@@ -200,3 +207,66 @@ class CatalogClient:
             next_cursor = container.get("next") or ""
 
         return [_game_search_result(item) for item in items[:limit]]
+
+
+class CatalogClientProtocol(Protocol):
+    """The subset of :class:`CatalogClient` that
+    :class:`~curator.enrichment.enrichment_service.EnrichmentService` depends on -- satisfied structurally
+    by both :class:`CatalogClient` and :class:`RotatingCatalogClient`."""
+
+    async def title_concept(self, title_id: str, platform: str = "PS5") -> TitleConcept: ...
+
+
+class InMemoryTokenStore:
+    """A :class:`~curator.psn.session.TokenStore` that keeps the derived token in the process only."""
+
+    def __init__(self) -> None:
+        self._token: dict[str, Any] | None = None
+
+    async def load(self) -> dict[str, Any] | None:
+        """Return the token held for this process, or ``None`` before the first exchange."""
+        return self._token
+
+    async def save(self, token_response: dict[str, Any]) -> None:
+        """Hold ``token_response`` for the life of this object."""
+        self._token = token_response
+
+    async def clear(self) -> None:
+        """Drop the held token."""
+        self._token = None
+
+
+class RotatingCatalogClient:
+    """Rotates across multiple single-account :class:`CatalogClient` instances behind the same surface
+    :class:`~curator.enrichment.enrichment_service.EnrichmentService` calls, advancing to the next
+    account when the current one's credential is rejected.
+
+    Rotates on :class:`~curator.psn.errors.PsnAuthError`.
+
+    :param clients: One client per configured npsso, in rotation order.
+    :raises ValueError: If ``clients`` is empty.
+    """
+
+    def __init__(self, clients: Sequence[CatalogClientProtocol]) -> None:
+        if not clients:
+            raise ValueError("RotatingCatalogClient requires at least one client.")
+        self._clients = clients
+        self._index = 0
+
+    async def title_concept(self, title_id: str, platform: str = "PS5") -> TitleConcept:
+        """Resolve a title's concept through whichever configured account is currently working."""
+        return await self._call(lambda client: client.title_concept(title_id, platform))
+
+    async def _call(self, invoke: Callable[[CatalogClientProtocol], Coroutine[Any, Any, _T]]) -> _T:
+        """Try the current account, rotating on a rejected credential and retrying the same call, until
+        one succeeds or every account has failed once -- then re-raise the last error, leaving the index
+        where it landed rather than resetting."""
+        rejections: list[PsnAuthError] = []
+        for _ in range(len(self._clients)):
+            try:
+                return await invoke(self._clients[self._index])
+            except PsnAuthError as error:
+                rejections.append(error)
+                logger.warning("PSN account %d of %d rejected; rotating.", self._index + 1, len(self._clients))
+                self._index = (self._index + 1) % len(self._clients)
+        raise rejections[-1]

@@ -23,7 +23,7 @@ from curator.enrichment.publisher_tier import PublisherTierRule, classify_tier
 from curator.enrichment.rawg_client import RawgApiError, RawgClientProtocol
 from curator.enrichment.rawg_matcher import find_best_match as find_rawg_match
 from curator.enrichment.repository import EnrichmentRepository, PsnCatalogCacheEntry
-from curator.psn.catalog_client import CatalogClient
+from curator.psn.catalog_client import CatalogClientProtocol
 from curator.scoring.size_estimation_service import SizeEstimate, estimate_install_size_gb
 
 _MULTIPLAYER_KEYWORDS = ("multiplayer", "co-op", "online", "pvp", "cooperative")
@@ -189,7 +189,7 @@ class EnrichmentService:
         *,
         rawg_client: RawgClientProtocol | None,
         opencritic_client: OpenCriticClientProtocol | None,
-        catalog_client: CatalogClient | None = None,
+        catalog_client: CatalogClientProtocol | None = None,
         repository: EnrichmentRepository,
         rate_limit_backoff_seconds: dict[str, float] | None = None,
         opencritic_admin_clients: tuple[OpenCriticClientProtocol, ...] = (),

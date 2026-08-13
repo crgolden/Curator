@@ -5,7 +5,10 @@ Ported from ``psnpy``'s ``test_capabilities.py``, split to the catalog/search su
 
 from __future__ import annotations
 
-from curator.psn.catalog_client import CatalogClient
+import pytest
+
+from curator.psn.catalog_client import CatalogClient, InMemoryTokenStore, RotatingCatalogClient
+from curator.psn.errors import PsnAuthError
 from curator.psn.models import GameSearchResult, TitleConcept
 
 
@@ -174,6 +177,83 @@ async def test_search_games_maps_first_page_from_context_query():
             is_free=False,
         )
     ]
+
+
+class FakeRotationClient:
+    def __init__(self, name, *, rejects=False, raises=None):
+        self.name = name
+        self._rejects = rejects
+        self._raises = raises
+        self.calls = 0
+
+    async def title_concept(self, title_id, platform="PS5"):
+        self.calls += 1
+        if self._raises is not None:
+            raise self._raises
+        if self._rejects:
+            raise PsnAuthError(f"{self.name} rejected")
+        return TitleConcept(concept_id=self.name)
+
+
+async def test_rotating_catalog_client_advances_past_a_rejected_account():
+    first = FakeRotationClient("first", rejects=True)
+    second = FakeRotationClient("second")
+    client = RotatingCatalogClient([first, second])
+
+    result = await client.title_concept("CUSA00900_00")
+
+    assert result.concept_id == "second"
+    assert (first.calls, second.calls) == (1, 1)
+
+
+async def test_rotating_catalog_client_stays_on_the_working_account_for_later_calls():
+    first = FakeRotationClient("first", rejects=True)
+    second = FakeRotationClient("second")
+    client = RotatingCatalogClient([first, second])
+
+    await client.title_concept("CUSA00900_00")
+    await client.title_concept("CUSA00901_00")
+
+    assert first.calls == 1, "a rejected account must not be retried once rotation has moved past it"
+    assert second.calls == 2
+
+
+async def test_rotating_catalog_client_raises_the_last_rejection_when_every_account_fails():
+    clients = [FakeRotationClient("first", rejects=True), FakeRotationClient("second", rejects=True)]
+    client = RotatingCatalogClient(clients)
+
+    with pytest.raises(PsnAuthError, match="second rejected"):
+        await client.title_concept("CUSA00900_00")
+
+    assert [c.calls for c in clients] == [1, 1], "each account is tried exactly once per call"
+
+
+async def test_rotating_catalog_client_does_not_rotate_on_a_non_auth_failure():
+    first = FakeRotationClient("first", raises=RuntimeError("transport blew up"))
+    second = FakeRotationClient("second")
+    client = RotatingCatalogClient([first, second])
+
+    with pytest.raises(RuntimeError, match="transport blew up"):
+        await client.title_concept("CUSA00900_00")
+
+    assert second.calls == 0, "only a rejected credential is a reason to burn another account"
+
+
+async def test_rotating_catalog_client_rejects_an_empty_client_list():
+    with pytest.raises(ValueError, match="at least one client"):
+        RotatingCatalogClient([])
+
+
+async def test_in_memory_token_store_round_trips_without_touching_a_database():
+    store = InMemoryTokenStore()
+
+    assert await store.load() is None
+
+    await store.save({"access_token": "abc"})
+    assert await store.load() == {"access_token": "abc"}
+
+    await store.clear()
+    assert await store.load() is None
 
 
 async def test_search_games_paginates_via_domain_query_until_limit():
