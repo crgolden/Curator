@@ -55,6 +55,9 @@ SERVICE_NAME_VALUE = "crgolden-curator"
 _HEALTH_EXCLUDED_URLS = "health"
 
 _METRIC_EXPORT_INTERVAL_MILLIS = 15_000
+_EXPORT_TIMEOUT_SECONDS = 30
+
+_OTLP_EXPORTER_LOGGER = "opentelemetry.exporter.otlp.proto.grpc.exporter"
 
 _REDACT_QUERY_PARAM_HOSTS = ("api.rawg.io",)
 _REDACT_QUERY_PARAM_NAME = "key"
@@ -140,14 +143,16 @@ def _register_otlp_providers(alloy_endpoint: str) -> None:
         resource = Resource.create({SERVICE_NAME: SERVICE_NAME_VALUE})
 
         tracer_provider = TracerProvider(resource=resource)
-        tracer_provider.add_span_processor(BatchSpanProcessor(OTLPSpanExporter(endpoint=alloy_endpoint)))
+        tracer_provider.add_span_processor(
+            BatchSpanProcessor(OTLPSpanExporter(endpoint=alloy_endpoint, timeout=_EXPORT_TIMEOUT_SECONDS))
+        )
         trace.set_tracer_provider(tracer_provider)
 
         meter_provider = MeterProvider(
             resource=resource,
             metric_readers=[
                 PeriodicExportingMetricReader(
-                    OTLPMetricExporter(endpoint=alloy_endpoint),
+                    OTLPMetricExporter(endpoint=alloy_endpoint, timeout=_EXPORT_TIMEOUT_SECONDS),
                     export_interval_millis=_METRIC_EXPORT_INTERVAL_MILLIS,
                 )
             ],
@@ -225,6 +230,7 @@ def _configure_elasticsearch_logging(settings: Settings) -> None:
         log_queue: SimpleQueue[logging.LogRecord] = SimpleQueue()
         queue_handler = QueueHandler(log_queue)
         queue_handler.setLevel(level)
+        queue_handler.addFilter(_ExcludeLogger(_OTLP_EXPORTER_LOGGER))
         listener = QueueListener(log_queue, handler, respect_handler_level=True)
         listener.start()
 
@@ -233,6 +239,22 @@ def _configure_elasticsearch_logging(settings: Settings) -> None:
         root_logger.setLevel(min(level, logging.INFO))
 
         _es_logging_configured = True
+
+
+class _ExcludeLogger(logging.Filter):
+    """Drops one logger's records from the handler it is attached to, leaving other handlers untouched."""
+
+    def __init__(self, logger_name: str) -> None:
+        """Build the filter.
+
+        :param logger_name: The logger to drop, matched on itself and its descendants.
+        """
+        super().__init__()
+        self._logger_name = logger_name
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        """Whether the record may pass to the handler."""
+        return not record.name.startswith(self._logger_name)
 
 
 def format_log_record(record: logging.LogRecord) -> dict[str, Any]:

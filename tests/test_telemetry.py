@@ -38,8 +38,11 @@ _SETTINGS_NO_TELEMETRY = Settings(
 
 
 class _FakeExporter:
+    all_kwargs: ClassVar[list[dict[str, Any]]] = []
+
     def __init__(self, **kwargs):
         self.kwargs = kwargs
+        type(self).all_kwargs.append(kwargs)
 
 
 class _FakeSpanProcessor:
@@ -132,6 +135,7 @@ def _patch_otlp_collaborators(monkeypatch):
     _FakeMeterProvider.instances = 0
     _FakeInstrumentor.instrument_calls = 0
     _FakeMetricReader.last_kwargs = {}
+    _FakeExporter.all_kwargs = []
 
 
 def test_configure_telemetry_is_a_noop_when_settings_absent(monkeypatch):
@@ -180,6 +184,40 @@ def test_register_otlp_providers_shortens_the_metric_export_interval(monkeypatch
 
     assert _FakeMetricReader.last_kwargs == {"export_interval_millis": telemetry._METRIC_EXPORT_INTERVAL_MILLIS}
     assert telemetry._METRIC_EXPORT_INTERVAL_MILLIS < 60_000  # strictly shorter than the SDK default
+
+
+def test_register_otlp_providers_gives_both_exporters_a_timeout_longer_than_the_grpc_default(monkeypatch):
+    _patch_otlp_collaborators(monkeypatch)
+
+    telemetry._register_otlp_providers("https://alloy.example.test:4317")
+
+    assert len(_FakeExporter.all_kwargs) == 2, "one span exporter and one metric exporter"
+    for kwargs in _FakeExporter.all_kwargs:
+        assert kwargs["timeout"] == telemetry._EXPORT_TIMEOUT_SECONDS
+    assert telemetry._EXPORT_TIMEOUT_SECONDS > 10
+
+
+def test_configure_elasticsearch_logging_keeps_otlp_exporter_failures_out_of_elasticsearch(monkeypatch):
+    _patch_es_collaborators(monkeypatch)
+    settings = _settings_with_es()
+    root_logger = logging.getLogger()
+    original_handlers = list(root_logger.handlers)
+
+    try:
+        telemetry._configure_elasticsearch_logging(settings)
+        queue_handler = root_logger.handlers[-1]
+
+        exporter_record = logging.LogRecord(
+            telemetry._OTLP_EXPORTER_LOGGER, logging.ERROR, __file__, 1, "Failed to export metrics", None, None
+        )
+        application_record = logging.LogRecord(
+            "curator.jobs.queue_consumer", logging.ERROR, __file__, 1, "a real failure", None, None
+        )
+
+        assert not queue_handler.filter(exporter_record)
+        assert queue_handler.filter(application_record)
+    finally:
+        root_logger.handlers = original_handlers
 
 
 def test_shutdown_telemetry_is_a_noop_when_never_configured(monkeypatch):
