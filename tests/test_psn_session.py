@@ -277,11 +277,9 @@ async def test_get_raises_for_other_http_errors():
 async def test_a_request_to_anything_but_a_psn_host_over_https_is_refused(url: str):
     recorder = RequestRecorder([httpx.Response(200, json={"ok": True})])
     store = FakeTokenStore(saved=_fake_token_response(access_token_expires_at=time.time() + 3600))
-    session = await PsnSession.restore(
-        None, store, client=httpx.AsyncClient(transport=httpx.MockTransport(recorder))
-    )
+    session = await PsnSession.restore(None, store, client=httpx.AsyncClient(transport=httpx.MockTransport(recorder)))
 
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="non-PSN URL"):
         await session.get(url)
 
     assert recorder.requests == []
@@ -290,11 +288,9 @@ async def test_a_request_to_anything_but_a_psn_host_over_https_is_refused(url: s
 async def test_a_path_that_escapes_its_endpoint_is_refused():
     recorder = RequestRecorder([httpx.Response(200, json={"ok": True})])
     store = FakeTokenStore(saved=_fake_token_response(access_token_expires_at=time.time() + 3600))
-    session = await PsnSession.restore(
-        None, store, client=httpx.AsyncClient(transport=httpx.MockTransport(recorder))
-    )
+    session = await PsnSession.restore(None, store, client=httpx.AsyncClient(transport=httpx.MockTransport(recorder)))
 
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="traversal segment"):
         await session.get("https://m.np.playstation.com/api/groups/../../admin")
 
     assert recorder.requests == []

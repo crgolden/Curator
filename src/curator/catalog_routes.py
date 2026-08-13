@@ -1,4 +1,5 @@
-"""``GET /catalog/games`` -- paginated, filterable browsing of the shared game catalog."""
+"""``GET /catalog/games`` -- paginated, filterable browsing of the shared game catalog, plus the
+``GET /catalog/genres`` vocabulary its genre filter draws from."""
 
 from __future__ import annotations
 
@@ -34,6 +35,12 @@ class CatalogGamesResponse(BaseModel):
 
     games: list[GameSummaryResponse]
     total: int = 0
+
+
+class CatalogGenresResponse(BaseModel):
+    """The ``GET /catalog/genres`` response body."""
+
+    genres: list[str] = []
 
 
 class CategoryBackfillResult(BaseModel):
@@ -132,6 +139,16 @@ async def get_game(
         psn_rating=game.psn_rating,
         percent_completed=game.percent_completed,
     )
+
+
+@router.get("/genres", response_model=CatalogGenresResponse)
+async def list_genres(request: Request) -> CatalogGenresResponse:
+    """List the genres ``GET /catalog/games`` can actually be filtered by.
+
+    :returns: Every genre assigned to at least one game, ordered by curation priority.
+    """
+    repository: CatalogRepository = request.app.state.catalog_repository
+    return CatalogGenresResponse(genres=await repository.list_genres())
 
 
 @router.post("/backfill", response_model=CatalogBackfillResponse)

@@ -9,6 +9,7 @@ results consumed in call order instead of returning one fixed value.
 from __future__ import annotations
 
 from curator.catalog.canonicalization_service import CanonicalGame, EntitlementSnapshot
+from curator.catalog.cover_art import SQUARE_COVER_ART_SQL
 from curator.catalog.franchise_assigner import FranchiseRule
 from curator.catalog.repository import CatalogRepository
 
@@ -87,6 +88,62 @@ async def test_list_franchise_rules_maps_rows():
 
     assert rules[0].franchise == "God of War"
     assert rules[0].priority == 0
+
+
+async def test_list_genres_flattens_rows_to_names():
+    pool = FakePool(fetchall_results=[[("Shooter",), ("RPG",), ("Adventure",)]])
+    repo = CatalogRepository(pool)
+
+    genres = await repo.list_genres()
+
+    assert genres == ["Shooter", "RPG", "Adventure"]
+
+
+async def test_list_games_uses_the_shared_cover_art_expression():
+    """Browse and the detail page show the same game, so a second artwork policy here would give it two
+    different shapes depending on which page the reader arrived at."""
+    pool = FakePool(fetchone_results=[(0,)], fetchall_results=[[]])
+    repo = CatalogRepository(pool)
+
+    await repo.list_games()
+
+    select_sql, _params = pool.connections[0].executed[1]
+    assert SQUARE_COVER_ART_SQL in select_sql
+
+
+async def test_get_game_uses_the_shared_cover_art_expression():
+    pool = FakePool(fetchone_results=[None])
+    repo = CatalogRepository(pool)
+
+    await repo.get_game("game-1")
+
+    select_sql, _params = pool.connections[0].executed[0]
+    assert SQUARE_COVER_ART_SQL in select_sql
+
+
+async def test_cover_art_queries_never_read_storefront_hero_art():
+    """``psn_catalog_cache.cover_image_url`` is 16:9 key art and covers a minority of titles; it stays
+    available for ``store_product_id`` but must not answer a cover-art lookup."""
+    pool = FakePool(fetchone_results=[(0,)], fetchall_results=[[]])
+    repo = CatalogRepository(pool)
+
+    await repo.list_games()
+
+    select_sql, _params = pool.connections[0].executed[1]
+    assert "pcc.cover_image_url" not in select_sql
+    assert "pcc.store_product_id" in select_sql
+
+
+async def test_list_genres_offers_only_genres_an_enriched_game_already_carries():
+    pool = FakePool(fetchall_results=[[("Shooter",)]])
+    repo = CatalogRepository(pool)
+
+    await repo.list_genres()
+
+    sql, _params = pool.connections[0].executed[0]
+    assert "JOIN game_enrichment ge ON ge.genre_id = gen.genre_id" in sql
+    assert "WHERE gen.active = true" in sql
+    assert "ORDER BY gen.priority" in sql
 
 
 async def test_get_edition_ranks_builds_dict():

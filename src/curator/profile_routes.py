@@ -139,6 +139,7 @@ class ProfileLibraryGameResponse(BaseModel):
     is_active: bool
     percent_completed: int | None
     cover_image_url: str | None
+    platforms: list[str] = []
 
 
 class ProfileLibraryPageResponse(BaseModel):
@@ -481,6 +482,7 @@ async def get_user_library(
                 is_active=game.is_active,
                 percent_completed=None,
                 cover_image_url=game.cover_image_url,
+                platforms=list(game.platforms),
             )
             for game in games
         ],

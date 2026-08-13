@@ -36,6 +36,7 @@ _RATE_LIMIT_STATUS_CODE = 429
 _DEFAULT_RATE_LIMIT_RETRY_SECONDS = 3600.0
 _MAX_RATE_LIMIT_RETRY_SECONDS = 86400.0
 _TRANSPORT_FAILURE_LIMIT = 3
+_ESRB_AUTHORITY = "ESRB"
 
 
 def next_rate_limit_backoff_seconds(previous_retry_after_seconds: float) -> float:
@@ -121,6 +122,7 @@ class PsnCatalogLookup:
     publisher: str | None = None
     release_date: str | None = None
     content_rating: str | None = None
+    rating_authority: str | None = None
 
 
 def _release_year(released: str | date | None) -> int | None:
@@ -133,6 +135,13 @@ def _release_year(released: str | date | None) -> int | None:
         return released.year
     prefix = (released or "")[:4]
     return int(prefix) if prefix.isdigit() else None
+
+
+def _esrb_rating(psn_catalog: PsnCatalogLookup) -> str | None:
+    """PSN's content rating when PSN rated it under ESRB, otherwise ``None``."""
+    if psn_catalog.rating_authority != _ESRB_AUTHORITY:
+        return None
+    return psn_catalog.content_rating
 
 
 def _score_source(critical_score: float | None, oc_score: float | None) -> str | None:
@@ -385,7 +394,7 @@ class EnrichmentService:
         release_year = _release_year(psn_catalog.release_date) or _release_year(rawg_released)
 
         rawg_esrb = ((rawg_detail or {}).get("esrb_rating") or {}).get("name") if rawg_detail else None
-        esrb = psn_catalog.content_rating or rawg_esrb
+        esrb = _esrb_rating(psn_catalog) or rawg_esrb
 
         result = EnrichmentResult(
             genre=genre,
@@ -519,6 +528,7 @@ class EnrichmentService:
                 publisher=cached.publisher,
                 release_date=cached.release_date,
                 content_rating=cached.content_rating,
+                rating_authority=cached.rating_authority,
             )
 
         try:
@@ -544,4 +554,5 @@ class EnrichmentService:
             publisher=concept.publisher,
             release_date=concept.release_date,
             content_rating=concept.content_rating,
+            rating_authority=concept.rating_authority,
         )

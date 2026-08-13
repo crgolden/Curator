@@ -22,6 +22,7 @@ from typing import Any, Literal
 
 from psycopg_pool import AsyncConnectionPool
 
+from curator.catalog.cover_art import SQUARE_COVER_ART_SQL
 from curator.collections.collection_spec import CollectionSpec
 from curator.collections.filter_predicate import FilterPredicate, parse_predicate, predicate_to_dict
 from curator.collections.game_candidate import GameCandidate
@@ -36,28 +37,9 @@ _ITEM_SORT_COLUMNS: dict[str, str] = {
     "psn_rating": "ge.psn_rating",
 }
 
-_ITEM_COVER_IMAGE_SQL = """
-                       COALESCE(
-                           (
-                               SELECT pcc.cover_image_url
-                               FROM library_entries any_le
-                               JOIN psn_catalog_cache pcc ON pcc.title_id = any_le.title_id
-                               WHERE any_le.game_id = g.game_id AND pcc.cover_image_url IS NOT NULL
-                               LIMIT 1
-                           ),
-                           (
-                               SELECT COALESCE(es.title_image_url, es.game_icon_url, es.concept_icon_url)
-                               FROM game_concepts gc
-                               JOIN entitlement_snapshots es ON es.concept_id = gc.concept_id
-                               WHERE gc.game_id = g.game_id
-                                 AND COALESCE(es.title_image_url, es.game_icon_url, es.concept_icon_url) IS NOT NULL
-                               LIMIT 1
-                           )
-                       ) AS cover_image_url"""
-
 _ITEM_SELECT_COLUMNS = f"""cdi.game_id, cdi.rank, g.canonical_title, g.franchise, gen.name, ge.aaa_tier,
                        ge.critical_score, ge.oc_score, ge.psn_rating,
-{_ITEM_COVER_IMAGE_SQL},
+                       {SQUARE_COVER_ART_SQL} AS cover_image_url,
                        COALESCE(le.is_active, false) AS owner_has_access"""
 
 _ITEM_BASE_FROM = """

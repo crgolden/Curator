@@ -33,7 +33,11 @@ _STALE_RUN_THRESHOLD = timedelta(hours=24)
 
 
 class LibraryGameResponse(BaseModel):
-    """One entry in the ``GET /library`` response."""
+    """One entry in the ``GET /library`` response.
+
+    :param platforms: Every PlayStation platform this owner holds the game on, newest first. Empty only
+        for a manually-added entry, which has no entitlement to derive a platform from.
+    """
 
     game_id: str
     title: str
@@ -48,6 +52,7 @@ class LibraryGameResponse(BaseModel):
     percent_completed: int | None
     source: str = "psn"
     cover_image_url: str | None
+    platforms: list[str] = []
 
 
 class LibraryPageResponse(BaseModel):
@@ -181,6 +186,7 @@ async def get_library(
                 percent_completed=game.percent_completed,
                 source=game.source,
                 cover_image_url=game.cover_image_url,
+                platforms=list(game.platforms),
             )
             for game in games
         ],

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
+from curator.catalog.cover_art import SQUARE_COVER_ART_SQL
 from curator.collections.collection_spec import CollectionSpec
 from curator.collections.filter_predicate import GenreIn
 from curator.collections.game_candidate import GameCandidate
@@ -506,13 +507,9 @@ async def test_list_definition_items_reports_a_game_the_owner_lost_access_to():
     assert items[0].owner_has_access is False
 
 
-async def test_list_definition_items_falls_back_to_entitlement_artwork():
-    """psn_catalog_cache only has a row once PSN catalog enrichment ran, so it cannot be the only source.
-
-    The artwork ingestion now captures (entitlement_snapshots.title_image_url / game_icon_url /
-    concept_icon_url) is the fallback leg, joined by concept id alone so it stays identity-free -- a
-    collection of freshly-imported games has to render for a viewer who is not the importer.
-    """
+async def test_list_definition_items_reads_entitlement_artwork():
+    """Collection items carry the square entitlement icon, identity-free so a collection of
+    freshly-imported games renders for a viewer who is not the importer."""
     row = ("g1", 1, "God of War", None, None, None, None, None, None, "entitlement.png", True)
     pool = FakePool(fetchall_results=[[row]])
     repo = CollectionsRepository(pool)
@@ -521,28 +518,33 @@ async def test_list_definition_items_falls_back_to_entitlement_artwork():
 
     assert items[0].cover_image_url == "entitlement.png"
     sql, _params = pool.connections[0].executed[0]
-    assert "psn_catalog_cache" in sql
     assert "entitlement_snapshots" in sql
-    assert sql.index("psn_catalog_cache") < sql.index("entitlement_snapshots"), (
-        "the real store cover must be preferred over entitlement artwork"
-    )
 
 
-async def test_list_definition_items_joins_psn_catalog_cache_by_title_id_not_product_id():
-    """Regression test: psn_catalog_cache is keyed by title_id (migration 0023 renamed it from
-    product_id), but this query joins it through library_entries -- a different table from
-    game_concepts.product_id, which still exists and is a different identifier. A stale `pcc.product_id`
-    reference here 500s at runtime (UndefinedColumn) without ever failing this FakePool-based test suite,
-    since nothing here executes against a real schema -- this only locks in the known-correct SQL text."""
-    row = ("g1", 1, "God of War", "God of War", "Action", "AAA", 94.0, 92.0, 4.5, "a.png", True)
-    pool = FakePool(fetchall_results=[[row]])
+async def test_list_definition_items_never_serves_storefront_hero_art():
+    """``psn_catalog_cache`` holds 16:9 key art, which would render this list at a different shape from
+    every other surface showing the same games."""
+    pool = FakePool(fetchall_results=[[]])
     repo = CollectionsRepository(pool)
 
     await repo.list_definition_items("def-1")
 
     sql, _params = pool.connections[0].executed[0]
-    assert "pcc.title_id" in sql
-    assert "pcc.product_id" not in sql
+    assert "psn_catalog_cache" not in sql
+    assert "pcc." not in sql
+
+
+async def test_list_definition_items_uses_the_shared_cover_art_expression():
+    """Every cover-returning query interpolates the same constant, so none can drift into a second
+    artwork policy. Nothing in this FakePool suite executes against a real schema, so a column that
+    exists in no table would otherwise only surface as an UndefinedColumn 500 at runtime."""
+    pool = FakePool(fetchall_results=[[]])
+    repo = CollectionsRepository(pool)
+
+    await repo.list_definition_items("def-1")
+
+    sql, _params = pool.connections[0].executed[0]
+    assert SQUARE_COVER_ART_SQL in sql
 
 
 async def test_update_definition_sets_updated_at_explicitly():

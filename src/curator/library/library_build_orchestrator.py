@@ -317,6 +317,7 @@ class LibraryBuildOrchestrator:
                 product_id=game.product_id,
                 title_id=game.winning_title_id,
                 is_active=game.active,
+                platforms=game.platforms,
             )
             game_ids.append(game_id)
         return game_ids

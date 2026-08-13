@@ -16,6 +16,7 @@ from typing import Any
 from psycopg_pool import AsyncConnectionPool
 
 from curator.catalog.canonicalization_service import CanonicalGame, EntitlementSnapshot
+from curator.catalog.cover_art import SQUARE_COVER_ART_SQL
 from curator.catalog.exclusion_rules import ExclusionRule
 from curator.catalog.franchise_assigner import FranchiseRule, assign_franchise
 from curator.psn.store_client import StoreProduct
@@ -99,10 +100,7 @@ class CatalogRepository:
             await cur.execute(
                 f"""
                 SELECT g.game_id, g.canonical_title, g.franchise, gen.name, ge.aaa_tier,
-                       (
-                           SELECT pcc.cover_image_url FROM psn_catalog_cache pcc
-                           WHERE pcc.game_id = g.game_id AND pcc.cover_image_url IS NOT NULL LIMIT 1
-                       ) AS cover_image_url,
+                       {SQUARE_COVER_ART_SQL} AS cover_image_url,
                        (
                            SELECT pcc.store_product_id FROM psn_catalog_cache pcc
                            WHERE pcc.game_id = g.game_id AND pcc.store_product_id IS NOT NULL LIMIT 1
@@ -140,22 +138,9 @@ class CatalogRepository:
         """
         async with self._pool.connection() as conn, conn.cursor() as cur:
             await cur.execute(
-                """
+                f"""
                 SELECT g.game_id, g.canonical_title, g.franchise, gen.name, ge.aaa_tier,
-                       COALESCE(
-                           (
-                               SELECT pcc.cover_image_url FROM psn_catalog_cache pcc
-                               WHERE pcc.game_id = g.game_id AND pcc.cover_image_url IS NOT NULL LIMIT 1
-                           ),
-                           (
-                               SELECT COALESCE(es.title_image_url, es.concept_icon_url, es.game_icon_url)
-                               FROM entitlement_snapshots es
-                               JOIN library_entries le ON le.title_id = es.title_id
-                               WHERE le.game_id = g.game_id
-                                 AND COALESCE(es.title_image_url, es.concept_icon_url, es.game_icon_url) IS NOT NULL
-                               LIMIT 1
-                           )
-                       ) AS cover_image_url,
+                       {SQUARE_COVER_ART_SQL} AS cover_image_url,
                        (
                            SELECT pcc.store_product_id FROM psn_catalog_cache pcc
                            WHERE pcc.game_id = g.game_id AND pcc.store_product_id IS NOT NULL LIMIT 1
@@ -189,6 +174,25 @@ class CatalogRepository:
             psn_rating=row[9],
             percent_completed=row[10],
         )
+
+    async def list_genres(self) -> list[str]:
+        """Return every active genre that is assigned to at least one game, most-preferred first.
+
+        :returns: Genre names ordered by ``genres.priority`` ascending.
+        """
+        async with self._pool.connection() as conn, conn.cursor() as cur:
+            await cur.execute(
+                """
+                SELECT gen.name
+                FROM genres gen
+                JOIN game_enrichment ge ON ge.genre_id = gen.genre_id
+                WHERE gen.active = true
+                GROUP BY gen.name, gen.priority
+                ORDER BY gen.priority
+                """
+            )
+            rows = await cur.fetchall()
+        return [row[0] for row in rows]
 
     async def list_exclusion_rules(self) -> list[ExclusionRule]:
         """Return every exclusion rule."""

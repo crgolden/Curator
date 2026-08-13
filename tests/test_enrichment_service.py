@@ -377,6 +377,61 @@ async def test_enrich_game_caches_psn_content_rating_for_later_runs():
     assert repository.psn_cache["p1"].rating_authority == "ESRB"
 
 
+async def test_enrich_game_ignores_psn_content_rating_from_a_non_esrb_authority():
+    from curator.enrichment.rawg_matcher import RawgCandidate
+
+    candidate = RawgCandidate(rawg_game_id=1, name="Some Game", platform_ids=frozenset({187}))
+    rawg_client = FakeRawgClient(search_results=[candidate], detail=_rawg_detail())
+    concept = TitleConcept(concept_id="c1", genres=("Action",), content_rating="PEGI 18", rating_authority="PEGI")
+    service = _service(
+        rawg_client=rawg_client,
+        catalog_client=FakeCatalogClient(concept=concept),
+        repository=FakeEnrichmentRepository(),
+    )
+
+    result, _ = await service.enrich_game(
+        "Some Game",
+        title_id="p1",
+        is_ps5=True,
+        genre_priorities=_GENRE_PRIORITIES,
+        publisher_tier_rules=_PUBLISHER_RULES,
+        size_estimates=_SIZE_ESTIMATES,
+    )
+
+    assert result.esrb == "Mature", "a PEGI descriptor must not land in a column named esrb"
+
+
+async def test_enrich_game_ignores_cached_psn_content_rating_from_a_non_esrb_authority():
+    from curator.enrichment.rawg_matcher import RawgCandidate
+
+    candidate = RawgCandidate(rawg_game_id=1, name="Some Game", platform_ids=frozenset({187}))
+    rawg_client = FakeRawgClient(search_results=[candidate], detail=_rawg_detail())
+    repository = FakeEnrichmentRepository()
+    repository.psn_cache["p1"] = PsnCatalogCacheEntry(
+        title_id="p1",
+        concept_id="c1",
+        genres=("Action",),
+        star_rating=4.5,
+        publisher="Sony",
+        release_date="2018-10-05T04:00:00Z",
+        cover_image_url=None,
+        content_rating="CERO Z",
+        rating_authority="CERO",
+    )
+    service = _service(rawg_client=rawg_client, catalog_client=FakeCatalogClient(), repository=repository)
+
+    result, _ = await service.enrich_game(
+        "Some Game",
+        title_id="p1",
+        is_ps5=True,
+        genre_priorities=_GENRE_PRIORITIES,
+        publisher_tier_rules=_PUBLISHER_RULES,
+        size_estimates=_SIZE_ESTIMATES,
+    )
+
+    assert result.esrb == "Mature", "the cache-hit path must carry rating_authority through the same guard"
+
+
 async def test_enrich_game_calls_catalog_client_with_title_id_not_product_id():
     """Regression test for the product_id/title_id mix-up (0023_library_entries_title_id.sql): PSN's
     catalog "concepts" endpoint requires an npTitleId (e.g. "CUSA13505_00"), not a PSN product id (e.g.

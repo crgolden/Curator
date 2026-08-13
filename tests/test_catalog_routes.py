@@ -17,8 +17,9 @@ from test_routes import FakeAgentFactory, FakeRepository, FakeTokenValidator, _b
 
 
 class FakeCatalogRepository:
-    def __init__(self, games=None):
+    def __init__(self, games=None, genres=None):
         self._games = games or []
+        self._genres = genres or []
         self.list_games_calls = []
         self.get_game_calls = []
 
@@ -29,6 +30,9 @@ class FakeCatalogRepository:
     async def get_game(self, game_id, identity_sub=None):
         self.get_game_calls.append((game_id, identity_sub))
         return next((game for game in self._games if game.game_id == game_id), None)
+
+    async def list_genres(self):
+        return list(self._genres)
 
 
 def _build(catalog_repository=None, *, backfill_service=None, omit_backfill_service=False):
@@ -112,6 +116,30 @@ def test_catalog_carries_ratings_and_the_derived_tier():
     assert game["oc_score"] == 91.5
     assert game["psn_rating"] == 4.7
     assert game["aaa_tier"] == "AAA"
+
+
+def test_listing_the_genre_filter_options_needs_no_token():
+    client, _validator = _build(FakeCatalogRepository(genres=["Shooter", "RPG"]))
+
+    response = client.get("/catalog/genres")
+
+    assert response.status_code == 200
+    assert response.json()["genres"] == ["Shooter", "RPG"]
+
+
+def test_genres_keep_the_curation_priority_order_rather_than_being_sorted_alphabetically():
+    client, _validator = _build(FakeCatalogRepository(genres=["Shooter", "RPG", "Adventure", "Action"]))
+
+    assert client.get("/catalog/genres").json()["genres"] == ["Shooter", "RPG", "Adventure", "Action"]
+
+
+def test_a_catalog_with_no_enriched_games_offers_no_genres_rather_than_erroring():
+    client, _validator = _build(FakeCatalogRepository(genres=[]))
+
+    response = client.get("/catalog/genres")
+
+    assert response.status_code == 200
+    assert response.json()["genres"] == []
 
 
 def test_backfill_still_requires_admin_now_that_browsing_is_anonymous():

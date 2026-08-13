@@ -81,6 +81,7 @@ class FakeLibraryGameView:
         percent_completed=None,
         source="psn",
         cover_image_url=None,
+        platforms=(),
     ):
         self.game_id = game_id
         self.title = title
@@ -96,6 +97,7 @@ class FakeLibraryGameView:
         self.percent_completed = percent_completed
         self.source = source
         self.cover_image_url = cover_image_url
+        self.platforms = platforms
 
 
 _SORT_ATTRS = {
@@ -341,6 +343,7 @@ def test_get_library_returns_callers_own_games_with_ratings_and_category():
             rawg_enriched=True,
             opencritic_enriched=True,
             cover_image_url="https://cdn.example/elden-ring.jpg",
+            platforms=("PS5", "PS4"),
         ),
         FakeLibraryGameView("game-2", "Unmatched Game", rawg_enriched=False, opencritic_enriched=False),
     ]
@@ -366,6 +369,7 @@ def test_get_library_returns_callers_own_games_with_ratings_and_category():
                 "percent_completed": None,
                 "source": "psn",
                 "cover_image_url": "https://cdn.example/elden-ring.jpg",
+                "platforms": ["PS5", "PS4"],
             },
             {
                 "game_id": "game-2",
@@ -381,10 +385,24 @@ def test_get_library_returns_callers_own_games_with_ratings_and_category():
                 "percent_completed": None,
                 "source": "psn",
                 "cover_image_url": None,
+                "platforms": [],
             },
         ],
         "total": 2,
     }
+
+
+def test_get_library_preserves_platform_order_from_the_repository():
+    """Platforms arrive ordered newest-first by ``platforms.sort_order``; the route must not re-sort
+    them into alphabetical order, which would read PS3 before PS5."""
+    games = [FakeLibraryGameView("game-1", "99Vidas", platforms=("PS4", "PS3", "PSVITA"))]
+    client, validator, _publisher = _build(library_repository=FakeLibraryRepository({"sub-a": games}))
+    validator.register("token-a", _claims(sub="sub-a"))
+
+    response = client.get("/library", headers=_bearer("token-a"))
+
+    assert response.status_code == 200
+    assert response.json()["games"][0]["platforms"] == ["PS4", "PS3", "PSVITA"]
 
 
 def test_get_library_flags_a_game_the_caller_lost_access_to():

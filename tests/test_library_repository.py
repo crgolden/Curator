@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from curator.library.repository import LibraryRepository
+from curator.catalog.cover_art import SQUARE_COVER_ART_SQL
+from curator.library.repository import _OWNED_PLATFORMS_SQL, LibraryRepository
 
 
 class FakeCursor:
@@ -146,6 +147,67 @@ async def test_upsert_entry_owning_neither_platform_clears_every_join_row():
     assert not any("INSERT INTO library_entry_platforms" in sql for sql, _ in executed)
 
 
+async def test_upsert_entry_unions_extra_platforms_with_the_boolean_pair():
+    pool = FakePool()
+    repo = LibraryRepository(pool)
+
+    await repo.upsert_entry(
+        "sub-1",
+        "game-1",
+        native_ps5=False,
+        ps4_eligible=False,
+        owned_edition="Shaun White Snowboarding",
+        winning_entitlement_id="e1",
+        product_id="p1",
+        title_id="BLUS30233_00",
+        platforms=("PS3",),
+    )
+
+    insert_sql, insert_params = pool.connections[0].executed[2]
+    assert "INSERT INTO library_entry_platforms" in insert_sql
+    assert insert_params == ("sub-1", "game-1", ["PS3"])
+
+
+async def test_upsert_entry_extra_platforms_do_not_duplicate_the_boolean_derived_ones():
+    pool = FakePool()
+    repo = LibraryRepository(pool)
+
+    await repo.upsert_entry(
+        "sub-1",
+        "game-1",
+        native_ps5=True,
+        ps4_eligible=False,
+        owned_edition="Cross-Gen",
+        winning_entitlement_id="e1",
+        product_id="p1",
+        title_id="t1",
+        platforms=("PS5", "PS3"),
+    )
+
+    _insert_sql, insert_params = pool.connections[0].executed[2]
+    assert insert_params == ("sub-1", "game-1", ["PS5", "PS3"])
+
+
+async def test_upsert_entry_with_no_boolean_platform_and_no_extra_platforms_clears_every_join_row():
+    pool = FakePool()
+    repo = LibraryRepository(pool)
+
+    await repo.upsert_entry(
+        "sub-1",
+        "game-1",
+        native_ps5=False,
+        ps4_eligible=False,
+        owned_edition="Unknown Platform",
+        winning_entitlement_id="e1",
+        product_id="p1",
+        title_id="ZZZZ00001_00",
+    )
+
+    executed = pool.connections[0].executed
+    assert executed[1][1] == ("sub-1", "game-1", [])
+    assert not any("INSERT INTO library_entry_platforms" in sql for sql, _ in executed)
+
+
 async def test_upsert_manual_entry_records_platforms_only_when_a_row_was_written():
     pool = FakePool(rowcount=0)
     repo = LibraryRepository(pool)
@@ -225,8 +287,25 @@ async def test_list_entries_with_enrichment_maps_rows_and_total():
                     63,
                     "psn",
                     "https://cdn.example/elden-ring.jpg",
+                    ["PS5", "PS4"],
                 ),
-                ("game-2", "Unmatched", None, None, None, None, None, False, False, False, None, None, "manual", None),
+                (
+                    "game-2",
+                    "Unmatched",
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    False,
+                    False,
+                    False,
+                    None,
+                    None,
+                    "manual",
+                    None,
+                    [],
+                ),
             ]
         ],
     )
@@ -253,6 +332,8 @@ async def test_list_entries_with_enrichment_maps_rows_and_total():
     assert games[1].cover_image_url is None
     assert games[0].source == "psn"
     assert games[1].source == "manual", "provenance must survive the row mapping so the UI can mark it"
+    assert games[0].platforms == ("PS5", "PS4")
+    assert games[1].platforms == ()
 
     assert games[1].is_active is False
     assert games[1].np_communication_id is None
@@ -304,6 +385,47 @@ async def test_list_entries_with_enrichment_sorts_by_percent_completed():
     select_sql, _ = pool.connections[0].executed[1]
     assert "ORDER BY le.trophy_percent_completed DESC NULLS LAST, g.canonical_title ASC" in select_sql
     assert "cover_image_url" in select_sql
+
+
+async def test_list_entries_with_enrichment_reads_platforms_as_a_scalar_subquery():
+    """A game owned on three platforms must stay one row. Joining ``library_entry_platforms`` into the
+    shared ``FROM`` clause would multiply it and inflate the ``COUNT(*)`` taken over the same clause, so
+    the page would claim more games than the user owns."""
+    pool = FakePool(fetchone_results=[(0,)], fetchall_results=[[]])
+    repo = LibraryRepository(pool)
+
+    await repo.list_entries_with_enrichment("sub-1")
+
+    count_sql, _ = pool.connections[0].executed[0]
+    select_sql, _ = pool.connections[0].executed[1]
+    assert "library_entry_platforms" not in count_sql, "the platform lookup must not reach the counted FROM clause"
+    assert _OWNED_PLATFORMS_SQL in select_sql
+    assert "ORDER BY p.sort_order" in select_sql
+
+
+async def test_list_entries_with_enrichment_defaults_absent_platforms_to_empty():
+    """``array_agg`` yields NULL over no rows; the caller must see an empty tuple, not ``None``."""
+    row = ("game-1", "Solo", None, None, None, None, None, False, False, True, None, None, "manual", None, None)
+    pool = FakePool(fetchone_results=[(1,)], fetchall_results=[[row]])
+    repo = LibraryRepository(pool)
+
+    games, _total = await repo.list_entries_with_enrichment("sub-1")
+
+    assert games[0].platforms == ()
+
+
+async def test_list_entries_with_enrichment_uses_the_shared_cover_art_expression():
+    """The library table shows the same games as the catalog, so it must resolve artwork identically --
+    ``psn_catalog_cache``'s 16:9 key art would render this table at a different shape from every other
+    surface."""
+    pool = FakePool(fetchone_results=[(0,)], fetchall_results=[[]])
+    repo = LibraryRepository(pool)
+
+    await repo.list_entries_with_enrichment("sub-1")
+
+    select_sql, _ = pool.connections[0].executed[1]
+    assert SQUARE_COVER_ART_SQL in select_sql
+    assert "psn_catalog_cache" not in select_sql
 
 
 async def test_list_entries_with_enrichment_applies_limit_and_offset():

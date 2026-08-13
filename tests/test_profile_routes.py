@@ -180,6 +180,7 @@ class FakeLibraryGameView:
         is_active=True,
         percent_completed=None,
         cover_image_url=None,
+        platforms=(),
     ) -> None:
         self.game_id = game_id
         self.title = title
@@ -193,6 +194,7 @@ class FakeLibraryGameView:
         self.is_active = is_active
         self.percent_completed = percent_completed
         self.cover_image_url = cover_image_url
+        self.platforms = platforms
 
 
 class FakeCollectionsRepository:
@@ -608,6 +610,7 @@ def test_library_200_with_data_when_public_and_show_library_true():
                     rawg_enriched=True,
                     opencritic_enriched=False,
                     cover_image_url="https://cdn.example/elden-ring.jpg",
+                    platforms=("PS5", "PS3"),
                 )
             ]
         }
@@ -633,6 +636,7 @@ def test_library_200_with_data_when_public_and_show_library_true():
                 "is_active": True,
                 "percent_completed": None,
                 "cover_image_url": "https://cdn.example/elden-ring.jpg",
+                "platforms": ["PS5", "PS3"],
             }
         ],
         "total": 1,

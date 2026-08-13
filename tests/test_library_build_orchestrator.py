@@ -160,8 +160,9 @@ class FakeLibraryRepository:
         product_id,
         title_id,
         is_active=True,
+        platforms=(),
     ):
-        self.upsert_calls.append((identity_sub, game_id, native_ps5, ps4_eligible, is_active))
+        self.upsert_calls.append((identity_sub, game_id, native_ps5, ps4_eligible, is_active, platforms))
         self.last_title_id = title_id
 
     async def get_unmatched_game_ids(self, identity_sub, game_ids):
@@ -195,12 +196,14 @@ class FakeTrophyClient:
         return self._fuzzy_titles
 
 
-def _snapshot(title="God of War", concept_id="c1", entitlement_id="e1", package_type="PS4GD", active=None):
+def _snapshot(
+    title="God of War", concept_id="c1", entitlement_id="e1", package_type="PS4GD", active=None, title_id="t1"
+):
     return EntitlementSnapshot(
         entitlement_id=entitlement_id,
         concept_id=concept_id,
         product_id="p1",
-        title_id="t1",
+        title_id=title_id,
         game_meta_name=title,
         concept_meta_name=None,
         title_meta_name=title,
@@ -262,11 +265,30 @@ async def test_persist_and_link_upserts_game_and_library_entry():
     assert game_ids == ["game-1"]
     assert catalog_repository.upsert_calls[0][0] == "game-1"
     assert library_repository.upsert_calls == [
-        ("sub-1", "game-1", games[0].native_ps5, games[0].ps4_eligible, games[0].active)
+        ("sub-1", "game-1", games[0].native_ps5, games[0].ps4_eligible, games[0].active, games[0].platforms)
     ]
 
     assert games[0].winning_title_id == "t1"
     assert library_repository.last_title_id == "t1"
+
+
+async def test_persist_and_link_propagates_a_legacy_titles_platform_through_to_the_library_entry():
+    catalog_repository = FakeCatalogRepository()
+    library_repository = FakeLibraryRepository()
+    ingestion_service = FakeIngestionService(
+        snapshots=[_snapshot(title="Shaun White Snowboarding", package_type=None, title_id="BLUS30233_00")]
+    )
+    orchestrator = _orchestrator(
+        ingestion_service=ingestion_service,
+        catalog_repository=catalog_repository,
+        library_repository=library_repository,
+    )
+    games = await orchestrator.canonicalize_current_entitlements("sub-1")
+
+    await orchestrator.persist_and_link("sub-1", games)
+
+    assert games[0].platforms == ("PS3",)
+    assert library_repository.upsert_calls[0][5] == ("PS3",)
 
 
 async def test_persist_and_link_carries_inactive_state_onto_the_library_entry():

@@ -12,6 +12,8 @@ from typing import Any, Literal
 from psycopg import AsyncCursor
 from psycopg_pool import AsyncConnectionPool
 
+from curator.catalog.cover_art import SQUARE_COVER_ART_SQL
+
 LibrarySortField = Literal["title", "category", "rawg_rating", "opencritic_rating", "psn_rating", "percent_completed"]
 
 _SORT_COLUMNS: dict[str, str] = {
@@ -22,6 +24,20 @@ _SORT_COLUMNS: dict[str, str] = {
     "psn_rating": "ge.psn_rating",
     "percent_completed": "le.trophy_percent_completed",
 }
+
+_OWNED_PLATFORMS_SQL = """(
+                           SELECT COALESCE(array_agg(p.platform_id ORDER BY p.sort_order), ARRAY[]::text[])
+                           FROM library_entry_platforms lep
+                           JOIN platforms p ON p.platform_id = lep.platform
+                           WHERE lep.identity_sub = le.identity_sub AND lep.game_id = le.game_id
+                       )"""
+"""Correlated scalar subquery yielding one entry's platforms, ordered by ``platforms.sort_order``.
+
+The outer query must alias ``library_entries`` as ``le``. Scalar rather than a join so a game owned on
+three platforms stays one row and cannot inflate a ``COUNT(*)`` taken over the same ``FROM`` clause.
+``array_agg`` returns ``NULL`` over no rows, so the empty case is coalesced to an empty array rather
+than reaching the caller as ``None``.
+"""
 
 
 @dataclass(frozen=True, slots=True)
@@ -43,6 +59,7 @@ class LibraryGameView:
     percent_completed: int | None = None
     source: str = "psn"
     cover_image_url: str | None = None
+    platforms: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -92,6 +109,7 @@ class LibraryRepository:
         product_id: str | None,
         title_id: str | None,
         is_active: bool = True,
+        platforms: tuple[str, ...] = (),
     ) -> None:
         """Record (or refresh) a user's ownership of one game.
 
@@ -108,6 +126,9 @@ class LibraryRepository:
         :param is_active: Whether this user can still play the game. Refreshed on every build, so a
             lapsed PS Plus title flips to ``False`` here instead of being stranded as permanently owned
             (which is what happened while canonicalization dropped inactive entitlements outright).
+        :param platforms: Every platform this entry owns beyond what ``native_ps5``/``ps4_eligible`` can
+            express (:attr:`~curator.catalog.canonicalization_service.CanonicalGame.platforms`) -- unioned
+            with the PS5/PS4 pair, not a replacement for it.
         """
         async with self._pool.connection() as conn, conn.cursor() as cur:
             await cur.execute(
@@ -141,34 +162,45 @@ class LibraryRepository:
                 ),
             )
             await self._sync_entry_platforms(
-                cur, identity_sub, game_id, native_ps5=native_ps5, ps4_eligible=ps4_eligible
+                cur, identity_sub, game_id, native_ps5=native_ps5, ps4_eligible=ps4_eligible, platforms=platforms
             )
 
     @staticmethod
     async def _sync_entry_platforms(
-        cur: AsyncCursor[Any], identity_sub: str, game_id: str, *, native_ps5: bool, ps4_eligible: bool
+        cur: AsyncCursor[Any],
+        identity_sub: str,
+        game_id: str,
+        *,
+        native_ps5: bool,
+        ps4_eligible: bool,
+        platforms: tuple[str, ...] = (),
     ) -> None:
-        """Reconcile ``library_entry_platforms`` to match the entry's boolean pair.
+        """Reconcile ``library_entry_platforms`` to match the entry's boolean pair, plus any extra platforms.
 
         :param native_ps5: Whether the entry owns the PS5 platform.
         :param ps4_eligible: Whether the entry owns the PS4 platform.
+        :param platforms: Extra platforms to union in beyond the PS5/PS4 pair -- already-present values
+            are not duplicated.
         """
-        platforms = [platform for platform, owned in (("PS5", native_ps5), ("PS4", ps4_eligible)) if owned]
+        owned_platforms = [platform for platform, owned in (("PS5", native_ps5), ("PS4", ps4_eligible)) if owned]
+        for platform in platforms:
+            if platform not in owned_platforms:
+                owned_platforms.append(platform)
         await cur.execute(
             """
             DELETE FROM library_entry_platforms
-            WHERE identity_sub = %s AND game_id = %s AND NOT (platform = ANY(%s))
+            WHERE identity_sub = %s AND game_id = %s AND NOT (platform = ANY(%s::text[]))
             """,
-            (identity_sub, game_id, platforms),
+            (identity_sub, game_id, owned_platforms),
         )
-        if platforms:
+        if owned_platforms:
             await cur.execute(
                 """
                 INSERT INTO library_entry_platforms (identity_sub, game_id, platform)
                 SELECT %s, %s, unnest(%s::text[])
                 ON CONFLICT DO NOTHING
                 """,
-                (identity_sub, game_id, platforms),
+                (identity_sub, game_id, owned_platforms),
             )
 
     async def upsert_manual_entry(
@@ -382,12 +414,10 @@ class LibraryRepository:
         (not enriched yet, not an error); ``rawg_enriched``/``opencritic_enriched`` still default to
         ``False`` via ``COALESCE``.
 
-        ``cover_image_url`` uses the same two-source COALESCE fallback
-        ``CollectionsRepository.list_definition_items`` already uses (a real PSN store cover from
-        ``psn_catalog_cache`` first, entitlement-ingestion artwork second) -- as a scalar subquery, not a
-        ``JOIN``, so it can't multiply rows or skew ``total``. Unlike that method this one is already
-        scoped to one ``identity_sub`` via ``le``, so the lookup needs no self-join to reach an "any
-        owner's" row first.
+        ``cover_image_url`` is :data:`~curator.catalog.cover_art.SQUARE_COVER_ART_SQL`, the same
+        expression every other cover-returning query uses. ``platforms`` is
+        :data:`_OWNED_PLATFORMS_SQL`, ordered by ``platforms.sort_order`` so a multi-platform game reads
+        newest-first rather than alphabetically.
 
         :param identity_sub: The Curator user id (Identity's ``sub``).
         :param search: Optional case-insensitive title substring filter.
@@ -431,18 +461,8 @@ class LibraryRepository:
                        ge.psn_rating, le.product_id,
                        COALESCE(ge.rawg_enriched, false), COALESCE(ge.opencritic_enriched, false),
                        le.is_active, le.np_communication_id, le.trophy_percent_completed, le.source,
-                       COALESCE(
-                           (SELECT pcc.cover_image_url FROM psn_catalog_cache pcc
-                            WHERE pcc.title_id = le.title_id AND pcc.cover_image_url IS NOT NULL LIMIT 1),
-                           (
-                               SELECT COALESCE(es.title_image_url, es.game_icon_url, es.concept_icon_url)
-                               FROM game_concepts gc
-                               JOIN entitlement_snapshots es ON es.concept_id = gc.concept_id
-                               WHERE gc.game_id = g.game_id
-                                 AND COALESCE(es.title_image_url, es.game_icon_url, es.concept_icon_url) IS NOT NULL
-                               LIMIT 1
-                           )
-                       ) AS cover_image_url
+                       {SQUARE_COVER_ART_SQL} AS cover_image_url,
+                       {_OWNED_PLATFORMS_SQL} AS platforms
                 {base_query}
                 ORDER BY {sort_column} {direction} NULLS LAST, g.canonical_title ASC
                 LIMIT %s OFFSET %s
@@ -467,6 +487,7 @@ class LibraryRepository:
                 percent_completed=row[11],
                 source=row[12],
                 cover_image_url=row[13],
+                platforms=tuple(row[14] or ()),
             )
             for row in rows
         ]

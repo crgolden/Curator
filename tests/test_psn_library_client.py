@@ -99,6 +99,42 @@ async def test_entitlements_falls_back_to_title_name_and_icon_url():
     assert entitlements[0].active is False
 
 
+async def test_entitlements_sends_no_package_type_filter():
+    """Regression test: the query must not scope itself to PSGD/PS4GD -- that filter is what dropped every
+    legacy PS3/Vita/PSP entitlement (see AGENTS/PARKING_LOT.md section 7 item 9).
+    """
+    session = FakeSession(entitlements_pages=[{"entitlements": [], "totalResults": 0}])
+    client = LibraryClient(session)
+
+    await client.entitlements()
+
+    _url, params = session.get_calls[0]
+    assert "gameMetaPackageType" not in params
+
+
+async def test_entitlements_maps_a_legacy_entry_with_no_entitlement_attributes():
+    page = {
+        "entitlements": [
+            {
+                "id": "ent-legacy",
+                "gameMeta": {"name": "Shaun White Snowboarding"},
+                "titleMeta": {"titleId": "BLUS30233_00", "name": "Shaun White Snowboarding"},
+                "conceptMeta": {},
+                "activeFlag": True,
+                "activeDate": "2009-01-01T00:00:00Z",
+            }
+        ],
+        "totalResults": 1,
+    }
+    client = LibraryClient(FakeSession(entitlements_pages=[page]))
+
+    entitlements = await client.entitlements()
+
+    assert entitlements[0].title_id == "BLUS30233_00"
+    assert entitlements[0].package_type is None
+    assert entitlements[0].platform_ids == ()
+
+
 async def test_entitlements_stops_when_page_is_empty():
     client = LibraryClient(FakeSession(entitlements_pages=[{"entitlements": [], "totalResults": 0}]))
 

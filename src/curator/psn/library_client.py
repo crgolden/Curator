@@ -49,11 +49,12 @@ class LibraryClient:
         self._session = session
 
     async def entitlements(self, limit: int | None = None) -> list[Entitlement]:
-        """List the authenticated user's owned PS4/PS5 games and add-ons (entitlements).
+        """List the authenticated user's owned games and add-ons (entitlements) across every generation.
 
         .. note::
-           This is a self-only capability -- PSN exposes entitlements only for the authenticated account,
-           and only for PS4/PS5 titles (the mobile-app endpoint is limited to those generations).
+           This is a self-only capability -- PSN exposes entitlements only for the authenticated account.
+           The query sends no ``gameMetaPackageType`` filter, so entries with no ``gameMeta.packageType``
+           are included in the result.
 
         :param limit: Maximum number of entitlements to return, or ``None`` (the default) to fetch every
             entitlement PSN reports -- matching ``psnawp_api``'s own ``game_entitlements(limit=None)``
@@ -90,7 +91,6 @@ class LibraryClient:
                         "entitlementType": "1,2,3,4,5",
                         "fields": "titleMeta,gameMeta,conceptMeta,rewardMeta,rewardMeta.retentionPolicy,"
                         "rewardMeta.rewardMembershipType",
-                        "gameMetaPackageType": "PSGD,PS4GD",
                         "titleId": "",
                         "limit": page_limit,
                         "offset": offset,

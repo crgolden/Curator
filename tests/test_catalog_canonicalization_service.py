@@ -8,6 +8,8 @@ input shape now that entitlement extraction happens once, at ingestion time, int
 
 from __future__ import annotations
 
+import pytest
+
 from curator.catalog.canonicalization_service import (
     CanonicalGame,
     EntitlementSnapshot,
@@ -29,7 +31,17 @@ _FRANCHISE_RULES = [
 _F2P_RULE = ExclusionRule(rule_id="f1", rule_type="f2p_title", pattern="Fortnite")
 
 
-def _snapshot(gm_name, pkg="PS4GD", tm_name=None, concept_id="", active=None, entitlement_id=None, title_id=None):
+def _snapshot(
+    gm_name,
+    pkg="PS4GD",
+    tm_name=None,
+    concept_id="",
+    active=None,
+    entitlement_id=None,
+    title_id=None,
+    platform_ids=(),
+    is_game=None,
+):
     return EntitlementSnapshot(
         entitlement_id=entitlement_id or f"ent-{gm_name}-{concept_id}-{pkg}",
         concept_id=concept_id or None,
@@ -40,6 +52,8 @@ def _snapshot(gm_name, pkg="PS4GD", tm_name=None, concept_id="", active=None, en
         title_meta_name=tm_name if tm_name is not None else gm_name,
         package_type=pkg,
         active=active,
+        platform_ids=platform_ids,
+        is_game=is_game,
     )
 
 
@@ -350,3 +364,260 @@ def test_canonical_game_carries_every_merged_concept_id():
     result = _canonicalize(data)
     assert isinstance(result[0], CanonicalGame)
     assert result[0].concept_ids == ("10",)
+
+
+def test_an_add_on_marked_is_game_false_is_excluded_even_with_a_game_shaped_package_type():
+    """Widening ingestion past the PSGD/PS4GD filter also admits add-on/DLC entitlements PSN itself marks
+    ``isGame: false`` (a real example: "Horizon Zero Dawn Artbook", packageType ``PSGD``) -- these must not
+    become games just because their packageType and display name look like one.
+    """
+    data = [_snapshot("Horizon Zero Dawn Artbook", "PSGD", concept_id="addon-1", is_game=False)]
+
+    assert _canonicalize(data) == []
+
+
+@pytest.mark.parametrize(
+    ("name", "package_type"),
+    [
+        ("Destiny: Rise of Iron - Dynamic Theme", "PS4MISC"),
+        ("Harley Quinn Story Pack", "PS4AC"),
+        ("Destiny Expansion Pass", "PS4AL"),
+        ("Call of Duty: Black Ops Cold War - Campaign 1", "PSAC"),
+        ("Destiny 2: The Witch Queen Pre-Order Pack", "PSAL"),
+        ("Operation: Tango - Tracker", "PSTRACK"),
+        ("Netflix", "PSMEDIA"),
+        ("Standard Founders Pack Consumable", "PSCONS"),
+        ("PS Plus Premium", "PSSUBS"),
+    ],
+)
+def test_a_non_game_package_type_is_excluded_however_game_shaped_its_name(name: str, package_type: str):
+    assert _canonicalize([_snapshot(name, package_type, concept_id=f"c-{package_type}")]) == []
+
+
+def test_the_package_type_denylist_does_not_touch_the_two_game_package_types():
+    data = [
+        _snapshot("Worms Rumble", "PSGD", concept_id="ps5-1"),
+        _snapshot("Need for Speed Undercover", "PS4GD", concept_id="ps4-1"),
+    ]
+
+    assert len(_canonicalize(data)) == 2
+
+
+def test_is_game_unset_does_not_exclude_a_legacy_entry_that_never_reported_it():
+    data = [_snapshot("Shaun White Snowboarding", pkg=None, concept_id="ps3-2", title_id="BLUS30234_00")]
+
+    games = _canonicalize(data)
+
+    assert len(games) == 1
+    assert games[0].platforms == ("PS3",)
+
+
+def test_legacy_entry_with_no_game_meta_name_survives_on_title_meta_name_alone():
+    """Some of the legacy entitlements the widened ingestion now admits carry no ``gameMeta.name`` at all
+    (per ``LibraryClient``'s own fallback, ``game_meta.get("name") or title_meta.get("name")``) -- the
+    drop check must not require ``game_meta_name`` to be present, only that some display name resolves.
+    """
+    data = [_snapshot(None, pkg=None, tm_name="Shaun White Snowboarding", title_id="BLUS30233_00")]
+
+    games = _canonicalize(data)
+
+    assert len(games) == 1
+    assert games[0].canonical_title == "Shaun White Snowboarding"
+    assert games[0].platforms == ("PS3",)
+
+
+def test_a_media_app_with_no_game_meta_name_is_still_excluded_by_its_title_meta_name():
+    """The exclusion-name check must fall back to ``title_meta_name`` too, not just the display name --
+    otherwise a media-app entitlement whose ``gameMeta.name`` is absent (a real observed shape) bypasses
+    the curated ``media_app`` screen entirely once the empty ``gameMeta.name`` is no longer itself a
+    drop reason.
+    """
+    exclusion_rules = [ExclusionRule(rule_id="m1", rule_type="media_app", pattern="Netflix")]
+    data = [_snapshot(None, pkg=None, tm_name="Netflix", title_id="CUSA00129_00")]
+
+    assert _canonicalize(data, exclusion_rules=exclusion_rules) == []
+
+
+def test_legacy_ps3_entry_with_no_package_type_resolves_platform_from_title_id():
+    """A legacy entitlement carries no entitlementAttributes and no gameMeta.packageType at all -- the
+    platform must come from the title-id prefix instead (AGENTS/PARKING_LOT.md section 7 item 9).
+    """
+    data = [_snapshot("Shaun White Snowboarding", pkg=None, concept_id="ps3-1", title_id="BLUS30233_00")]
+
+    game = _canonicalize(data)[0]
+
+    assert game.platforms == ("PS3",)
+    assert game.native_ps5 is False
+    assert game.ps4_eligible is False
+
+
+def test_legacy_vita_entry_with_no_package_type_resolves_platform_from_title_id():
+    data = [_snapshot("Reality Fighters", pkg=None, concept_id="vita-1", title_id="PCSA00012_00")]
+
+    game = _canonicalize(data)[0]
+
+    assert game.platforms == ("PSVITA",)
+
+
+def test_subscription_entitlement_is_excluded_even_with_a_game_like_display_name():
+    """A non-title entitlement must never become a game, regardless of what its names look like -- the
+    title-id prefix is the reliable signal, not the (curated, incomplete) exclusion-rules name match.
+    """
+    data = [_snapshot("PlayStation Plus", pkg=None, concept_id="sub-1", title_id="SUBC00002_00")]
+
+    assert _canonicalize(data) == []
+
+
+def test_promo_entitlement_is_excluded_by_title_id_prefix():
+    data = [_snapshot("Free Trial", pkg=None, concept_id="promo-1", title_id="SCEAPROMO_00")]
+
+    assert _canonicalize(data) == []
+
+
+@pytest.mark.parametrize(
+    ("name", "title_id"),
+    [
+        ("PS Plus Essential", "NPIA90005_00"),
+        ("SP Discount/ Forever; 25% off", "NPIA90005_01"),
+        ("PS2 System Data", "NPIA00001_00"),
+        ("VSH 400 Beta", "NPIA00061_00"),
+    ],
+)
+def test_npia_entitlement_is_excluded_as_a_non_title_entitlement(name: str, title_id: str):
+    """``NPIA`` is Sony's service range -- PS Plus SKUs, their discount/reward child SKUs, system data and
+    VSH betas -- not a PS3 game prefix. Real PS3 games arrive under ``NPUB``/``NPUA``/``BLUS``/``NPUO``.
+    """
+    data = [_snapshot(name, pkg=None, concept_id=f"npia-{title_id}", title_id=title_id)]
+
+    assert _canonicalize(data) == []
+
+
+def test_ps3_game_prefixes_still_resolve_after_npia_left_the_ps3_prefix_table():
+    data = [
+        _snapshot("Shaun White Snowboarding", pkg=None, concept_id="ps3-a", title_id="BLUS30233_00"),
+        _snapshot("Trine 2", pkg=None, concept_id="ps3-b", title_id="NPUB30567_00"),
+        _snapshot("Fat Princess", pkg=None, concept_id="ps3-c", title_id="NPUA80231_00"),
+    ]
+
+    assert [game.platforms for game in _canonicalize(data)] == [("PS3",), ("PS3",), ("PS3",)]
+
+
+def test_no_package_type_is_admitted_when_the_title_has_no_classified_entitlement():
+    """The legacy shape: a PS3/Vita/PSP title reports no ``packageType`` on any of its entitlements."""
+    data = [
+        _snapshot("Retro Game", pkg=None, concept_id="legacy-1", entitlement_id="e1", title_id="NPUB30001_00"),
+        _snapshot("Retro Game Deluxe", pkg=None, concept_id="legacy-1", entitlement_id="e2", title_id="NPUB30001_00"),
+    ]
+
+    assert len(_canonicalize(data)) == 1
+
+
+def test_no_package_type_is_admitted_when_the_title_has_a_psgd_sibling():
+    data = [
+        _snapshot("Modern Game", "PSGD", concept_id="mg-1", entitlement_id="e1", title_id="PPSA00001_00"),
+        _snapshot("Modern Game Bonus", pkg=None, concept_id="mg-2", entitlement_id="e2", title_id="PPSA00001_00"),
+    ]
+
+    assert len(_canonicalize(data)) == 2
+
+
+def test_no_package_type_is_admitted_when_the_title_has_a_ps4gd_sibling():
+    data = [
+        _snapshot("Older Game", "PS4GD", concept_id="og-1", entitlement_id="e1", title_id="CUSA00001_00"),
+        _snapshot("Older Game Bonus", pkg=None, concept_id="og-2", entitlement_id="e2", title_id="CUSA00001_00"),
+    ]
+
+    assert len(_canonicalize(data)) == 2
+
+
+def test_no_package_type_is_dropped_when_every_classified_sibling_is_a_non_game():
+    """A real example: ``CUSA23827_00`` carries only ``PS4AC``/``PS4AL`` add-ons plus two unclassified
+    "Modern Warfare III - Cross-Gen Pack" rows, and no game entitlement at all.
+    """
+    data = [
+        _snapshot("MWIII: Multiplayer", "PS4AC", concept_id="cod-1", entitlement_id="e1", title_id="CUSA23827_00"),
+        _snapshot("MWIII Content License", "PS4AL", concept_id="cod-2", entitlement_id="e2", title_id="CUSA23827_00"),
+        _snapshot("Call of Duty", pkg=None, concept_id="cod-3", entitlement_id="e3", title_id="CUSA23827_00"),
+    ]
+
+    assert _canonicalize(data) == []
+
+
+def test_no_package_type_is_admitted_when_a_classified_sibling_is_an_unrecognised_package_type():
+    data = [
+        _snapshot("Odd Sibling", "PS4FUTURE", concept_id="odd-1", entitlement_id="e1", title_id="CUSA00002_00"),
+        _snapshot("Unclassified Game", pkg=None, concept_id="odd-2", entitlement_id="e2", title_id="CUSA00002_00"),
+    ]
+
+    assert len(_canonicalize(data)) == 2
+
+
+def test_no_package_type_and_no_title_id_is_admitted_because_it_has_no_siblings_to_consult():
+    data = [
+        _snapshot("Add-on", "PS4AC", concept_id="nt-1", entitlement_id="e1", title_id="CUSA00003_00"),
+        _snapshot("Orphan Game", pkg=None, concept_id="nt-2", entitlement_id="e2", title_id=None),
+    ]
+
+    assert [game.canonical_title for game in _canonicalize(data)] == ["Orphan Game"]
+
+
+def test_the_sibling_rule_is_scoped_to_one_title_id():
+    """A denylisted add-on under one title must not suppress an unclassified entitlement under another."""
+    data = [
+        _snapshot("Some Add-on", "PS4AC", concept_id="s-1", entitlement_id="e1", title_id="CUSA00004_00"),
+        _snapshot("Different Game", pkg=None, concept_id="s-2", entitlement_id="e2", title_id="NPUB30002_00"),
+    ]
+
+    assert [game.canonical_title for game in _canonicalize(data)] == ["Different Game"]
+
+
+def test_entry_with_neither_platform_id_nor_a_recognisable_title_id_has_no_platforms():
+    data = [_snapshot("Mystery Game", pkg=None, concept_id="mystery-1", title_id="ZZZZ00001_00")]
+
+    game = _canonicalize(data)[0]
+
+    assert game.platforms == ()
+
+
+def test_entry_with_no_title_id_at_all_has_no_platforms():
+    data = [_snapshot("No Title Id Game", pkg=None, concept_id="notitle-1", title_id=None)]
+
+    game = _canonicalize(data)[0]
+
+    assert game.platforms == ()
+
+
+def test_xperia_platform_id_is_dropped_but_a_co_listed_console_platform_is_kept():
+    """``xperia`` marks a phone entitlement co-listed alongside a real console platform, not a platform
+    of its own -- it must never end up in ``library_entry_platforms``.
+    """
+    data = [
+        _snapshot("Some PS4 Game", "PS4GD", concept_id="xp-1", title_id="CUSA00080_00", platform_ids=("ps4", "xperia"))
+    ]
+
+    game = _canonicalize(data)[0]
+
+    assert game.platforms == ("PS4",)
+
+
+def test_platform_id_from_attributes_is_preferred_over_the_title_id_fallback():
+    data = [_snapshot("Cross-Gen Game", "PSGD", concept_id="cg-1", title_id="CUSA99999_00", platform_ids=("ps5",))]
+
+    game = _canonicalize(data)[0]
+
+    assert game.platforms == ("PS5",)
+
+
+def test_platforms_union_across_a_merged_cross_buy_concept():
+    data = [
+        _snapshot(
+            "Game", "PS4GD", concept_id="cb-1", entitlement_id="e1", title_id="CUSA00001_00", platform_ids=("ps4",)
+        ),
+        _snapshot(
+            "Game", "PSGD", concept_id="cb-1", entitlement_id="e2", title_id="PPSA00001_00", platform_ids=("ps5",)
+        ),
+    ]
+
+    game = _canonicalize(data)[0]
+
+    assert game.platforms == ("PS4", "PS5")
