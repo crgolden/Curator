@@ -324,20 +324,35 @@ async def test_every_request_acquires_the_rate_limiter():
     assert rate_limiter.acquire_calls == 1
 
 
-async def test_run_with_reauth_reboostraps_once_on_auth_error_then_succeeds():
-    recorder = RequestRecorder(
-        [
-            httpx.Response(401, text="unauthorized"),  # first attempt's API call: stale token rejected
-            httpx.Response(  # re-bootstrap: authorization code
-                302,
-                headers={"location": "com.scee.psxandroid.scecompcall://redirect?code=AUTHCODE123"},
-            ),
-            httpx.Response(200, json=_fake_token_response(access_token="AT-REBOOTSTRAPPED")),  # re-bootstrap: token
-            httpx.Response(200, json={"ok": True}),  # retried API call succeeds
-        ]
-    )
-    session = _session(recorder, npsso="npsso-cookie")
+async def test_run_with_reauth_refreshes_once_then_retries_when_there_is_no_npsso():
+    rejected_access_token = httpx.Response(401, text="unauthorized")
+    refresh_grant = httpx.Response(200, json=_fake_token_response(access_token="AT-REFRESHED"))
+    retried_call = httpx.Response(200, json={"ok": True})
+    recorder = RequestRecorder([rejected_access_token, refresh_grant, retried_call])
+    session = _session(recorder)
     session.token_response = _fake_token_response(access_token_expires_at=time.time() + 3600)
+
+    async def operation():
+        return await session.get("https://m.np.playstation.com/api/thing")
+
+    response = await session.run_with_reauth(operation)
+
+    assert response.json() == {"ok": True}
+    assert session.token_response is not None
+    assert session.token_response["access_token"] == "AT-REFRESHED"
+    assert recorder.requests[1].url.path.endswith("/token")
+
+
+async def test_run_with_reauth_bootstraps_from_npsso_when_there_is_no_refresh_token():
+    rejected_access_token = httpx.Response(401, text="unauthorized")
+    authorization_code = httpx.Response(
+        302, headers={"location": "com.scee.psxandroid.scecompcall://redirect?code=AUTHCODE123"}
+    )
+    bootstrap_grant = httpx.Response(200, json=_fake_token_response(access_token="AT-REBOOTSTRAPPED"))
+    retried_call = httpx.Response(200, json={"ok": True})
+    recorder = RequestRecorder([rejected_access_token, authorization_code, bootstrap_grant, retried_call])
+    session = _session(recorder, npsso="npsso-cookie")
+    session.token_response = _fake_token_response(access_token_expires_at=time.time() + 3600, refresh_token="")
 
     async def operation():
         return await session.get("https://m.np.playstation.com/api/thing")
@@ -349,14 +364,26 @@ async def test_run_with_reauth_reboostraps_once_on_auth_error_then_succeeds():
     assert session.token_response["access_token"] == "AT-REBOOTSTRAPPED"
 
 
-async def test_run_with_reauth_reraises_when_no_npsso_to_reboostrap_from():
+async def test_run_with_reauth_reraises_when_there_is_neither_a_refresh_token_nor_an_npsso():
     recorder = RequestRecorder([])
-    store = FakeTokenStore(saved=_fake_token_response(access_token_expires_at=time.time() + 3600))
+    store = FakeTokenStore(saved=_fake_token_response(access_token_expires_at=time.time() + 3600, refresh_token=""))
     session = await PsnSession.restore(
         None,
         store,
         client=httpx.AsyncClient(transport=httpx.MockTransport(recorder)),
     )
+
+    async def operation():
+        raise PsnAuthError("boom")
+
+    with pytest.raises(PsnAuthError, match="boom"):
+        await session.run_with_reauth(operation)
+
+
+async def test_run_with_reauth_reraises_the_original_error_when_the_refresh_grant_is_refused():
+    recorder = RequestRecorder([httpx.Response(400, text="invalid_grant")])
+    session = _session(recorder)
+    session.token_response = _fake_token_response(access_token_expires_at=time.time() + 3600)
 
     async def operation():
         raise PsnAuthError("boom")

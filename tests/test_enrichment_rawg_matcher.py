@@ -17,12 +17,12 @@ def _candidate(name, platform_ids=frozenset({PS5_PLATFORM_ID}), rawg_game_id=1, 
 
 
 def test_normalize_treats_a_typographic_apostrophe_as_an_ascii_one():
-    assert normalize("Marvel’s Spider-Man 2") == normalize("Marvel's Spider-Man 2")  # noqa: RUF001 -- U+2019 is the subject
-    assert normalize("Assassin’s Creed") == normalize("Assassin's Creed")  # noqa: RUF001 -- same
+    assert normalize("Marvel\u2019s Spider-Man 2") == normalize("Marvel's Spider-Man 2")
+    assert normalize("Assassin\u2019s Creed") == normalize("Assassin's Creed")
 
 
 def test_a_typographic_apostrophe_does_not_split_the_rawg_cache_key():
-    assert similarity("Demon’s Souls", "Demon's Souls") == 1.0  # noqa: RUF001 -- U+2019 is the subject
+    assert similarity("Demon\u2019s Souls", "Demon's Souls") == 1.0
 
 
 def test_exact_title_matches():

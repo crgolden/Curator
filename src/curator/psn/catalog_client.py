@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable, Coroutine, Sequence
+from datetime import date, datetime
 from typing import Any, Protocol, TypeVar
 
 from curator.psn._graphql import run_persisted_query
@@ -90,6 +91,19 @@ def _multiplayer(concept: dict[str, Any]) -> bool | None:
     return max(counts) > 1
 
 
+def _release_date(value: Any) -> date | None:
+    """Read PSN's release date as a ``date``, dropping the time, or ``None`` when it is absent or
+    unparseable."""
+    if isinstance(value, date):
+        return value
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        return datetime.fromisoformat(value).date()
+    except ValueError:
+        return None
+
+
 def _parse_title_concept(concept: dict[str, Any]) -> TitleConcept:
     """Map a raw PSN store concept payload (from :meth:`CatalogClient.title_concept`) to :class:`TitleConcept`."""
     release = _opt_dict(concept.get("releaseDate"))
@@ -101,7 +115,7 @@ def _parse_title_concept(concept: dict[str, Any]) -> TitleConcept:
         name=concept.get("name"),
         type=concept.get("type"),
         publisher=concept.get("publisherName"),
-        release_date=release.get("date"),
+        release_date=_release_date(release.get("date")),
         minimum_age=concept.get("minimumAge"),
         content_rating=rating.get("name"),
         rating_authority=rating.get("authority"),

@@ -28,6 +28,7 @@ class JobRun:
     error: str | None
     result_summary: dict[str, Any] | None
     updated_at: datetime
+    lease_expires_at: datetime | None = None
 
 
 class JobRunsRepository:
@@ -172,7 +173,7 @@ class JobRunsRepository:
         """Return one run, or ``None`` if ``run_id`` is unknown."""
         async with self._pool.connection() as conn, conn.cursor() as cur:
             await cur.execute(
-                "SELECT run_id, kind, identity_sub, status, error, result_summary, updated_at "
+                "SELECT run_id, kind, identity_sub, status, error, result_summary, updated_at, lease_expires_at "
                 "FROM job_runs WHERE run_id = %s",
                 (run_id,),
             )
@@ -189,11 +190,11 @@ class JobRunsRepository:
         should get that run's id back, not start a second, genuinely concurrent job against the same real,
         rate-limited PSN/RAWG/OpenCritic APIs. Staleness (deciding whether a returned run is actually still
         alive or should be superseded) is deliberately left to the caller -- this method only reports what
-        exists, since ``updated_at`` is already on :class:`JobRun` for that decision.
+        exists, and :class:`JobRun` carries both ``lease_expires_at`` and ``updated_at`` for that decision.
         """
         async with self._pool.connection() as conn, conn.cursor() as cur:
             await cur.execute(
-                "SELECT run_id, kind, identity_sub, status, error, result_summary, updated_at "
+                "SELECT run_id, kind, identity_sub, status, error, result_summary, updated_at, lease_expires_at "
                 "FROM job_runs WHERE identity_sub = %s AND kind = %s "
                 "AND status NOT IN ('succeeded', 'failed') "
                 "ORDER BY created_at DESC LIMIT 1",
@@ -212,7 +213,7 @@ class JobRunsRepository:
         """
         async with self._pool.connection() as conn, conn.cursor() as cur:
             await cur.execute(
-                "SELECT run_id, kind, identity_sub, status, error, result_summary, updated_at "
+                "SELECT run_id, kind, identity_sub, status, error, result_summary, updated_at, lease_expires_at "
                 "FROM job_runs WHERE kind = %s ORDER BY created_at DESC LIMIT 1",
                 (kind,),
             )
@@ -229,4 +230,5 @@ class JobRunsRepository:
             error=row[4],
             result_summary=row[5],
             updated_at=row[6],
+            lease_expires_at=row[7],
         )

@@ -120,7 +120,7 @@ class PsnCatalogLookup:
     genres: list[str]
     star_rating: float | None
     publisher: str | None = None
-    release_date: str | None = None
+    release_date: date | None = None
     content_rating: str | None = None
     rating_authority: str | None = None
     multiplayer: bool | None = None

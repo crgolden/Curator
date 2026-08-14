@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import date, datetime
 from typing import TYPE_CHECKING, Any
 
 from psycopg_pool import AsyncConnectionPool
@@ -45,7 +45,7 @@ class PsnCatalogCacheEntry:
     genres: tuple[str, ...]
     star_rating: float | None
     publisher: str | None
-    release_date: str | None
+    release_date: date | None
     cover_image_url: str | None
     content_rating: str | None = None
     rating_authority: str | None = None

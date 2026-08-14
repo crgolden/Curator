@@ -160,16 +160,31 @@ class PsnSession:
         :param operation: A zero-argument async callable to run (typically a client's private ``_op``
             method bound with its arguments via a closure).
         :returns: The operation's result.
-        :raises PsnAuthError: If the operation still fails after one re-bootstrap attempt, or there is no
-            npsso to re-bootstrap from.
+        :raises PsnAuthError: If the operation still fails after one recovery attempt, or there is neither
+            a refresh token nor an npsso to recover with.
         """
         try:
             return await operation()
         except PsnAuthError:
-            if not self._npsso:
+            if not await self._reauthenticate():
                 raise
-            self.token_response = None
             return await operation()
+
+    async def _reauthenticate(self) -> bool:
+        """Obtain a way to retry after PSN rejected the current token, or report that there is none.
+
+        :returns: Whether the caller may retry the operation once.
+        """
+        if self.token_response is not None and self.token_response.get("refresh_token"):
+            try:
+                await self._refresh()
+                return True
+            except PsnAuthError:
+                pass
+        if not self._npsso:
+            return False
+        self.token_response = None
+        return True
 
     async def _ensure_fresh(self) -> None:
         """Bootstrap from npsso, or refresh the access token, if needed before a request."""

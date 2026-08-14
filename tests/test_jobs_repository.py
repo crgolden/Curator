@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from curator.jobs.repository import DEFAULT_LEASE_SECONDS, JobRunsRepository
 
 _NOW = datetime(2026, 8, 3, 12, 0, 0, tzinfo=timezone.utc)
+_LEASE = datetime(2026, 8, 3, 12, 2, 0, tzinfo=timezone.utc)
 
 
 class FakeCursor:
@@ -253,7 +254,7 @@ async def test_mark_rate_limited_returns_an_incrementing_seq_across_repeated_cal
 
 
 async def test_get_returns_run():
-    pool = FakePool(fetchone_results=[("run-1", "library_refresh", "sub-1", "running", None, None, _NOW)])
+    pool = FakePool(fetchone_results=[("run-1", "library_refresh", "sub-1", "running", None, None, _NOW, _LEASE)])
     repo = JobRunsRepository(pool)
 
     run = await repo.get("run-1")
@@ -266,11 +267,12 @@ async def test_get_returns_run():
     assert run.error is None
     assert run.result_summary is None
     assert run.updated_at == _NOW
+    assert run.lease_expires_at == _LEASE
 
 
 async def test_get_returns_result_summary():
     summary = {"rawg_enriched_titles": ["Elden Ring"], "opencritic_topup_incomplete": True}
-    pool = FakePool(fetchone_results=[("run-1", "library_refresh", "sub-1", "succeeded", None, summary, _NOW)])
+    pool = FakePool(fetchone_results=[("run-1", "library_refresh", "sub-1", "succeeded", None, summary, _NOW, None)])
     repo = JobRunsRepository(pool)
 
     run = await repo.get("run-1")
@@ -289,7 +291,7 @@ async def test_get_returns_none_when_not_found():
 
 
 async def test_find_active_run_returns_matching_row():
-    pool = FakePool(fetchone_results=[("run-1", "library_refresh", "sub-1", "running", None, None, _NOW)])
+    pool = FakePool(fetchone_results=[("run-1", "library_refresh", "sub-1", "running", None, None, _NOW, _LEASE)])
     repo = JobRunsRepository(pool)
 
     run = await repo.find_active_run("sub-1", "library_refresh")
@@ -313,7 +315,7 @@ async def test_find_active_run_returns_none_when_no_non_terminal_row_exists():
 
 
 async def test_get_latest_by_kind_returns_matching_row():
-    pool = FakePool(fetchone_results=[("run-1", "enrichment", None, "succeeded", None, None, _NOW)])
+    pool = FakePool(fetchone_results=[("run-1", "enrichment", None, "succeeded", None, None, _NOW, None)])
     repo = JobRunsRepository(pool)
 
     run = await repo.get_latest_by_kind("enrichment")

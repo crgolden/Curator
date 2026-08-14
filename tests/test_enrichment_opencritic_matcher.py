@@ -29,9 +29,9 @@ def test_normalize_strips_punctuation_and_symbols():
 
 
 def test_normalize_treats_a_typographic_apostrophe_as_an_ascii_one():
-    assert normalize("Marvel’s Spider-Man 2") == "marvels spider man 2"  # noqa: RUF001 -- U+2019 is the subject
-    assert normalize("Marvel’s Spider-Man 2") == normalize("Marvel's Spider-Man 2")  # noqa: RUF001 -- same
-    assert normalize("Assassin’s Creed") == normalize("Assassin's Creed")  # noqa: RUF001 -- same
+    assert normalize("Marvel\u2019s Spider-Man 2") == "marvels spider man 2"
+    assert normalize("Marvel\u2019s Spider-Man 2") == normalize("Marvel's Spider-Man 2")
+    assert normalize("Assassin\u2019s Creed") == normalize("Assassin's Creed")
 
 
 def test_strip_subtitle_on_colon():
@@ -81,7 +81,7 @@ def test_strategy_5_substring_fallback_a_our_title_inside_catalog_name():
 def test_strategy_6_substring_fallback_b_catalog_name_at_start_of_our_title():
     games = [_game(1, "Grand Theft Auto III")]
     index, nospace_index = build_name_index(games)
-    result = find_match("Grand Theft Auto III – The Definitive Edition", index, nospace_index)  # noqa: RUF001
+    result = find_match("Grand Theft Auto III \u2013 The Definitive Edition", index, nospace_index)
     assert result is not None
     assert result.oc_game_id == 1
 

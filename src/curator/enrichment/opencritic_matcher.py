@@ -53,8 +53,8 @@ def normalize(title: str) -> str:
     normalized = normalized.lower()
     normalized = re.sub(r"[™®©]", "", normalized)
     normalized = re.sub(r"\(tm\)|\(r\)|\(c\)", "", normalized)
-    normalized = re.sub(r"[''’‘ʼ`\"]+", "", normalized)  # noqa: RUF001 -- typographic quotes, matched literally
-    normalized = re.sub(r"[–—\-]+", " ", normalized)  # noqa: RUF001 -- en/em dash, matched literally
+    normalized = re.sub(r"[''\u2019\u2018\u02bc`\"]+", "", normalized)
+    normalized = re.sub(r"[\u2013\u2014\-]+", " ", normalized)
     normalized = re.sub(r"[^a-z0-9 ]+", " ", normalized)
     normalized = re.sub(r"\s+", " ", normalized)
     normalized = normalized.strip()

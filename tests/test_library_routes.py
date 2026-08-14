@@ -32,7 +32,17 @@ class FakePublisher:
 
 
 class FakeJobRun:
-    def __init__(self, run_id, kind, identity_sub, status, error=None, result_summary=None, updated_at=None):
+    def __init__(
+        self,
+        run_id,
+        kind,
+        identity_sub,
+        status,
+        error=None,
+        result_summary=None,
+        updated_at=None,
+        lease_expires_at=None,
+    ):
         self.run_id = run_id
         self.kind = kind
         self.identity_sub = identity_sub
@@ -40,6 +50,7 @@ class FakeJobRun:
         self.error = error
         self.result_summary = result_summary
         self.updated_at = updated_at if updated_at is not None else datetime.now(timezone.utc)
+        self.lease_expires_at = lease_expires_at
 
 
 class FakeJobRunsRepository:
@@ -182,7 +193,13 @@ def test_publishes_for_the_callers_own_sub_and_returns_run_id():
 
 
 def test_duplicate_refresh_returns_existing_run_id_instead_of_publishing_again():
-    active = FakeJobRun("run-existing", "library_refresh", "sub-a", "running")
+    active = FakeJobRun(
+        "run-existing",
+        "library_refresh",
+        "sub-a",
+        "running",
+        lease_expires_at=datetime.now(timezone.utc) + timedelta(minutes=2),
+    )
     client, validator, publisher = _build(FakeJobRunsRepository([active]))
     validator.register("token-a", _claims(sub="sub-a"))
 
@@ -240,6 +257,61 @@ def test_a_stale_non_terminal_run_is_superseded_not_returned():
         ("run-stale", "Superseded: no progress for over 24 hours, treated as abandoned.")
     ]
     assert job_runs_repository.runs["run-stale"].status == "failed"
+
+
+def test_a_running_run_holding_a_live_lease_is_returned_not_superseded():
+    alive = FakeJobRun(
+        "run-alive",
+        "library_refresh",
+        "sub-a",
+        "running",
+        lease_expires_at=datetime.now(timezone.utc) + timedelta(minutes=2),
+    )
+    job_runs_repository = FakeJobRunsRepository([alive])
+    client, validator, publisher = _build(job_runs_repository)
+    validator.register("token-a", _claims(sub="sub-a"))
+
+    response = client.post("/library/refresh", headers=_bearer("token-a"))
+
+    assert response.json() == {"run_id": "run-alive"}
+    assert publisher.library_refresh_calls == []
+    assert job_runs_repository.failed_calls == []
+
+
+def test_a_running_run_whose_lease_expired_is_superseded_even_though_updated_at_is_recent():
+    dead = FakeJobRun(
+        "run-dead",
+        "library_refresh",
+        "sub-a",
+        "running",
+        updated_at=datetime.now(timezone.utc) - timedelta(minutes=1),
+        lease_expires_at=datetime.now(timezone.utc) - timedelta(minutes=5),
+    )
+    job_runs_repository = FakeJobRunsRepository([dead])
+    client, validator, publisher = _build(job_runs_repository)
+    validator.register("token-a", _claims(sub="sub-a"))
+
+    response = client.post("/library/refresh", headers=_bearer("token-a"))
+
+    assert response.json() == {"run_id": "run-1"}
+    assert publisher.library_refresh_calls == ["sub-a"]
+    assert job_runs_repository.failed_calls == [
+        ("run-dead", "Superseded: the processing lease expired, treated as abandoned.")
+    ]
+
+
+def test_a_running_run_that_never_took_a_lease_is_superseded():
+    unleased = FakeJobRun("run-unleased", "library_refresh", "sub-a", "running", lease_expires_at=None)
+    job_runs_repository = FakeJobRunsRepository([unleased])
+    client, validator, _publisher = _build(job_runs_repository)
+    validator.register("token-a", _claims(sub="sub-a"))
+
+    response = client.post("/library/refresh", headers=_bearer("token-a"))
+
+    assert response.json() == {"run_id": "run-1"}
+    assert job_runs_repository.failed_calls == [
+        ("run-unleased", "Superseded: the processing lease expired, treated as abandoned.")
+    ]
 
 
 def test_a_run_within_the_staleness_threshold_is_not_superseded_even_while_rate_limited():

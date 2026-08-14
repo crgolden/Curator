@@ -28,8 +28,8 @@ class RawgCandidate:
 def normalize(title: str) -> str:
     """Normalize a title for fuzzy comparison: strip TM/reg/copyright symbols, collapse whitespace."""
     normalized = re.sub(r"[™®©]", "", title)
-    normalized = re.sub(r"[''’‘ʼ`]", "'", normalized)  # noqa: RUF001 -- typographic quotes, matched literally
-    normalized = re.sub(r"[–—]", "-", normalized)  # noqa: RUF001 -- en/em dash, matched literally
+    normalized = re.sub(r"[''\u2019\u2018\u02bc`]", "'", normalized)
+    normalized = re.sub(r"[\u2013\u2014]", "-", normalized)
     normalized = re.sub(r"\s+", " ", normalized)
     return normalized.strip().lower()
 

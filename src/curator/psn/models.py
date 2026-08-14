@@ -8,6 +8,7 @@ folding ``psnpy`` into Curator beyond the module's new home.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import date
 from typing import Any
 
 
@@ -135,7 +136,7 @@ class TitleConcept:
     name: str | None = None
     type: str | None = None
     publisher: str | None = None
-    release_date: str | None = None
+    release_date: date | None = None
     minimum_age: int | None = None
     content_rating: str | None = None
     rating_authority: str | None = None

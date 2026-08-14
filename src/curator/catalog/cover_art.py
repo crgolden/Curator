@@ -12,16 +12,8 @@ SQUARE_COVER_ART_SQL = """(
                            ORDER BY ep_art.pulled_at DESC
                            LIMIT 1
                        )"""
-"""Correlated scalar subquery yielding one game's cover art, or ``NULL`` when PSN carries none.
+"""Correlated scalar subquery yielding one game's cover art from its most recent entitlement pull, or
+``NULL`` when PSN carries none. Not scoped to the requesting account.
 
 The outer query must alias ``games`` as ``g``.
-
-``entitlement_snapshots`` holds one row per title *per pull*, so ``LIMIT 1`` without an order returns
-whichever pull the planner reaches first and the art can change between identical requests. Ordering by
-``pulled_at`` descending pins it to the most recent pull, and stays correct if snapshots are later
-deduplicated to one row per entitlement.
-
-Art is deliberately not scoped to the requesting account. ``games`` is a shared catalog, the art is public
-store art, and any account that owns the title carries the same images -- scoping it per user would blank
-covers for a game the caller has not entitled.
 """

@@ -5,6 +5,8 @@ Ported from ``psnpy``'s ``test_capabilities.py``, split to the catalog/search su
 
 from __future__ import annotations
 
+from datetime import date
+
 import pytest
 
 from curator.psn.catalog_client import CatalogClient, InMemoryTokenStore, RotatingCatalogClient
@@ -67,7 +69,7 @@ async def test_title_concept_maps_fields():
         name="Bloodborne",
         type="GAME",
         publisher="Sony Interactive Entertainment",
-        release_date="2015-03-24",
+        release_date=date(2015, 3, 24),
         minimum_age=17,
         content_rating="ESRB_MATURE_17",
         rating_authority="ESRB",
@@ -76,6 +78,32 @@ async def test_title_concept_maps_fields():
         title_ids=("CUSA00900_00",),
         cover_image_url="master.png",
     )
+
+
+async def test_title_concept_drops_the_time_from_psns_full_release_timestamp():
+    concept = {"id": "1", "releaseDate": {"date": "2018-10-05T04:00:00Z"}}
+    client = CatalogClient(FakeSession(concept_details=[concept]))
+
+    result = await client.title_concept("CUSA00900_00")
+
+    assert result.release_date == date(2018, 10, 5)
+
+
+async def test_title_concept_leaves_release_date_none_when_psn_sends_something_unparseable():
+    concept = {"id": "1", "releaseDate": {"date": "coming soon"}}
+    client = CatalogClient(FakeSession(concept_details=[concept]))
+
+    result = await client.title_concept("CUSA00900_00")
+
+    assert result.release_date is None
+
+
+async def test_title_concept_leaves_release_date_none_when_psn_omits_it():
+    client = CatalogClient(FakeSession(concept_details=[{"id": "1"}]))
+
+    result = await client.title_concept("CUSA00900_00")
+
+    assert result.release_date is None
 
 
 async def test_title_concept_reads_multiplayer_from_psns_network_player_count():

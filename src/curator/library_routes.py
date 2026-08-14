@@ -22,7 +22,7 @@ from curator.audit.repository import ACTION_LIBRARY_REFRESH_REQUESTED, AccountAc
 from curator.catalog.repository import CatalogRepository
 from curator.deps import require_bearer
 from curator.jobs.queue_publisher import QueuePublisher
-from curator.jobs.repository import JobRunsRepository
+from curator.jobs.repository import JobRun, JobRunsRepository
 from curator.library.repository import LibraryRepository, LibrarySortField
 from curator.token_validation import TokenClaims
 
@@ -30,6 +30,17 @@ router = APIRouter(prefix="/library", tags=["library"])
 logger = logging.getLogger("curator")
 
 _STALE_RUN_THRESHOLD = timedelta(hours=24)
+
+
+def abandoned_run_reason(run: JobRun, now: datetime) -> str | None:
+    """Why ``run`` should be superseded by a fresh one, or ``None`` if it is still alive."""
+    if run.status == "running":
+        if run.lease_expires_at is not None and run.lease_expires_at > now:
+            return None
+        return "Superseded: the processing lease expired, treated as abandoned."
+    if now - run.updated_at < _STALE_RUN_THRESHOLD:
+        return None
+    return "Superseded: no progress for over 24 hours, treated as abandoned."
 
 
 class LibraryGameResponse(BaseModel):
@@ -209,11 +220,10 @@ async def refresh_library(request: Request, claims: TokenClaims = Depends(requir
     job_runs_repository: JobRunsRepository = request.app.state.job_runs_repository
     active_run = await job_runs_repository.find_active_run(claims.sub, "library_refresh")
     if active_run is not None:
-        if datetime.now(timezone.utc) - active_run.updated_at < _STALE_RUN_THRESHOLD:
+        reason = abandoned_run_reason(active_run, datetime.now(timezone.utc))
+        if reason is None:
             return LibraryRefreshResponse(run_id=active_run.run_id)
-        await job_runs_repository.mark_failed(
-            active_run.run_id, "Superseded: no progress for over 24 hours, treated as abandoned."
-        )
+        await job_runs_repository.mark_failed(active_run.run_id, reason)
 
     queue_publisher: QueuePublisher | None = request.app.state.queue_publisher
     if queue_publisher is None:

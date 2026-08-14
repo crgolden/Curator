@@ -14,7 +14,6 @@ on:
 
 jobs:
   test:
-    if: github.actor != 'dependabot[bot]'
     name: Test
     runs-on: ubuntu-latest
     permissions:
@@ -66,6 +65,7 @@ jobs:
       # SonarCloud analysis — runs after coverage is generated and tests pass.
       # Uses sonarqube-scan-action (no JDK/scanner setup required); sonarcloud-github-action is deprecated.
       - name: SonarCloud analysis
+        if: github.actor != 'dependabot[bot]'
         uses: sonarsource/sonarqube-scan-action@v8
         env:
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
