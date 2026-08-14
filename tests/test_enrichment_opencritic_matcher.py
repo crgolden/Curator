@@ -28,6 +28,12 @@ def test_normalize_strips_punctuation_and_symbols():
     assert normalize("Marvel's Spider-Man™ 2") == "marvels spider mantm 2"
 
 
+def test_normalize_treats_a_typographic_apostrophe_as_an_ascii_one():
+    assert normalize("Marvel’s Spider-Man 2") == "marvels spider man 2"  # noqa: RUF001 -- U+2019 is the subject
+    assert normalize("Marvel’s Spider-Man 2") == normalize("Marvel's Spider-Man 2")  # noqa: RUF001 -- same
+    assert normalize("Assassin’s Creed") == normalize("Assassin's Creed")  # noqa: RUF001 -- same
+
+
 def test_strip_subtitle_on_colon():
     assert strip_subtitle("Sekiro: Shadows Die Twice") == "Sekiro"
 
