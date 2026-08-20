@@ -141,12 +141,11 @@ jobs:
           /tmp/smoke-venv/bin/python -m pip install poetry --quiet
           /tmp/smoke-venv/bin/poetry config virtualenvs.create false
           /tmp/smoke-venv/bin/poetry install --no-root
+          smoke_key="$(PYTHONPATH=src /tmp/smoke-venv/bin/python -c 'from curator.persistence.crypto import TokenCrypto; print(TokenCrypto.generate_key().decode())')"
+          export OIDC_AUTHORITY='https://smoke-test.invalid'
+          export CURATOR_TOKEN_KEY="$smoke_key"
+          export CURATOR_DATABASE_URL='postgresql://smoke:test@localhost:5432/smoke'
           /tmp/smoke-venv/bin/python -c "
-          import os
-          from curator.persistence.crypto import TokenCrypto
-          os.environ['OIDC_AUTHORITY'] = 'https://smoke-test.invalid'
-          os.environ['CURATOR_TOKEN_KEY'] = TokenCrypto.generate_key().decode()
-          os.environ['CURATOR_DATABASE_URL'] = 'postgresql://smoke:test@localhost:5432/smoke'
           import app
           print('Smoke test OK:', app.app)
           "
