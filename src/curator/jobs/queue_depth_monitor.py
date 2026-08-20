@@ -1,9 +1,8 @@
 """Periodically polls Service Bus queue runtime properties into telemetry gauges.
 
-Mirrors Functions' ``QueueDepthMonitorJob``/``Telemetry.cs`` for the .NET pipeline queues: nothing else
-watches dead-lettered messages today (a message that fails processing dead-letters silently -- see
-:mod:`curator.jobs.queue_consumer` -- with no alert until someone looks), so this polls each queue's
-runtime properties into a gauge the fleet's "Service Bus dead-letter depth" alert style can read.
+Nothing else watches dead-lettered messages (a message that fails processing dead-letters silently, with
+no alert until someone looks), so this polls each queue's runtime properties into a gauge the fleet's
+"Service Bus dead-letter depth" alert style can read.
 """
 
 from __future__ import annotations

@@ -5,7 +5,6 @@ reading/writing another user's console.
 
 from __future__ import annotations
 
-from cryptography.fernet import Fernet
 from fastapi.testclient import TestClient
 
 from curator.app import create_app
@@ -116,7 +115,7 @@ def _console(console_id="c1"):
 
 def _build(collections_repository=None):
     repository = FakeRepository()
-    token_crypto = TokenCrypto(Fernet.generate_key())
+    token_crypto = TokenCrypto(TokenCrypto.generate_key())
     validator = FakeTokenValidator()
     app = create_app(
         _make_settings(),
@@ -253,7 +252,7 @@ def test_patches_a_console():
     assert response.status_code == 200
     body = response.json()
     assert body["name"] == "Renamed"
-    assert body["platform"] == "PS5"  # untouched -- platform isn't a PATCH field at all
+    assert body["platform"] == "PS5"
 
 
 def test_patch_console_404s_for_another_users_console():

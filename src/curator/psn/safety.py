@@ -7,11 +7,11 @@ mutation against the account currently linked to that Curator user, and against 
 operation's class. Because the check is on the immutable ``account_id`` and runs live, no cached or stolen
 token can widen its own permissions.
 
-Ported from ``psnpy.safety``, re-platformed from a local JSON file (``TestAccountStore``) to the DB-backed
-:class:`~curator.psn.repository.TestAccountRepository` (``psn_test_accounts``), since Curator is a
-multi-instance web service where a local file can't be trusted to persist or be visible across instances.
-:meth:`MutationGuard.register`/:meth:`MutationGuard.require_pinned` and ``psn_test_accounts`` remain for
-development and manual ``psnpy``-style testing; they are no longer the production path.
+The pinned-account store is DB-backed (:class:`~curator.psn.repository.PinnedAccountRepository`,
+``psn_test_accounts``) rather than a local file, since Curator is a multi-instance web service where a
+local file can't be trusted to persist or be visible across instances.
+:meth:`MutationGuard.register`/:meth:`MutationGuard.require_pinned` and ``psn_test_accounts`` exist for
+development and manual testing; they are not the production path.
 """
 
 from __future__ import annotations
@@ -44,12 +44,10 @@ def expected_test_online_id() -> str:
     return DEFAULT_TEST_ONLINE_ID
 
 
-class TestAccountRepository(Protocol):
+class PinnedAccountRepository(Protocol):
     """Duck-typed async pinned-test-account store.
 
-    Satisfied by :class:`curator.psn.repository.TestAccountRepository`. Never imported directly into a
-    test module (tests depend on the concrete repository or their own ``FakeTestAccountRepository``), so
-    unlike that concrete class this one needs no ``__test__ = False`` pytest-collection guard.
+    Satisfied by :class:`curator.psn.repository.PinnedAccountRepository`.
     """
 
     async def get_pinned_account_id(self, identity_sub: str) -> str | None:
@@ -90,7 +88,7 @@ class MutationGuard:
     def __init__(
         self,
         identity_sub: str,
-        repository: TestAccountRepository,
+        repository: PinnedAccountRepository,
         links: LinkReader | None = None,
         mutations: MutationCounter | None = None,
     ) -> None:

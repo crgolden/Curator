@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import json
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime
 
 from curator.jobs.queue_publisher import QueuePublisher
 
@@ -31,12 +31,9 @@ class FakeJobRunsRepository:
         self.created.append((run_id, kind, identity_sub))
 
 
-def _make_publisher(
-    library_sender=None, library_continuation_sender=None, enrichment_sender=None, job_runs_repository=None
-):
+def _make_publisher(library_sender=None, enrichment_sender=None, job_runs_repository=None):
     return QueuePublisher(
         library_refresh_sender=library_sender or FakeSender(),
-        library_refresh_continuation_sender=library_continuation_sender or FakeSender(),
         enrichment_sender=enrichment_sender or FakeSender(),
         job_runs_repository=job_runs_repository or FakeJobRunsRepository(),
     )
@@ -49,7 +46,7 @@ async def test_publish_library_refresh_sends_identity_sub_and_returns_run_id():
 
     run_id = await publisher.publish_library_refresh("sub-1")
 
-    assert uuid.UUID(run_id)  # a real UUID was generated
+    assert uuid.UUID(run_id)
     assert len(library_sender.sent) == 1
     body = json.loads(str(library_sender.sent[0]))
     assert body == {"run_id": run_id, "identity_sub": "sub-1"}
@@ -81,31 +78,3 @@ async def test_each_publish_generates_a_distinct_run_id():
     run_id_2 = await publisher.publish_library_refresh("sub-1")
 
     assert run_id_1 != run_id_2
-
-
-async def test_publish_library_refresh_continuation_schedules_a_message_with_the_same_run_id():
-    continuation_sender = FakeSender()
-    job_runs_repository = FakeJobRunsRepository()
-    publisher = _make_publisher(
-        library_continuation_sender=continuation_sender, job_runs_repository=job_runs_repository
-    )
-    before = datetime.now(timezone.utc)
-
-    await publisher.publish_library_refresh_continuation(
-        "run-1", "sub-1", ["g1", "g2"], "rawg", retry_after_seconds=3600.0, seq=1
-    )
-
-    assert len(continuation_sender.scheduled) == 1
-    message, schedule_time_utc = continuation_sender.scheduled[0]
-    body = json.loads(str(message))
-    assert body == {
-        "run_id": "run-1",
-        "identity_sub": "sub-1",
-        "remaining_game_ids": ["g1", "g2"],
-        "provider": "rawg",
-        "retry_after_seconds": 3600.0,
-        "seq": 1,
-    }
-    assert schedule_time_utc >= before
-
-    assert job_runs_repository.created == []

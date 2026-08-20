@@ -23,7 +23,7 @@ from curator.psn.safety import (
 )
 
 
-class FakeTestAccountRepository:
+class FakePinnedAccountRepository:
     def __init__(self):
         self.pinned: dict[str, str] = {}
         self.pin_calls: list[tuple[str, str]] = []
@@ -65,7 +65,7 @@ def _consenting_guard(*, spent=0, **flags):
     counter = FakeMutationCounter(spent=spent)
     guard = MutationGuard(
         "sub-1",
-        FakeTestAccountRepository(),
+        FakePinnedAccountRepository(),
         links=FakeLinkReader(FakeLink("acct-linked", **flags)),
         mutations=counter,
     )
@@ -95,7 +95,7 @@ def test_expected_test_online_id_falls_back_to_legacy_psnpy_env_var(monkeypatch)
 
 async def test_register_pins_matching_account(monkeypatch):
     monkeypatch.setenv("CURATOR_PSN_TEST_ONLINE_ID", "curator-test-account")
-    repo = FakeTestAccountRepository()
+    repo = FakePinnedAccountRepository()
     guard = MutationGuard("sub-1", repo)
     account = Account(account_id="acct-1", online_id="curator-test-account")
 
@@ -106,7 +106,7 @@ async def test_register_pins_matching_account(monkeypatch):
 
 async def test_register_rejects_non_matching_account(monkeypatch):
     monkeypatch.setenv("CURATOR_PSN_TEST_ONLINE_ID", "curator-test-account")
-    repo = FakeTestAccountRepository()
+    repo = FakePinnedAccountRepository()
     guard = MutationGuard("sub-1", repo)
     account = Account(account_id="acct-1", online_id="wrong-account")
 
@@ -117,7 +117,7 @@ async def test_register_rejects_non_matching_account(monkeypatch):
 
 
 async def test_require_pinned_raises_when_nothing_pinned():
-    guard = MutationGuard("sub-1", FakeTestAccountRepository())
+    guard = MutationGuard("sub-1", FakePinnedAccountRepository())
     account = Account(account_id="acct-1", online_id="whoever")
 
     with pytest.raises(MutationNotAllowedError, match="No test account is registered"):
@@ -125,7 +125,7 @@ async def test_require_pinned_raises_when_nothing_pinned():
 
 
 async def test_require_pinned_raises_when_live_account_differs():
-    repo = FakeTestAccountRepository()
+    repo = FakePinnedAccountRepository()
     repo.pinned["sub-1"] = "acct-pinned"
     guard = MutationGuard("sub-1", repo)
     account = Account(account_id="acct-different", online_id="someone-else")
@@ -135,16 +135,16 @@ async def test_require_pinned_raises_when_live_account_differs():
 
 
 async def test_require_pinned_succeeds_when_live_account_matches():
-    repo = FakeTestAccountRepository()
+    repo = FakePinnedAccountRepository()
     repo.pinned["sub-1"] = "acct-pinned"
     guard = MutationGuard("sub-1", repo)
     account = Account(account_id="acct-pinned", online_id="curator-test-account")
 
-    await guard.require_pinned(account)  # does not raise
+    await guard.require_pinned(account)
 
 
 async def test_pinned_state_is_per_user():
-    repo = FakeTestAccountRepository()
+    repo = FakePinnedAccountRepository()
     repo.pinned["sub-a"] = "acct-a"
     guard_a = MutationGuard("sub-a", repo)
     guard_b = MutationGuard("sub-b", repo)
@@ -156,14 +156,14 @@ async def test_pinned_state_is_per_user():
 
 
 async def test_require_allowed_raises_when_no_link_store_is_configured():
-    guard = MutationGuard("sub-1", FakeTestAccountRepository())
+    guard = MutationGuard("sub-1", FakePinnedAccountRepository())
 
     with pytest.raises(MutationNotAllowedError, match="No PSN link store is configured"):
         await guard.require_allowed(Account(account_id="acct-linked", online_id="me"), FRIEND_WRITES)
 
 
 async def test_require_allowed_raises_when_user_has_no_link():
-    guard = MutationGuard("sub-1", FakeTestAccountRepository(), links=FakeLinkReader(None))
+    guard = MutationGuard("sub-1", FakePinnedAccountRepository(), links=FakeLinkReader(None))
 
     with pytest.raises(MutationNotAllowedError, match="No PSN account is linked"):
         await guard.require_allowed(Account(account_id="acct-linked", online_id="me"), FRIEND_WRITES)
@@ -223,7 +223,7 @@ async def test_require_allowed_permits_the_last_mutation_under_the_cap():
 async def test_require_allowed_skips_the_cap_when_no_counter_is_configured():
     guard = MutationGuard(
         "sub-1",
-        FakeTestAccountRepository(),
+        FakePinnedAccountRepository(),
         links=FakeLinkReader(FakeLink("acct-linked", allow_chat_writes=True)),
     )
 

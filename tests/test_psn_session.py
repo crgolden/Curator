@@ -14,7 +14,17 @@ import httpx
 import pytest
 
 from curator.psn.errors import PsnAuthError
-from curator.psn.session import PsnSession
+from curator.psn.session import READ_ATTEMPTS, PsnSession, is_transient_psn_failure
+
+
+@pytest.fixture
+def no_retry_backoff(monkeypatch):
+    """Collapse the retry backoff so a test that exhausts attempts doesn't spend seconds sleeping.
+
+    ``_request`` reads the multiplier at call time, so patching the module attribute is enough.
+    """
+    monkeypatch.setattr("curator.psn.session.RETRY_BACKOFF_MULTIPLIER_SECONDS", 0)
+    monkeypatch.setattr("curator.psn.session.RETRY_MAX_WAIT_SECONDS", 0)
 
 
 class FakeTokenStore:
@@ -170,7 +180,7 @@ async def test_restore_uses_cached_token_without_bootstrapping():
 
     await session._ensure_fresh()
 
-    assert recorder.requests == []  # token is still fresh; no bootstrap, no refresh
+    assert recorder.requests == []
     assert session.token_response is not None
     assert session.token_response["access_token"] == "AT1"
 
@@ -253,8 +263,8 @@ async def test_patch_put_delete_attach_bearer():
     assert all(r.headers["Authorization"] == "Bearer AT1" for r in recorder.requests)
 
 
-async def test_get_raises_for_other_http_errors():
-    recorder = RequestRecorder([httpx.Response(500)])
+async def test_get_raises_for_other_http_errors(no_retry_backoff):
+    recorder = RequestRecorder([httpx.Response(500)] * READ_ATTEMPTS)
     store = FakeTokenStore(saved=_fake_token_response(access_token_expires_at=time.time() + 3600))
     session = await PsnSession.restore(
         None,
@@ -380,6 +390,20 @@ async def test_run_with_reauth_reraises_when_there_is_neither_a_refresh_token_no
         await session.run_with_reauth(operation)
 
 
+async def test_a_transient_token_endpoint_failure_is_not_an_auth_failure():
+    session = _session(RequestRecorder([httpx.Response(503, text="service unavailable")]), npsso="npsso-cookie")
+
+    with pytest.raises(httpx.HTTPStatusError):
+        await session._exchange(grant_type="refresh_token", refresh_token="RT1")
+
+
+async def test_a_token_response_without_expires_in_is_an_auth_failure():
+    session = _session(RequestRecorder([httpx.Response(200, json={"access_token": "AT1"})]), npsso="npsso-cookie")
+
+    with pytest.raises(PsnAuthError, match="expires_in"):
+        await session._exchange(grant_type="refresh_token", refresh_token="RT1")
+
+
 async def test_run_with_reauth_reraises_the_original_error_when_the_refresh_grant_is_refused():
     recorder = RequestRecorder([httpx.Response(400, text="invalid_grant")])
     session = _session(recorder)
@@ -390,3 +414,91 @@ async def test_run_with_reauth_reraises_the_original_error_when_the_refresh_gran
 
     with pytest.raises(PsnAuthError, match="boom"):
         await session.run_with_reauth(operation)
+
+
+async def _authenticated(recorder: RequestRecorder) -> PsnSession:
+    store = FakeTokenStore(saved=_fake_token_response(access_token_expires_at=time.time() + 3600))
+    return await PsnSession.restore(None, store, client=httpx.AsyncClient(transport=httpx.MockTransport(recorder)))
+
+
+async def test_a_read_retries_a_5xx_and_returns_the_eventual_success(no_retry_backoff):
+    recorder = RequestRecorder([httpx.Response(503), httpx.Response(200, json={"ok": True})])
+    session = await _authenticated(recorder)
+
+    response = await session.get("https://m.np.playstation.com/api/thing")
+
+    assert response.json() == {"ok": True}
+    assert len(recorder.requests) == 2
+
+
+async def test_a_read_gives_up_after_the_attempt_budget(no_retry_backoff):
+    recorder = RequestRecorder([httpx.Response(503)] * READ_ATTEMPTS)
+    session = await _authenticated(recorder)
+
+    with pytest.raises(httpx.HTTPStatusError):
+        await session.get("https://m.np.playstation.com/api/thing")
+
+    assert len(recorder.requests) == READ_ATTEMPTS
+
+
+async def test_a_read_retries_a_transport_failure(no_retry_backoff):
+    attempts: list[httpx.Request] = []
+
+    def flaky(request: httpx.Request) -> httpx.Response:
+        attempts.append(request)
+        if len(attempts) == 1:
+            raise httpx.ConnectError("connection reset", request=request)
+        return httpx.Response(200, json={"ok": True})
+
+    store = FakeTokenStore(saved=_fake_token_response(access_token_expires_at=time.time() + 3600))
+    session = await PsnSession.restore(None, store, client=httpx.AsyncClient(transport=httpx.MockTransport(flaky)))
+
+    response = await session.get("https://m.np.playstation.com/api/thing")
+
+    assert response.json() == {"ok": True}
+    assert len(attempts) == 2
+
+
+async def test_a_write_is_never_retried_because_it_could_apply_twice(no_retry_backoff):
+    recorder = RequestRecorder([httpx.Response(503)])
+    session = await _authenticated(recorder)
+
+    with pytest.raises(httpx.HTTPStatusError):
+        await session.post("https://m.np.playstation.com/api/thing", json={"x": 1})
+
+    assert len(recorder.requests) == 1
+
+
+async def test_a_read_does_not_retry_a_deliberate_4xx(no_retry_backoff):
+    recorder = RequestRecorder([httpx.Response(404)])
+    session = await _authenticated(recorder)
+
+    with pytest.raises(httpx.HTTPStatusError):
+        await session.get("https://m.np.playstation.com/api/thing")
+
+    assert len(recorder.requests) == 1
+
+
+async def test_a_read_does_not_retry_an_auth_rejection(no_retry_backoff):
+    recorder = RequestRecorder([httpx.Response(401, text="unauthorized")])
+    session = await _authenticated(recorder)
+
+    with pytest.raises(PsnAuthError):
+        await session.get("https://m.np.playstation.com/api/thing")
+
+    assert len(recorder.requests) == 1
+
+
+@pytest.mark.parametrize(
+    ("status_code", "retryable"),
+    [(500, True), (502, True), (503, True), (429, False), (404, False), (400, False)],
+)
+def test_only_server_side_failures_are_transient(status_code, retryable):
+    request = httpx.Request("GET", "https://m.np.playstation.com/api/thing")
+    error = httpx.HTTPStatusError("boom", request=request, response=httpx.Response(status_code, request=request))
+
+    assert is_transient_psn_failure(error) is retryable
+
+
+def test_a_psn_auth_error_is_never_transient():
+    assert is_transient_psn_failure(PsnAuthError("401")) is False

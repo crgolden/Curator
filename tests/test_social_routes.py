@@ -8,7 +8,6 @@ missing link, a withheld consent flag and a guard refusal into status codes, and
 
 from __future__ import annotations
 
-from cryptography.fernet import Fernet
 from fastapi.testclient import TestClient
 
 from curator.app import create_app
@@ -24,6 +23,8 @@ from test_routes import (
     _make_settings,
     _seed_link,
 )
+
+GROUP_ID = "ba08b67ca0b044b7688a29abdc884f37b5dd47cd-215"
 
 
 class FakeAuditRepository:
@@ -62,7 +63,7 @@ class FakeMutationService:
 def _build(*, service=None, unlinked_factory=False, **flags):
     repository = FakeRepository()
     if flags.pop("linked", True):
-        _seed_link(repository, TokenCrypto(Fernet.generate_key()), SUB, **flags)
+        _seed_link(repository, TokenCrypto(TokenCrypto.generate_key()), SUB, **flags)
 
     validator = FakeTokenValidator()
     validator.register("valid-token", _claims(sub=SUB, email=EMAIL))
@@ -106,7 +107,7 @@ def test_add_friend_without_friend_write_consent_is_403():
 def test_chat_write_consent_does_not_authorize_a_friend_write():
     client, service, _ = _build(allow_chat_writes=True, allow_friend_writes=False)
 
-    response = client.post("/me/chat/groups", json={"online_ids": ["a"]}, headers=_bearer("valid-token"))
+    response = client.post("/me/chat/groups", json={"online_ids": ["peer-one"]}, headers=_bearer("valid-token"))
     assert response.status_code == 200
 
     response = client.delete("/me/friends/SomeOnlineId", headers=_bearer("valid-token"))
@@ -166,19 +167,21 @@ def test_create_chat_group_returns_and_logs_the_group_id():
     client, service, audit = _build(allow_chat_writes=True)
 
     response = client.post(
-        "/me/chat/groups", json={"online_ids": ["a"], "account_ids": ["9"]}, headers=_bearer("valid-token")
+        "/me/chat/groups", json={"online_ids": ["peer-one"], "account_ids": ["9"]}, headers=_bearer("valid-token")
     )
 
     assert response.status_code == 200
     assert response.json() == {"group_id": "new-group"}
-    assert service.calls == [("create_group", (), {"online_ids": ["a"], "account_ids": ["9"]})]
+    assert service.calls == [("create_group", (), {"online_ids": ["peer-one"], "account_ids": ["9"]})]
     assert audit.entries == [(SUB, "chat_group_created", "new-group")]
 
 
 def test_inviting_to_a_chat_group_has_no_route():
     client, service, _ = _build(allow_chat_writes=True)
 
-    response = client.post("/me/chat/groups/g1/invitees", json={"online_ids": ["a"]}, headers=_bearer("valid-token"))
+    response = client.post(
+        "/me/chat/groups/" + GROUP_ID + "/invitees", json={"online_ids": ["peer-one"]}, headers=_bearer("valid-token")
+    )
 
     assert response.status_code == 404
     assert service.calls == []
@@ -187,11 +190,11 @@ def test_inviting_to_a_chat_group_has_no_route():
 def test_leave_chat_group_logs_a_membership_change():
     client, service, audit = _build(allow_chat_writes=True)
 
-    response = client.delete("/me/chat/groups/g1/members/me", headers=_bearer("valid-token"))
+    response = client.delete("/me/chat/groups/" + GROUP_ID + "/members/me", headers=_bearer("valid-token"))
 
     assert response.status_code == 204
-    assert service.calls == [("leave_group", ("g1",), {})]
-    assert audit.entries == [(SUB, "chat_membership_changed", "g1 left")]
+    assert service.calls == [("leave_group", (GROUP_ID,), {})]
+    assert audit.entries == [(SUB, "chat_membership_changed", f"{GROUP_ID} left")]
 
 
 def test_a_failed_audit_write_does_not_fail_the_mutation():
@@ -202,7 +205,7 @@ def test_a_failed_audit_write_does_not_fail_the_mutation():
 
     audit.log = failing_log
 
-    response = client.delete("/me/chat/groups/g1/members/me", headers=_bearer("valid-token"))
+    response = client.delete("/me/chat/groups/" + GROUP_ID + "/members/me", headers=_bearer("valid-token"))
 
     assert response.status_code == 204
 
@@ -214,7 +217,7 @@ def test_social_routes_require_a_bearer_token():
         client.put("/me/friends/x"),
         client.delete("/me/friends/x"),
         client.post("/me/chat/groups", json={}),
-        client.delete("/me/chat/groups/g1/members/me"),
+        client.delete("/me/chat/groups/" + GROUP_ID + "/members/me"),
     ):
         assert response.status_code == 401
 

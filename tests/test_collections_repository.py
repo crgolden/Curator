@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from random import randint
+from uuid import uuid4
 
 from curator.catalog.cover_art import SQUARE_COVER_ART_SQL
 from curator.collections.collection_spec import CollectionSpec
@@ -688,3 +690,42 @@ async def test_upsert_measured_size_upserts_on_game_and_platform():
     conn = pool.connections[0]
     assert "ON CONFLICT (game_id, platform) DO UPDATE" in conn.executed[0][0]
     assert conn.executed[0][1] == ("g1", "PS5", 42.5, "sub-a")
+
+
+async def test_is_following_collection_is_true_when_a_follow_row_exists():
+    follower_sub = f"sub-{uuid4()}"
+    definition_id = f"def-{uuid4()}"
+    pool = FakePool(fetchone_results=[(1,)])
+    repo = CollectionsRepository(pool)
+
+    assert await repo.is_following_collection(follower_sub, definition_id) is True
+    sql, params = pool.connections[0].executed[0]
+    assert params == (follower_sub, definition_id)
+    assert "FROM collection_follows" in sql
+
+
+async def test_is_following_collection_is_false_when_no_row_comes_back():
+    pool = FakePool(fetchone_results=[None])
+    repo = CollectionsRepository(pool)
+
+    assert await repo.is_following_collection(f"sub-{uuid4()}", f"def-{uuid4()}") is False
+
+
+async def test_collection_follower_count_returns_the_scalar_scoped_to_one_collection():
+    definition_id = f"def-{uuid4()}"
+    follower_count = randint(1, 5000)
+    pool = FakePool(fetchone_results=[(follower_count,)])
+    repo = CollectionsRepository(pool)
+
+    assert await repo.collection_follower_count(definition_id) == follower_count
+    sql, params = pool.connections[0].executed[0]
+    assert params == (definition_id,)
+    assert "count(*)" in sql
+    assert "WHERE definition_id = %s" in sql
+
+
+async def test_collection_follower_count_is_zero_when_nobody_follows():
+    pool = FakePool(fetchone_results=[(0,)])
+    repo = CollectionsRepository(pool)
+
+    assert await repo.collection_follower_count(f"def-{uuid4()}") == 0

@@ -5,7 +5,6 @@ require_preference -- only unlinked (404) and linked (200) cases apply.
 
 from __future__ import annotations
 
-from cryptography.fernet import Fernet
 from fastapi.testclient import TestClient
 
 from curator.app import create_app
@@ -36,7 +35,7 @@ def _build(repository=None):
 
 def _build_linked(**harvest_flags):
     repository = FakeRepository()
-    crypto = TokenCrypto(Fernet.generate_key())
+    crypto = TokenCrypto(TokenCrypto.generate_key())
     _seed_link(repository, crypto, SUB, **harvest_flags)
     return _build(repository)
 

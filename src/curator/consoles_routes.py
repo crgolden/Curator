@@ -19,6 +19,7 @@ from pydantic import BaseModel
 from curator.collections.console_model_defaults import default_capacity_gb
 from curator.collections.repository import CollectionsRepository, UserConsole
 from curator.deps import require_bearer
+from curator.psn.title_platform import ConsolePlatform, console_platform
 from curator.token_validation import TokenClaims
 
 router = APIRouter(prefix="/consoles", tags=["consoles"])
@@ -98,6 +99,13 @@ class ConsoleInstallsResponse(BaseModel):
     game_ids: list[str]
 
 
+def _console_platform(value: str) -> ConsolePlatform:
+    try:
+        return console_platform(value)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail='platform must be "PS5" or "PS4".') from exc
+
+
 def _to_response(console: UserConsole, *, capacity_is_default: bool = False) -> ConsoleResponse:
     return ConsoleResponse(
         console_id=console.console_id,
@@ -128,8 +136,7 @@ async def create_console(
         constraint would reject it anyway; validating here first gives a clearer message than a raw
         constraint-violation 500).
     """
-    if body.platform not in ("PS5", "PS4"):
-        raise HTTPException(status_code=400, detail='platform must be "PS5" or "PS4".')
+    platform = _console_platform(body.platform)
 
     capacity_is_default = body.raw_capacity_gb is None
     raw_capacity_gb = body.raw_capacity_gb
@@ -140,7 +147,7 @@ async def create_console(
     console = await repository.create_console(
         claims.sub,
         name=body.name,
-        platform=body.platform,
+        platform=platform,
         raw_capacity_gb=raw_capacity_gb,
         update_buffer_gb=body.update_buffer_gb,
         routing_genres=tuple(body.routing_genres),

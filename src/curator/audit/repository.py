@@ -123,8 +123,8 @@ class AccountActionLogRepository:
     async def purge_older_than(self, cutoff: datetime) -> int:
         """Delete every row older than ``cutoff``, returning the number of rows removed.
 
-        Called by the retention purge job (see the ``Functions`` repo's timer trigger), never from a
-        request path -- nothing in the application itself trims this table on its own.
+        Called by the retention purge job, never from a request path -- nothing in the application itself
+        trims this table on its own.
 
         :param cutoff: Rows with ``occurred_at`` strictly before this timestamp are deleted.
         """

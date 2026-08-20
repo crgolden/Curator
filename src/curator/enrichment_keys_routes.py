@@ -1,9 +1,9 @@
 """``GET/PUT/DELETE /me/enrichment-keys`` -- the caller's own, optionally-provided RAWG/OpenCritic API keys.
 
 Curator never provisions a shared RAWG/OpenCritic key -- it doesn't scale to every user's library. Instead
-a user may supply their own key for either or both providers; :mod:`curator.app`'s
-``_library_refresh_handler`` uses it (and only it, no fallback) for that user's own enrichment. Keys are
-encrypted with the same Fernet key already protecting PSN tokens at rest (see
+a user may supply their own key for either or both providers, and that key alone (no fallback) enriches
+that user's own library. Keys are
+encrypted with the same AES-256-GCM key already protecting PSN tokens at rest (see
 :class:`curator.persistence.crypto.TokenCrypto`, :meth:`curator.persistence.repository.Repository.upsert_link`)
 and are never returned by any route -- ``GET`` reports only whether a key is configured and when it was
 added, never the value.

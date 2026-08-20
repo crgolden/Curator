@@ -9,13 +9,11 @@ from __future__ import annotations
 from psycopg_pool import AsyncConnectionPool
 
 
-class TestAccountRepository:
+class PinnedAccountRepository:
     """DAO over ``psn_test_accounts``: one pinned test account per Curator user.
 
     :param pool: The shared connection pool.
     """
-
-    __test__ = False  # not a pytest test class despite the "Test" prefix
 
     def __init__(self, pool: AsyncConnectionPool) -> None:
         self._pool = pool

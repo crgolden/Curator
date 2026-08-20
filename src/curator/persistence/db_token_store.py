@@ -31,9 +31,7 @@ import time
 from datetime import datetime, timezone
 from typing import Any, Protocol
 
-from cryptography.fernet import InvalidToken
-
-from curator.persistence.crypto import TokenCrypto
+from curator.persistence.crypto import InvalidToken, TokenCrypto
 from curator.persistence.repository import Repository
 
 _EPHEMERAL_KEYS = frozenset({"access_token", "expires_in", "access_token_expires_at"})

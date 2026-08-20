@@ -14,7 +14,6 @@ from __future__ import annotations
 from datetime import datetime, timezone
 
 import pytest
-from cryptography.fernet import Fernet
 from fastapi.testclient import TestClient
 
 from curator.app import create_app
@@ -160,7 +159,7 @@ def test_bearer_required_routes_reject_garbage_token(method, path, kwargs):
 
 def test_cross_user_isolation_between_two_established_callers():
     repo = RecordingRepository()
-    crypto = TokenCrypto(Fernet.generate_key())
+    crypto = TokenCrypto(TokenCrypto.generate_key())
     _seed_custom_link(repo, crypto, "sub-a", account_id="psn-account-a", hour=1)
     _seed_custom_link(repo, crypto, "sub-b", account_id="psn-account-b", hour=2)
 

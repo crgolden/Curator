@@ -3,8 +3,9 @@
 --
 -- Adds per-user, optionally-provided RAWG/OpenCritic API keys (user_enrichment_keys) -- Curator never
 -- provisions a shared key for either provider (it doesn't scale), so a user's own library enrichment only
--- happens if they've supplied their own key for that provider. Keys are encrypted with the same Fernet key
--- (CURATOR_TOKEN_KEY / curator.persistence.crypto.TokenCrypto) already used for PSN tokens at rest --
+-- happens if they've supplied their own key for that provider. Keys are encrypted with the same
+-- AES-256-GCM key (CURATOR_TOKEN_KEY / curator.persistence.crypto.TokenCrypto) already used for PSN
+-- tokens at rest --
 -- see curator.persistence.repository.Repository.upsert_link for the precedent.
 --
 -- Also adds:

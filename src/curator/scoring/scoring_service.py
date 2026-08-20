@@ -1,15 +1,18 @@
-"""The canonical composite/rank score, ported from ``ps_assign_ps5.py``'s ``composite_score()``/
-``rank_score()`` -- the single call site every consumer (collections/capacity-fill, filter-list, any
-future dashboard) shares.
-
-Unifying this closes a real drift that existed in the legacy pipeline: ``ps_assign_ps4.py`` computed
-``composite_score()`` without a PSN-rating input at all (an accepted, intentional behavior change per the
-migration plan -- PS4 assignment now gets the same three-source average PS5 assignment always had).
+"""The canonical composite/rank score -- the single call site every consumer (collections/capacity-fill,
+filter-list, any future dashboard) shares. Platform-agnostic: the same three-source average applies to
+every platform.
 """
 
 from __future__ import annotations
 
 F2P_KEYWORDS = frozenset({"free to play", "f2p", "live service", "live-service", "free-to-play"})
+
+HIGH_COMPOSITE_THRESHOLD = 85.0
+MID_COMPOSITE_THRESHOLD = 75.0
+HIGH_COMPOSITE_POINTS = 3
+MID_COMPOSITE_POINTS = 1
+FRANCHISE_POINTS = 1
+F2P_PENALTY_POINTS = 3
 
 
 def composite_score(
@@ -33,24 +36,22 @@ def rank_score(composite: float | None, multiplayer: str | None, franchise: str 
 
     :param composite: The game's :func:`composite_score`.
     :param multiplayer: The game's multiplayer/live-service descriptor text (checked for F2P keywords).
-    :param franchise: The game's assigned franchise (see
-        :func:`~curator.catalog.franchise_assigner.assign_franchise`); any non-empty value counts.
-    :returns: The point total: ``+3`` for composite >= 85, ``+1`` for composite 75-84, ``+1`` if part of a
-        franchise, ``-3`` if tagged free-to-play/live-service.
+    :param franchise: The game's assigned franchise; any non-empty value counts.
+    :returns: The point total, from the module's ``*_POINTS``/``*_THRESHOLD`` constants.
     """
     points = 0
 
     if composite is not None:
-        if composite >= 85:
-            points += 3
-        elif composite >= 75:
-            points += 1
+        if composite >= HIGH_COMPOSITE_THRESHOLD:
+            points += HIGH_COMPOSITE_POINTS
+        elif composite >= MID_COMPOSITE_THRESHOLD:
+            points += MID_COMPOSITE_POINTS
 
     if franchise:
-        points += 1
+        points += FRANCHISE_POINTS
 
     multiplayer_lower = (multiplayer or "").lower()
     if any(keyword in multiplayer_lower for keyword in F2P_KEYWORDS):
-        points -= 3
+        points -= F2P_PENALTY_POINTS
 
     return points

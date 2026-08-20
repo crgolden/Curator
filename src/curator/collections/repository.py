@@ -26,8 +26,21 @@ from curator.catalog.cover_art import SQUARE_COVER_ART_SQL
 from curator.collections.collection_spec import CollectionSpec
 from curator.collections.filter_predicate import FilterPredicate, parse_predicate, predicate_to_dict
 from curator.collections.game_candidate import GameCandidate
+from curator.psn.title_platform import ConsolePlatform
 
 CollectionItemSortField = Literal["rank", "title", "critical_score", "oc_score", "psn_rating"]
+StorageDeviceKind = Literal["m2", "usb"]
+
+_STORAGE_DEVICE_KINDS: dict[str, StorageDeviceKind] = {"m2": "m2", "usb": "usb"}
+
+
+def storage_device_kind(value: str) -> StorageDeviceKind:
+    """Narrow a stored device-kind string to :data:`StorageDeviceKind`, or raise :class:`ValueError`."""
+    kind = _STORAGE_DEVICE_KINDS.get(value)
+    if kind is None:
+        raise ValueError(f"Unexpected storage device kind: {value!r}")
+    return kind
+
 
 _ITEM_SORT_COLUMNS: dict[str, str] = {
     "rank": "cdi.rank",
@@ -69,7 +82,7 @@ class UserConsole:
 
     console_id: str
     name: str
-    platform: str  # "PS5" | "PS4"
+    platform: ConsolePlatform
     raw_capacity_gb: float
     update_buffer_gb: float
     routing_genres: tuple[str, ...]
@@ -96,7 +109,7 @@ class StorageDevice:
     identity_sub: str
     console_id: str | None
     name: str
-    kind: str  # "m2" | "usb"
+    kind: StorageDeviceKind
     capacity_gb: float
     buffer_gb: float
 
@@ -114,7 +127,7 @@ class MeasuredSize:
     ``recorded_by`` is ``None`` once its contributor's account has been deleted."""
 
     game_id: str
-    platform: str  # "PS5" | "PS4"
+    platform: ConsolePlatform
     size_gb: float
     recorded_by: str | None
     recorded_at: datetime
@@ -246,7 +259,7 @@ class CollectionsRepository:
         identity_sub: str,
         *,
         name: str,
-        platform: str,
+        platform: ConsolePlatform,
         raw_capacity_gb: float,
         update_buffer_gb: float = 0.0,
         routing_genres: tuple[str, ...] = (),
@@ -372,7 +385,7 @@ class CollectionsRepository:
         identity_sub: str,
         *,
         name: str,
-        kind: str,
+        kind: StorageDeviceKind,
         capacity_gb: float,
         buffer_gb: float = 0.0,
         console_id: str | None = None,
@@ -572,7 +585,9 @@ class CollectionsRepository:
             for row in rows
         ]
 
-    async def upsert_measured_size(self, game_id: str, platform: str, size_gb: float, recorded_by: str) -> MeasuredSize:
+    async def upsert_measured_size(
+        self, game_id: str, platform: ConsolePlatform, size_gb: float, recorded_by: str
+    ) -> MeasuredSize:
         """Record one game's measured install size for one platform, superseding any existing value."""
         async with self._pool.connection() as conn, conn.cursor() as cur:
             await cur.execute(
@@ -622,9 +637,7 @@ class CollectionsRepository:
             built from what its owner can actually launch unless they ask otherwise.
         :param min_percent_completed: Minimum stored trophy completion to include, or ``None`` for no
             floor. Expressible as SQL only because ``0015_library_entries_trophy_progress.sql`` persists
-            the percentage: while it lived exclusively in Redis this had to be applied in Python *after*
-            fetching every game's trophy data, which is what made a narrow collection spec cost a
-            full-library PSN resolution.
+            the percentage, so a narrow collection spec does not cost a full-library PSN resolution.
         :param exclude_installed_on: Console ids whose currently-installed games should be excluded.
             Scoped to ``identity_sub``'s own consoles regardless of what's passed in -- an id that isn't
             this caller's own is silently ignored rather than trusted, since ``console_installs`` itself
@@ -785,7 +798,7 @@ class CollectionsRepository:
                 ),
             )
             row = await cur.fetchone()
-            assert row is not None  # guaranteed by RETURNING definition_id above
+            assert row is not None
             definition_id = str(row[0])
             await self._insert_items(cur, definition_id, game_ids)
         return definition_id
@@ -973,7 +986,7 @@ class CollectionsRepository:
         async with self._pool.connection() as conn, conn.cursor() as cur:
             await cur.execute(f"SELECT COUNT(*) {_ITEM_BASE_FROM} WHERE {where_clause}", tuple(params))
             count_row = await cur.fetchone()
-            assert count_row is not None  # COUNT(*) always returns exactly one row
+            assert count_row is not None
             total = count_row[0]
 
             await cur.execute(
@@ -1223,7 +1236,7 @@ class CollectionsRepository:
                 (identity_sub, definition_id, json.dumps(spec_snapshot)),
             )
             row = await cur.fetchone()
-            assert row is not None  # guaranteed by RETURNING run_id above
+            assert row is not None
             run_id = str(row[0])
 
             for rank, candidate in enumerate(included, start=1):

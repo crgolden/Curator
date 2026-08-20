@@ -1,8 +1,8 @@
 """Shared PSN GraphQL persisted-query helper.
 
 PSN's mobile app calls a GraphQL gateway using pre-registered ("persisted") queries identified by a
-``sha256`` hash rather than a query document -- both :mod:`curator.psn.library_client` (recently
-played/purchased) and :mod:`curator.psn.catalog_client` (universal search) call through this same shape,
+``sha256`` hash rather than a query document -- both the library (recently played/purchased) and
+catalog (universal search) callers go through this same shape,
 just with different operations, headers, and error-checking needs.
 """
 

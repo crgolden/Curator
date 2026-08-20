@@ -9,11 +9,10 @@ from pydantic import BaseModel
 
 from curator.collections.repository import CollectionsRepository, MeasuredSize
 from curator.deps import require_bearer
+from curator.psn.title_platform import ConsolePlatform, console_platform
 from curator.token_validation import TokenClaims
 
 router = APIRouter(prefix="/games/{game_id}/measured-sizes", tags=["measured-sizes"])
-
-_VALID_PLATFORMS = ("PS5", "PS4")
 
 
 class MeasuredSizeResponse(BaseModel):
@@ -30,6 +29,13 @@ class SetMeasuredSizeRequest(BaseModel):
     """The ``PUT /games/{game_id}/measured-sizes/{platform}`` request body."""
 
     size_gb: float
+
+
+def _console_platform(value: str) -> ConsolePlatform:
+    try:
+        return console_platform(value)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail='platform must be "PS5" or "PS4".') from exc
 
 
 def _to_response(measured_size: MeasuredSize) -> MeasuredSizeResponse:
@@ -64,9 +70,8 @@ async def set_measured_size(
 
     :raises fastapi.HTTPException: 400, if ``platform`` isn't ``"PS5"`` or ``"PS4"``.
     """
-    if platform not in _VALID_PLATFORMS:
-        raise HTTPException(status_code=400, detail='platform must be "PS5" or "PS4".')
+    narrowed_platform = _console_platform(platform)
 
     repository: CollectionsRepository = request.app.state.collections_repository
-    measured_size = await repository.upsert_measured_size(game_id, platform, body.size_gb, claims.sub)
+    measured_size = await repository.upsert_measured_size(game_id, narrowed_platform, body.size_gb, claims.sub)
     return _to_response(measured_size)

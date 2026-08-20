@@ -2,10 +2,9 @@
 
 from __future__ import annotations
 
-import json
 from datetime import datetime, timezone
 
-from curator.jobs.repository import DEFAULT_LEASE_SECONDS, JobRunsRepository
+from curator.jobs.repository import JobRunsRepository
 
 _NOW = datetime(2026, 8, 3, 12, 0, 0, tzinfo=timezone.utc)
 _LEASE = datetime(2026, 8, 3, 12, 2, 0, tzinfo=timezone.utc)
@@ -77,180 +76,17 @@ async def test_create_defaults_identity_sub_to_none():
     assert params == ("run-1", "enrichment", None)
 
 
-async def test_try_begin_delivery_returns_true_and_updates_status_when_row_is_claimed():
-    pool = FakePool(fetchone_results=[("run-1",)])
-    repo = JobRunsRepository(pool)
-
-    began = await repo.try_begin_delivery("run-1", 0)
-
-    assert began is True
-    sql, params = pool.connections[0].executed[0]
-    assert "UPDATE job_runs" in sql
-    assert "RETURNING run_id" in sql
-    assert params == (DEFAULT_LEASE_SECONDS, "run-1", 0)
-
-
-async def test_try_begin_delivery_returns_false_when_seq_does_not_match():
-    """A redelivered message whose payload seq has already been superseded by a later mark_rate_limited
-    checkpoint -- the real ``WHERE seq = %s`` clause matches no row, exactly like this fake's configured
-    ``None``."""
-    pool = FakePool(fetchone_results=[None])
-    repo = JobRunsRepository(pool)
-
-    began = await repo.try_begin_delivery("run-1", 3)
-
-    assert began is False
-    _sql, params = pool.connections[0].executed[0]
-    assert params == (DEFAULT_LEASE_SECONDS, "run-1", 3)
-
-
-async def test_try_begin_delivery_only_claims_a_running_row_whose_lease_has_lapsed():
-    """0026: the SQL must refuse a *concurrent* redelivery of the still-current checkpoint. A seq-only CAS
-    would let a second copy in while the first is still inside process(); the lease predicate is what
-    makes a 'running' row claimable only once its lease has actually expired."""
-    pool = FakePool(fetchone_results=[("run-1",)])
-    repo = JobRunsRepository(pool)
-
-    await repo.try_begin_delivery("run-1", 0)
-
-    sql, _params = pool.connections[0].executed[0]
-    assert "status <> 'running' OR lease_expires_at IS NULL OR lease_expires_at <= now()" in sql
-    assert "lease_expires_at = now() + make_interval(secs => %s)" in sql
-
-
-async def test_try_begin_delivery_accepts_a_custom_lease_duration():
-    pool = FakePool(fetchone_results=[("run-1",)])
-    repo = JobRunsRepository(pool)
-
-    await repo.try_begin_delivery("run-1", 0, lease_seconds=5.0)
-
-    _sql, params = pool.connections[0].executed[0]
-    assert params == (5.0, "run-1", 0)
-
-
-async def test_renew_lease_pushes_the_lease_forward_only_while_running():
-    pool = FakePool(fetchone_results=[("run-1",)])
-    repo = JobRunsRepository(pool)
-
-    renewed = await repo.renew_lease("run-1")
-
-    assert renewed is True
-    sql, params = pool.connections[0].executed[0]
-    assert "lease_expires_at = now() + make_interval(secs => %s)" in sql
-    assert "status = 'running'" in sql
-    assert params == (DEFAULT_LEASE_SECONDS, "run-1")
-
-
-async def test_renew_lease_returns_false_once_the_run_is_no_longer_running():
-    """The heartbeat's cue to stop: a run that reached succeeded/failed/rate_limited already had its lease
-    cleared, and a late heartbeat must not resurrect one."""
-    pool = FakePool(fetchone_results=[None])
-    repo = JobRunsRepository(pool)
-
-    assert await repo.renew_lease("run-1") is False
-
-
-async def test_terminal_and_checkpoint_transitions_all_clear_the_lease():
+async def test_mark_failed_clears_the_lease_and_records_error():
     """Every exit from 'running' must release the lease, or a finished run would stay unclaimable for the
     rest of its lease window."""
-    for call in (
-        lambda repo: repo.mark_succeeded("run-1"),
-        lambda repo: repo.mark_failed("run-1", "boom"),
-    ):
-        pool = FakePool()
-        await call(JobRunsRepository(pool))
-        sql, _params = pool.connections[0].executed[0]
-        assert "lease_expires_at = NULL" in sql
-
-    pool = FakePool(fetchone_results=[(2,)])
-    await JobRunsRepository(pool).mark_rate_limited("run-1", {"remaining_count": 1})
-    sql, _params = pool.connections[0].executed[0]
-    assert "lease_expires_at = NULL" in sql
-
-
-async def test_try_begin_delivery_returns_false_when_status_already_terminal():
-    """A run that already reached succeeded/failed -- the real ``AND status NOT IN ('succeeded',
-    'failed')`` clause matches no row regardless of seq, exactly like this fake's configured ``None``."""
-    pool = FakePool(fetchone_results=[None])
-    repo = JobRunsRepository(pool)
-
-    began = await repo.try_begin_delivery("run-1", 0)
-
-    assert began is False
-
-
-async def test_mark_succeeded_updates_status():
-    pool = FakePool()
-    repo = JobRunsRepository(pool)
-
-    await repo.mark_succeeded("run-1")
-
-    _sql, params = pool.connections[0].executed[0]
-    assert params == ("succeeded", None, "run-1")
-
-
-async def test_mark_succeeded_serializes_result_summary_as_json():
-    pool = FakePool()
-    repo = JobRunsRepository(pool)
-
-    await repo.mark_succeeded("run-1", {"rawg_enriched_titles": ["Elden Ring"]})
-
-    _sql, params = pool.connections[0].executed[0]
-    assert params is not None
-    assert params[0] == "succeeded"
-    assert params[1] == '{"rawg_enriched_titles": ["Elden Ring"]}'
-    assert params[2] == "run-1"
-
-
-async def test_mark_failed_records_error():
     pool = FakePool()
     repo = JobRunsRepository(pool)
 
     await repo.mark_failed("run-1", "boom")
 
-    _sql, params = pool.connections[0].executed[0]
-    assert params == ("failed", "boom", "run-1")
-
-
-async def test_mark_rate_limited_serializes_result_summary_sets_status_and_returns_new_seq():
-    pool = FakePool(fetchone_results=[(1,)])
-    repo = JobRunsRepository(pool)
-    summary = {
-        "rawg_enriched_titles": ["Elden Ring"],
-        "opencritic_enriched_titles": [],
-        "opencritic_topup_incomplete": False,
-        "rate_limited_provider": "rawg",
-        "retry_after_seconds": 3600.0,
-        "remaining_count": 4,
-    }
-
-    new_seq = await repo.mark_rate_limited("run-1", summary)
-
-    assert new_seq == 1
     sql, params = pool.connections[0].executed[0]
-    assert "UPDATE job_runs" in sql
-    assert "RETURNING seq" in sql
-    assert params is not None
-    assert json.loads(params[0]) == summary
-    assert params[1] == "run-1"
-
-
-async def test_mark_rate_limited_returns_an_incrementing_seq_across_repeated_calls():
-    """Each call opens its own connection (a fresh ``UPDATE ... RETURNING seq`` against real Postgres),
-    so the fake's per-call return value is set between calls rather than queued up front -- see
-    ``FakePool.connection()``, which hands every new connection a fresh copy of the pool's configured
-    ``fetchone_results``."""
-    pool = FakePool(fetchone_results=[(1,)])
-    repo = JobRunsRepository(pool)
-    summary = {"rawg_enriched_titles": [], "opencritic_enriched_titles": [], "opencritic_topup_incomplete": False}
-
-    first_seq = await repo.mark_rate_limited("run-1", summary)
-    pool._fetchone_results = [(2,)]
-    second_seq = await repo.mark_rate_limited("run-1", summary)
-
-    assert first_seq == 1
-    assert second_seq == 2
-    assert second_seq == first_seq + 1
+    assert "lease_expires_at = NULL" in sql
+    assert params == ("failed", "boom", "run-1")
 
 
 async def test_get_returns_run():

@@ -4,7 +4,6 @@ API. No Authorization header is ever sent in these tests; that omission is the p
 
 from __future__ import annotations
 
-from cryptography.fernet import Fernet
 from fastapi.testclient import TestClient
 
 from curator.app import create_app
@@ -63,7 +62,7 @@ def _item(game_id="g1"):
 
 def _build(collections_repository=None):
     repository = FakeRepository()
-    token_crypto = TokenCrypto(Fernet.generate_key())
+    token_crypto = TokenCrypto(TokenCrypto.generate_key())
     app = create_app(
         _make_settings(),
         repository=repository,

@@ -3,7 +3,9 @@
 Curator is a PlayStation game-curation API. A user links their PlayStation Network (PSN) account, imports
 their entitlements (owned games), and builds named **collections** from them — explicit, ordered lists a
 user curates and can optionally share via a public link. [Librarian](https://github.com/crgolden/Librarian)
-is the web frontend; it never calls PSN, RAWG, or OpenCritic itself — Curator is the only thing that does.
+is the web frontend; it never calls PSN, RAWG, or OpenCritic itself. Those calls come from two places only:
+this API, for anything a user is waiting on, and the background job consumer, for the long-running imports
+and enrichment passes it picks up off the job queue.
 
 ## System overview
 
@@ -89,22 +91,22 @@ sequenceDiagram
     Curator-->>Librarian: 202 {run_id}
 
     Queue->>Worker: deliver message
-    Worker->>DB: try_begin_delivery(run_id, seq) (skips stale redeliveries -- see below)
+    Worker->>DB: claim the run -- compare-and-swap on (run_id, seq), skipping stale redeliveries
     Worker->>PSN: fetch entitlements
     Worker->>DB: canonicalize + upsert library_entries/games (commits before enrichment)
     loop each game
-        Worker->>RAWG: enrich (BYOK or admin-rotated key)
+        Worker->>RAWG: enrich, using this user's own key
         alt key rejected (401/403)
             Worker->>Worker: disable that provider for the rest of this run, retry the same game
-            Worker->>DB: mark_*_key_rejected, audit log entry
+            Worker->>DB: record the rejected key + an audit log entry
         else rate limited (429)
-            Worker->>DB: mark_rate_limited(run_id, result_summary)
+            Worker->>DB: job_runs -> rate_limited, seq bumped, result_summary so far
             Worker->>Queue: schedule continuation message (backoff)
             Note over Worker,Queue: run pauses here; resumes from the same point later
         end
     end
     Worker->>PSN: match + fetch trophy completion
-    Worker->>DB: mark_succeeded(run_id, result_summary)
+    Worker->>DB: job_runs -> succeeded, with the merged result_summary
 
     Librarian->>Curator: GET /library/refresh/{run_id} (polled)
     Curator-->>Librarian: status + result_summary
@@ -114,11 +116,12 @@ Entitlement ingestion commits before enrichment runs, so a rejected key, a rate 
 network error during enrichment costs a user enrichment signal and trophy-match data for that pass — never
 the underlying library import itself.
 
-`job_runs.seq` is a checkpoint counter, bumped every time `mark_rate_limited` records a pause and stamped
-into that pause's continuation message. `try_begin_delivery` is a compare-and-swap on `(run_id, seq)`: a
-message redelivered after its own settlement failed (e.g. a Service Bus lock lapsing mid-run) carries a
-`seq` that a later checkpoint has already superseded, so the guard settles it without reprocessing instead
-of restarting the whole batch.
+`job_runs.seq` is a checkpoint counter, bumped every time a pause is recorded and stamped into that pause's
+continuation message. The worker claims a message with a compare-and-swap on `(run_id, seq)`: a message
+redelivered after its own settlement failed (e.g. a Service Bus lock lapsing mid-run) carries a `seq` that a
+later checkpoint has already superseded, so the guard settles it without reprocessing instead of restarting
+the whole batch. The consumer also holds a lease on the row and renews it while it works, so a run that has
+stopped being renewed is distinguishable from one still in flight.
 
 ## Collection sharing
 
@@ -294,19 +297,19 @@ to a continuation queue once the provider's limit is expected to have lifted, an
 across every resume so the run's final report describes the whole job, not just its last leg. A run can
 cycle through `rate_limited` → `running` more than once before reaching a terminal state.
 
-## Enrichment: BYOK first, then a rotating admin key
+## Enrichment: a user's own key, or the shared cache
 
-Every user may configure their own RAWG/OpenCritic API key (`user_enrichment_keys`, encrypted at rest).
-When a request needs enrichment and no per-user key is configured, Curator falls back to a rotating pool of
-admin-held keys (`RotatingRawgClient`/`RotatingOpenCriticClient`) so enrichment still functions for users
-who haven't brought their own key. A key that a provider rejects (401/403) disables *only that provider*
-for the rest of the run — the run still reaches `succeeded`, `result_summary.rejected_providers` records
-what was skipped, and the rejection is persisted (`rawg_key_rejected_at`/`opencritic_key_rejected_at`) so
+Every user may configure their own RAWG/OpenCritic API key (`user_enrichment_keys`, encrypted at rest), and
+a user's own refresh spends only that key. Without a RAWG key a refresh makes no RAWG calls at all. Without
+an OpenCritic key it still matches against the shared `opencritic_cache` — only extending that cache with
+freshly fetched pages needs a key of its own.
+
+Admin-held keys are used in two places, neither of them a user's refresh: the catalog-wide enrichment run
+and the nightly OpenCritic cache sweep. Both fill the shared caches every user's refresh then reads from,
+which is what keeps enrichment useful for a user who has brought no key.
+
+A key that a provider rejects (401/403) disables *only that provider* for the rest of the run — the run
+still reaches `succeeded`, `result_summary.rejected_providers` records what was skipped, and the rejection
+is persisted (`rawg_key_rejected_at`/`opencritic_key_rejected_at`) so
 `/psn` can prompt the owner to re-enter a dead key without them discovering it via a string of quietly
 degraded refreshes.
-
-## Where this lives
-
-Agent-facing operational detail not shown here — hosting, Key Vault secret names, credential-store
-mappings, ADO project links, work-package history — lives outside this repo in the workspace-root
-`AGENTS/Curator.md` (not version-controlled; see `AGENTS.md`'s explanation of the workspace layout).

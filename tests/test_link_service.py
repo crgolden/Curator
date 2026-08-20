@@ -6,7 +6,6 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 
 import pytest
-from cryptography.fernet import Fernet
 
 from curator.link_service import LinkError, LinkResult, emails_match, link, normalize_email, unlink
 from curator.persistence.crypto import TokenCrypto
@@ -104,7 +103,7 @@ class FakeAgent:
 
 
 def _make_crypto() -> TokenCrypto:
-    return TokenCrypto(Fernet.generate_key())
+    return TokenCrypto(TokenCrypto.generate_key())
 
 
 async def _seed_link(repo: FakeRepository, crypto: TokenCrypto, sub: str) -> None:

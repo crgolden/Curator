@@ -2,17 +2,15 @@
 ``POST/GET /library/refresh`` (queue + poll a library-build job).
 
 ``POST /library/refresh`` publishes to the ``curator-library-refresh`` Service Bus queue and returns
-immediately; the actual ingest -> canonicalize -> persist -> enrich-delta pipeline
-(:class:`curator.library.library_build_orchestrator.LibraryBuildOrchestrator`) runs on
-:mod:`curator.jobs.queue_consumer`'s own schedule, since it can involve many uncached RAWG/OpenCritic/PSN
-calls bound by those services' own rate limits. ``GET /library/refresh/{run_id}`` polls the resulting
-:class:`~curator.jobs.repository.JobRun`'s status.
+immediately; the actual ingest -> canonicalize -> persist -> enrich-delta pipeline runs out of process,
+since it can involve many uncached RAWG/OpenCritic/PSN calls bound by those services' own rate limits.
+``GET /library/refresh/{run_id}`` polls the resulting :class:`~curator.jobs.repository.JobRun`'s status.
 """
 
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
@@ -22,25 +20,13 @@ from curator.audit.repository import ACTION_LIBRARY_REFRESH_REQUESTED, AccountAc
 from curator.catalog.repository import CatalogRepository
 from curator.deps import require_bearer
 from curator.jobs.queue_publisher import QueuePublisher
-from curator.jobs.repository import JobRun, JobRunsRepository
+from curator.jobs.repository import JobRunsRepository
+from curator.jobs.staleness import abandoned_run_reason
 from curator.library.repository import LibraryRepository, LibrarySortField
 from curator.token_validation import TokenClaims
 
 router = APIRouter(prefix="/library", tags=["library"])
 logger = logging.getLogger("curator")
-
-_STALE_RUN_THRESHOLD = timedelta(hours=24)
-
-
-def abandoned_run_reason(run: JobRun, now: datetime) -> str | None:
-    """Why ``run`` should be superseded by a fresh one, or ``None`` if it is still alive."""
-    if run.status == "running":
-        if run.lease_expires_at is not None and run.lease_expires_at > now:
-            return None
-        return "Superseded: the processing lease expired, treated as abandoned."
-    if now - run.updated_at < _STALE_RUN_THRESHOLD:
-        return None
-    return "Superseded: no progress for over 24 hours, treated as abandoned."
 
 
 class LibraryGameResponse(BaseModel):
@@ -209,18 +195,15 @@ async def get_library(
 async def refresh_library(request: Request, claims: TokenClaims = Depends(require_bearer)) -> LibraryRefreshResponse:
     """Queue a library-refresh job for the caller's own PSN entitlements.
 
-    If the caller already has a non-terminal run, its run id is returned instead of enqueueing a second,
-    genuinely concurrent job against the same real, rate-limited PSN/RAWG/OpenCritic APIs -- unless that
-    run has gone stale (see :data:`_STALE_RUN_THRESHOLD`), in which case it's marked failed and superseded
-    by a fresh one rather than permanently blocking this caller from ever refreshing again.
-
-    :returns: The existing non-terminal run's id, or a newly queued run's id.
+    :returns: The caller's live non-terminal run's id if one exists, otherwise a newly queued run's id --
+        a non-terminal run that has gone stale (:data:`~curator.jobs.staleness.STALE_RUN_THRESHOLD`) is
+        marked failed and superseded.
     :raises fastapi.HTTPException: 503, if the job queue isn't configured on this deployment.
     """
     job_runs_repository: JobRunsRepository = request.app.state.job_runs_repository
     active_run = await job_runs_repository.find_active_run(claims.sub, "library_refresh")
     if active_run is not None:
-        reason = abandoned_run_reason(active_run, datetime.now(timezone.utc))
+        reason = abandoned_run_reason(active_run, datetime.now(timezone.utc), noun="refresh")
         if reason is None:
             return LibraryRefreshResponse(run_id=active_run.run_id)
         await job_runs_repository.mark_failed(active_run.run_id, reason)

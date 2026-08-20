@@ -4,7 +4,6 @@
 
 from __future__ import annotations
 
-from cryptography.fernet import Fernet
 from fastapi.testclient import TestClient
 
 from curator.app import create_app
@@ -128,7 +127,7 @@ def _device(device_id="d1", identity_sub="sub-a", kind="usb", console_id=None):
 
 def _build(collections_repository=None):
     repository = FakeRepository()
-    token_crypto = TokenCrypto(Fernet.generate_key())
+    token_crypto = TokenCrypto(TokenCrypto.generate_key())
     validator = FakeTokenValidator()
     app = create_app(
         _make_settings(),
@@ -223,7 +222,7 @@ def test_patches_a_device():
     assert response.status_code == 200
     body = response.json()
     assert body["name"] == "Renamed"
-    assert body["kind"] == "usb"  # untouched -- kind isn't a PATCH field
+    assert body["kind"] == "usb"
 
 
 def test_deletes_a_device():

@@ -5,7 +5,13 @@ from __future__ import annotations
 
 import pytest
 
-from curator.scoring.scoring_service import composite_score, rank_score
+from curator.scoring.scoring_service import (
+    F2P_PENALTY_POINTS,
+    FRANCHISE_POINTS,
+    HIGH_COMPOSITE_POINTS,
+    composite_score,
+    rank_score,
+)
 
 
 def test_all_three_sources_averaged():
@@ -53,13 +59,16 @@ def test_franchise_adds_one_pt():
 
 
 def test_f2p_subtracts_three_pts():
-    assert rank_score(85, "free to play", None) == 0  # 3 - 3
-    assert rank_score(85, "live-service", None) == 0
-    assert rank_score(85, "free-to-play", None) == 0
+    penalized = HIGH_COMPOSITE_POINTS - F2P_PENALTY_POINTS
+    assert rank_score(85, "free to play", None) == penalized
+    assert rank_score(85, "live-service", None) == penalized
+    assert rank_score(85, "free-to-play", None) == penalized
 
 
 def test_f2p_with_high_score_and_franchise():
-    assert rank_score(85, "free to play", "Overwatch") == 1  # 3 + 1 - 3
+    assert rank_score(85, "free to play", "Overwatch") == (
+        HIGH_COMPOSITE_POINTS + FRANCHISE_POINTS - F2P_PENALTY_POINTS
+    )
 
 
 def test_no_multiplayer_not_penalized():

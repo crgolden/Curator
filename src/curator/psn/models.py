@@ -1,8 +1,7 @@
-"""Typed result models returned by ``curator.psn``'s clients, ported verbatim from ``psnpy.models``.
+"""Typed result models returned by ``curator.psn``'s clients.
 
 These are Curator's own stable shapes, decoupled from PSN's raw JSON response shapes, so the interface
-stays constant as the backend evolves. Pure data -- no I/O, no async -- so nothing here changed as part of
-folding ``psnpy`` into Curator beyond the module's new home.
+stays constant as the backend evolves. Pure data -- no I/O, no async.
 """
 
 from __future__ import annotations
@@ -155,7 +154,7 @@ class Entitlement:
     reflects whether the entitlement is currently valid (``activeFlag``). ``name`` is the already-resolved
     display fallback (``gameMeta.name`` or ``titleMeta.name``) most callers want; ``game_meta_name``/
     ``concept_meta_name``/``title_meta_name`` are kept separately (undecided) because
-    ``curator.catalog.canonicalization_service.canonicalize`` needs the distinction between them --
+    canonicalization needs the distinction between them --
     ``game_meta_name`` carries "Bonus Content"/"Demo" suffixes for exclusion checks that
     ``title_meta_name`` (preferred for display) often strips.
 

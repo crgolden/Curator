@@ -62,32 +62,6 @@ class LibraryGameView:
     platforms: tuple[str, ...] = ()
 
 
-@dataclass(frozen=True, slots=True)
-class ContinuationGame:
-    """One game to resume enriching in a library-refresh continuation job -- see
-    ``curator.app._library_refresh_continuation_handler``."""
-
-    game_id: str
-    title: str
-    product_id: str | None
-    title_id: str | None
-    native_ps5: bool
-
-
-@dataclass(frozen=True, slots=True)
-class LibraryEntry:
-    """One row from ``library_entries``: a user's derived ownership of one game."""
-
-    identity_sub: str
-    game_id: str
-    native_ps5: bool
-    ps4_eligible: bool
-    owned_edition: str | None
-    winning_entitlement_id: str | None
-    product_id: str | None
-    title_id: str | None
-
-
 class LibraryRepository:
     """DAO over ``library_entries``.
 
@@ -96,74 +70,6 @@ class LibraryRepository:
 
     def __init__(self, pool: AsyncConnectionPool) -> None:
         self._pool = pool
-
-    async def upsert_entry(
-        self,
-        identity_sub: str,
-        game_id: str,
-        *,
-        native_ps5: bool,
-        ps4_eligible: bool,
-        owned_edition: str | None,
-        winning_entitlement_id: str | None,
-        product_id: str | None,
-        title_id: str | None,
-        is_active: bool = True,
-        platforms: tuple[str, ...] = (),
-    ) -> None:
-        """Record (or refresh) a user's ownership of one game.
-
-        :param identity_sub: The Curator user id (Identity's ``sub``).
-        :param game_id: The shared ``games.game_id`` this entry resolves to.
-        :param native_ps5: Whether the winning edition is PS5-native.
-        :param ps4_eligible: Whether a PS4 edition is playable.
-        :param owned_edition: The winning edition's display name/label, if tracked separately from the
-            game's canonical title.
-        :param winning_entitlement_id: The entitlement id that won the edition tiebreak.
-        :param product_id: The winning edition's PSN product id.
-        :param title_id: The winning edition's PSN store/content title id (npTitleId), used for
-            official-PSN-catalog enrichment lookups.
-        :param is_active: Whether this user can still play the game. Refreshed on every build, so a
-            lapsed PS Plus title flips to ``False`` here instead of being stranded as permanently owned
-            (which is what happened while canonicalization dropped inactive entitlements outright).
-        :param platforms: Every platform this entry owns beyond what ``native_ps5``/``ps4_eligible`` can
-            express (:attr:`~curator.catalog.canonicalization_service.CanonicalGame.platforms`) -- unioned
-            with the PS5/PS4 pair, not a replacement for it.
-        """
-        async with self._pool.connection() as conn, conn.cursor() as cur:
-            await cur.execute(
-                """
-                INSERT INTO library_entries (
-                    identity_sub, game_id, native_ps5, ps4_eligible, owned_edition,
-                    winning_entitlement_id, product_id, title_id, is_active, source, last_seen_at
-                )
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, 'psn', now())
-                ON CONFLICT (identity_sub, game_id) DO UPDATE SET
-                    native_ps5 = EXCLUDED.native_ps5,
-                    ps4_eligible = EXCLUDED.ps4_eligible,
-                    owned_edition = EXCLUDED.owned_edition,
-                    winning_entitlement_id = EXCLUDED.winning_entitlement_id,
-                    product_id = EXCLUDED.product_id,
-                    title_id = EXCLUDED.title_id,
-                    is_active = EXCLUDED.is_active,
-                    source = 'psn',
-                    last_seen_at = now()
-                """,
-                (
-                    identity_sub,
-                    game_id,
-                    native_ps5,
-                    ps4_eligible,
-                    owned_edition,
-                    winning_entitlement_id,
-                    product_id,
-                    title_id,
-                    is_active,
-                ),
-            )
-            await self._sync_entry_platforms(
-                cur, identity_sub, game_id, native_ps5=native_ps5, ps4_eligible=ps4_eligible, platforms=platforms
-            )
 
     @staticmethod
     async def _sync_entry_platforms(
@@ -240,105 +146,6 @@ class LibraryRepository:
             )
             return bool(cur.rowcount)
 
-    async def get_unmatched_game_ids(self, identity_sub: str, game_ids: list[str]) -> list[str]:
-        """Return the subset of ``game_ids`` (already this user's ``library_entries`` rows) with no
-        persisted trophy-title match yet (``np_communication_id IS NULL``).
-
-        The delta check :class:`~curator.library.library_build_orchestrator.LibraryBuildOrchestrator`'s
-        ``match_trophies`` stage uses, mirroring :meth:`~curator.enrichment.repository.EnrichmentRepository
-        .get_unenriched_game_ids` -- so a library rebuild only spends PSN trophy-API calls on games not
-        already resolved (successfully or not; see ``trophy_match_attempted_at`` in
-        ``0014_library_entries_trophy_match.sql``).
-
-        :param identity_sub: The Curator user id (Identity's ``sub``).
-        :param game_ids: Candidate ``games.game_id`` values (e.g. this run's just-canonicalized library).
-        """
-        if not game_ids:
-            return []
-        async with self._pool.connection() as conn, conn.cursor() as cur:
-            await cur.execute(
-                """
-                SELECT game_id FROM library_entries
-                WHERE identity_sub = %s AND game_id = ANY(%s) AND np_communication_id IS NULL
-                """,
-                (identity_sub, game_ids),
-            )
-            rows = await cur.fetchall()
-        return [str(row[0]) for row in rows]
-
-    async def set_trophy_match(
-        self,
-        identity_sub: str,
-        game_id: str,
-        *,
-        np_communication_id: str | None,
-        method: str | None,
-        percent_completed: int | None = None,
-    ) -> None:
-        """Persist one game's matched PSN trophy-title identity and completion for a user.
-
-        Always stamps ``trophy_match_attempted_at``, even when ``np_communication_id`` is ``None`` -- a
-        title with genuinely no trophy set (an app, an F2P title) must not be re-attempted on every future
-        refresh forever just because it has no match to show for it.
-
-        ``trophy_progress_fetched_at`` is stamped only when a percentage is actually supplied, so it means
-        "this number was true as of then" rather than "we last looked". A match attempt that found nothing
-        leaves it null.
-
-        :param identity_sub: The Curator user id (Identity's ``sub``).
-        :param game_id: The shared ``games.game_id`` this entry resolves to.
-        :param np_communication_id: The matched trophy title's id, or ``None`` if no confident match found.
-        :param method: ``"exact"`` (PS4 title-id lookup) or ``"fuzzy"`` (name similarity); ``None`` iff
-            ``np_communication_id`` is also ``None``.
-        :param percent_completed: The matched title's completion percentage, if known.
-        """
-        async with self._pool.connection() as conn, conn.cursor() as cur:
-            await cur.execute(
-                """
-                UPDATE library_entries
-                SET np_communication_id = %s,
-                    trophy_match_method = %s,
-                    trophy_match_attempted_at = now(),
-                    trophy_percent_completed = %s,
-                    trophy_progress_fetched_at = CASE WHEN %s::smallint IS NULL
-                        THEN trophy_progress_fetched_at ELSE now() END
-                WHERE identity_sub = %s AND game_id = %s
-                """,
-                (np_communication_id, method, percent_completed, percent_completed, identity_sub, game_id),
-            )
-
-    async def refresh_trophy_progress(self, identity_sub: str, progress_by_np_id: dict[str, int]) -> int:
-        """Refresh stored completion percentages for games already matched to a trophy title.
-
-        Separate from :meth:`set_trophy_match` because the two happen on very different cadences: identity
-        is resolved once per game and never revisited (that is what ``trophy_match_attempted_at`` protects),
-        while progress changes every time the user plays. A refresh that only touched newly-matched games
-        would leave an established library's percentages frozen at whatever they were the day each game
-        was first seen.
-
-        Keyed by ``np_communication_id`` rather than ``game_id`` because that is what a
-        ``trophy_titles()`` response actually carries -- no second lookup needed to map it back.
-
-        :param identity_sub: The Curator user id (Identity's ``sub``).
-        :param progress_by_np_id: ``{np_communication_id: percent_completed}``.
-        :returns: The number of rows updated.
-        """
-        if not progress_by_np_id:
-            return 0
-        updated = 0
-        async with self._pool.connection() as conn, conn.cursor() as cur:
-            for np_communication_id, percent in progress_by_np_id.items():
-                await cur.execute(
-                    """
-                    UPDATE library_entries
-                    SET trophy_percent_completed = %s, trophy_progress_fetched_at = now()
-                    WHERE identity_sub = %s AND np_communication_id = %s
-                    """,
-                    (percent, identity_sub, np_communication_id),
-                )
-                updated += cur.rowcount
-        return updated
-
     async def clear_trophy_progress(self, identity_sub: str) -> int:
         """Erase every stored trophy percentage for a user, for use when they disable ``harvest_trophies``.
 
@@ -364,35 +171,6 @@ class LibraryRepository:
                 (identity_sub,),
             )
             return cur.rowcount
-
-    async def list_entries(self, identity_sub: str) -> list[LibraryEntry]:
-        """Return every game a user owns, per their most recent library build.
-
-        :param identity_sub: The Curator user id (Identity's ``sub``).
-        """
-        async with self._pool.connection() as conn, conn.cursor() as cur:
-            await cur.execute(
-                """
-                SELECT identity_sub, game_id, native_ps5, ps4_eligible, owned_edition,
-                       winning_entitlement_id, product_id, title_id
-                FROM library_entries WHERE identity_sub = %s
-                """,
-                (identity_sub,),
-            )
-            rows = await cur.fetchall()
-        return [
-            LibraryEntry(
-                identity_sub=str(row[0]),
-                game_id=str(row[1]),
-                native_ps5=row[2],
-                ps4_eligible=row[3],
-                owned_edition=row[4],
-                winning_entitlement_id=row[5],
-                product_id=row[6],
-                title_id=row[7],
-            )
-            for row in rows
-        ]
 
     async def list_entries_with_enrichment(
         self,
@@ -452,7 +230,7 @@ class LibraryRepository:
         async with self._pool.connection() as conn, conn.cursor() as cur:
             await cur.execute(f"SELECT COUNT(*) {base_query}", tuple(params))
             count_row = await cur.fetchone()
-            assert count_row is not None  # COUNT(*) always returns exactly one row
+            assert count_row is not None
             total = count_row[0]
 
             await cur.execute(
@@ -492,38 +270,6 @@ class LibraryRepository:
             for row in rows
         ]
         return games, total
-
-    async def get_games_for_continuation(self, identity_sub: str, game_ids: list[str]) -> list[ContinuationGame]:
-        """Look up title/product id/platform for a subset of a user's library, by game id.
-
-        Used to resume enrichment after a rate limit (``curator.app._library_refresh_continuation_handler``)
-        without re-ingesting/re-canonicalizing from PSN -- these games are already in ``library_entries``
-        from the run that got rate-limited; only the fields
-        ``curator.library.library_build_orchestrator.enrich_games`` needs are re-read here.
-
-        :param identity_sub: The Curator user id (Identity's ``sub``).
-        :param game_ids: The subset of the user's owned game ids to look up.
-        :returns: One :class:`ContinuationGame` per matching row, in no particular order -- callers that
-            need to preserve ``game_ids``' order (so a subsequent rate limit's ``remaining_game_ids``
-            reflects the same resume order) should re-sort by it themselves.
-        """
-        if not game_ids:
-            return []
-        async with self._pool.connection() as conn, conn.cursor() as cur:
-            await cur.execute(
-                """
-                SELECT le.game_id, g.canonical_title, le.product_id, le.title_id, le.native_ps5
-                FROM library_entries le
-                JOIN games g ON g.game_id = le.game_id
-                WHERE le.identity_sub = %s AND le.game_id = ANY(%s)
-                """,
-                (identity_sub, game_ids),
-            )
-            rows = await cur.fetchall()
-        return [
-            ContinuationGame(game_id=str(row[0]), title=row[1], product_id=row[2], title_id=row[3], native_ps5=row[4])
-            for row in rows
-        ]
 
     async def list_categories(self, identity_sub: str) -> list[str]:
         """Return the distinct, sorted set of categories (resolved genres) present in a user's

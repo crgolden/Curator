@@ -17,7 +17,6 @@ from datetime import datetime
 from typing import Any, ClassVar
 
 import httpx
-from cryptography.fernet import Fernet
 from fastapi.testclient import TestClient
 from opentelemetry.instrumentation.httpx import RequestInfo
 from opentelemetry.sdk.trace import TracerProvider
@@ -170,7 +169,7 @@ def test_register_otlp_providers_registers_exactly_once_across_repeated_calls(mo
 
     assert _FakeTracerProvider.instances == 1
     assert _FakeMeterProvider.instances == 1
-    assert _FakeInstrumentor.instrument_calls == 2  # psycopg + requests, once each
+    assert _FakeInstrumentor.instrument_calls == 2
 
 
 def test_register_otlp_providers_shortens_the_metric_export_interval(monkeypatch):
@@ -183,7 +182,7 @@ def test_register_otlp_providers_shortens_the_metric_export_interval(monkeypatch
     telemetry._register_otlp_providers("https://alloy.example.test:4317")
 
     assert _FakeMetricReader.last_kwargs == {"export_interval_millis": telemetry._METRIC_EXPORT_INTERVAL_MILLIS}
-    assert telemetry._METRIC_EXPORT_INTERVAL_MILLIS < 60_000  # strictly shorter than the SDK default
+    assert telemetry._METRIC_EXPORT_INTERVAL_MILLIS < 60_000
 
 
 def test_register_otlp_providers_gives_both_exporters_a_timeout_longer_than_the_grpc_default(monkeypatch):
@@ -211,7 +210,7 @@ def test_configure_elasticsearch_logging_keeps_otlp_exporter_failures_out_of_ela
             telemetry._OTLP_EXPORTER_LOGGER, logging.ERROR, __file__, 1, "Failed to export metrics", None, None
         )
         application_record = logging.LogRecord(
-            "curator.jobs.queue_consumer", logging.ERROR, __file__, 1, "a real failure", None, None
+            "curator.jobs.queue_publisher", logging.ERROR, __file__, 1, "a real failure", None, None
         )
 
         assert not queue_handler.filter(exporter_record)
@@ -222,8 +221,13 @@ def test_configure_elasticsearch_logging_keeps_otlp_exporter_failures_out_of_ela
 
 def test_shutdown_telemetry_is_a_noop_when_never_configured(monkeypatch):
     monkeypatch.setattr(telemetry, "_otel_configured", False)
+    tracer_provider_before = telemetry.trace.get_tracer_provider()
+    meter_provider_before = telemetry.metrics.get_meter_provider()
 
-    telemetry.shutdown_telemetry()  # must not raise, must not touch trace/metrics namespaces
+    telemetry.shutdown_telemetry()
+
+    assert telemetry.trace.get_tracer_provider() is tracer_provider_before
+    assert telemetry.metrics.get_meter_provider() is meter_provider_before
 
 
 def test_shutdown_telemetry_shuts_down_both_providers_when_configured(monkeypatch):
@@ -259,7 +263,7 @@ def test_shutdown_telemetry_swallows_a_failing_provider_shutdown(monkeypatch):
     telemetry.trace.set_tracer_provider(_BoomProvider())
     telemetry.metrics.set_meter_provider(_BoomProvider())
 
-    telemetry.shutdown_telemetry()  # must not raise
+    telemetry.shutdown_telemetry()
 
 
 def test_configure_tracing_and_metrics_noop_when_alloy_endpoint_absent(monkeypatch):
@@ -415,12 +419,27 @@ def test_format_log_record_produces_flat_log_level_and_service_name():
     doc = telemetry.format_log_record(record)
 
     assert doc["message"] == "something happened: detail"
-    assert doc["log.level"] == "Warning"  # fleet's Serilog/ECS spelling, not Python's own "WARNING"
+    assert doc["log.level"] == "Warning"
     assert doc["service.name"] == "crgolden-curator"
     assert doc["logger.name"] == "curator.psn_routes"
-    assert "log" not in doc  # flat key, never a nested `log: {level: ...}` object
+    assert "log" not in doc
     assert "error.stack_trace" not in doc
-    datetime.fromisoformat(doc["@timestamp"])  # parses without raising
+
+
+def test_format_log_record_timestamp_is_parseable_iso_8601():
+    record = logging.LogRecord(
+        name="curator.psn_routes",
+        level=logging.WARNING,
+        pathname=__file__,
+        lineno=1,
+        msg="something happened",
+        args=(),
+        exc_info=None,
+    )
+
+    doc = telemetry.format_log_record(record)
+
+    assert datetime.fromisoformat(doc["@timestamp"]).tzinfo is not None
 
 
 def test_format_log_record_includes_stack_trace_on_exception():
@@ -503,7 +522,7 @@ def test_create_app_health_check_unaffected_by_telemetry_wiring(monkeypatch):
     monkeypatch.setattr(telemetry, "_es_logging_configured", False)
 
     repository = FakeRepository()
-    crypto = TokenCrypto(Fernet.generate_key())
+    crypto = TokenCrypto(TokenCrypto.generate_key())
     app = create_app(
         _SETTINGS_NO_TELEMETRY,
         repository=repository,
@@ -528,6 +547,16 @@ def _traced_span(url_attribute_keys=("http.url", "url.full")):
     tracer = provider.get_tracer(__name__)
     attributes = {key: "https://api.rawg.io/api/games?key=super-secret&search=Foo" for key in url_attribute_keys}
     span = tracer.start_span("test-span", attributes=attributes)
+    return span, exporter
+
+
+def _ended_span(attributes):
+    """A span that has already ended, so ``is_recording()`` is False -- returns (span, exporter)."""
+    exporter = InMemorySpanExporter()
+    provider = TracerProvider()
+    provider.add_span_processor(SimpleSpanProcessor(exporter))
+    span = provider.get_tracer(__name__).start_span("test-span", attributes=attributes)
+    span.end()
     return span, exporter
 
 
@@ -568,12 +597,8 @@ async def test_redact_rawg_key_from_span_leaves_non_rawg_hosts_untouched():
 
 
 async def test_redact_rawg_key_from_span_noop_when_span_not_recording():
-    exporter = InMemorySpanExporter()
-    provider = TracerProvider()
-    provider.add_span_processor(SimpleSpanProcessor(exporter))
-    tracer = provider.get_tracer(__name__)
-    span = tracer.start_span("test-span", attributes={"http.url": "https://api.rawg.io/api/games?key=secret"})
-    span.end()  # already ended -- is_recording() is now False
+    span, exporter = _ended_span(attributes={"http.url": "https://api.rawg.io/api/games?key=secret"})
+    assert not span.is_recording()
 
     request_info = RequestInfo(
         method=b"GET",
@@ -582,4 +607,8 @@ async def test_redact_rawg_key_from_span_noop_when_span_not_recording():
         stream=None,
         extensions=None,
     )
-    await telemetry._redact_rawg_key_from_span(span, request_info)  # must not raise
+
+    await telemetry._redact_rawg_key_from_span(span, request_info)
+
+    (recorded,) = exporter.get_finished_spans()
+    assert recorded.attributes["http.url"] == "https://api.rawg.io/api/games?key=secret"

@@ -1,10 +1,8 @@
-"""Console-capacity-constrained bin-pack, generalized from ``ps_assign_ps5.py``/``ps_assign_ps4.py``'s
-greedy fill -- and, since WP3, genuinely multi-bin: a console's own built-in storage and each of its
+"""Console-capacity-constrained, multi-bin bin-pack: a console's own built-in storage and each of its
 currently-attached :class:`~curator.collections.repository.StorageDevice` rows are separate capacity
-pools, never pooled into one combined number. "Do not club internal and M.2 together as one pool; they
-share only the playability rule" is the WP3 requirement this generalizes for -- console-internal and an
-attached M.2 drive are two different bins that happen to allow the same titles, while an attached USB
-drive is a third bin that allows fewer.
+pools, never pooled into one combined number. Console-internal and an attached M.2 drive are two
+different bins that happen to allow the same titles, while an attached USB drive is a third bin that
+allows fewer -- they share only the playability rule, never a pool.
 
 Multi-console overflow spilling across several *consoles* remains a
 :mod:`curator.collections.collection_orchestrator` concern, not this module's -- this only packs across

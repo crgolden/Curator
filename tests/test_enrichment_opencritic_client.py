@@ -5,7 +5,7 @@ from __future__ import annotations
 import httpx
 import pytest
 
-from curator.enrichment.opencritic_client import OpenCriticApiError, OpenCriticClient, OpenCriticNetworkError
+from curator.enrichment.opencritic_client import OpenCriticApiError, OpenCriticClient
 
 
 class RequestRecorder:
@@ -46,95 +46,6 @@ async def test_provider_detail_redacts_the_api_key_if_the_body_echoes_it():
     assert "[redacted]" in exc_info.value.provider_detail
 
 
-async def test_fetch_platform_games_stops_on_short_page():
-    page = [{"id": 1, "name": "Game A", "topCriticScore": 85, "tier": "Strong", "percentRecommended": 90}]
-    recorder = RequestRecorder([httpx.Response(200, json=page)])
-    client = _client(recorder)
-
-    result = await client.fetch_platform_games("ps5")
-
-    assert len(result.games) == 1
-    assert result.games[0].oc_game_id == 1
-    assert result.games[0].name == "Game A"
-    assert result.exhausted is True
-    assert result.next_skip == 0
-    assert recorder.requests[0].headers["x-rapidapi-key"] == "test-key"
-
-
-async def test_fetch_platform_games_negative_score_becomes_none():
-    page = [{"id": 1, "name": "Unscored Game", "topCriticScore": -1, "tier": "", "percentRecommended": None}]
-    recorder = RequestRecorder([httpx.Response(200, json=page)])
-    client = _client(recorder)
-
-    result = await client.fetch_platform_games("ps5")
-
-    assert result.games[0].top_critic_score is None
-
-
-async def test_fetch_platform_games_paginates_full_pages():
-    full_page = [
-        {"id": i, "name": f"Game {i}", "topCriticScore": 70, "tier": "Fair", "percentRecommended": 50}
-        for i in range(20)
-    ]
-    short_page = [{"id": 100, "name": "Last Game", "topCriticScore": 70, "tier": "Fair", "percentRecommended": 50}]
-    recorder = RequestRecorder([httpx.Response(200, json=full_page), httpx.Response(200, json=short_page)])
-    client = _client(recorder)
-
-    result = await client.fetch_platform_games("ps4")
-
-    assert len(result.games) == 21
-    assert result.exhausted is True
-    assert recorder.requests[0].url.params["skip"] == "0"
-    assert recorder.requests[1].url.params["skip"] == "20"
-
-
-async def test_fetch_platform_games_stops_when_rate_limit_low():
-    page = [{"id": 1, "name": "Game A", "topCriticScore": 80, "tier": "Strong", "percentRecommended": 80}] * 20
-    recorder = RequestRecorder([httpx.Response(200, json=page, headers={"X-RateLimit-Requests-Remaining": "5"})])
-    client = _client(recorder)
-
-    result = await client.fetch_platform_games("ps5")
-
-    assert len(recorder.requests) == 1
-    assert result.exhausted is False
-    assert result.next_skip == 20
-
-
-async def test_fetch_platform_games_empty_response_stops_immediately():
-    recorder = RequestRecorder([httpx.Response(200, json=[])])
-    client = _client(recorder)
-
-    result = await client.fetch_platform_games("ps5")
-
-    assert result.games == []
-    assert result.exhausted is True
-    assert result.next_skip == 0
-
-
-async def test_fetch_platform_games_respects_start_skip():
-    recorder = RequestRecorder([httpx.Response(200, json=[])])
-    client = _client(recorder)
-
-    await client.fetch_platform_games("ps5", start_skip=3800)
-
-    assert recorder.requests[0].url.params["skip"] == "3800"
-
-
-async def test_fetch_platform_games_respects_max_pages():
-    full_page = [
-        {"id": i, "name": f"Game {i}", "topCriticScore": 70, "tier": "Fair", "percentRecommended": 50}
-        for i in range(20)
-    ]
-    recorder = RequestRecorder([httpx.Response(200, json=full_page), httpx.Response(200, json=full_page)])
-    client = _client(recorder)
-
-    result = await client.fetch_platform_games("ps5", max_pages=1)
-
-    assert len(recorder.requests) == 1
-    assert result.exhausted is False
-    assert result.next_skip == 20
-
-
 async def test_validate_key_succeeds_on_200():
     recorder = RequestRecorder([httpx.Response(200, json=[])])
     client = _client(recorder)
@@ -155,85 +66,25 @@ async def test_validate_key_raises_sanitized_error_on_401():
 
     assert exc_info.value.status_code == 401
     assert "invalid key" not in str(exc_info.value)
-
-
-async def test_fetch_platform_games_raises_sanitized_error_on_non_2xx():
-    recorder = RequestRecorder([httpx.Response(401, json={"message": "invalid key"})])
-    client = _client(recorder)
-
-    with pytest.raises(OpenCriticApiError) as exc_info:
-        await client.fetch_platform_games("ps5")
-
-    assert exc_info.value.status_code == 401
-    assert "invalid key" not in str(exc_info.value)
     assert exc_info.value.__cause__ is None
 
 
-async def test_fetch_platform_games_parses_retry_after_seconds_header():
+async def test_parses_retry_after_seconds_header():
     recorder = RequestRecorder([httpx.Response(429, headers={"Retry-After": "60"})])
     client = _client(recorder)
 
     with pytest.raises(OpenCriticApiError) as exc_info:
-        await client.fetch_platform_games("ps5")
+        await client.validate_key()
 
     assert exc_info.value.status_code == 429
     assert exc_info.value.retry_after_seconds == 60.0
 
 
-async def test_fetch_platform_games_retry_after_seconds_none_when_header_absent():
+async def test_retry_after_seconds_none_when_header_absent():
     recorder = RequestRecorder([httpx.Response(500)])
     client = _client(recorder)
 
     with pytest.raises(OpenCriticApiError) as exc_info:
-        await client.fetch_platform_games("ps5")
+        await client.validate_key()
 
     assert exc_info.value.retry_after_seconds is None
-
-
-def _full_page(name: str) -> list[dict]:
-    """A page with exactly DEFAULT_PAGE_SIZE (20) entries, so pagination continues to a second page
-    instead of treating a short first page as end-of-catalog."""
-    return [
-        {"id": i, "name": f"{name} {i}", "topCriticScore": 80, "tier": "Fair", "percentRecommended": 60}
-        for i in range(20)
-    ]
-
-
-async def test_fetch_platform_games_attaches_partial_progress_to_api_error():
-    """A hard pagination error mid-sweep (e.g. an auth rejection on page 2) must not discard page 1's
-    already-fetched games -- see EnrichmentService._refresh_opencritic_platform, which persists these."""
-    page_one = _full_page("Game")
-    recorder = RequestRecorder([httpx.Response(200, json=page_one), httpx.Response(401, json={"error": "bad key"})])
-    client = _client(recorder)
-
-    with pytest.raises(OpenCriticApiError) as exc_info:
-        await client.fetch_platform_games("ps5")
-
-    assert exc_info.value.partial_games is not None
-    assert len(exc_info.value.partial_games) == 20
-    assert exc_info.value.partial_next_skip == 20
-
-
-async def test_fetch_platform_games_wraps_a_network_error_with_partial_progress():
-    page_one = _full_page("Game")
-
-    def raise_network_error(request: httpx.Request) -> httpx.Response:
-        raise httpx.ConnectError("boom", request=request)
-
-    call_count = 0
-
-    def recorder(request: httpx.Request) -> httpx.Response:
-        nonlocal call_count
-        call_count += 1
-        if call_count == 1:
-            return httpx.Response(200, json=page_one)
-        return raise_network_error(request)
-
-    client = OpenCriticClient(httpx.AsyncClient(transport=httpx.MockTransport(recorder)), rapidapi_key="test-key")
-
-    with pytest.raises(OpenCriticNetworkError) as exc_info:
-        await client.fetch_platform_games("ps5")
-
-    assert len(exc_info.value.partial_games) == 20
-    assert exc_info.value.partial_next_skip == 20
-    assert isinstance(exc_info.value.__cause__, httpx.ConnectError)

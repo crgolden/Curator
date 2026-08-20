@@ -1,7 +1,7 @@
 """Mutating PSN social/chat operations, gated by the mutation-safety wall (:mod:`curator.psn.safety`).
 
-Ported from ``psnpy.client.PsnAgent``'s mutating methods. ``send_message`` and ``kick_from_group`` are
-implemented and tested but deliberately unrouted -- see ``AGENTS/DESIGNS.md`` §7 item 7.
+``send_message`` and ``kick_from_group`` are implemented and tested but deliberately unrouted -- see
+``AGENTS/DESIGNS.md`` §7 item 7.
 """
 
 from __future__ import annotations

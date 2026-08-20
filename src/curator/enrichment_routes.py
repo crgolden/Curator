@@ -1,17 +1,13 @@
-"""``POST /enrichment/runs`` -- queues a global catalog re-enrichment job. Admin-scoped.
+"""``POST /enrichment/runs`` (queue a global catalog re-enrichment job) and ``GET
+/enrichment/runs/latest``/``{run_id}`` (poll one). Admin-scoped.
 
-Publishes to the ``curator-enrichment`` Service Bus queue and returns immediately; the actual work
-(:mod:`curator.app`'s ``_enrichment_run_handler``) runs on :mod:`curator.jobs.queue_consumer`'s own
-schedule -- this is exactly the kind of bursty, rate-limited backfill the migration plan's rate-limit
-section calls for moving to a background worker rather than an inline-blocking request. That handler
-runs four passes: an OpenCritic cache refresh, franchise reclassification for every catalog game,
-``aaa_tier`` reclassification for every already-enriched game, and best-effort full enrichment
-(RAWG + OpenCritic; no PSN-catalog signal, which needs a per-user authenticated session this
-admin-only pass doesn't have) for games nobody has enriched yet.
+Publishing to the ``curator-enrichment`` Service Bus queue is all this API does; a separate worker
+service consumes that queue and writes the ``job_runs`` row the GET routes read.
 """
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -20,6 +16,7 @@ from pydantic import BaseModel
 from curator.deps import require_admin
 from curator.jobs.queue_publisher import QueuePublisher
 from curator.jobs.repository import JobRunsRepository
+from curator.jobs.staleness import abandoned_run_reason
 from curator.token_validation import TokenClaims
 
 router = APIRouter(prefix="/enrichment", tags=["enrichment"])
@@ -47,13 +44,19 @@ async def start_enrichment_run(
 ) -> EnrichmentRunResponse:
     """Queue a global catalog re-enrichment job. Admin-scoped.
 
-    Refreshes the OpenCritic cache, reclassifies franchise for every catalog game and ``aaa_tier``
-    for every already-enriched game against the current curation-rule tables, and best-effort
-    enriches (RAWG + OpenCritic) any game nobody has enriched yet.
-
-    :returns: The new job's run id.
+    :returns: The live in-flight run's id if one exists, otherwise a newly queued run's id -- an
+        in-flight run that has gone stale (:data:`~curator.jobs.staleness.STALE_RUN_THRESHOLD`) is
+        marked failed and superseded.
     :raises fastapi.HTTPException: 503, if the job queue isn't configured on this deployment.
     """
+    job_runs_repository: JobRunsRepository = request.app.state.job_runs_repository
+    active_run = await job_runs_repository.find_active_global_run("enrichment")
+    if active_run is not None:
+        reason = abandoned_run_reason(active_run, datetime.now(timezone.utc), noun="enrichment run")
+        if reason is None:
+            return EnrichmentRunResponse(run_id=active_run.run_id)
+        await job_runs_repository.mark_failed(active_run.run_id, reason)
+
     queue_publisher: QueuePublisher | None = request.app.state.queue_publisher
     if queue_publisher is None:
         raise HTTPException(status_code=503, detail="Enrichment queue is not configured.")

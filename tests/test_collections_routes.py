@@ -5,7 +5,6 @@ from __future__ import annotations
 from dataclasses import replace
 
 import psycopg
-from cryptography.fernet import Fernet
 from fastapi.testclient import TestClient
 
 from curator.app import create_app
@@ -200,7 +199,7 @@ class FakeCollectionsRepository:
 
 def _build(orchestrator=None, collections_repository=None, repository=None, trophy_client_factory=None):
     repository = repository if repository is not None else FakeRepository()
-    token_crypto = TokenCrypto(Fernet.generate_key())
+    token_crypto = TokenCrypto(TokenCrypto.generate_key())
     validator = FakeTokenValidator()
     app = create_app(
         _make_settings(),
@@ -334,7 +333,7 @@ def test_preview_never_resolves_trophy_completion_at_request_time():
     orchestrator nothing and the row's own value stands.
     """
     repository = FakeRepository()
-    crypto = TokenCrypto(Fernet.generate_key())
+    crypto = TokenCrypto(TokenCrypto.generate_key())
     _seed_link(repository, crypto, "sub-a", harvest_trophies=True)
     factory = FakeTrophyClientFactory()
     factory.linked["sub-a"] = FakeTrophyClient(titles=[])

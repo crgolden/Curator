@@ -13,13 +13,16 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 
-from curator.collections.repository import CollectionsRepository, StorageDevice
+from curator.collections.repository import (
+    CollectionsRepository,
+    StorageDevice,
+    StorageDeviceKind,
+    storage_device_kind,
+)
 from curator.deps import require_bearer
 from curator.token_validation import TokenClaims
 
 router = APIRouter(prefix="/storage-devices", tags=["storage-devices"])
-
-_VALID_KINDS = ("m2", "usb")
 
 
 class StorageDeviceRequest(BaseModel):
@@ -88,6 +91,13 @@ def _to_response(device: StorageDevice) -> StorageDeviceResponse:
     )
 
 
+def _storage_device_kind(value: str) -> StorageDeviceKind:
+    try:
+        return storage_device_kind(value)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail='kind must be "m2" or "usb".') from exc
+
+
 async def _require_owned_console(repository: CollectionsRepository, identity_sub: str, console_id: str) -> None:
     """:raises fastapi.HTTPException: 400, if ``console_id`` doesn't belong to the caller -- matches how
     ``collections_routes.save_collection`` validates a collection's own ``console_id`` before it can be
@@ -105,15 +115,14 @@ async def create_storage_device(
     :raises fastapi.HTTPException: 400, if ``kind`` isn't ``"m2"``/``"usb"``, or ``console_id`` is given
         but isn't one of the caller's own consoles.
     """
-    if body.kind not in _VALID_KINDS:
-        raise HTTPException(status_code=400, detail='kind must be "m2" or "usb".')
+    kind = _storage_device_kind(body.kind)
     repository: CollectionsRepository = request.app.state.collections_repository
     if body.console_id is not None:
         await _require_owned_console(repository, claims.sub, body.console_id)
     device = await repository.create_storage_device(
         claims.sub,
         name=body.name,
-        kind=body.kind,
+        kind=kind,
         capacity_gb=body.capacity_gb,
         buffer_gb=body.buffer_gb,
         console_id=body.console_id,

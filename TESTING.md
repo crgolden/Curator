@@ -57,9 +57,21 @@ If `pip install -e ".[dev]"` doesn't resolve every dependency in your environmen
 packages directly:
 
 ```powershell
-python -m pip install pytest httpx fastapi uvicorn joserfc cryptography "psycopg[binary]" psycopg-pool redis azure-servicebus pycountry
+python -m pip install pytest pytest-asyncio pytest-xdist httpx fastapi uvicorn joserfc cryptography "psycopg[binary]" psycopg-pool redis azure-servicebus pycountry
 python -m pytest tests -q
 ```
+
+`pytest-xdist` is not optional in that list: `pyproject.toml`'s `addopts` passes `-n auto --dist loadgroup`,
+so without it every `pytest` invocation fails with `error: unrecognized arguments: -n --dist`. The suite
+runs in parallel by default because its cost is diffuse per-test overhead rather than any one slow test.
+
+To run serially — debugging a single test, or reading output in source order — pass `-n 0`:
+
+```powershell
+python -m pytest tests/test_routes.py -q -n 0
+```
+
+`-p no:xdist` does **not** work for this: disabling the plugin leaves the `addopts` flags unrecognized.
 
 `tests/test_telemetry.py` covers `curator.telemetry`: both legs (OTLP traces/metrics, Elasticsearch
 logging) stay no-op when their settings are absent; the module-level registration guards make repeated
@@ -74,18 +86,28 @@ no `unittest.mock`.
 
 `tests/test_schema.py` is the one place in this suite that touches a real PostgreSQL instance. It is
 gated on the `CURATOR_TEST_DATABASE_URL` environment variable via a module-level `pytest.mark.skipif`:
-unset (the default — nothing to configure for a plain `python -m pytest` run, and CI never sets it), every
-test in the module is skipped rather than run against a fake. When set, it applies **every**
-`db/migrations/*.sql` file in filename order plus each test's inserts inside one transaction per test,
-then rolls that transaction back in teardown — so a correctly-configured database is left exactly as it
-started.
+unset (the default for a plain local `python -m pytest` run), every test in the module is skipped rather
+than run against a fake. CI does set it, against the `postgres:17` service container described below.
+
+When set, a **session**-scoped fixture applies every `db/migrations/*.sql` file in filename order, once,
+inside a transaction that is never committed. Each test then runs inside a nested `SAVEPOINT` that is
+rolled back in teardown, and the session-wide transaction is rolled back when the module finishes — so a
+correctly-configured database is left exactly as it started, and nothing here ever commits.
+
+Replaying all the migrations per test instead cost roughly 11 seconds per test; building the schema once
+takes the module from ~286 s to under 2 s.
 
 Because the fixture issues plain `CREATE TABLE`, the target has to be **empty**; it cannot run against a
 database that already holds the schema.
 
+The module carries an `xdist_group` mark so `--dist loadgroup` keeps all of its tests on one worker. They
+share a single connection holding an uncommitted schema, so a second worker re-applying the same
+`CREATE TABLE` statements would block on that connection's locks rather than fail cleanly.
+
 **Only ever point `CURATOR_TEST_DATABASE_URL` at a disposable, throwaway database created solely for this
-purpose — never a shared or production database.** The rollback-per-test discipline above is what makes
-that safe to do repeatedly, but it still assumes the target database is not something else's.
+purpose — never a shared or production database, and never at the `curator` dev database itself.** The
+rollback discipline above is what makes that safe to do repeatedly, but it still assumes the target
+database is not something else's.
 
 What it checks: every table the migration is expected to create exists; representative CHECK constraints
 reject an out-of-enum value (`game_assignments.collection_status`, `user_consoles.platform`,
@@ -121,10 +143,19 @@ Then point `CURATOR_TEST_DATABASE_URL` at it, run the tests (they roll back, lea
 ## Testing a migration before it reaches CI
 
 **A migration is not done when the `.sql` file is written. It is done when it has run against the local
-dev database.** Nothing else in this repo's pipeline will catch a broken one first: CI never runs
-`test_schema.py` (there is no PostgreSQL service in that job), so an untested migration's first real
-execution is the deploy job, against the production database. Do not commit a migration that has not been
-applied locally.
+dev database.** Do not commit a migration that has not been applied locally.
+
+CI now runs `test_schema.py` against a `postgres:17` service container (see the CI section below), so a
+migration that breaks the schema contract is caught before deploy rather than by it. That is a backstop,
+not a substitute: CI only ever exercises the **fresh** path, because a service container starts empty. The
+incremental path — the one the deploy job actually performs, against a database built by older migrations —
+still only happens locally.
+
+That gap is not theoretical. Migration `0039` was rehearsed against production inside a rolled-back
+transaction, passed, and still broke `test_deleting_a_user_cascades_every_per_user_table` by adding a
+`NOT NULL` column the test's `INSERT` did not supply. Running it locally is what surfaced that, and it
+also surfaced five *pre-existing* failures in this suite that nobody had seen — the cost of a suite that
+only ran when someone opted in.
 
 Test both paths — they catch different things:
 
@@ -150,10 +181,20 @@ on a base nobody has exercised.
 installs Curator's runtime and dev dependencies directly (rather than `pip install -e .`) so the job
 doesn't depend on any cross-repo checkout.
 
-The `test` job runs, in order: Ruff lint, Ruff format check, mypy, then the unit test suite with coverage
+The `test` job runs, in order: Ruff lint, Ruff format check, mypy, then the whole test suite with coverage
 (`--cov=src/curator --cov-report=xml:coverage.xml`), then a SonarCloud analysis over `coverage.xml`. Each
-lint/type-check step is its own named step so a failure is attributable at a glance. `CURATOR_TEST_DATABASE_URL`
-is never set in the workflow, so `test_schema.py` auto-skips; there is no PostgreSQL service in this job.
+lint/type-check step is its own named step so a failure is attributable at a glance.
+
+**The job carries a `postgres:17` service container, so `test_schema.py` runs in CI rather than skipping.**
+`POSTGRES_DB` gives it the empty database the fixture requires — the fixture applies every migration
+itself once per session and rolls back each test's savepoint, so one container serves the whole suite. The credentials are throwaway:
+the container is bound to localhost and destroyed with the job, so they live in the workflow rather than
+in repository variables. They are declared once in the job's `env` block and referenced by both the
+service and the test step, because the two would otherwise drift and the failure would read as an
+authentication error rather than a typo.
+
+`pg_isready` is the container's health check; without it the test step can start before Postgres accepts
+connections and fail intermittently on a cold runner.
 
 ## Local SonarCloud analysis
 
@@ -183,5 +224,9 @@ that floor is meant to be a real promise.
 `conf/sonar-scanner.properties`, so neither belongs on the command line: the CLI ships its own JRE 21 and
 uses it even though `java` is not on PATH.
 
-Reading the resulting quality gate — and why a green CI run and a just-scanned project both mislead — is
-fleet-wide, and lives in the workspace `AGENTS/TOOLING.md`'s SonarScanner CLI section.
+Two things mislead when you go to read the result. A **green CI run is not a passed quality gate** — the
+workflow does not set `sonar.qualitygate.wait`, so the Sonar step submits the analysis and reports success
+whatever the gate later says. And a **just-scanned project can under-report**: security findings are
+published on a lag behind the main analysis, so `ce/task` returning SUCCESS does not mean the issue list is
+complete. When the measures endpoint and the issue list disagree, believe the measures — that is what the
+gate evaluates — and re-query rather than calling the project clean.

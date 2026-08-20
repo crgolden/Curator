@@ -3,8 +3,7 @@
 Curator resolves every piece of runtime configuration (database URL, token-encryption key, ...) the
 same way: prefer an explicit argument, then an environment variable, then a local ``.env`` file. This
 module implements that priority once so :mod:`curator.persistence.connection` and
-:mod:`curator.persistence.crypto` don't each re-derive it. Mirrors ``psnpy.config``'s ``resolve_npsso``
-shape, generalized to an arbitrary setting rather than just the npsso token.
+:mod:`curator.persistence.crypto` don't each re-derive it.
 """
 
 from __future__ import annotations

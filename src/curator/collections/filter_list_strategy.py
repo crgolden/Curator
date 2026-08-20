@@ -1,6 +1,5 @@
-"""Unconstrained genre/score/tier filter list, generalized from the hardcoded "Criterion"/"Blockbuster"
-genre-set classifiers in ``ps_assign_ps4.py`` -- replaced by a data-driven
-:class:`~curator.collections.collection_spec.CollectionSpec` filter instead of two fixed genre sets.
+"""Unconstrained genre/score/tier filter list, driven by a
+:class:`~curator.collections.collection_spec.CollectionSpec` filter.
 """
 
 from __future__ import annotations
@@ -66,8 +65,8 @@ def apply_filter_list(
         ``spec.sort_order`` for the sort (:func:`curator.collections.sort_order.resolve_sort_key`; unset
         keeps this function's own long-standing default, composite score descending with rank score as
         tiebreak).
-    :param completion_available: Whether trophy-completion data could actually be fetched for this run (see
-        ``curator.psn.trophy_completion.CompletionResult.available``). ``spec.min_percent_completed`` is only
+    :param completion_available: Whether trophy-completion data could actually be fetched for this run.
+        ``spec.min_percent_completed`` is only
         applied when this is ``True`` -- otherwise a PSN outage, a disabled ``harvest_trophies`` preference,
         or a broken link would leave every candidate's ``percent_completed`` as ``None`` and the predicate
         would exclude everything, silently turning a saved collection empty for reasons unrelated to the

@@ -12,7 +12,6 @@ from __future__ import annotations
 import asyncio
 from datetime import datetime, timedelta, timezone
 
-from cryptography.fernet import Fernet
 from fastapi.testclient import TestClient
 
 from curator.app import create_app
@@ -239,7 +238,7 @@ def _build(
     app = create_app(
         settings,
         repository=repository,
-        token_crypto=TokenCrypto(Fernet.generate_key()),
+        token_crypto=TokenCrypto(TokenCrypto.generate_key()),
         token_validator=validator,
         profile_repository=profile_repository,
         follow_repository=follow_repository,
@@ -737,7 +736,7 @@ def test_collections_200_with_data_when_public_and_show_collections_true():
         min_score=None,
         aaa_tier_filter=None,
         sort_order=None,
-        visibility="public",  # a non-owner viewer only ever sees "public" collections (0019)
+        visibility="public",
         item_count=5,
     )
     collections_repository = FakeCollectionsRepository({SUB_A: [definition]})

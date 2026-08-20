@@ -1,5 +1,3 @@
-"""Curator's enrichment slice: RAWG + OpenCritic + official PSN catalog metadata, merged onto the shared
-game catalog built by :mod:`curator.catalog`.
-"""
+"""Curator's enrichment slice: validating a user's own RAWG and OpenCritic API keys."""
 
 from __future__ import annotations

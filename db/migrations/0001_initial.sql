@@ -81,7 +81,7 @@ CREATE TABLE app_users
 );
 
 -- Each user's link to their PSN account. token_response_enc holds the folded-in psnpy token dict (access
--- + refresh tokens and their expiries), Fernet-encrypted before it ever reaches SQL — see
+-- + refresh tokens and their expiries), AES-256-GCM-encrypted before it ever reaches SQL — see
 -- curator.persistence.crypto.TokenCrypto and curator.persistence.db_token_store.DbTokenStore.
 -- No npsso column: the npsso cookie is a one-time bootstrap credential, never persisted. No email
 -- column: same hard privacy tenet as app_users.

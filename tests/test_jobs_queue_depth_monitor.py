@@ -42,6 +42,10 @@ def _clear_queue_depth_gauges():
     telemetry._QUEUE_DEAD_LETTER_COUNTS.clear()
 
 
+_POLL_INTERVAL_SECONDS = 0.01
+_LONG_ENOUGH_FOR_ONE_POLL_CYCLE = _POLL_INTERVAL_SECONDS * 5
+
+
 async def test_poll_once_records_active_and_dead_letter_counts_per_queue():
     admin_client = FakeAdminClient(
         {
@@ -64,7 +68,7 @@ async def test_poll_once_continues_past_a_failing_queue():
     )
     monitor = QueueDepthMonitor(admin_client, ["curator-library-refresh", "curator-enrichment"])
 
-    await monitor.poll_once()  # must not raise
+    await monitor.poll_once()
 
     assert admin_client.calls == ["curator-library-refresh", "curator-enrichment"]
     assert "curator-library-refresh" not in telemetry._QUEUE_ACTIVE_COUNTS
@@ -85,11 +89,11 @@ async def test_poll_once_skips_a_queue_reporting_no_counts():
 
 async def test_start_and_stop_manage_the_background_task():
     admin_client = FakeAdminClient({"q": FakeRuntimeProperties(active_message_count=0, dead_letter_message_count=0)})
-    monitor = QueueDepthMonitor(admin_client, ["q"], poll_interval_seconds=0.01)
+    monitor = QueueDepthMonitor(admin_client, ["q"], poll_interval_seconds=_POLL_INTERVAL_SECONDS)
 
     monitor.start()
     assert monitor._task is not None
-    await asyncio.sleep(0.05)  # let at least one poll cycle run
+    await asyncio.sleep(_LONG_ENOUGH_FOR_ONE_POLL_CYCLE)
 
     await monitor.stop()
     assert monitor._task is None

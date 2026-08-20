@@ -25,10 +25,7 @@ _ELASTICSEARCH_USERNAME_ENV_NAMES: tuple[str, ...] = ("ElasticsearchUsername",)
 _ELASTICSEARCH_PASSWORD_ENV_NAMES: tuple[str, ...] = ("ElasticsearchPassword",)
 _LOG_LEVEL_ENV_NAMES: tuple[str, ...] = ("LogLevel", "Logging__LogLevel__Default")
 
-_RAWG_API_KEY_PREFIX = "RawgApiKey"
-_OPENCRITIC_RAPIDAPI_KEY_PREFIX = "OpenCriticRapidApiKey"
 _STORE_QUERY_HASH_PREFIX = "StoreQueryHash"
-_PSN_NPSSO_PREFIX = "PsnNpsso"
 _SERVICE_BUS_NAMESPACE_ENV_NAMES: tuple[str, ...] = ("ServiceBusNamespace",)
 _SERVICE_BUS_CONNECTION_ENV_NAMES: tuple[str, ...] = ("ServiceBusConnectionString",)
 
@@ -45,7 +42,7 @@ class Settings:
     :param oidc_authority: The Identity OIDC authority base URL -- both its
         ``/.well-known/openid-configuration`` discovery document (for the JWKS) and the expected ``iss``
         claim on every validated access token are derived from this.
-    :param token_key: The Fernet key encrypting stored PSN tokens at rest.
+    :param token_key: The AES-256-GCM key encrypting stored PSN tokens at rest.
     :param database_url: The PostgreSQL connection URL.
     :param alloy_endpoint: The Grafana Alloy OTLP gRPC endpoint (traces + metrics); ``None`` disables that
         telemetry leg entirely.
@@ -56,25 +53,6 @@ class Settings:
     :param log_level: Threshold for what reaches Elasticsearch, as a standard level name
         (``DEBUG``/``INFO``/``WARNING``/``ERROR``), from ``LogLevel`` or
         ``Logging__LogLevel__Default``; defaults to ``WARNING``.
-    :param rawg_api_keys: RAWG API keys for the admin catalog-wide re-scrape (``POST /enrichment/runs``),
-        resolved from indexed env vars ``RawgApiKey__0``, ``RawgApiKey__1``, ...; empty disables live RAWG
-        enrichment lookups in that context. More than one key lets the admin singleton rotate to the next
-        on a rejected/rate-limited key rather than being capped at one key's daily quota (see
-        ``curator.enrichment.rawg_client.RotatingRawgClient``) -- per-user BYOK
-        (``EnrichmentKeysRepository``) is unaffected and always exactly one key.
-    :param opencritic_rapidapi_keys: RapidAPI keys for the OpenCritic API, resolved from
-        ``OpenCriticRapidApiKey__0``, ``OpenCriticRapidApiKey__1``, ..., same admin-only multi-key rotation
-        as ``rawg_api_keys`` (see ``curator.enrichment.opencritic_client.RotatingOpenCriticClient``); empty
-        disables live OpenCritic enrichment lookups in that context.
-    :param psn_npsso_tokens: npsso cookies backing the admin catalog-wide enrichment pass's PSN catalog
-        lookups, resolved from indexed env vars ``PsnNpsso__0``, ``PsnNpsso__1``, ...; empty (the normal
-        case for a deployment that has not opted in) leaves that pass without a PSN catalog client, so it
-        falls back to RAWG-only exactly as before. More than one lets the admin singleton rotate to the
-        next account on a rejected/expired credential rather than being capped at one account's PSN budget
-        (see ``curator.psn.catalog_client.RotatingCatalogClient``) -- per-user paths are unaffected and
-        always use that user's own linked account. npsso rather than a derived access/refresh token
-        because npsso is the credential a human can regenerate; the derived tokens cannot be re-minted
-        independently of it, so a lapsed one would have no user-actionable fix.
     :param store_query_hashes: Persisted-query hashes for the anonymous PlayStation Store gateway,
         resolved from ``StoreQueryHash__0``, ``StoreQueryHash__1``, ...; tried before the built-in
         defaults in ``curator.psn.store_client``. Empty (the normal case) uses the built-ins alone.
@@ -102,9 +80,6 @@ class Settings:
     elasticsearch_username: str | None = None
     elasticsearch_password: str | None = None
     log_level: str = "WARNING"
-    rawg_api_keys: tuple[str, ...] = ()
-    opencritic_rapidapi_keys: tuple[str, ...] = ()
-    psn_npsso_tokens: tuple[str, ...] = ()
     store_query_hashes: tuple[str, ...] = ()
     service_bus_namespace: str | None = None
     service_bus_connection_string: str | None = None
@@ -142,9 +117,6 @@ class Settings:
         elasticsearch_password = resolve_setting(
             None, env_names=_ELASTICSEARCH_PASSWORD_ENV_NAMES, dotenv_path=dotenv_path
         )
-        rawg_api_keys = _resolve_indexed_keys(_RAWG_API_KEY_PREFIX, dotenv_path)
-        opencritic_rapidapi_keys = _resolve_indexed_keys(_OPENCRITIC_RAPIDAPI_KEY_PREFIX, dotenv_path)
-        psn_npsso_tokens = _resolve_indexed_keys(_PSN_NPSSO_PREFIX, dotenv_path)
         store_query_hashes = _resolve_indexed_keys(_STORE_QUERY_HASH_PREFIX, dotenv_path)
         service_bus_namespace = resolve_setting(
             None, env_names=_SERVICE_BUS_NAMESPACE_ENV_NAMES, dotenv_path=dotenv_path
@@ -167,9 +139,6 @@ class Settings:
             elasticsearch_username=elasticsearch_username,
             elasticsearch_password=elasticsearch_password,
             log_level=(log_level or "WARNING").upper(),
-            rawg_api_keys=rawg_api_keys,
-            opencritic_rapidapi_keys=opencritic_rapidapi_keys,
-            psn_npsso_tokens=psn_npsso_tokens,
             store_query_hashes=store_query_hashes,
             service_bus_namespace=service_bus_namespace,
             service_bus_connection_string=service_bus_connection_string,
@@ -183,10 +152,6 @@ class Settings:
 def _resolve_indexed_keys(prefix: str, dotenv_path: Path | None) -> tuple[str, ...]:
     """Resolve an array-shaped setting from indexed env vars: ``{prefix}__0``, ``{prefix}__1``, ...,
     stopping at the first missing index.
-
-    Matches the ``__N`` array convention ASP.NET Core's configuration system already uses fleet-wide for a
-    genuine array setting (e.g. Identity's ``CorsPolicy__Origins__N``), rather than inventing a one-off
-    comma-joined-string convention just for Curator.
     """
     keys: list[str] = []
     index = 0

@@ -17,7 +17,6 @@ from datetime import datetime, timezone
 from types import SimpleNamespace
 
 import pytest
-from cryptography.fernet import Fernet
 from fastapi.testclient import TestClient
 
 from curator.app import create_app
@@ -323,7 +322,7 @@ def _bearer(token: str) -> dict[str, str]:
 def _make_settings() -> Settings:
     return Settings(
         oidc_authority="https://identity.example.test",
-        token_key=Fernet.generate_key().decode(),
+        token_key=TokenCrypto.generate_key().decode(),
         database_url="postgresql://unused",
     )
 
@@ -331,7 +330,7 @@ def _make_settings() -> Settings:
 def _build(repository=None, token_crypto=None, agent_factory=None, token_validator=None, audit_repository=None):
     settings = _make_settings()
     repository = repository if repository is not None else FakeRepository()
-    token_crypto = token_crypto if token_crypto is not None else TokenCrypto(Fernet.generate_key())
+    token_crypto = token_crypto if token_crypto is not None else TokenCrypto(TokenCrypto.generate_key())
     agent_factory = agent_factory if agent_factory is not None else FakeAgentFactory(repository, token_crypto)
     token_validator = token_validator if token_validator is not None else FakeTokenValidator()
     audit_repository = audit_repository if audit_repository is not None else FakeAuditRepository()
@@ -348,6 +347,10 @@ def _build(repository=None, token_crypto=None, agent_factory=None, token_validat
     app.state.refresh_schedules_repository = FakeRefreshSchedulesRepository()
     client = TestClient(app)
     return client, repository, token_crypto, agent_factory, token_validator, audit_repository
+
+
+def _upsert_app_user_row_the_way_a_real_caller_would(client, token="valid-token"):
+    client.get("/me", headers=_bearer(token))
 
 
 def _build_with_valid_token(token="valid-token", **claims_kwargs):
@@ -381,8 +384,8 @@ def test_unhandled_exception_returns_500_and_is_logged(caplog):
     app = create_app(
         settings,
         repository=repository,
-        token_crypto=TokenCrypto(Fernet.generate_key()),
-        agent_factory=FakeAgentFactory(repository, TokenCrypto(Fernet.generate_key())),
+        token_crypto=TokenCrypto(TokenCrypto.generate_key()),
+        agent_factory=FakeAgentFactory(repository, TokenCrypto(TokenCrypto.generate_key())),
         token_validator=FakeTokenValidator(),
     )
 
@@ -413,7 +416,7 @@ def test_create_app_with_no_redis_settings_disables_caching_and_rate_limiting():
 
 def _build_with_settings(settings):
     repository = FakeRepository()
-    token_crypto = TokenCrypto(Fernet.generate_key())
+    token_crypto = TokenCrypto(TokenCrypto.generate_key())
     app = create_app(
         settings,
         repository=repository,
@@ -424,14 +427,13 @@ def _build_with_settings(settings):
     return TestClient(app)
 
 
-def test_create_app_with_neither_service_bus_setting_disables_queue_publisher_and_consumer():
+def test_create_app_with_neither_service_bus_setting_disables_queue_publisher():
     client = _build_with_settings(_make_settings())
 
     assert client.app.state.queue_publisher is None
-    assert client.app.state.queue_consumer is None
 
 
-def test_create_app_with_service_bus_namespace_wires_queue_publisher_and_consumer():
+def test_create_app_with_service_bus_namespace_wires_queue_publisher():
     """Production sets only ``ServiceBusNamespace`` -- the fleet's shared namespace has ``DisableLocalAuth``
     enabled, so this is the only path that actually works there (managed identity via
     ``DefaultAzureCredential``, no connection string)."""
@@ -439,12 +441,11 @@ def test_create_app_with_service_bus_namespace_wires_queue_publisher_and_consume
     client = _build_with_settings(settings)
 
     assert client.app.state.queue_publisher is not None
-    assert client.app.state.queue_consumer is not None
 
 
-def test_create_app_with_service_bus_connection_string_wires_queue_publisher_and_consumer():
+def test_create_app_with_service_bus_connection_string_wires_queue_publisher():
     """The connection-string fallback (local dev / an environment without a real managed identity) must
-    still wire the queues, matching the pre-managed-identity behavior."""
+    still wire the publisher, matching the pre-managed-identity behavior."""
     settings = dataclasses.replace(
         _make_settings(),
         service_bus_connection_string=(
@@ -455,7 +456,6 @@ def test_create_app_with_service_bus_connection_string_wires_queue_publisher_and
     client = _build_with_settings(settings)
 
     assert client.app.state.queue_publisher is not None
-    assert client.app.state.queue_consumer is not None
 
 
 def test_create_app_prefers_service_bus_namespace_over_connection_string_when_both_set(monkeypatch):
@@ -478,7 +478,6 @@ def test_create_app_prefers_service_bus_namespace_over_connection_string_when_bo
     client = _build_with_settings(settings)
 
     assert client.app.state.queue_publisher is not None
-    assert client.app.state.queue_consumer is not None
 
 
 async def test_trophy_client_factory_raises_for_unlinked_user():
@@ -495,7 +494,7 @@ async def test_create_app_wires_injected_redis_client_into_rate_limiter_and_trop
     from test_redis_client import FakeRawRedis
 
     repository = FakeRepository()
-    crypto = TokenCrypto(Fernet.generate_key())
+    crypto = TokenCrypto(TokenCrypto.generate_key())
     _seed_link(repository, crypto, SUB)
     settings = _make_settings()
     fake_redis = FakeRawRedis()
@@ -586,7 +585,7 @@ def test_me_reports_is_admin_true_for_an_admin_claim():
 
 def test_me_with_matching_verified_link_keeps_it_and_touches_verified():
     repo = FakeRepository()
-    crypto = TokenCrypto(Fernet.generate_key())
+    crypto = TokenCrypto(TokenCrypto.generate_key())
     agent_factory = FakeAgentFactory(repo, crypto)
     agent_factory.email_info = (EMAIL, True)
     _seed_link(repo, crypto, SUB, last_verified_at=OLD_IAT)
@@ -604,7 +603,7 @@ def test_me_with_matching_verified_link_keeps_it_and_touches_verified():
 
 def test_me_with_mismatched_email_auto_unlinks():
     repo = FakeRepository()
-    crypto = TokenCrypto(Fernet.generate_key())
+    crypto = TokenCrypto(TokenCrypto.generate_key())
     agent_factory = FakeAgentFactory(repo, crypto)
     agent_factory.email_info = ("someone-else@example.com", True)
     _seed_link(repo, crypto, SUB, last_verified_at=OLD_IAT)
@@ -620,7 +619,7 @@ def test_me_with_mismatched_email_auto_unlinks():
 
 def test_me_with_unverified_email_auto_unlinks():
     repo = FakeRepository()
-    crypto = TokenCrypto(Fernet.generate_key())
+    crypto = TokenCrypto(TokenCrypto.generate_key())
     agent_factory = FakeAgentFactory(repo, crypto)
     agent_factory.email_info = (EMAIL, False)
     _seed_link(repo, crypto, SUB, last_verified_at=OLD_IAT)
@@ -636,7 +635,7 @@ def test_me_with_unverified_email_auto_unlinks():
 
 def test_me_reverify_network_blip_leaves_link_intact():
     repo = FakeRepository()
-    crypto = TokenCrypto(Fernet.generate_key())
+    crypto = TokenCrypto(TokenCrypto.generate_key())
 
     class FlakyAgent(FakeAgent):
         async def account_email_verified(self):
@@ -662,7 +661,7 @@ def test_me_reverify_network_blip_leaves_link_intact():
 
 def test_me_reverify_skips_psn_check_when_token_iat_not_newer_than_last_verified():
     repo = FakeRepository()
-    crypto = TokenCrypto(Fernet.generate_key())
+    crypto = TokenCrypto(TokenCrypto.generate_key())
     agent_factory = FakeAgentFactory(repo, crypto)
     _seed_link(repo, crypto, SUB, last_verified_at=NEW_IAT)
     validator = FakeTokenValidator()
@@ -760,7 +759,7 @@ def test_psn_link_auth_failure_returns_401():
 
 def test_psn_unlink_then_me_shows_unlinked():
     repo = FakeRepository()
-    crypto = TokenCrypto(Fernet.generate_key())
+    crypto = TokenCrypto(TokenCrypto.generate_key())
     agent_factory = FakeAgentFactory(repo, crypto)
     agent_factory.email_info = (EMAIL, True)
     _seed_link(repo, crypto, SUB)
@@ -782,7 +781,7 @@ def test_psn_unlink_clears_stored_trophy_progress():
     promises this erasure by name; this is what holds the route to it.
     """
     repo = FakeRepository()
-    crypto = TokenCrypto(Fernet.generate_key())
+    crypto = TokenCrypto(TokenCrypto.generate_key())
     agent_factory = FakeAgentFactory(repo, crypto)
     agent_factory.email_info = (EMAIL, True)
     _seed_link(repo, crypto, SUB, harvest_trophies=True)
@@ -801,7 +800,7 @@ def test_psn_unlink_deletes_any_recurring_refresh_schedule():
     schedule left pointing at a deleted token would keep firing against a credential that cannot work.
     """
     repo = FakeRepository()
-    crypto = TokenCrypto(Fernet.generate_key())
+    crypto = TokenCrypto(TokenCrypto.generate_key())
     agent_factory = FakeAgentFactory(repo, crypto)
     agent_factory.email_info = (EMAIL, True)
     _seed_link(repo, crypto, SUB)
@@ -829,12 +828,12 @@ def test_psn_unlink_without_email_claim_is_403():
 
 def test_delete_me_removes_the_caller_and_their_link():
     repo = FakeRepository()
-    crypto = TokenCrypto(Fernet.generate_key())
+    crypto = TokenCrypto(TokenCrypto.generate_key())
     _seed_link(repo, crypto, SUB)
     validator = FakeTokenValidator()
     validator.register("valid-token", _claims())
     client, *_ = _build(repository=repo, token_crypto=crypto, token_validator=validator)
-    client.get("/me", headers=_bearer("valid-token"))  # upserts app_users row, matching a real caller
+    _upsert_app_user_row_the_way_a_real_caller_would(client)
 
     response = client.delete("/me", headers=_bearer("valid-token"))
     assert response.status_code == 204
@@ -894,7 +893,7 @@ def test_psn_link_mismatch_logs_link_failed_with_reason():
 
 def test_psn_unlink_logs_unlinked():
     repo = FakeRepository()
-    crypto = TokenCrypto(Fernet.generate_key())
+    crypto = TokenCrypto(TokenCrypto.generate_key())
     agent_factory = FakeAgentFactory(repo, crypto)
     agent_factory.email_info = (EMAIL, True)
     _seed_link(repo, crypto, SUB)

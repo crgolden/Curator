@@ -5,10 +5,17 @@ These are the only tests in this suite that touch a live database. They are gate
 ``CURATOR_TEST_DATABASE_URL`` environment variable via a module-level ``pytest.mark.skipif`` — when it is
 unset (the default in CI and any plain local ``pytest`` run), every test in this module is skipped, not
 run against a fake or an in-memory substitute. When you do set it, **point it at a disposable, throwaway
-database created solely for this purpose** — never a shared or production database. Each test applies
-every migration file (in filename order) and every insert inside one transaction, then rolls that
-transaction back in teardown, so a correctly-configured disposable database is left exactly as it started;
-nothing here ever commits.
+database created solely for this purpose** — never a shared or production database.
+
+Every migration file (in filename order) is applied once per session, inside a transaction that is never
+committed; each test then runs inside a nested ``SAVEPOINT`` that is rolled back in teardown, and the
+session-wide transaction is itself rolled back at the end. A correctly-configured disposable database is
+therefore left exactly as it started; nothing here ever commits.
+
+The whole module shares one connection and one schema build, so it carries an ``xdist_group`` mark: under
+``-n``/``--dist loadgroup`` every test here lands on a single worker. Split across workers, each would
+open its own connection and re-apply the same ``CREATE TABLE`` statements inside its own uncommitted
+transaction, and block on the first worker's locks.
 
 Example (PowerShell), using a scratch database on a local/dev PostgreSQL instance you control:
 
@@ -29,13 +36,16 @@ from psycopg import errors as psycopg_errors
 
 DATABASE_URL = os.environ.get("CURATOR_TEST_DATABASE_URL")
 
-pytestmark = pytest.mark.skipif(
-    not DATABASE_URL,
-    reason=(
-        "CURATOR_TEST_DATABASE_URL is not set; schema integration tests only run against an explicitly "
-        "configured disposable PostgreSQL database. See this module's docstring."
+pytestmark = [
+    pytest.mark.skipif(
+        not DATABASE_URL,
+        reason=(
+            "CURATOR_TEST_DATABASE_URL is not set; schema integration tests only run against an explicitly "
+            "configured disposable PostgreSQL database. See this module's docstring."
+        ),
     ),
-)
+    pytest.mark.xdist_group("schema"),
+]
 
 MIGRATIONS_DIR = Path(__file__).resolve().parent.parent / "db" / "migrations"
 
@@ -81,25 +91,37 @@ EXPECTED_TABLES = {
 }
 
 
-@pytest.fixture
-def db_connection():
-    """Open a connection, apply every migration file (in filename order) inside one transaction, and roll
-    it all back on exit.
+@pytest.fixture(scope="session")
+def migrated_connection():
+    """Open one connection and apply every migration file (in filename order) inside a single transaction
+    that is never committed, then roll the whole thing back when the session ends.
 
-    Every test using this fixture (directly or via ``seeded_user_and_game``) therefore leaves the target
-    database exactly as it found it, regardless of pass/fail/exception — including a deliberately-raised
-    CHECK-constraint violation, which only aborts the current transaction, not the connection's ability to
-    be rolled back.
+    Session-scoped because applying the migrations is the entire cost of this module: replaying them per
+    test made 26 tests take ~11 seconds each, and the schema they build is identical every time.
     """
     connection = psycopg.connect(DATABASE_URL, autocommit=False)
-    with connection.cursor() as cur:
-        for migration_file in sorted(MIGRATIONS_DIR.glob("*.sql")):
-            cur.execute(migration_file.read_text(encoding="utf-8"))
     try:
+        with connection.cursor() as cur:
+            for migration_file in sorted(MIGRATIONS_DIR.glob("*.sql")):
+                cur.execute(migration_file.read_text(encoding="utf-8"))
         yield connection
     finally:
         connection.rollback()
         connection.close()
+
+
+@pytest.fixture
+def db_connection(migrated_connection):
+    """Wrap each test in a ``SAVEPOINT`` on the session's migrated connection, rolled back on exit.
+
+    Every test using this fixture (directly or via ``seeded_user_and_game``) therefore leaves the schema
+    exactly as it found it, regardless of pass/fail/exception — including a deliberately-raised
+    CHECK-constraint violation. ``force_rollback`` is what makes that case work: the violation leaves the
+    transaction aborted but the exception is swallowed by ``pytest.raises``, so the savepoint has to be
+    rolled back rather than released.
+    """
+    with migrated_connection.transaction(force_rollback=True):
+        yield migrated_connection
 
 
 @pytest.fixture
@@ -151,12 +173,12 @@ def test_game_enrichment_genre_id_rejects_orphan_fk(db_connection, seeded_user_a
         )
 
 
-def test_user_consoles_rejects_invalid_platform(db_connection, seeded_user_and_game):
+def test_user_consoles_rejects_a_platform_outside_the_platforms_table(db_connection, seeded_user_and_game):
     user_sub, _game_id = seeded_user_and_game
-    with pytest.raises(psycopg_errors.CheckViolation), db_connection.cursor() as cur:
+    with pytest.raises(psycopg_errors.ForeignKeyViolation), db_connection.cursor() as cur:
         cur.execute(
             "INSERT INTO user_consoles (identity_sub, name, platform, raw_capacity_gb) VALUES (%s, %s, %s, %s)",
-            (user_sub, "Living Room", "PS3", 825),
+            (user_sub, "Living Room", "NOT-A-PLATFORM", 825),
         )
 
 
@@ -297,10 +319,15 @@ def test_deleting_a_user_cascades_every_per_user_table(db_connection, seeded_use
             (pull_id, user_sub, "curator-live", 1),
         )
         cur.execute(
-            "INSERT INTO entitlement_snapshots (pull_id, entitlement_id, raw) VALUES (%s, %s, %s)",
-            (pull_id, "ent-1", "{}"),
+            "INSERT INTO entitlement_snapshots "
+            "(identity_sub, pull_id, entitlement_id, raw, first_seen_at, last_seen_at) "
+            "VALUES (%s, %s, %s, %s, now(), now())",
+            (user_sub, pull_id, "ent-1", "{}"),
         )
-        cur.execute("INSERT INTO library_entries (identity_sub, game_id) VALUES (%s, %s)", (user_sub, game_id))
+        cur.execute(
+            "INSERT INTO library_entries (identity_sub, game_id, winning_entitlement_id) VALUES (%s, %s, %s)",
+            (user_sub, game_id, "ent-1"),
+        )
         cur.execute(
             "INSERT INTO library_exclusions (identity_sub, game_id, reason) VALUES (%s, %s, %s)",
             (user_sub, game_id, "not interested"),
@@ -449,10 +476,14 @@ def test_is_active_is_per_user_and_defaults_to_true(db_connection, seeded_user_a
     with db_connection.cursor() as cur:
         cur.execute("INSERT INTO app_users (identity_sub) VALUES (%s)", (user_b,))
         cur.execute(
-            "INSERT INTO library_entries (identity_sub, game_id, is_active) VALUES (%s, %s, false)",
+            "INSERT INTO library_entries (identity_sub, game_id, is_active, winning_entitlement_id) "
+            "VALUES (%s, %s, false, 'ent-a')",
             (user_a, game_id),
         )
-        cur.execute("INSERT INTO library_entries (identity_sub, game_id) VALUES (%s, %s)", (user_b, game_id))
+        cur.execute(
+            "INSERT INTO library_entries (identity_sub, game_id, winning_entitlement_id) VALUES (%s, %s, %s)",
+            (user_b, game_id, "ent-b"),
+        )
 
         cur.execute(
             "SELECT identity_sub, is_active FROM library_entries WHERE game_id = %s ORDER BY is_active",
@@ -482,7 +513,10 @@ def test_set_trophy_match_accepts_a_no_match_result(db_connection, seeded_user_a
     """
     user_sub, game_id = seeded_user_and_game
     with db_connection.cursor() as cur:
-        cur.execute("INSERT INTO library_entries (identity_sub, game_id) VALUES (%s, %s)", (user_sub, game_id))
+        cur.execute(
+            "INSERT INTO library_entries (identity_sub, game_id, winning_entitlement_id) VALUES (%s, %s, %s)",
+            (user_sub, game_id, "ent-1"),
+        )
 
         cur.execute(
             """
@@ -516,7 +550,10 @@ def test_set_trophy_match_accepts_a_confident_match_with_progress(db_connection,
     """
     user_sub, game_id = seeded_user_and_game
     with db_connection.cursor() as cur:
-        cur.execute("INSERT INTO library_entries (identity_sub, game_id) VALUES (%s, %s)", (user_sub, game_id))
+        cur.execute(
+            "INSERT INTO library_entries (identity_sub, game_id, winning_entitlement_id) VALUES (%s, %s, %s)",
+            (user_sub, game_id, "ent-1"),
+        )
 
         cur.execute(
             """

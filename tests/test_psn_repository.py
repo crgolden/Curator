@@ -1,9 +1,9 @@
-"""Tests for curator.psn.repository.TestAccountRepository, using hand-written fake async psycopg_pool
+"""Tests for curator.psn.repository.PinnedAccountRepository, using hand-written fake async psycopg_pool
 objects (no real database, no unittest.mock) -- same pattern as tests/test_repository.py."""
 
 from __future__ import annotations
 
-from curator.psn.repository import TestAccountRepository
+from curator.psn.repository import PinnedAccountRepository
 
 
 class FakeCursor:
@@ -50,14 +50,14 @@ class FakePool:
 
 
 async def test_get_pinned_account_id_returns_none_when_no_row():
-    repo = TestAccountRepository(FakePool(fetchone_result=None))
+    repo = PinnedAccountRepository(FakePool(fetchone_result=None))
 
     assert await repo.get_pinned_account_id("sub-1") is None
 
 
 async def test_get_pinned_account_id_returns_the_pinned_id():
     pool = FakePool(fetchone_result=("psn-account-1",))
-    repo = TestAccountRepository(pool)
+    repo = PinnedAccountRepository(pool)
 
     result = await repo.get_pinned_account_id("sub-1")
 
@@ -69,7 +69,7 @@ async def test_get_pinned_account_id_returns_the_pinned_id():
 
 async def test_pin_upserts_with_on_conflict():
     pool = FakePool()
-    repo = TestAccountRepository(pool)
+    repo = PinnedAccountRepository(pool)
 
     await repo.pin("sub-1", "psn-account-1")
 

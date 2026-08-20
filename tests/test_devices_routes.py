@@ -4,7 +4,6 @@ test_trophy_routes.py's style.
 
 from __future__ import annotations
 
-from cryptography.fernet import Fernet
 from fastapi.testclient import TestClient
 
 from curator.app import create_app
@@ -76,7 +75,7 @@ def _build(social_client_factory=None, repository=None, collections_repository=N
 
 def _build_linked(social_client_factory=None, collections_repository=None):
     repository = FakeRepository()
-    crypto = TokenCrypto(Fernet.generate_key())
+    crypto = TokenCrypto(TokenCrypto.generate_key())
     _seed_link(repository, crypto, SUB, harvest_devices=True)
     return _build(social_client_factory, repository=repository, collections_repository=collections_repository)
 
@@ -184,7 +183,7 @@ def test_get_devices_no_link_is_404():
 
 def test_get_devices_harvest_devices_disabled_is_403():
     repository = FakeRepository()
-    crypto = TokenCrypto(Fernet.generate_key())
+    crypto = TokenCrypto(TokenCrypto.generate_key())
     _seed_link(repository, crypto, SUB, harvest_devices=False)
     client, _ = _build(repository=repository)
 

@@ -1,9 +1,7 @@
 """Npsso credential normalization.
 
-Ported from ``psnpy.config``'s ``parse_npsso()`` -- the only piece of that module Curator needs. psnpy's
-env-var/``.env`` resolution chain (``resolve_npsso``, ``npsso_env_names``) assumed one shared local
-credential; Curator is multi-tenant and always receives the npsso per-request via ``POST /psn/link``'s
-body, so there is no equivalent "resolve from environment" concept to preserve.
+Curator is multi-tenant and always receives the npsso per-request via ``POST /psn/link``'s body, so this
+module deliberately has no "resolve from environment" path -- it parses and normalizes only.
 """
 
 from __future__ import annotations

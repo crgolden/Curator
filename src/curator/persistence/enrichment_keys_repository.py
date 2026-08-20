@@ -1,12 +1,7 @@
 """Data-access layer over ``user_enrichment_keys`` -- a user's optionally-provided, encrypted RAWG/
 OpenCritic API keys (see ``db/migrations/0004_user_enrichment_keys.sql``).
 
-Deliberately separate from :class:`curator.persistence.repository.Repository` (PSN links) and
-:class:`curator.enrichment.repository.EnrichmentRepository` (the shared catalog aggregate) -- same
-modular-repository convention used throughout this codebase. Never decrypts anything itself; encryption
-happens at the route layer (``curator.enrichment_keys_routes``) and decryption happens at the one place a
-key is actually used (``curator.app._library_refresh_handler``), both via the existing
-:class:`curator.persistence.crypto.TokenCrypto`.
+Stores and returns ciphertext only; it never encrypts or decrypts.
 """
 
 from __future__ import annotations
@@ -80,8 +75,8 @@ class EnrichmentKeysRepository:
         """Return ``(rawg_api_key_enc, opencritic_api_key_enc)`` -- still encrypted, despite the name
         describing what the caller will do with them next.
 
-        Internal use only (``curator.app._library_refresh_handler``, which holds the ``TokenCrypto``
-        needed to actually decrypt these). Never exposed through a route.
+        Internal use only -- the caller holds the ``TokenCrypto`` needed to actually decrypt these. Never
+        exposed through a route.
 
         :param sub: The Identity ``sub`` claim.
         """
@@ -101,7 +96,7 @@ class EnrichmentKeysRepository:
         at all is proof any prior rejection no longer applies.
 
         :param sub: The Identity ``sub`` claim.
-        :param key_enc: The Fernet-encrypted API key.
+        :param key_enc: The AES-256-GCM-encrypted API key.
         """
         sql = (
             "INSERT INTO user_enrichment_keys (identity_sub, rawg_api_key_enc, rawg_added_at) "
@@ -119,7 +114,7 @@ class EnrichmentKeysRepository:
         Also clears ``opencritic_key_rejected_at`` -- see :meth:`upsert_rawg_key`.
 
         :param sub: The Identity ``sub`` claim.
-        :param key_enc: The Fernet-encrypted API key.
+        :param key_enc: The AES-256-GCM-encrypted API key.
         """
         sql = (
             "INSERT INTO user_enrichment_keys (identity_sub, opencritic_api_key_enc, opencritic_added_at) "

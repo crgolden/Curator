@@ -1,9 +1,8 @@
 """Redis-backed distributed PSN rate limiter.
 
-``psnpy``'s original rate limiter was an in-process ``collections.deque`` sliding window -- correct only
-for a single-shot CLI process. Curator can scale out across multiple App Service instances, so each
-instance tracking an independent budget could collectively exceed PSN's real 300-req/15-min limit. This
-implements the same sliding-window algorithm against a Redis sorted set shared by every instance: each
+Curator can scale out across multiple App Service instances, so each instance tracking an independent
+budget could collectively exceed PSN's real 300-req/15-min limit. This implements a sliding-window
+algorithm against a Redis sorted set shared by every instance: each
 request's timestamp is a member score, stale entries older than the window are trimmed on every call, and
 the caller waits out however much of the window the oldest surviving entry still occupies once the budget
 is full.

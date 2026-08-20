@@ -3,7 +3,7 @@
 Trophy progress is time-decaying, current-state data: a short TTL self-heals staleness with no explicit
 invalidation path needed, unlike the durable Postgres caches (RAWG/OpenCritic/PSN catalog) that protect
 genuinely scarce external quota (see ``db/migrations/0001_initial.sql``'s header comment). Deliberately
-NOT a Postgres table for that reason -- see the migration plan's "Infrastructure services used" section.
+NOT a Postgres table for that reason.
 """
 
 from __future__ import annotations

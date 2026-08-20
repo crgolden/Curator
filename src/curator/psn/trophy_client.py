@@ -1,9 +1,8 @@
 """Async client for PSN trophy data: summaries, per-title status, and raw trophy definitions merged with
 earned progress.
 
-Ported from ``psnpy.client.PsnAgent``'s trophy methods. ``rarest_trophies_for_title``'s derive/sort logic
-was extracted out to :mod:`curator.psn.trophy_service` (pure, no I/O); results here are the source of truth
-this client's caller may choose to wrap in :class:`~curator.psn.trophy_cache.CachedTrophyClient`.
+Results here are the source of truth this client's caller may choose to wrap in
+:class:`~curator.psn.trophy_cache.CachedTrophyClient`.
 """
 
 from __future__ import annotations

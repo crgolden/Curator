@@ -80,7 +80,7 @@ async def test_trophy_summary_calls_through_and_caches():
     second = await cached.trophy_summary()
 
     assert first == second
-    assert client.summary_calls == 1  # second call served from cache
+    assert client.summary_calls == 1
     assert redis.set_calls[0][2] == 900
 
 

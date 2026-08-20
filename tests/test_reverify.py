@@ -4,8 +4,6 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from cryptography.fernet import Fernet
-
 from curator.persistence.crypto import TokenCrypto
 from curator.persistence.repository import LinkRecord
 from curator.psn.errors import PsnAuthError
@@ -59,7 +57,7 @@ class FakeAgent:
 
 
 def _make_crypto() -> TokenCrypto:
-    return TokenCrypto(Fernet.generate_key())
+    return TokenCrypto(TokenCrypto.generate_key())
 
 
 def _seed_access_token_only_link(repo: FakeRepository, crypto: TokenCrypto, sub: str) -> None:

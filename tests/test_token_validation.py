@@ -73,10 +73,10 @@ def test_valid_token_is_accepted_and_claims_extracted():
 
 def test_wrong_signature_is_rejected():
     key = _generate_key("key-1")
-    other_key = _generate_key("key-1")  # same kid, different key material
+    impostor_key_with_the_same_kid = _generate_key("key-1")
     jwks = {"keys": [key.as_dict(private=False)]}
     validator, _fetcher = _make_validator(jwks)
-    token = _sign(other_key, "key-1")
+    token = _sign(impostor_key_with_the_same_kid, "key-1")
 
     with pytest.raises(TokenError):
         validator.validate(token)

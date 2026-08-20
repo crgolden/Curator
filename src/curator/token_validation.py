@@ -3,10 +3,9 @@
 Curator is a pure resource server: it never issues tokens, never redirects a browser through a login
 flow, and holds no session of its own (see ``README.md``'s auth section). Every protected route instead
 presents an access token Identity minted, and :class:`JwtValidator` is where that token earns trust.
-Validation mirrors the sibling ``Directory`` .NET API's ``JwtBearerOptions`` (``Directory/Program.cs``):
-RS256 signature verified against Identity's discovery-published JWKS, ``iss`` checked against the
-configured authority, ``exp``/``nbf`` checked -- but **not** ``aud`` (``ValidateAudience = false`` there;
-Identity issues tokens with no Curator-specific audience, so Curator doesn't check for one either).
+Validation verifies the RS256 signature against Identity's discovery-published JWKS, checks ``iss``
+against the configured authority, and checks ``exp``/``nbf`` -- but **not** ``aud``: Identity issues
+tokens with no Curator-specific audience, so Curator doesn't check for one.
 
 JWKS/discovery fetching is injected (``fetch_json``) so unit tests can serve canned documents with no
 network access at all; the default implementation is a small ``urllib``-based HTTP GET. The fetched JWKS
@@ -30,6 +29,8 @@ from joserfc.jwk import KeySet, KeySetSerialization
 from joserfc.jwt import JWTClaimsRegistry
 
 _ALGORITHMS = ["RS256"]
+
+_DISCOVERY_FETCH_TIMEOUT_SECONDS = 10.0
 
 
 class TokenError(Exception):
@@ -85,8 +86,9 @@ def fetch_json(url: str) -> dict[str, Any]:
 
     :param url: The URL to fetch (Identity's discovery document, or the ``jwks_uri`` it points to).
     :returns: The parsed JSON body.
+    :raises OSError: On a network failure, including a timeout.
     """
-    with urllib.request.urlopen(url) as response:
+    with urllib.request.urlopen(url, timeout=_DISCOVERY_FETCH_TIMEOUT_SECONDS) as response:
         body: dict[str, Any] = json.loads(response.read().decode("utf-8"))
         return body
 

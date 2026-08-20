@@ -2,8 +2,7 @@
 ranked/filtered/(optionally capacity-)packed result set on demand.
 
 The single orchestrator both console-checklist generation ("give me what fits on this console") and
-unconstrained filter lists ("all RPGs above 80") go through -- replacing ``ps_assign_ps5.py``/
-``ps_assign_ps4.py``'s two hardcoded scripts with one reusable, on-the-fly pipeline.
+unconstrained filter lists ("all RPGs above 80") go through.
 """
 
 from __future__ import annotations
@@ -67,8 +66,7 @@ class CollectionOrchestrator:
         :param identity_sub: The Curator user id (Identity's ``sub``).
         :param spec: The collection spec (saved definition or inline preview).
         :param size_estimates: Every install-size estimate row, used when a game has no measured actual.
-        :param completion_map: ``{game_id: percent_completed}``, precomputed by the caller (see
-            ``curator.psn.trophy_completion.get_completion_result``) -- attached to each
+        :param completion_map: ``{game_id: percent_completed}``, precomputed by the caller -- attached to each
             :class:`~curator.collections.game_candidate.GameCandidate` for display; ``None``/missing
             entries leave ``percent_completed`` as ``None``.
         :param completion_available: Whether ``completion_map`` reflects a real fetch attempt (as opposed

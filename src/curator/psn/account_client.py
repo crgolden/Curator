@@ -1,8 +1,5 @@
-"""Async client for PSN account identity and email.
-
-Ported from ``psnpy.client.PsnAgent``'s ``whoami()``/``account_email()``/``account_email_verified()`` --
-the account-facing slice already partially used by ``curator.link_service`` (via the transitional
-``psnpy``-backed adapter in ``app.py``, removed once callers switch to this client).
+"""Async client for PSN account identity and email -- the account-facing slice ``curator.link_service``
+uses.
 """
 
 from __future__ import annotations

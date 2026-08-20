@@ -6,7 +6,6 @@ _make_settings) the same way test_authz.py does.
 
 from __future__ import annotations
 
-from cryptography.fernet import Fernet
 from fastapi.testclient import TestClient
 
 from curator.app import create_app
@@ -37,7 +36,7 @@ class FakeCatalogRepository:
 
 def _build(catalog_repository=None, *, backfill_service=None, omit_backfill_service=False):
     repository = FakeRepository()
-    token_crypto = TokenCrypto(Fernet.generate_key())
+    token_crypto = TokenCrypto(TokenCrypto.generate_key())
     validator = FakeTokenValidator()
     app = create_app(
         _make_settings(),

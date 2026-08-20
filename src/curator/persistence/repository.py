@@ -1,8 +1,7 @@
 """Data-access layer over the ``app_users`` / ``psn_links`` account tables.
 
 Raw SQL via psycopg 3 rather than an ORM — the schema (``db/migrations/0001_initial.sql``) is small and
-deliberate, and this repo already favors ADO.NET-style hand-written SQL over a mapper in its sibling .NET
-services. :class:`Repository` is backed by a shared ``psycopg_pool.AsyncConnectionPool`` (one pool per
+deliberate. :class:`Repository` is backed by a shared ``psycopg_pool.AsyncConnectionPool`` (one pool per
 process, opened once in ``create_app()``'s lifespan) rather than opening a connection per call, and every
 method is a coroutine so a slow query never blocks the event loop or exhausts FastAPI's sync threadpool.
 Tests inject a hand-written fake pool with the same async context-manager/cursor shape, never a real
@@ -22,7 +21,7 @@ class LinkRecord:
     """A user's stored PSN link row.
 
     :param psn_account_id: The linked PSN account id, if known yet.
-    :param token_response_enc: The Fernet-encrypted, JSON-serialized PSN token response.
+    :param token_response_enc: The AES-256-GCM-encrypted, JSON-serialized PSN token response.
     :param access_token_expires_at: When the current access token expires, if known.
     :param refresh_token_expires_at: When the refresh token expires, if known.
     :param linked_at: When the link was first created.
@@ -156,7 +155,7 @@ class Repository:
         (which doesn't re-discover the account id) must never clobber a previously learned one.
 
         :param sub: The Identity ``sub`` claim.
-        :param token_response_enc: The Fernet-encrypted, JSON-serialized PSN token response.
+        :param token_response_enc: The AES-256-GCM-encrypted, JSON-serialized PSN token response.
         :param access_token_expires_at: When the new access token expires, if known.
         :param refresh_token_expires_at: When the refresh token expires, if known.
         :param psn_account_id: The linked PSN account id, if newly discovered this call.

@@ -16,14 +16,14 @@ cookie.
 from __future__ import annotations
 
 import logging
-from collections.abc import AsyncIterator, Callable, Coroutine
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Any, cast
 
 import httpx
 from azure.identity import DefaultAzureCredential as SyncDefaultAzureCredential
 from azure.identity.aio import DefaultAzureCredential
-from azure.servicebus.aio import AutoLockRenewer, ServiceBusClient
+from azure.servicebus.aio import ServiceBusClient
 from azure.servicebus.management import ServiceBusAdministrationClient
 from fastapi import FastAPI, Request
 from fastapi.openapi.utils import get_openapi
@@ -31,8 +31,7 @@ from fastapi.responses import PlainTextResponse
 from psycopg_pool import AsyncConnectionPool
 from redis.asyncio import Redis
 
-from curator.audit.repository import ACTION_ENRICHMENT_KEY_REJECTED, AccountActionLogRepository
-from curator.catalog.franchise_assigner import fingerprint_franchise_rules
+from curator.audit.repository import AccountActionLogRepository
 from curator.catalog.repository import CatalogRepository
 from curator.catalog.store_backfill_service import StoreBackfillService
 from curator.catalog_routes import router as catalog_router
@@ -41,18 +40,9 @@ from curator.collections.repository import CollectionsRepository
 from curator.collections_routes import router as collections_router
 from curator.consoles_routes import router as consoles_router
 from curator.devices_routes import router as devices_router
-from curator.enrichment.enrichment_service import (
-    EnrichmentAuthError,
-    EnrichmentRateLimitError,
-    EnrichmentService,
-    next_rate_limit_backoff_seconds,
-)
-from curator.enrichment.opencritic_client import OpenCriticClient, OpenCriticClientProtocol
-from curator.enrichment.publisher_tier import PublisherTierRule, fingerprint_publisher_tier_rules
-from curator.enrichment.rawg_client import RawgClient, RawgClientProtocol, RotatingRawgClient
-from curator.enrichment.repository import EnrichmentRepository
 from curator.enrichment_keys_routes import router as enrichment_keys_router
 from curator.enrichment_routes import router as enrichment_router
+from curator.http_client import shared_ssl_context
 from curator.identity_routes import router as identity_router
 from curator.jobs import (
     ENRICHMENT_QUEUE,
@@ -60,12 +50,9 @@ from curator.jobs import (
     LIBRARY_REFRESH_QUEUE,
     SCHEDULED_REFRESH_QUEUE,
 )
-from curator.jobs.queue_consumer import QueueConsumer, RateLimitRetryScheduled
 from curator.jobs.queue_depth_monitor import QueueDepthMonitor
 from curator.jobs.queue_publisher import QueuePublisher
 from curator.jobs.repository import JobRunsRepository
-from curator.library.ingestion_service import IngestionService
-from curator.library.library_build_orchestrator import LibraryBuildOrchestrator, enrich_games
 from curator.library.repository import LibraryRepository
 from curator.library_routes import router as library_router
 from curator.link_service import AgentFactory, PsnAgentLike
@@ -82,12 +69,10 @@ from curator.preferences_routes import router as preferences_router
 from curator.presence_routes import router as presence_router
 from curator.profile_routes import router as profile_router
 from curator.psn.account_client import AccountClient, AccountClientFactory
-from curator.psn.catalog_client import CatalogClient, InMemoryTokenStore, RotatingCatalogClient
-from curator.psn.library_client import LibraryClient
 from curator.psn.mutation_service import MutationService, MutationServiceFactory
 from curator.psn.presence_client import PresenceClient, PresenceClientFactory
 from curator.psn.rate_limiter import RedisRateLimiter
-from curator.psn.repository import TestAccountRepository
+from curator.psn.repository import PinnedAccountRepository
 from curator.psn.safety import MutationGuard
 from curator.psn.session import PsnSession, RateLimiter
 from curator.psn.social_client import SocialClient, SocialClientFactory
@@ -108,28 +93,6 @@ from curator.trophy_routes import router as trophy_router
 logger = logging.getLogger("curator")
 
 
-class ServiceBusLockRenewer:
-    """Thin :class:`~curator.jobs.queue_consumer.LockRenewer` adapter over
-    :class:`azure.servicebus.aio.AutoLockRenewer` -- the real implementation, wired only here (production
-    ``create_app()``), never in :class:`~curator.jobs.queue_consumer.QueueConsumer` itself, which stays
-    Azure-agnostic and testable against hand-written fakes (see ``curator.jobs.queue_consumer.NullLockRenewer``,
-    the default every existing test implicitly uses).
-
-    :param max_lock_renewal_duration: Maximum total seconds to keep renewing one message's lock.
-    """
-
-    def __init__(self, *, max_lock_renewal_duration: int) -> None:
-        self._renewer = AutoLockRenewer(max_lock_renewal_duration=max_lock_renewal_duration)
-
-    def register(self, receiver: Any, message: Any) -> None:
-        """Start auto-renewing ``message``'s lock on ``receiver``."""
-        self._renewer.register(receiver, message)
-
-    async def close(self) -> None:
-        """Stop renewing every registered message and release the renewer's resources."""
-        await self._renewer.close()
-
-
 def create_app(
     settings: Settings | None = None,
     *,
@@ -139,7 +102,6 @@ def create_app(
     token_validator: TokenValidatorLike | None = None,
     pool: AsyncConnectionPool | None = None,
     catalog_repository: CatalogRepository | None = None,
-    enrichment_repository: EnrichmentRepository | None = None,
     library_repository: LibraryRepository | None = None,
     collections_repository: CollectionsRepository | None = None,
     job_runs_repository: JobRunsRepository | None = None,
@@ -179,8 +141,6 @@ def create_app(
         the app's lifespan when this factory creates it.
     :param catalog_repository: The shared-catalog/canonicalization repository; defaults to a real
         :class:`~curator.catalog.repository.CatalogRepository` over ``pool``.
-    :param enrichment_repository: The enrichment repository; defaults to a real
-        :class:`~curator.enrichment.repository.EnrichmentRepository` over ``pool``.
     :param library_repository: The per-user library repository; defaults to a real
         :class:`~curator.library.repository.LibraryRepository` over ``pool``.
     :param collections_repository: The collections repository; defaults to a real
@@ -251,13 +211,12 @@ def create_app(
     )
     token_validator = token_validator or JwtValidator(settings.oidc_authority)
     catalog_repository = catalog_repository or CatalogRepository(shared_pool)
-    enrichment_repository = enrichment_repository or EnrichmentRepository(shared_pool)
     library_repository = library_repository or LibraryRepository(shared_pool)
     collections_repository = collections_repository or CollectionsRepository(shared_pool)
     collection_orchestrator = CollectionOrchestrator(collections_repository)
     store_backfill_service = StoreBackfillService(
         StoreCatalogClient(
-            httpx.AsyncClient(timeout=45.0),
+            httpx.AsyncClient(timeout=45.0, verify=shared_ssl_context()),
             query_hashes=(*settings.store_query_hashes, *CATEGORY_GRID_RETRIEVE_HASHES),
         ),
         catalog_repository,
@@ -273,24 +232,8 @@ def create_app(
     )
 
     owns_http_client = http_client is None
-    http_client = http_client or httpx.AsyncClient(timeout=httpx.Timeout(10.0, connect=5.0))
-    admin_rawg_clients: list[RawgClientProtocol] = [RawgClient(http_client, key) for key in settings.rawg_api_keys]
-    admin_rawg_client: RawgClientProtocol | None = (
-        admin_rawg_clients[0]
-        if len(admin_rawg_clients) == 1
-        else RotatingRawgClient(admin_rawg_clients)
-        if admin_rawg_clients
-        else None
-    )
-    admin_opencritic_clients: list[OpenCriticClientProtocol] = [
-        OpenCriticClient(http_client, key) for key in settings.opencritic_rapidapi_keys
-    ]
-    enrichment_service = EnrichmentService(
-        rawg_client=admin_rawg_client,
-        opencritic_client=None,
-        opencritic_admin_clients=tuple(admin_opencritic_clients),
-        catalog_client=_admin_catalog_client(settings.psn_npsso_tokens, rate_limiter),
-        repository=enrichment_repository,
+    http_client = http_client or httpx.AsyncClient(
+        timeout=httpx.Timeout(10.0, connect=5.0), verify=shared_ssl_context()
     )
 
     service_bus_credential: DefaultAzureCredential | None = None
@@ -315,73 +258,25 @@ def create_app(
     else:
         service_bus_client = None
     queue_publisher: QueuePublisher | None = None
-    queue_consumer: QueueConsumer | None = None
-    lock_renewer: ServiceBusLockRenewer | None = None
     if service_bus_client is not None:
         queue_publisher = QueuePublisher(
             library_refresh_sender=service_bus_client.get_queue_sender(LIBRARY_REFRESH_QUEUE),
-            library_refresh_continuation_sender=service_bus_client.get_queue_sender(LIBRARY_REFRESH_CONTINUATION_QUEUE),
             enrichment_sender=service_bus_client.get_queue_sender(ENRICHMENT_QUEUE),
             scheduled_refresh_sender=service_bus_client.get_queue_sender(SCHEDULED_REFRESH_QUEUE),
             job_runs_repository=job_runs_repository,
-        )
-        lock_renewer = ServiceBusLockRenewer(max_lock_renewal_duration=900)
-        queue_consumer = QueueConsumer(
-            library_refresh_receiver=service_bus_client.get_queue_receiver(LIBRARY_REFRESH_QUEUE),
-            library_refresh_continuation_receiver=service_bus_client.get_queue_receiver(
-                LIBRARY_REFRESH_CONTINUATION_QUEUE
-            ),
-            enrichment_receiver=service_bus_client.get_queue_receiver(ENRICHMENT_QUEUE),
-            on_library_refresh=_library_refresh_handler(
-                repository=repository,
-                token_crypto=token_crypto,
-                catalog_repository=catalog_repository,
-                enrichment_repository=enrichment_repository,
-                library_repository=library_repository,
-                enrichment_keys_repository=enrichment_keys_repository,
-                job_runs_repository=job_runs_repository,
-                queue_publisher=queue_publisher,
-                http_client=http_client,
-                rate_limiter=rate_limiter,
-                redis_adapter=redis_adapter,
-                audit_repository=audit_repository,
-            ),
-            on_library_refresh_continuation=_library_refresh_continuation_handler(
-                repository=repository,
-                token_crypto=token_crypto,
-                catalog_repository=catalog_repository,
-                enrichment_repository=enrichment_repository,
-                library_repository=library_repository,
-                enrichment_keys_repository=enrichment_keys_repository,
-                job_runs_repository=job_runs_repository,
-                queue_publisher=queue_publisher,
-                http_client=http_client,
-                rate_limiter=rate_limiter,
-                redis_adapter=redis_adapter,
-                audit_repository=audit_repository,
-            ),
-            on_enrichment_run=_enrichment_run_handler(enrichment_service, catalog_repository, enrichment_repository),
-            job_runs_repository=job_runs_repository,
-            lock_renewer=lock_renewer,
         )
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         if owns_pool and pool is not None:
             await pool.open()
-        if queue_consumer is not None:
-            queue_consumer.start()
         if queue_depth_monitor is not None:
             queue_depth_monitor.start()
         try:
             yield
         finally:
-            if queue_consumer is not None:
-                await queue_consumer.stop()
             if queue_depth_monitor is not None:
                 await queue_depth_monitor.stop()
-            if lock_renewer is not None:
-                await lock_renewer.close()
             if service_bus_client is not None:
                 await service_bus_client.close()
             if service_bus_credential is not None:
@@ -412,7 +307,6 @@ def create_app(
     app.state.token_validator = token_validator
     app.state.catalog_repository = catalog_repository
     app.state.store_backfill_service = store_backfill_service
-    app.state.enrichment_repository = enrichment_repository
     app.state.library_repository = library_repository
     app.state.collections_repository = collections_repository
     app.state.collection_orchestrator = collection_orchestrator
@@ -424,7 +318,6 @@ def create_app(
     app.state.refresh_schedules_repository = refresh_schedules_repository
     app.state.mutation_service_factory = mutation_service_factory
     app.state.queue_publisher = queue_publisher
-    app.state.queue_consumer = queue_consumer
     app.state.queue_depth_monitor = queue_depth_monitor
 
     app.include_router(me_router)
@@ -498,572 +391,6 @@ def _openapi_schema_with_bearer_auth(app: FastAPI) -> dict[str, Any]:
     return schema
 
 
-async def _run_opencritic_refresh_pass(enrichment_service: EnrichmentService) -> dict[str, Any]:
-    """Run ``EnrichmentService.refresh_opencritic_cache()``, reporting the outcome instead of letting a
-    missing/rejected/rate-limited key raise out of the caller -- see problem #1/#2 in the plan this
-    implements: a missing or bad OpenCritic key must never block the franchise/tier/enrichment passes
-    that don't need it.
-    """
-    if not enrichment_service.has_opencritic_client:
-        return {"status": "not_configured"}
-    try:
-        games_fetched = await enrichment_service.refresh_opencritic_cache()
-    except EnrichmentAuthError as exc:
-        return {"status": "auth_error", "detail": str(exc)}
-    except EnrichmentRateLimitError as exc:
-        return {"status": "rate_limited", "retry_after_seconds": exc.retry_after_seconds}
-    return {"status": "ok", "games_fetched": games_fetched}
-
-
-async def _run_enrichment_pass(
-    enrichment_service: EnrichmentService,
-    catalog_repository: CatalogRepository,
-    enrichment_repository: EnrichmentRepository,
-    publisher_tier_rules: list[PublisherTierRule],
-) -> dict[str, Any]:
-    """Best-effort full enrichment (franchise/tier/genre/scores) for games nobody has enriched yet, using
-    the admin ``enrichment_service`` singleton (built from ``Settings.rawg_api_keys``/
-    ``opencritic_rapidapi_keys`` -- optional admin-level keys, independent of any user's BYOK key).
-
-    Reports each provider's availability (``psn`` is always ``"not_configured"`` here -- the official-PSN-
-    catalog signal needs a per-user authenticated session, which this admin context never has) and stops
-    early on an auth/rate-limit error from either configured provider, recording exactly how far it got --
-    games saved before the stop stay saved; the rest are picked up again by ``get_unenriched_game_ids`` on
-    the next run, no special resume bookkeeping needed since this pass is always a full worklist rebuild.
-    """
-    providers = {
-        "rawg": "ok" if enrichment_service.has_rawg_client else "not_configured",
-        "opencritic": "ok" if enrichment_service.has_opencritic_client else "not_configured",
-        "psn": "not_configured",
-    }
-
-    all_games = await catalog_repository.list_all_game_ids_and_titles()
-    unenriched = set(await enrichment_repository.get_unenriched_game_ids([game_id for game_id, _, _ in all_games]))
-    if not unenriched:
-        return {
-            "providers": providers,
-            "attempted_count": 0,
-            "enriched_count": 0,
-            "remaining_count": 0,
-            "stopped_provider": None,
-            "stopped_reason": None,
-        }
-
-    genre_rows = await enrichment_repository.get_active_genres()
-    genre_priorities = {name.lower(): priority for _, name, priority in genre_rows}
-    genre_ids_by_name = {name.lower(): genre_id for genre_id, name, _ in genre_rows}
-    size_estimates = await catalog_repository.get_size_estimates()
-
-    enriched_count = 0
-    stopped_provider: str | None = None
-    stopped_reason: str | None = None
-    for game_id, title, title_id in all_games:
-        if game_id not in unenriched:
-            continue
-        try:
-            result, _size = await enrichment_service.enrich_game(
-                title,
-                title_id=title_id,
-                is_ps5=False,
-                genre_priorities=genre_priorities,
-                publisher_tier_rules=publisher_tier_rules,
-                size_estimates=size_estimates,
-            )
-        except EnrichmentAuthError as exc:
-            stopped_provider, stopped_reason = exc.provider, "auth_error"
-            break
-        except EnrichmentRateLimitError as exc:
-            stopped_provider, stopped_reason = exc.provider, "rate_limited"
-            break
-        genre_id = genre_ids_by_name.get(result.genre.lower())
-        subgenre_id = genre_ids_by_name.get(result.subgenre.lower())
-        await enrichment_repository.save_game_enrichment(game_id, genre_id, subgenre_id, result)
-        enriched_count += 1
-
-    return {
-        "providers": providers,
-        "attempted_count": enriched_count + (1 if stopped_reason else 0),
-        "enriched_count": enriched_count,
-        "remaining_count": len(unenriched) - enriched_count,
-        "stopped_provider": stopped_provider,
-        "stopped_reason": stopped_reason,
-    }
-
-
-def _enrichment_run_handler(
-    enrichment_service: EnrichmentService,
-    catalog_repository: CatalogRepository,
-    enrichment_repository: EnrichmentRepository,
-) -> Callable[[], Coroutine[Any, Any, dict[str, Any] | None]]:
-    """Build the ``POST /enrichment/runs`` admin action: a full catalog-wide re-enrichment pass, not
-    just an OpenCritic cache refresh.
-
-    Four passes, in order, each reported in the returned result summary rather than raising -- a provider
-    being unconfigured, rejected, or rate-limited never fails the whole job (see the module's Follow-up
-    plan): the run is fully idempotent (this pass's own cursor/no-op-write/worklist-rebuild behavior means
-    a restart can always pick up exactly where a stop left off), so there is nothing here a genuinely
-    failed run couldn't just as easily redo from scratch.
-
-    1. ``refresh_opencritic_cache()`` -- pages OpenCritic's PS4/PS5 catalog into ``opencritic_cache``.
-    2. Franchise reclassification for every game -- pure title-regex matching against ``franchise_rules``,
-       no external API dependency. Skipped when ``franchise_rules`` hasn't changed since the last pass
-       that actually ran (see :func:`~curator.catalog.franchise_assigner.fingerprint_franchise_rules`) --
-       every newly-canonicalized game is already classified with the current rules at ingestion time, so
-       this pass only exists to retroactively fix pre-existing games after a rule edit.
-    3. Tier reclassification for every already-enriched ``game_enrichment`` row -- reclassifies
-       ``aaa_tier`` from the publisher/developer that enrichment already resolved and stored, against
-       the current ``publisher_tiers``. Needed because ``get_unenriched_game_ids`` means an
-       already-enriched game is never revisited by the normal per-user refresh path. Skipped on an
-       unchanged rule-set fingerprint, same reasoning as pass 2.
-    4. Best-effort full enrichment for games nobody has enriched yet (see :func:`_run_enrichment_pass`).
-    """
-
-    async def handle() -> dict[str, Any]:
-        opencritic_summary = await _run_opencritic_refresh_pass(enrichment_service)
-
-        franchise_rules = await catalog_repository.list_franchise_rules()
-        franchise_fingerprint = fingerprint_franchise_rules(franchise_rules)
-        previous_franchise_fingerprint = await catalog_repository.get_franchise_rules_fingerprint()
-        if franchise_fingerprint != previous_franchise_fingerprint:
-            updated = await catalog_repository.reclassify_franchise(franchise_rules)
-            await catalog_repository.set_franchise_rules_fingerprint(franchise_fingerprint)
-            franchise_summary: dict[str, Any] = {"status": "ran", "updated_count": updated}
-        else:
-            franchise_summary = {"status": "skipped_unchanged"}
-
-        publisher_tier_rules = await enrichment_repository.list_publisher_tier_rules()
-        tier_fingerprint = fingerprint_publisher_tier_rules(publisher_tier_rules)
-        previous_tier_fingerprint = await enrichment_repository.get_publisher_tier_rules_fingerprint()
-        if tier_fingerprint != previous_tier_fingerprint:
-            updated = await enrichment_repository.reclassify_tier(publisher_tier_rules)
-            await enrichment_repository.set_publisher_tier_rules_fingerprint(tier_fingerprint)
-            tier_summary: dict[str, Any] = {"status": "ran", "updated_count": updated}
-        else:
-            tier_summary = {"status": "skipped_unchanged"}
-
-        enrichment_summary = await _run_enrichment_pass(
-            enrichment_service, catalog_repository, enrichment_repository, publisher_tier_rules
-        )
-
-        return {
-            "opencritic_cache_refresh": opencritic_summary,
-            "franchise_reclassification": franchise_summary,
-            "tier_reclassification": tier_summary,
-            "enrichment": enrichment_summary,
-        }
-
-    return handle
-
-
-def _admin_catalog_client(
-    npsso_tokens: tuple[str, ...], rate_limiter: RateLimiter | None
-) -> RotatingCatalogClient | None:
-    """Build the catalog-wide pass's PSN catalog client, or ``None`` when no npsso is configured.
-
-    :param npsso_tokens: The configured ``PsnNpsso__N`` values, in rotation order.
-    :param rate_limiter: The shared distributed PSN throttle.
-    """
-    if not npsso_tokens:
-        return None
-    return RotatingCatalogClient(
-        [
-            CatalogClient(PsnSession(npsso, token_store=InMemoryTokenStore(), rate_limiter=rate_limiter))
-            for npsso in npsso_tokens
-        ]
-    )
-
-
-_RAWG_USER_MAX_REQUESTS = 1
-_RAWG_USER_WINDOW_SECONDS = 1
-
-
-def _rate_limited_result_summary(
-    *,
-    rawg_enriched_titles: list[str],
-    opencritic_enriched_titles: list[str],
-    opencritic_topup_incomplete: bool,
-    rate_limited_provider: str,
-    retry_after_seconds: float,
-    remaining_count: int,
-    rejected_providers: list[str],
-    unavailable_providers: list[str],
-) -> dict[str, Any]:
-    """Build the ``result_summary`` ``JobRunsRepository.mark_rate_limited`` records -- the same shape
-    ``mark_succeeded`` gets, plus the three fields ``GET /library/refresh/{run_id}`` needs to answer "how
-    many succeeded" and "when will it resume" for a still-in-progress, rate-limited run.
-    """
-    return {
-        "rawg_enriched_titles": rawg_enriched_titles,
-        "opencritic_enriched_titles": opencritic_enriched_titles,
-        "opencritic_topup_incomplete": opencritic_topup_incomplete,
-        "rate_limited_provider": rate_limited_provider,
-        "retry_after_seconds": retry_after_seconds,
-        "remaining_count": remaining_count,
-        "rejected_providers": rejected_providers,
-        "unavailable_providers": unavailable_providers,
-    }
-
-
-async def _record_rejected_providers(
-    identity_sub: str,
-    rejected_providers: list[str],
-    *,
-    enrichment_keys_repository: EnrichmentKeysRepository,
-    audit_repository: AccountActionLogRepository,
-) -> None:
-    """Persist and audit-log every provider newly rejected during one enrichment call.
-
-    ``rejected_providers`` must be scoped to the single :func:`~curator.library.library_build_orchestrator
-    .enrich_games` call that just ran (never a merged/cumulative list spanning a rate-limit continuation
-    chain) -- otherwise a provider already known-rejected from an earlier message in the chain would be
-    re-marked and re-logged on every resume, which is both redundant and would pollute the audit trail with
-    one entry per continuation message instead of one per actual rejection event.
-    """
-    for provider in rejected_providers:
-        if provider == "rawg":
-            await enrichment_keys_repository.mark_rawg_key_rejected(identity_sub)
-        elif provider == "opencritic":
-            await enrichment_keys_repository.mark_opencritic_key_rejected(identity_sub)
-        try:
-            await audit_repository.log(identity_sub, ACTION_ENRICHMENT_KEY_REJECTED, provider)
-        except Exception:
-            logger.exception(
-                "Failed to write account_action_log entry (sub=%s, action=%s, provider=%s)",
-                identity_sub,
-                ACTION_ENRICHMENT_KEY_REJECTED,
-                provider,
-            )
-
-
-def _build_per_user_rawg_client(
-    identity_sub: str, rawg_key: str, *, http_client: httpx.AsyncClient, redis_adapter: RedisAdapter | None
-) -> RawgClient:
-    rawg_rate_limiter = (
-        RedisRateLimiter(
-            redis_adapter,
-            key=f"curator:rawg:{identity_sub}",
-            max_requests=_RAWG_USER_MAX_REQUESTS,
-            window_seconds=_RAWG_USER_WINDOW_SECONDS,
-        )
-        if redis_adapter is not None
-        else None
-    )
-    return RawgClient(http_client, rawg_key, rate_limiter=rawg_rate_limiter)
-
-
-async def _build_per_user_enrichment_clients(
-    identity_sub: str,
-    *,
-    enrichment_keys_repository: EnrichmentKeysRepository,
-    token_crypto: TokenCrypto,
-    http_client: httpx.AsyncClient,
-    redis_adapter: RedisAdapter | None,
-) -> tuple[RawgClient | None, OpenCriticClient | None]:
-    """Build a user's own RAWG/OpenCritic clients from their stored BYOK keys (see
-    ``curator.enrichment_keys_routes``) -- ``None`` for either a user hasn't configured. Curator never
-    provisions a shared/fallback key for either provider here; shared by :func:`_library_refresh_handler`
-    and :func:`_library_refresh_continuation_handler` so both build identical per-user clients.
-    """
-    rawg_key_enc, opencritic_key_enc = await enrichment_keys_repository.get_decrypted_key_material(identity_sub)
-    user_rawg_client: RawgClient | None = None
-    if rawg_key_enc is not None:
-        rawg_key = token_crypto.decrypt(rawg_key_enc).decode()
-        user_rawg_client = _build_per_user_rawg_client(
-            identity_sub, rawg_key, http_client=http_client, redis_adapter=redis_adapter
-        )
-    user_opencritic_client: OpenCriticClient | None = None
-    if opencritic_key_enc is not None:
-        opencritic_key = token_crypto.decrypt(opencritic_key_enc).decode()
-        user_opencritic_client = OpenCriticClient(http_client, opencritic_key)
-    return user_rawg_client, user_opencritic_client
-
-
-def _library_refresh_handler(
-    *,
-    repository: Repository,
-    token_crypto: TokenCrypto,
-    catalog_repository: CatalogRepository,
-    enrichment_repository: EnrichmentRepository,
-    library_repository: LibraryRepository,
-    enrichment_keys_repository: EnrichmentKeysRepository,
-    job_runs_repository: JobRunsRepository,
-    queue_publisher: QueuePublisher,
-    http_client: httpx.AsyncClient,
-    rate_limiter: RateLimiter | None,
-    redis_adapter: RedisAdapter | None,
-    audit_repository: AccountActionLogRepository,
-) -> Callable[[str, str], Coroutine[Any, Any, dict[str, Any] | None]]:
-    """Build the ``on_library_refresh`` handler the queue consumer dispatches to.
-
-    Unlike the module-level ``enrichment_service`` singleton, a library refresh needs a PSN catalog
-    signal scoped to the refreshing user's own linked account -- so this closure builds a fresh
-    :class:`~curator.psn.session.PsnSession`/:class:`~curator.psn.catalog_client.CatalogClient`/
-    :class:`~curator.enrichment.enrichment_service.EnrichmentService`/
-    :class:`~curator.library.library_build_orchestrator.LibraryBuildOrchestrator` per job instead of
-    reusing one global instance. It also looks up the refreshing user's own RAWG/OpenCritic keys (see
-    ``curator.enrichment_keys_routes``) and builds per-user clients from them -- there is deliberately no
-    fallback to any shared/global key here; a provider a user hasn't configured is simply skipped
-    (:class:`~curator.enrichment.enrichment_service.EnrichmentService` tolerates a ``None`` client for
-    either).
-
-    If enrichment stops early on a RAWG/OpenCritic rate limit, this performs its own
-    ``job_runs_repository.mark_rate_limited`` + ``queue_publisher.publish_library_refresh_continuation``
-    and raises :class:`~curator.jobs.queue_consumer.RateLimitRetryScheduled`, instead of returning a result
-    dict for the queue consumer's default ``mark_succeeded`` path -- the run isn't actually done yet.
-
-    :param rate_limiter: The shared distributed PSN rate limiter (``None`` throttles nothing); passed
-        through to the fresh :class:`~curator.psn.session.PsnSession` so a library refresh's PSN calls
-        count against the same fleet-wide budget as every other client.
-    :param redis_adapter: The shared Redis adapter backing the access-token cache (``None`` disables it;
-        see :class:`~curator.persistence.db_token_store.DbTokenStore`) and the per-user RAWG rate limiter
-        below (``None`` disables throttling entirely, matching the fleet's ``NullRateLimiter`` philosophy).
-    """
-
-    async def handle(run_id: str, identity_sub: str) -> dict[str, Any] | None:
-        token_store = DbTokenStore(identity_sub, repository, token_crypto, redis_adapter)
-        saved = await token_store.load()
-        if saved is None:
-            raise RuntimeError(f"No PSN link for user {identity_sub!r}; cannot refresh library.")
-
-        session = await PsnSession.restore(None, token_store, rate_limiter=rate_limiter)
-        library_client = LibraryClient(session)
-        catalog_client = CatalogClient(session)
-        ingestion_service = IngestionService(library_client, catalog_repository)
-
-        user_rawg_client, user_opencritic_client = await _build_per_user_enrichment_clients(
-            identity_sub,
-            enrichment_keys_repository=enrichment_keys_repository,
-            token_crypto=token_crypto,
-            http_client=http_client,
-            redis_adapter=redis_adapter,
-        )
-
-        per_user_enrichment_service = EnrichmentService(
-            rawg_client=user_rawg_client,
-            opencritic_client=user_opencritic_client,
-            catalog_client=catalog_client,
-            repository=enrichment_repository,
-        )
-        orchestrator = LibraryBuildOrchestrator(
-            ingestion_service=ingestion_service,
-            catalog_repository=catalog_repository,
-            enrichment_service=per_user_enrichment_service,
-            enrichment_repository=enrichment_repository,
-            library_repository=library_repository,
-        )
-
-        trophy_client: TrophyClient | CachedTrophyClient | None = None
-        link = await repository.get_link(identity_sub)
-        if link is not None and link.harvest_trophies:
-            trophy_client = TrophyClient(session)
-            if redis_adapter is not None:
-                trophy_client = CachedTrophyClient(trophy_client, redis_adapter)
-
-        publisher_tier_rules = await enrichment_repository.list_publisher_tier_rules()
-        size_estimates = await catalog_repository.get_size_estimates()
-        result = await orchestrator.build(
-            identity_sub,
-            publisher_tier_rules=publisher_tier_rules,
-            size_estimates=size_estimates,
-            trophy_client=trophy_client,
-        )
-
-        if result.rejected_providers:
-            await _record_rejected_providers(
-                identity_sub,
-                result.rejected_providers,
-                enrichment_keys_repository=enrichment_keys_repository,
-                audit_repository=audit_repository,
-            )
-
-        if result.rate_limited_provider is not None:
-            assert result.retry_after_seconds is not None
-            result_summary = _rate_limited_result_summary(
-                rawg_enriched_titles=result.rawg_enriched_titles,
-                opencritic_enriched_titles=result.opencritic_enriched_titles,
-                opencritic_topup_incomplete=result.opencritic_topup_incomplete,
-                rate_limited_provider=result.rate_limited_provider,
-                retry_after_seconds=result.retry_after_seconds,
-                remaining_count=len(result.remaining_game_ids),
-                rejected_providers=result.rejected_providers,
-                unavailable_providers=result.unavailable_providers,
-            )
-            new_seq = await job_runs_repository.mark_rate_limited(run_id, result_summary)
-            await queue_publisher.publish_library_refresh_continuation(
-                run_id,
-                identity_sub,
-                result.remaining_game_ids,
-                result.rate_limited_provider,
-                result.retry_after_seconds,
-                seq=new_seq,
-            )
-            raise RateLimitRetryScheduled
-
-        return {
-            "rawg_enriched_titles": result.rawg_enriched_titles,
-            "opencritic_enriched_titles": result.opencritic_enriched_titles,
-            "opencritic_topup_incomplete": result.opencritic_topup_incomplete,
-            "rejected_providers": result.rejected_providers,
-            "unavailable_providers": result.unavailable_providers,
-        }
-
-    return handle
-
-
-def _library_refresh_continuation_handler(
-    *,
-    repository: Repository,
-    token_crypto: TokenCrypto,
-    catalog_repository: CatalogRepository,
-    enrichment_repository: EnrichmentRepository,
-    library_repository: LibraryRepository,
-    enrichment_keys_repository: EnrichmentKeysRepository,
-    job_runs_repository: JobRunsRepository,
-    queue_publisher: QueuePublisher,
-    http_client: httpx.AsyncClient,
-    rate_limiter: RateLimiter | None,
-    redis_adapter: RedisAdapter | None,
-    audit_repository: AccountActionLogRepository,
-) -> Callable[[dict[str, Any]], Coroutine[Any, Any, dict[str, Any] | None]]:
-    """Build the ``on_library_refresh_continuation`` handler the queue consumer dispatches to.
-
-    Resumes a library refresh's remaining games after a RAWG/OpenCritic rate limit stopped it early (see
-    :func:`_library_refresh_handler`'s rate-limit branch). Looks the remaining games up straight from
-    ``library_entries`` via :meth:`~curator.library.repository.LibraryRepository.get_games_for_continuation`
-    -- no re-ingestion/re-canonicalization from PSN needed -- then rebuilds the same per-user PSN-catalog/
-    RAWG/OpenCritic clients :func:`_library_refresh_handler` would, and runs the shared per-game enrichment
-    loop (:func:`~curator.library.library_build_orchestrator.enrich_games`) over just those games.
-
-    On success, merges into the run's already-recorded result summary and returns it for the queue
-    consumer's default ``mark_succeeded`` path. On another rate limit, performs its own
-    ``mark_rate_limited`` + republish and raises
-    :class:`~curator.jobs.queue_consumer.RateLimitRetryScheduled`, so the queue consumer completes the
-    message without touching the run's status again -- both side effects already happened here.
-    """
-
-    async def handle(payload: dict[str, Any]) -> dict[str, Any] | None:
-        run_id = payload["run_id"]
-        identity_sub = payload["identity_sub"]
-        remaining_game_ids = payload["remaining_game_ids"]
-        previous_provider = payload["provider"]
-        previous_retry_after_seconds = payload["retry_after_seconds"]
-
-        token_store = DbTokenStore(identity_sub, repository, token_crypto, redis_adapter)
-        saved = await token_store.load()
-        if saved is None:
-            raise RuntimeError(f"No PSN link for user {identity_sub!r}; cannot resume library refresh.")
-
-        session = await PsnSession.restore(None, token_store, rate_limiter=rate_limiter)
-        catalog_client = CatalogClient(session)
-
-        user_rawg_client, user_opencritic_client = await _build_per_user_enrichment_clients(
-            identity_sub,
-            enrichment_keys_repository=enrichment_keys_repository,
-            token_crypto=token_crypto,
-            http_client=http_client,
-            redis_adapter=redis_adapter,
-        )
-
-        per_user_enrichment_service = EnrichmentService(
-            rawg_client=user_rawg_client,
-            opencritic_client=user_opencritic_client,
-            catalog_client=catalog_client,
-            repository=enrichment_repository,
-            rate_limit_backoff_seconds={
-                previous_provider: next_rate_limit_backoff_seconds(previous_retry_after_seconds)
-            },
-        )
-
-        continuation_games = await library_repository.get_games_for_continuation(identity_sub, remaining_game_ids)
-        games_by_id = {game.game_id: game for game in continuation_games}
-        games = [
-            (
-                game_id,
-                games_by_id[game_id].title,
-                games_by_id[game_id].product_id,
-                games_by_id[game_id].title_id,
-                games_by_id[game_id].native_ps5,
-            )
-            for game_id in remaining_game_ids
-            if game_id in games_by_id
-        ]
-
-        publisher_tier_rules = await enrichment_repository.list_publisher_tier_rules()
-        size_estimates = await catalog_repository.get_size_estimates()
-        enrich_result = await enrich_games(
-            per_user_enrichment_service,
-            enrichment_repository,
-            games,
-            publisher_tier_rules=publisher_tier_rules,
-            size_estimates=size_estimates,
-        )
-
-        if enrich_result.rejected_providers:
-            await _record_rejected_providers(
-                identity_sub,
-                enrich_result.rejected_providers,
-                enrichment_keys_repository=enrichment_keys_repository,
-                audit_repository=audit_repository,
-            )
-
-        existing_run = await job_runs_repository.get(run_id)
-        existing_summary = (existing_run.result_summary if existing_run is not None else None) or {}
-        merged_rawg_titles = list(
-            dict.fromkeys([*existing_summary.get("rawg_enriched_titles", []), *enrich_result.rawg_enriched_titles])
-        )
-        merged_opencritic_titles = list(
-            dict.fromkeys(
-                [
-                    *existing_summary.get("opencritic_enriched_titles", []),
-                    *enrich_result.opencritic_enriched_titles,
-                ]
-            )
-        )
-        opencritic_topup_incomplete = (
-            existing_summary.get("opencritic_topup_incomplete", False)
-            or per_user_enrichment_service.opencritic_topup_incomplete
-        )
-        merged_rejected_providers = sorted(
-            {*existing_summary.get("rejected_providers", []), *enrich_result.rejected_providers}
-        )
-        merged_unavailable_providers = sorted(
-            {*existing_summary.get("unavailable_providers", []), *enrich_result.unavailable_providers}
-        )
-
-        if enrich_result.rate_limited_provider is not None:
-            assert enrich_result.retry_after_seconds is not None
-            result_summary = _rate_limited_result_summary(
-                rawg_enriched_titles=merged_rawg_titles,
-                opencritic_enriched_titles=merged_opencritic_titles,
-                opencritic_topup_incomplete=opencritic_topup_incomplete,
-                rate_limited_provider=enrich_result.rate_limited_provider,
-                retry_after_seconds=enrich_result.retry_after_seconds,
-                remaining_count=len(enrich_result.remaining_game_ids),
-                rejected_providers=merged_rejected_providers,
-                unavailable_providers=merged_unavailable_providers,
-            )
-            new_seq = await job_runs_repository.mark_rate_limited(run_id, result_summary)
-            await queue_publisher.publish_library_refresh_continuation(
-                run_id,
-                identity_sub,
-                enrich_result.remaining_game_ids,
-                enrich_result.rate_limited_provider,
-                enrich_result.retry_after_seconds,
-                seq=new_seq,
-            )
-            raise RateLimitRetryScheduled
-
-        return {
-            "rawg_enriched_titles": merged_rawg_titles,
-            "opencritic_enriched_titles": merged_opencritic_titles,
-            "opencritic_topup_incomplete": opencritic_topup_incomplete,
-            "rejected_providers": merged_rejected_providers,
-            "unavailable_providers": merged_unavailable_providers,
-        }
-
-    return handle
-
-
 def _default_agent_factory(
     repository: Repository,
     token_crypto: TokenCrypto,
@@ -1102,7 +429,7 @@ def _default_trophy_client_factory(
     :param rate_limiter: The shared distributed PSN rate limiter (``None`` throttles nothing).
     :param redis_adapter: The shared Redis adapter (``None`` disables both trophy-read caching and the
         access-token cache).
-    :raises RuntimeError: If the caller has no stored PSN link (mirrors ``_library_refresh_handler``).
+    :raises RuntimeError: If the caller has no stored PSN link.
     """
 
     async def factory(sub: str) -> TrophyClient | CachedTrophyClient:
@@ -1201,7 +528,7 @@ def _default_mutation_service_factory(
             raise RuntimeError(f"No PSN link for user {sub!r}; cannot build a mutation service.")
 
         session = await PsnSession.restore(None, token_store, rate_limiter=rate_limiter)
-        guard = MutationGuard(sub, TestAccountRepository(pool), repository, audit_repository)
+        guard = MutationGuard(sub, PinnedAccountRepository(pool), repository, audit_repository)
         return MutationService(session, guard)
 
     return factory

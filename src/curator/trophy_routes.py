@@ -24,6 +24,11 @@ from pydantic import BaseModel
 from curator.audit.repository import ACTION_TROPHY_FETCH, AccountActionLogRepository
 from curator.deps import require_bearer, require_preference
 from curator.psn.errors import PsnAuthError
+from curator.psn.identifiers import (
+    InvalidPsnIdentifierError,
+    validate_np_communication_id,
+    validate_trophy_group,
+)
 from curator.psn.models import TrophyCounts, TrophyDetail, TrophyGroup, TrophyGroups, TrophySummary, TrophyTitle
 from curator.psn.trophy_cache import CachedTrophyClient
 from curator.psn.trophy_client import TrophyClient, TrophyClientFactory
@@ -161,9 +166,12 @@ async def get_title_trophies(
 
     :param np_communication_id: The title's ``npCommunicationId`` (from ``GET /trophies/titles``).
     :param platform: The title's platform, e.g. ``"PS5"`` or ``"PS4"`` (also from ``GET /trophies/titles``).
-    :raises fastapi.HTTPException: 404, if the caller has no PSN link; 403, if ``harvest_trophies`` is not
-        enabled for this user; 401, if PSN rejects the stored token.
+    :raises fastapi.HTTPException: 422, if ``np_communication_id`` or ``group`` is malformed; 404, if the
+        caller has no PSN link; 403, if ``harvest_trophies`` is not enabled for this user; 401, if PSN
+        rejects the stored token.
     """
+    np_communication_id = _valid(validate_np_communication_id, np_communication_id)
+    group = _valid(validate_trophy_group, group)
     await require_preference(request, claims.sub, "harvest_trophies")
     client = await _trophy_client(request, claims)
     trophies = await _call(client.title_trophies, np_communication_id, platform, group=group)
@@ -181,9 +189,11 @@ async def get_trophy_groups(
 
     :param np_communication_id: The title's ``npCommunicationId`` (from ``GET /trophies/titles``).
     :param platform: The title's platform, e.g. ``"PS5"`` or ``"PS4"`` (also from ``GET /trophies/titles``).
-    :raises fastapi.HTTPException: 404, if the caller has no PSN link; 403, if ``harvest_trophies`` is not
-        enabled for this user; 401, if PSN rejects the stored token.
+    :raises fastapi.HTTPException: 422, if ``np_communication_id`` is malformed; 404, if the caller has no
+        PSN link; 403, if ``harvest_trophies`` is not enabled for this user; 401, if PSN rejects the stored
+        token.
     """
+    np_communication_id = _valid(validate_np_communication_id, np_communication_id)
     await require_preference(request, claims.sub, "harvest_trophies")
     client = await _trophy_client(request, claims)
     groups = await _call(client.trophy_groups, np_communication_id, platform)
@@ -208,6 +218,13 @@ async def _trophy_client(request: Request, claims: TokenClaims) -> TrophyClient 
 
 
 _T = TypeVar("_T")
+
+
+def _valid(validator: Callable[[str], str], value: str) -> str:
+    try:
+        return validator(value)
+    except InvalidPsnIdentifierError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
 async def _call(method: Callable[..., Coroutine[Any, Any, _T]], *args: Any, **kwargs: Any) -> _T:

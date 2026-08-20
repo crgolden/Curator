@@ -78,25 +78,6 @@ async def test_manual_entry_cannot_overwrite_a_psn_sourced_row():
     )
 
 
-async def test_psn_upsert_claims_a_row_that_had_been_added_manually():
-    pool = FakePool()
-    repository = LibraryRepository(pool)
-
-    await repository.upsert_entry(
-        "sub-a",
-        "game-1",
-        native_ps5=True,
-        ps4_eligible=False,
-        owned_edition="Deluxe",
-        winning_entitlement_id="ent-1",
-        product_id="prod-1",
-        title_id="CUSA1",
-    )
-
-    sql, _ = pool.connections[0].executed[0]
-    assert "source = 'psn'" in sql, "buying a manually-added game digitally makes it a PSN row"
-
-
 async def test_deleting_a_manual_entry_cannot_touch_a_psn_row():
     pool = FakePool(rowcount=1)
     repository = LibraryRepository(pool)
@@ -115,25 +96,3 @@ async def test_deleting_a_game_with_no_manual_entry_reports_false():
     repository = LibraryRepository(pool)
 
     assert await repository.delete_manual_entry("sub-a", "game-1") is False
-
-
-async def test_a_psn_refresh_never_deactivates_rows_it_did_not_mention():
-    pool = FakePool()
-    repository = LibraryRepository(pool)
-
-    await repository.upsert_entry(
-        "sub-a",
-        "game-1",
-        native_ps5=False,
-        ps4_eligible=True,
-        owned_edition=None,
-        winning_entitlement_id="ent-1",
-        product_id=None,
-        title_id=None,
-        is_active=True,
-    )
-
-    for sql, params in pool.connections[0].executed:
-        assert "is_active = false" not in sql.lower()
-        assert params is not None
-        assert "game-1" in params, "every statement must be scoped to the pulled game"

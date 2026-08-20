@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
-from cryptography.fernet import Fernet
 from fastapi.testclient import TestClient
 
 from curator.app import create_app
@@ -156,7 +155,7 @@ class FakeLibraryRepository:
 
 def _build(job_runs_repository=None, library_repository=None, repository=None, trophy_client_factory=None):
     repository = repository if repository is not None else FakeRepository()
-    token_crypto = TokenCrypto(Fernet.generate_key())
+    token_crypto = TokenCrypto(TokenCrypto.generate_key())
     validator = FakeTokenValidator()
     publisher = FakePublisher()
     app = create_app(
@@ -254,7 +253,7 @@ def test_a_stale_non_terminal_run_is_superseded_not_returned():
     assert response.json() == {"run_id": "run-1"}
     assert publisher.library_refresh_calls == ["sub-a"]
     assert job_runs_repository.failed_calls == [
-        ("run-stale", "Superseded: no progress for over 24 hours, treated as abandoned.")
+        ("run-stale", "This refresh made no progress for over 24 hours, so a new one has been started in its place.")
     ]
     assert job_runs_repository.runs["run-stale"].status == "failed"
 
@@ -296,7 +295,7 @@ def test_a_running_run_whose_lease_expired_is_superseded_even_though_updated_at_
     assert response.json() == {"run_id": "run-1"}
     assert publisher.library_refresh_calls == ["sub-a"]
     assert job_runs_repository.failed_calls == [
-        ("run-dead", "Superseded: the processing lease expired, treated as abandoned.")
+        ("run-dead", "This refresh stopped before it finished, so a new one has been started in its place.")
     ]
 
 
@@ -310,7 +309,7 @@ def test_a_running_run_that_never_took_a_lease_is_superseded():
 
     assert response.json() == {"run_id": "run-1"}
     assert job_runs_repository.failed_calls == [
-        ("run-unleased", "Superseded: the processing lease expired, treated as abandoned.")
+        ("run-unleased", "This refresh stopped before it finished, so a new one has been started in its place.")
     ]
 
 
@@ -645,7 +644,7 @@ def test_get_library_percent_completed_blank_for_unlinked_user():
 def test_get_library_percent_completed_blank_when_harvest_trophies_disabled():
     games = [FakeLibraryGameView("game-1", "God of War Ragnarök")]
     repository = FakeRepository()
-    crypto = TokenCrypto(Fernet.generate_key())
+    crypto = TokenCrypto(TokenCrypto.generate_key())
     _seed_link(repository, crypto, "sub-a", harvest_trophies=False)
     client, validator, _publisher = _build(
         library_repository=FakeLibraryRepository({"sub-a": games}), repository=repository
@@ -670,7 +669,7 @@ def test_get_library_never_calls_psn_to_resolve_completion():
         FakeLibraryGameView("game-2", "Game B", percent_completed=None),
     ]
     repository = FakeRepository()
-    crypto = TokenCrypto(Fernet.generate_key())
+    crypto = TokenCrypto(TokenCrypto.generate_key())
     _seed_link(repository, crypto, "sub-a", harvest_trophies=True)
     factory = FakeTrophyClientFactory()
     factory.linked["sub-a"] = FakeTrophyClient()

@@ -38,7 +38,7 @@ from datetime import datetime, timezone
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "src"))
 
-_ES_DATA_STREAM = "logs-app-curator"  # must match curator.telemetry._ES_DATA_STREAM
+_ES_DATA_STREAM = "logs-app-curator"
 
 
 def _report_bootstrap_failure(exc: BaseException) -> None:

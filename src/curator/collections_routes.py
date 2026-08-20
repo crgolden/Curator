@@ -313,7 +313,7 @@ async def save_definition(
         raise HTTPException(status_code=409, detail=f"You already have a collection named {body.name!r}.") from exc
 
     saved = await collections_repository.get_definition(claims.sub, definition_id)
-    assert saved is not None  # just inserted, in the same identity_sub scope
+    assert saved is not None
     return _definition_to_response(saved)
 
 
@@ -488,7 +488,7 @@ async def update_definition(
         raise HTTPException(status_code=409, detail=f"You already have a collection named {name!r}.") from exc
 
     updated_definition = await collections_repository.get_definition(claims.sub, definition_id)
-    assert updated_definition is not None  # confirmed to exist and be ours moments ago
+    assert updated_definition is not None
     items = await collections_repository.list_definition_items(definition_id)
     return DefinitionDetailResponse(
         **_definition_to_response(updated_definition).model_dump(), items=[_to_item_response(item) for item in items]

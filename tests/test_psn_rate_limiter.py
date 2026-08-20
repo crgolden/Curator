@@ -61,7 +61,7 @@ async def test_acquire_over_budget_sleeps_out_the_oldest_entry(monkeypatch):
 
     assert len(sleeps) == 1
     assert sleeps[0] > 0
-    assert len(redis.members) == 4  # 3 stale seeds still counted this call, plus the new entry
+    assert len(redis.members) == 4
 
 
 async def test_acquire_prunes_entries_older_than_the_window():

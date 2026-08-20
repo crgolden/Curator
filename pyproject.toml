@@ -15,6 +15,7 @@ dependencies = [
     "psycopg[binary]>=3.3.4,<4.0.0",
     "psycopg-pool>=3.3.1,<4.0.0",
     "httpx>=0.27.0",
+    "tenacity>=9.0.0,<10.0.0",
     "redis>=8.0.1,<9.0.0",
     "azure-servicebus>=7.14.3,<8.0.0",
     "azure-identity>=1.19.0,<2.0.0",
@@ -26,7 +27,6 @@ dependencies = [
     "opentelemetry-instrumentation-psycopg>=0.65b0",
     "opentelemetry-instrumentation-httpx>=0.48b0",
     "elasticsearch>=9.4.1,<10.0.0",
-    "tenacity>=9.0.0,<10.0.0",
 ]
 
 [project.optional-dependencies]
@@ -34,6 +34,8 @@ dev = [
     "pytest>=8.0.0",
     "pytest-asyncio>=1.4.0",
     "pytest-cov>=7.1.0",
+    "pytest-xdist>=3.8.0",
+    "httpx2>=2.10.0,<3.0.0",
     "ruff>=0.15.22",
     "mypy>=2.3.0",
 ]
@@ -49,6 +51,13 @@ package-mode = false
 testpaths = ["tests"]
 pythonpath = ["src"]
 asyncio_mode = "auto"
+# The suite has no hot spot -- the slowest test is ~1.5 s and the slowest 25 together are under a fifth of
+# the run -- so the cost is diffuse per-test overhead and parallelism is the only lever on it. `loadgroup`
+# load-balances individual tests except where an `xdist_group` mark pins a set to one worker;
+# `tests/test_schema.py` carries that mark because its tests share one connection holding an uncommitted
+# schema build, and a second worker re-applying the same CREATE TABLEs would block on its locks. Pass
+# `-n 0` to run serially when debugging -- `-p no:xdist` instead makes these very options unrecognized.
+addopts = "-n auto --dist loadgroup"
 
 [tool.ruff]
 target-version = "py310"
@@ -81,11 +90,8 @@ files = ["src", "tests"]
 # `tests/` has no `__init__.py`, so mypy names each test file's module after its bare filename
 # (`test_config`, not `tests.test_config`) -- the glob below matches on that. src/ remains fully strict.
 module = [
+    "test_app_shim",
     "test_authz",
-    "test_catalog_canonicalization_service",
-    "test_catalog_exclusion_rules",
-    "test_catalog_franchise_assigner",
-    "test_catalog_merge_service",
     "test_catalog_store_backfill",
     "test_catalog_repository",
     "test_catalog_routes",
@@ -101,31 +107,19 @@ module = [
     "test_consoles_routes",
     "test_deps",
     "test_devices_routes",
-    "test_enrichment_genre_reconciliation_service",
     "test_enrichment_keys_repository",
     "test_enrichment_keys_routes",
     "test_enrichment_opencritic_client",
-    "test_enrichment_opencritic_matcher",
-    "test_enrichment_publisher_tier",
     "test_enrichment_rawg_client",
-    "test_enrichment_rawg_matcher",
-    "test_enrichment_repository",
     "test_enrichment_routes",
-    "test_enrichment_run_handler",
-    "test_enrichment_service",
     "test_filter_predicate",
     "test_config",
     "test_connection",
     "test_crypto",
     "test_db_token_store",
-    "test_library_build_orchestrator",
     "test_library_manual_entries",
-    "test_library_ingestion_service",
-    "test_library_refresh_continuation_handler",
     "test_library_repository",
     "test_library_routes",
-    "test_jobs_error_messages",
-    "test_jobs_queue_consumer",
     "test_jobs_queue_depth_monitor",
     "test_jobs_queue_publisher",
     "test_jobs_repository",
@@ -138,9 +132,7 @@ module = [
     "test_profile_routes",
     "test_public_collections_routes",
     "test_psn_account_client",
-    "test_psn_catalog_client",
-    "test_psn_chat_client",
-    "test_psn_library_client",
+    "test_psn_identifiers",
     "test_psn_mutation_service",
     "test_psn_npsso",
     "test_psn_presence_client",
@@ -148,7 +140,6 @@ module = [
     "test_psn_repository",
     "test_redis_client",
     "test_refresh_schedules",
-    "test_trophy_completion",
     "test_trophy_routes",
     "test_psn_safety",
     "test_psn_session",
@@ -156,10 +147,8 @@ module = [
     "test_psn_social_client",
     "test_psn_trophy_cache",
     "test_psn_trophy_client",
-    "test_psn_trophy_service",
     "test_repository",
     "test_reverify",
-    "test_scoring_genre_service",
     "test_scoring_scoring_service",
     "test_scoring_size_estimation_service",
     "test_routes",

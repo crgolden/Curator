@@ -136,7 +136,7 @@ async def test_follow_is_idempotent_at_the_repository_call_level():
     await repo.follow("sub-a", "sub-b")
     await repo.follow("sub-a", "sub-b")
 
-    assert len(pool.connections) == 2  # two calls, each issuing its own ON CONFLICT DO NOTHING insert
+    assert len(pool.connections) == 2
 
 
 async def test_unfollow_returns_true_when_a_row_was_removed():

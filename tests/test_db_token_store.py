@@ -1,14 +1,14 @@
-"""Tests for DbTokenStore, using a hand-written fake Repository/Redis and the real TokenCrypto (Fernet is
-exercised directly, not mocked).
+"""Tests for DbTokenStore, using a hand-written fake Repository/Redis and the real TokenCrypto (AES-256-GCM
+is exercised directly, not mocked).
 """
 
 from __future__ import annotations
 
 import json
+import random
 import time
+import uuid
 from datetime import datetime, timezone
-
-from cryptography.fernet import Fernet
 
 from curator.persistence.crypto import TokenCrypto
 from curator.persistence.db_token_store import DbTokenStore, access_token_cache_key
@@ -68,7 +68,7 @@ class FakeRedis:
 
 
 def _make_crypto() -> TokenCrypto:
-    return TokenCrypto(Fernet.generate_key())
+    return TokenCrypto(TokenCrypto.generate_key())
 
 
 def _encrypted_link(crypto: TokenCrypto, payload: dict) -> LinkRecord:
@@ -93,7 +93,7 @@ async def test_load_returns_none_on_corrupt_ciphertext():
     repo = FakeRepository()
     repo.links["sub-1"] = LinkRecord(
         psn_account_id=None,
-        token_response_enc=b"not-a-valid-fernet-token",
+        token_response_enc=b"not-valid-ciphertext",
         access_token_expires_at=None,
         refresh_token_expires_at=None,
         linked_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
@@ -121,6 +121,50 @@ async def test_load_returns_durable_fields_as_is_when_redis_not_configured():
     store = DbTokenStore("sub-1", repo, crypto)
 
     assert await store.load() == {"refresh_token": "RT", "scope": "psn:mobile.v2.core"}
+
+
+async def test_load_reads_a_two_key_blob_written_by_the_worker_runtime():
+    """The worker persists only ``refresh_token`` and ``refresh_token_expires_at``, dropping the other
+    non-ephemeral keys this runtime happens to store. Both runtimes read the same ``psn_links`` row, so
+    the narrower shape has to round-trip here unchanged."""
+    crypto = _make_crypto()
+    repo = FakeRepository()
+    refresh_token = f"refresh-{uuid.uuid4().hex}"
+    refresh_expires_at = time.time() + random.randint(86_400, 5_184_000)
+    repo.links["sub-1"] = _encrypted_link(
+        crypto, {"refresh_token": refresh_token, "refresh_token_expires_at": refresh_expires_at}
+    )
+    store = DbTokenStore("sub-1", repo, crypto)
+
+    loaded = await store.load()
+
+    assert loaded == {"refresh_token": refresh_token, "refresh_token_expires_at": refresh_expires_at}
+
+
+async def test_save_round_trips_through_the_two_key_shape_the_worker_writes():
+    """A token response saved here, reduced to the worker's two durable keys, must still load as a
+    usable session -- ``PsnSession.restore`` only requires ``refresh_token`` to be present."""
+    crypto = _make_crypto()
+    repo = FakeRepository()
+    refresh_token = f"refresh-{uuid.uuid4().hex}"
+    refresh_expires_at = time.time() + random.randint(86_400, 5_184_000)
+    store = DbTokenStore("sub-1", repo, crypto)
+
+    await store.save(
+        {
+            "access_token": f"access-{uuid.uuid4().hex}",
+            "expires_in": 3600,
+            "access_token_expires_at": time.time() + 3600,
+            "refresh_token": refresh_token,
+            "refresh_token_expires_at": refresh_expires_at,
+        }
+    )
+    loaded = await store.load()
+
+    assert loaded is not None
+    assert loaded["refresh_token"] == refresh_token
+    assert loaded["refresh_token_expires_at"] == refresh_expires_at
+    assert "access_token" not in loaded
 
 
 async def test_load_merges_cached_access_token_with_durable_refresh_token():

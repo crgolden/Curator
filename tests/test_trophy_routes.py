@@ -4,7 +4,6 @@ DI-seam style as test_routes.py's FakeAgentFactory), so no real PSN/Redis calls 
 
 from __future__ import annotations
 
-from cryptography.fernet import Fernet
 from fastapi.testclient import TestClient
 
 from curator.app import create_app
@@ -114,7 +113,7 @@ def _build(trophy_client_factory=None, repository=None):
 def _build_linked(trophy_client_factory=None):
     """Build an app whose caller has a PSN link with ``harvest_trophies`` enabled."""
     repository = FakeRepository()
-    crypto = TokenCrypto(Fernet.generate_key())
+    crypto = TokenCrypto(TokenCrypto.generate_key())
     _seed_link(repository, crypto, SUB, harvest_trophies=True)
     return _build(trophy_client_factory, repository=repository)
 
@@ -155,7 +154,7 @@ def test_trophy_summary_psn_auth_error_is_401():
 
 def test_trophy_summary_harvest_trophies_disabled_is_403():
     repository = FakeRepository()
-    crypto = TokenCrypto(Fernet.generate_key())
+    crypto = TokenCrypto(TokenCrypto.generate_key())
     _seed_link(repository, crypto, SUB, harvest_trophies=False)
     client, _ = _build(repository=repository)
 
@@ -179,7 +178,7 @@ def test_trophy_titles_happy_path():
 
 def test_trophy_titles_harvest_trophies_disabled_is_403():
     repository = FakeRepository()
-    crypto = TokenCrypto(Fernet.generate_key())
+    crypto = TokenCrypto(TokenCrypto.generate_key())
     _seed_link(repository, crypto, SUB, harvest_trophies=False)
     client, _ = _build(repository=repository)
 
@@ -192,7 +191,7 @@ def test_title_trophies_requires_platform_query_param():
     factory.linked[SUB] = FakeTrophyClient()
     client, _ = _build_linked(factory)
 
-    response = client.get("/trophies/titles/NPWR1", headers=_bearer("valid-token"))
+    response = client.get("/trophies/titles/NPWR15509_00", headers=_bearer("valid-token"))
     assert response.status_code == 422
 
 
@@ -203,7 +202,7 @@ def test_title_trophies_happy_path():
     client, _ = _build_linked(factory)
 
     response = client.get(
-        "/trophies/titles/NPWR1", params={"platform": "PS5", "group": "default"}, headers=_bearer("valid-token")
+        "/trophies/titles/NPWR15509_00", params={"platform": "PS5", "group": "default"}, headers=_bearer("valid-token")
     )
 
     assert response.status_code == 200
@@ -222,16 +221,16 @@ def test_title_trophies_happy_path():
             "rarity": 42.5,
         }
     ]
-    assert fake_client.title_trophies_calls == [("NPWR1", "PS5", "default")]
+    assert fake_client.title_trophies_calls == [("NPWR15509_00", "PS5", "default")]
 
 
 def test_title_trophies_harvest_trophies_disabled_is_403():
     repository = FakeRepository()
-    crypto = TokenCrypto(Fernet.generate_key())
+    crypto = TokenCrypto(TokenCrypto.generate_key())
     _seed_link(repository, crypto, SUB, harvest_trophies=False)
     client, _ = _build(repository=repository)
 
-    response = client.get("/trophies/titles/NPWR1", params={"platform": "PS5"}, headers=_bearer("valid-token"))
+    response = client.get("/trophies/titles/NPWR15509_00", params={"platform": "PS5"}, headers=_bearer("valid-token"))
     assert response.status_code == 403
 
 
@@ -241,26 +240,32 @@ def test_trophy_groups_happy_path():
     factory.linked[SUB] = fake_client
     client, _ = _build_linked(factory)
 
-    response = client.get("/trophies/titles/NPWR1/groups", params={"platform": "PS5"}, headers=_bearer("valid-token"))
+    response = client.get(
+        "/trophies/titles/NPWR15509_00/groups", params={"platform": "PS5"}, headers=_bearer("valid-token")
+    )
 
     assert response.status_code == 200
     body = response.json()
     assert body["title_name"] == "Game A"
     assert body["groups"] == []
-    assert fake_client.trophy_groups_calls == [("NPWR1", "PS5")]
+    assert fake_client.trophy_groups_calls == [("NPWR15509_00", "PS5")]
 
 
 def test_trophy_groups_no_link_is_404():
     client, _ = _build()
-    response = client.get("/trophies/titles/NPWR1/groups", params={"platform": "PS5"}, headers=_bearer("valid-token"))
+    response = client.get(
+        "/trophies/titles/NPWR15509_00/groups", params={"platform": "PS5"}, headers=_bearer("valid-token")
+    )
     assert response.status_code == 404
 
 
 def test_trophy_groups_harvest_trophies_disabled_is_403():
     repository = FakeRepository()
-    crypto = TokenCrypto(Fernet.generate_key())
+    crypto = TokenCrypto(TokenCrypto.generate_key())
     _seed_link(repository, crypto, SUB, harvest_trophies=False)
     client, _ = _build(repository=repository)
 
-    response = client.get("/trophies/titles/NPWR1/groups", params={"platform": "PS5"}, headers=_bearer("valid-token"))
+    response = client.get(
+        "/trophies/titles/NPWR15509_00/groups", params={"platform": "PS5"}, headers=_bearer("valid-token")
+    )
     assert response.status_code == 403

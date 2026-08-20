@@ -58,7 +58,7 @@ class FakeSession:
         return await operation()
 
 
-class FakeTestAccountRepository:
+class FakePinnedAccountRepository:
     def __init__(self, pinned_account_id=None):
         self.pinned = pinned_account_id
 
@@ -90,7 +90,7 @@ def _service(session, *, linked="pinned-acct", allow_friend_writes=True, allow_c
         if linked is None
         else FakeLink(linked, allow_friend_writes=allow_friend_writes, allow_chat_writes=allow_chat_writes)
     )
-    guard = MutationGuard("sub-1", FakeTestAccountRepository(), links=FakeLinkReader(link))
+    guard = MutationGuard("sub-1", FakePinnedAccountRepository(), links=FakeLinkReader(link))
     return MutationService(session, guard)
 
 
@@ -174,7 +174,7 @@ async def test_invite_to_group_resolves_online_ids_to_account_ids():
     await service.invite_to_group("g1", online_ids=["SomeOnlineId"])
 
     invitee_account_ids = [i["accountId"] for i in session.post_calls[0][1]["invitees"]]
-    assert invitee_account_ids  # resolved via the profile2 lookup in FakeSession.get
+    assert invitee_account_ids
 
 
 async def test_invite_to_group_posts_to_the_named_group_not_the_create_group_endpoint():

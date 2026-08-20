@@ -147,7 +147,7 @@ def test_filter_predicate_replaces_the_flat_fields_rather_than_combining_with_th
     candidates = [_candidate("a", genre="Sports", aaa_tier="Indie")]
     spec = CollectionSpec(
         kind="filter_list",
-        genre_filter=("RPG",),  # would exclude "a" under the flat path
+        genre_filter=("RPG",),
         filter_predicate=GenreIn(values=("Sports",)),
     )
 

@@ -1,15 +1,11 @@
 """Async PSN HTTP session: auth bootstrap, refresh, and rate-throttled GET/POST/PATCH/PUT/DELETE.
 
-Ported from ``psnpy.psn_api.PsnSession`` onto ``httpx.AsyncClient`` with an ``asyncio``-based,
-Redis-backed distributed rate limiter, replacing ``psnpy``'s blocking ``requests`` + a plain in-process
-``collections.deque`` sliding window. Implements PSN's private OAuth2 flow directly (npsso cookie ->
-authorization code -> access/refresh token exchange) and a bearer-token request pattern -- no
-TLS-impersonation trick is needed; a live spike against a real account found no fingerprint blocking from
-PSN/Akamai.
+Built on ``httpx.AsyncClient`` with an ``asyncio``-based, Redis-backed distributed rate limiter.
+Implements PSN's private OAuth2 flow directly (npsso cookie -> authorization code -> access/refresh token
+exchange) and a bearer-token request pattern -- no TLS-impersonation trick is needed; a live spike
+against a real account found no fingerprint blocking from PSN/Akamai.
 
-Every other ``curator.psn.*`` client is built on this one shared engine, matching ``psnpy``'s original
-design -- only the transport (``httpx`` vs. ``requests``) and concurrency model (``async``/``await`` vs.
-blocking) changed.
+Every other ``curator.psn.*`` client is built on this one shared engine.
 """
 
 from __future__ import annotations
@@ -17,10 +13,12 @@ from __future__ import annotations
 import time
 import uuid
 from typing import TYPE_CHECKING, Any, Protocol, TypeVar
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, unquote, urlparse
 
 import httpx
+from tenacity import AsyncRetrying, retry_if_exception, stop_after_attempt, wait_exponential
 
+from curator.http_client import shared_ssl_context
 from curator.psn.errors import PsnAuthError
 
 if TYPE_CHECKING:
@@ -29,6 +27,7 @@ if TYPE_CHECKING:
 T = TypeVar("T")
 
 _AUTH_BASE = "https://ca.account.sony.com/api/authz/v3/oauth"
+_TOKEN_REJECTION_STATUS_CODES = frozenset({400, 401, 403})
 _CLIENT_ID = "09515159-7237-4370-9b40-3806e67c0891"
 _SCOPE = "psn:mobile.v2.core psn:clientapp"
 _REDIRECT_URI = "com.scee.psxandroid.scecompcall://redirect"
@@ -42,6 +41,13 @@ _DEFAULT_USER_AGENT = (
 RATE_LIMIT_MAX_REQUESTS = 300
 RATE_LIMIT_WINDOW_SECONDS = 15 * 60
 
+RETRYABLE_METHODS = frozenset({"GET"})
+RETRYABLE_STATUS_FLOOR = 500
+READ_ATTEMPTS = 3
+UNRETRIED_ATTEMPTS = 1
+RETRY_BACKOFF_MULTIPLIER_SECONDS = 0.5
+RETRY_MAX_WAIT_SECONDS = 4.0
+
 _ALLOWED_HOSTS: frozenset[str] = frozenset(
     {
         "ca.account.sony.com",
@@ -52,6 +58,21 @@ _ALLOWED_HOSTS: frozenset[str] = frozenset(
         "us-prof.np.community.playstation.net",
     }
 )
+
+
+def is_transient_psn_failure(exception: BaseException) -> bool:
+    """Whether a failed PSN call is worth another attempt.
+
+    :param exception: The exception a request attempt raised.
+    :returns: ``True`` for a network-level failure or a ``5xx``; ``False`` for anything the server
+        answered deliberately -- :class:`~curator.psn.errors.PsnAuthError` (``401``/``403``), any other
+        ``4xx``, and a rejected URL all mean the same call would fail identically on a retry.
+    """
+    if isinstance(exception, httpx.TransportError):
+        return True
+    if isinstance(exception, httpx.HTTPStatusError):
+        return exception.response.status_code >= RETRYABLE_STATUS_FLOOR
+    return False
 
 
 class TokenStore(Protocol):
@@ -115,6 +136,7 @@ class PsnSession:
                 "Country": "US",
             },
             timeout=15.0,
+            verify=shared_ssl_context(),
         )
         self.token_response: dict[str, Any] | None = None
 
@@ -153,9 +175,9 @@ class PsnSession:
     async def run_with_reauth(self, operation: Callable[[], Coroutine[Any, Any, T]]) -> T:
         """Run an async operation, re-bootstrapping from npsso once if PSN rejects the current token.
 
-        Mirrors ``psnpy.client.PsnAgent``'s ``_run``'s retry-once semantics, but token *persistence* is no
-        longer a separate step every client must remember to call: :meth:`_exchange` already saves to the
-        token store as soon as a fresh token is obtained, so this only needs to handle the retry.
+        Retry-once semantics. Token *persistence* is not a separate step a client must remember to call:
+        :meth:`_exchange` saves to the token store as soon as a fresh token is obtained, so this only
+        needs to handle the retry.
 
         :param operation: A zero-argument async callable to run (typically a client's private ``_op``
             method bound with its arguments via a closure).
@@ -257,12 +279,16 @@ class PsnSession:
             data["refresh_token"] = refresh_token
 
         response = await self._throttled_request("POST", f"{_AUTH_BASE}/token", headers=headers, data=data)
-        if response.status_code >= 400:
+        if response.status_code in _TOKEN_REJECTION_STATUS_CODES:
             raise PsnAuthError(f"PSN token exchange failed ({response.status_code}): {response.text[:200]}")
+        response.raise_for_status()
 
         token: dict[str, Any] = response.json()
+        expires_in = token.get("expires_in")
+        if not isinstance(expires_in, (int, float)):
+            raise PsnAuthError("PSN's token response carried no usable expires_in.")
         now = time.time()
-        token["access_token_expires_at"] = token["expires_in"] + now
+        token["access_token_expires_at"] = expires_in + now
         if "refresh_token_expires_in" in token:
             token["refresh_token_expires_at"] = token["refresh_token_expires_in"] + now
         self.token_response = token
@@ -345,10 +371,30 @@ class PsnSession:
         return await self._request("DELETE", url, headers=headers)
 
     async def _request(self, method: str, url: str, **kwargs: Any) -> httpx.Response:
+        """Make one authenticated PSN call, retrying a read that failed transiently.
+
+        Only the methods in :data:`RETRYABLE_METHODS` are retried. A ``5xx`` on a write funnels through
+        here too, and PSN gives no way to tell "the write failed" from "the write succeeded and the
+        response was lost" -- so a retried ``POST``/``PATCH``/``PUT``/``DELETE`` risks applying the
+        change twice. Reads carry no such risk, which is the whole reason the split exists.
+
+        Each attempt re-enters :meth:`_throttled_request` and therefore re-acquires rate-limit budget,
+        so retries are paced by the same fleet-wide throttle as first attempts.
+        """
+        attempts = READ_ATTEMPTS if method in RETRYABLE_METHODS else UNRETRIED_ATTEMPTS
+        retrying = AsyncRetrying(
+            stop=stop_after_attempt(attempts),
+            wait=wait_exponential(multiplier=RETRY_BACKOFF_MULTIPLIER_SECONDS, max=RETRY_MAX_WAIT_SECONDS),
+            retry=retry_if_exception(is_transient_psn_failure),
+            reraise=True,
+        )
+        return await retrying(self._send_once, method, url, **kwargs)
+
+    async def _send_once(self, method: str, url: str, **kwargs: Any) -> httpx.Response:
         await self._ensure_fresh()
         headers = dict(kwargs.pop("headers", None) or {})
         token_response = self.token_response
-        assert token_response is not None  # guaranteed by _ensure_fresh() above
+        assert token_response is not None
         headers["Authorization"] = f"Bearer {token_response['access_token']}"
         response = await self._throttled_request(method, url, headers=headers, **kwargs)
         if response.status_code in (401, 403):
@@ -363,24 +409,20 @@ class PsnSession:
         :param url: The absolute request URL.
         :returns: ``url``, unchanged.
         :raises ValueError: If the scheme is not HTTPS, the host is not a PSN host, or the path contains
-            a ``..`` segment. Callers build these URLs by interpolating PSN identifiers -- online ids,
-            account ids, group ids -- that originate with a user, so neither the host nor the path shape
-            is guaranteed by construction.
+            a ``..`` segment once percent-decoded.
         """
         parsed = urlparse(url)
         if parsed.scheme != "https" or parsed.hostname not in _ALLOWED_HOSTS:
             raise ValueError(f"Refusing a PSN request to a non-PSN URL: {parsed.scheme}://{parsed.hostname}")
-        if ".." in parsed.path.split("/"):
+        if ".." in unquote(parsed.path).replace("\\", "/").split("/"):
             raise ValueError("Refusing a PSN request whose path contains a traversal segment.")
         return url
 
     async def _throttled_request(self, method: str, url: str, **kwargs: Any) -> httpx.Response:
         """Acquire the distributed rate-limit budget, then make the request.
 
-        Unlike ``psnpy``'s original in-process ``collections.deque`` sliding window (correct only for a
-        single-shot CLI process), :attr:`_rate_limiter` is expected to be backed by a shared store (Redis)
-        when Curator scales out across multiple App Service instances, so the budget is enforced correctly
-        fleet-wide, not per-process.
+        :attr:`_rate_limiter` is expected to be backed by a shared store (Redis) when Curator scales out
+        across multiple App Service instances, so the budget is enforced fleet-wide, not per-process.
         """
         verified = self._verified_url(url)
         await self._rate_limiter.acquire()

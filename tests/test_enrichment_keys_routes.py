@@ -8,7 +8,6 @@ import logging
 from datetime import datetime, timezone
 
 import httpx
-from cryptography.fernet import Fernet
 from fastapi.testclient import TestClient
 
 from curator.app import create_app
@@ -93,7 +92,7 @@ def _mock_http_client(status_code: int = 200) -> httpx.AsyncClient:
 def _build(enrichment_keys_repository=None, audit_repository=None, http_client=None):
     settings = _make_settings()
     repository = FakeRepository()
-    token_crypto = TokenCrypto(Fernet.generate_key())
+    token_crypto = TokenCrypto(TokenCrypto.generate_key())
     enrichment_keys_repository = enrichment_keys_repository or FakeEnrichmentKeysRepository()
     audit_repository = audit_repository if audit_repository is not None else FakeAuditRepository()
     validator = FakeTokenValidator()

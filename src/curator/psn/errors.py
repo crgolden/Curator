@@ -1,4 +1,4 @@
-"""Exceptions raised by the ``curator.psn`` client, ported from ``psnpy``'s ``psn_api.py``/``safety.py``."""
+"""Exceptions raised by the ``curator.psn`` client."""
 
 from __future__ import annotations
 

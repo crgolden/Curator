@@ -24,10 +24,11 @@ for every user's library (it doesn't scale), so a user optionally supplies their
 providers (`GET/PUT/DELETE /me/enrichment-keys/{rawg|opencritic}`), encrypted at rest and used only for
 their own enrichment. See "Security considerations" below.
 
-This repository builds the API in stages. The scaffold, full database schema, and persistence layer
-(config resolution, connection URL, token encryption, the account-table DAO, and a PSN token store backed
-by it) came first. This stage adds the FastAPI application itself: settings resolution, JWT Bearer
-validation against Identity's JWKS, and the PSN link/unlink service and routes built on `curator.psn`.
+The long-running parts of that pipeline — pulling a user's entitlements from PSN, enriching the catalog,
+matching trophy progress — run in a separate background worker service, not on an HTTP request. This API
+creates the `job_runs` row, publishes the job message, and serves the run's status back to whoever is
+polling it; the worker leases that row, does the work, and writes the outcome to it. That split is why
+`POST /library/refresh` and `POST /enrichment/runs` return a `run_id` immediately instead of a result.
 
 ## Auth model
 
@@ -104,14 +105,14 @@ owner opts in.
   That capability is bought with a wider credential than a token-free design needs, which is why the rest
   of this section — and the schema itself — is built to earn the safety back: npsso is never persisted or
   logged, no email column exists anywhere in the schema (`db/migrations/0001_initial.sql`'s header
-  comment), and every stored token is Fernet-encrypted at rest.
+  comment), and every stored token is AES-256-GCM-encrypted at rest.
 - **`PUT /me/enrichment-keys/{provider}` validates the key against the real provider before persisting
   anything** — one cheap request (RAWG: `GET /genres?page_size=1`; OpenCritic: one page of the same
   non-search catalog listing every other OpenCritic call in this codebase uses) confirms the key is
   accepted. A rejected key (401/403) is a 400 and never written to the database; a provider that can't be
   reached at all is a 503, also never persisted — either way the caller finds out immediately and gets a
   chance to correct it, instead of only discovering a bad key when a later library refresh silently fails.
-- **Per-user BYOK keys are encrypted with the same Fernet key as PSN tokens** (`curator.persistence.crypto.TokenCrypto`,
+- **Per-user BYOK keys are encrypted with the same AES-256-GCM key as PSN tokens** (`curator.persistence.crypto.TokenCrypto`,
   keyed by `CURATOR_TOKEN_KEY`) — no separate encryption key was introduced for this feature. `GET
   /me/enrichment-keys` never returns a key value, only whether one is configured and when it was added;
   `PUT`/`DELETE` never echo the value back either.
@@ -153,10 +154,11 @@ owner opts in.
   embeds the full URL, is fully suppressed from the exception chain; (2) `curator.telemetry`'s httpx
   instrumentation `async_request_hook` strips the `key` query param from the OTel span attribute after the
   instrumentor sets it (OTel's own built-in query-param redaction only covers a fixed, unrelated allowlist —
-  `AWSAccessKeyId`/`Signature`/`sig`/`X-Goog-Signature` — not `key`); (3) `curator.jobs.error_messages.friendly_job_error`
-  maps every caught job exception to short, category-based, safe text before it's ever persisted to
-  `job_runs.error` or returned from `GET /library/refresh/{run_id}`, so even a future exception type nobody
-  thought to sanitize can't leak anything through that path.
+  `AWSAccessKeyId`/`Signature`/`sig`/`X-Goog-Signature` — not `key`); (3) the process that writes
+  `job_runs.error` maps every caught job exception to short, category-based, safe text first, so even a
+  future exception type nobody thought to sanitize can't leak anything through what
+  `GET /library/refresh/{run_id}` returns. The first two live here, since RAWG calls originate from this
+  codebase's BYOK-key-validation path; the third lives in the background worker that owns the write.
 
 ## Design conventions
 
@@ -332,36 +334,41 @@ src/curator/
   storage_devices_routes.py                   # POST/GET/PATCH/DELETE /storage-devices,
                                                # PUT/DELETE /storage-devices/{id}/attach[/{consoleId}],
                                                # GET/PUT /storage-devices/{id}/installs[/{gameId}]
-  enrichment_routes.py                        # POST /enrichment/runs (admin-only)
+  enrichment_routes.py                        # POST /enrichment/runs, GET /enrichment/runs/latest|{run_id} (admin-only)
+  refresh_schedules_routes.py                 # GET/PUT/DELETE /me/refresh-schedule: the standing weekly/monthly refresh
+  measured_sizes_routes.py                    # GET/PUT /games/{gameId}/measured-sizes[/{platform}]
+  social_routes.py                            # PUT/DELETE /me/friends/{onlineId}, PSN chat group create/leave
   profile_routes.py                             # GET/PUT /me/profile-settings, GET /users/{sub}/profile,
                                                  # POST/DELETE /users/{sub}/follow, followers/following,
                                                  # library/collections passthrough for another user's sub
-  jobs/
-    error_messages.py    # friendly_job_error(): sanitized, category-based job-failure text
-    queue_consumer.py    # QueueConsumer: drains all three job queues; LockRenewer keeps long runs' locks alive
-    queue_publisher.py   # QueuePublisher: publishes library-refresh/continuation/enrichment job messages
-    repository.py        # JobRunsRepository: job_runs DAO, incl. result_summary and mark_rate_limited
+  jobs/                 # queue publishing and job_runs status; the runs themselves execute in the worker service
+    queue_publisher.py    # QueuePublisher: publishes the library-refresh, scheduled-refresh and enrichment messages
+    queue_depth_monitor.py # QueueDepthMonitor: polls each queue's dead-letter depth into a telemetry gauge
+    repository.py         # JobRunsRepository: job_runs DAO -- creates a run, reads its status, fails an abandoned one
+    staleness.py          # abandoned_run_reason(): whether an in-flight run is still alive or has been abandoned
   library/
-    ingestion_service.py # IngestionService: PSN entitlements -> entitlement_pulls/entitlement_snapshots
-    library_build_orchestrator.py  # build(): ingest -> canonicalize -> enrich -> match_trophies
-    repository.py        # LibraryRepository: library_entries DAO, incl. the trophy match/progress columns
+    repository.py         # LibraryRepository: library_entries DAO, incl. the trophy match/progress columns
   collections/
     repository.py        # CollectionsRepository: definitions, definition items, run history, candidate pool
     collection_orchestrator.py     # dispatches a spec to a strategy
     filter_list_strategy.py        # apply_filter_list(): the console-free authoring aid
     capacity_fill_strategy.py      # fill_capacity(): the opt-in per-console capacity mode
-  catalog/
-    canonicalization_service.py    # entitlements -> one catalog game per title, carrying is_active through
-  psn/
-    trophy_completion.py # fuzzy-matches PSN trophy titles to catalog titles at ingestion time only
+  catalog/              # the shared game catalog: the games DAO, cover art, and the PS Store backfill
+  enrichment/           # the RAWG and OpenCritic clients, the RAWG title matcher, and the enrichment DAO
+  scoring/              # genre selection, install-size estimation, and the collection scoring pass
+  audit/
+    repository.py        # AccountActionLogRepository: the account_action_log defensive audit trail
+  psn/                  # the in-repo PSN client: session and npsso auth, trophies, social, presence,
+                        #   the store, and the shared request rate limiter
   persistence/
     config.py          # generic arg -> env var -> .env resolution
     connection.py       # PostgreSQL connection URL resolution
-    crypto.py            # TokenCrypto: Fernet encryption for tokens at rest
+    crypto.py            # TokenCrypto: AES-256-GCM encryption for tokens at rest
     repository.py        # Repository: psycopg 3 DAO over app_users / psn_links
     enrichment_keys_repository.py  # EnrichmentKeysRepository: psycopg 3 DAO over user_enrichment_keys
     profile_repository.py  # ProfileRepository: psycopg 3 DAO over user_profiles (display toggles)
     follow_repository.py   # FollowRepository: psycopg 3 DAO over follows (the follow graph)
+    refresh_schedules_repository.py  # RefreshSchedulesRepository: a user's standing weekly/monthly refresh
     db_token_store.py    # DbTokenStore: curator.psn.session.TokenStore contract, backed by Repository
 db/migrations/
   0001_initial.sql        # full schema

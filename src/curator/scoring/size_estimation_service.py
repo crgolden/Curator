@@ -1,16 +1,16 @@
-"""Install-size estimation, ported from ``Tools\\PlayStation\\ps_sizes.py``'s ``get_install_size()``.
+"""Install-size estimation.
 
-The legacy script's hardcoded ``KNOWN_SIZES`` per-title override dict and its empirically-tuned
-AAA/AA/Indie x genre-class heuristic bands both now live in the ``size_estimates`` table as config-as-data
-rows (:class:`SizeEstimate`) instead of Python literals, closing the same "recalibrating the formula means
-editing code" gap the migration fixed for genres/publisher tiers. Publisher-tier classification itself is
-:mod:`curator.enrichment.publisher_tier`'s job, not this module's -- callers resolve ``aaa_tier`` first and
-pass it in.
+Per-title overrides and the AAA/AA/Indie x genre-class heuristic bands both live in the ``size_estimates``
+table as config-as-data rows (:class:`SizeEstimate`), so recalibrating the formula does not mean editing
+code. Publisher-tier classification is not this module's job -- callers resolve ``aaa_tier`` first and pass
+it in.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
+
+from curator.psn.title_platform import ConsolePlatform
 
 
 @dataclass(frozen=True, slots=True)
@@ -25,7 +25,7 @@ class SizeEstimate:
     title_pattern: str | None
     aaa_tier: str | None
     genre_class: str | None
-    platform: str  # "PS5" | "PS4"
+    platform: ConsolePlatform
     size_gb: float
 
 
@@ -40,12 +40,12 @@ def estimate_install_size_gb(
 
     Resolution order: (1) the longest matching per-title substring override for the game's platform, else
     (2) the most specific matching AAA/AA/Indie x genre-class band for that platform, else (3) that tier's
-    generic (no genre-class) band for that platform. Returns ``None`` if nothing matches at all -- unlike
-    the legacy script's hardcoded final "return 16" fallback, an unestimatable title is a real gap the
-    ``size_estimates`` table should be extended to cover, not something to silently paper over here.
+    generic (no genre-class) band for that platform. Returns ``None`` if nothing matches at all -- there
+    is deliberately no catch-all fallback size: an unestimatable title is a real gap the ``size_estimates``
+    table should be extended to cover, not something to silently paper over here.
 
     :param title: The game's canonical title.
-    :param genre: The game's resolved genre (from :func:`~curator.scoring.genre_service.pick_genre_subgenre`).
+    :param genre: The game's resolved genre, as stored in ``game_enrichment``.
     :param is_ps5: Whether to estimate for the PS5 edition (``False`` estimates the PS4 edition).
     :param aaa_tier: The game's publisher tier (``"AAA"``/``"AA"``/``"Indie"``), already resolved by the caller.
     :param estimates: Every row from ``size_estimates``.

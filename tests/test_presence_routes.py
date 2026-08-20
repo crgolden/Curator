@@ -4,7 +4,6 @@ test_trophy_routes.py's style.
 
 from __future__ import annotations
 
-from cryptography.fernet import Fernet
 from fastapi.testclient import TestClient
 
 from curator.app import create_app
@@ -57,7 +56,7 @@ def _build(presence_client_factory=None, repository=None):
 
 def _build_linked(presence_client_factory=None):
     repository = FakeRepository()
-    crypto = TokenCrypto(Fernet.generate_key())
+    crypto = TokenCrypto(TokenCrypto.generate_key())
     _seed_link(repository, crypto, SUB, harvest_presence=True)
     return _build(presence_client_factory, repository=repository)
 
@@ -70,7 +69,7 @@ def test_get_presence_no_link_is_404():
 
 def test_get_presence_harvest_presence_disabled_is_403():
     repository = FakeRepository()
-    crypto = TokenCrypto(Fernet.generate_key())
+    crypto = TokenCrypto(TokenCrypto.generate_key())
     _seed_link(repository, crypto, SUB, harvest_presence=False)
     client, _ = _build(repository=repository)
 

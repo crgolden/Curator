@@ -8,7 +8,6 @@ from __future__ import annotations
 import json
 from datetime import datetime, timedelta, timezone
 
-from cryptography.fernet import Fernet
 from fastapi.testclient import TestClient
 
 from curator.app import create_app
@@ -96,7 +95,7 @@ def _build(*, linked: bool, schedules=None, publisher=None):
     settings = _make_settings()
     repository = FakeRepository()
     if linked:
-        _seed_link(repository, TokenCrypto(Fernet.generate_key()), SUB)
+        _seed_link(repository, TokenCrypto(TokenCrypto.generate_key()), SUB)
     validator = FakeTokenValidator()
     validator.register("valid-token", _claims(sub=SUB, email=EMAIL))
     app = create_app(
@@ -208,7 +207,6 @@ async def test_publish_scheduled_library_refresh_creates_no_job_run_row():
     job_runs = FakeJobRunsRepository()
     publisher = QueuePublisher(
         library_refresh_sender=FakeSender(),
-        library_refresh_continuation_sender=FakeSender(),
         enrichment_sender=FakeSender(),
         scheduled_refresh_sender=sender,
         job_runs_repository=job_runs,
@@ -224,7 +222,6 @@ async def test_publish_scheduled_library_refresh_defers_to_the_requested_time_an
     sender = FakeSender()
     publisher = QueuePublisher(
         library_refresh_sender=FakeSender(),
-        library_refresh_continuation_sender=FakeSender(),
         enrichment_sender=FakeSender(),
         scheduled_refresh_sender=sender,
         job_runs_repository=FakeJobRunsRepository(),
@@ -240,7 +237,6 @@ async def test_publish_scheduled_library_refresh_defers_to_the_requested_time_an
 async def test_publish_scheduled_library_refresh_without_a_configured_queue_raises():
     publisher = QueuePublisher(
         library_refresh_sender=FakeSender(),
-        library_refresh_continuation_sender=FakeSender(),
         enrichment_sender=FakeSender(),
         job_runs_repository=FakeJobRunsRepository(),
     )
