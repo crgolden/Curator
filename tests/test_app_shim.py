@@ -6,23 +6,27 @@ import importlib.util
 import pathlib
 import sys
 
+import pytest
+
+import curator.app
 import curator.telemetry as telemetry
 
 _APP_SHIM_PATH = pathlib.Path(__file__).resolve().parent.parent / "app.py"
 
 
-def _load_app_shim():
+def _load_app_shim(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(curator.app, "create_app", lambda: object())
     spec = importlib.util.spec_from_file_location("curator_app_shim", _APP_SHIM_PATH)
     assert spec is not None
     assert spec.loader is not None
     module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module
+    monkeypatch.setitem(sys.modules, spec.name, module)
     spec.loader.exec_module(module)
     return module
 
 
-def test_bootstrap_failure_reporter_targets_the_same_data_stream_as_runtime_logging():
-    shim = _load_app_shim()
+def test_bootstrap_failure_reporter_targets_the_same_data_stream_as_runtime_logging(monkeypatch: pytest.MonkeyPatch):
+    shim = _load_app_shim(monkeypatch)
 
     assert shim._ES_DATA_STREAM == telemetry._ES_DATA_STREAM
 
