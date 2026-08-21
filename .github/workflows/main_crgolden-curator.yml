@@ -1,7 +1,3 @@
-# Docs for the Azure Web Apps Deploy action: https://github.com/Azure/webapps-deploy
-# More GitHub Actions for Azure: https://github.com/Azure/actions
-# More info on Python, GitHub Actions, and Azure App Service: https://aka.ms/python-webapps-actions
-
 name: Build and deploy Python app to Azure Web App - crgolden-curator
 
 on:
@@ -17,7 +13,7 @@ jobs:
     name: Test
     runs-on: ubuntu-latest
     permissions:
-      contents: read #This is required for actions/checkout
+      contents: read
 
     env:
       POSTGRES_DB: curator_ci
@@ -43,17 +39,13 @@ jobs:
       - name: Checkout Curator
         uses: actions/checkout@v6
         with:
-          fetch-depth: 0  # Shallow clones should be disabled for better Sonar analysis relevancy
+          fetch-depth: 0
 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.14'
 
-      # pyproject.toml + poetry.lock is the single dependency manifest -- a requirements.txt hand-maintained
-      # separately from pyproject.toml once drifted out of sync and shipped a ModuleNotFoundError to
-      # production (see workspace AGENTS/DEPLOYMENT.md). virtualenvs.create=false installs straight into
-      # this job's Python so every later step (ruff/mypy/pytest) keeps running as a bare `python -m <tool>`.
       - name: Install Poetry
         run: python -m pip install poetry
 
@@ -65,8 +57,6 @@ jobs:
           poetry config virtualenvs.create false
           poetry install --extras dev
 
-      # Each of the three checks below runs as its own step (rather than one combined lint stage) so a
-      # failure is attributable to the specific tool at a glance in the Actions UI.
       - name: Ruff lint
         run: python -m ruff check src tests app.py dev_server.py
 
@@ -84,8 +74,6 @@ jobs:
           CURATOR_TEST_DATABASE_URL: postgresql://${{ env.POSTGRES_USER }}:${{ env.POSTGRES_PASSWORD }}@localhost:5432/${{ env.POSTGRES_DB }}
         run: python -m pytest --cov=src/curator --cov-report=xml:coverage.xml --cov-report=term -q
 
-      # SonarCloud analysis — runs after coverage is generated and tests pass.
-      # Uses sonarqube-scan-action (no JDK/scanner setup required); sonarcloud-github-action is deprecated.
       - name: SonarCloud analysis
         if: github.actor != 'dependabot[bot]'
         uses: sonarsource/sonarqube-scan-action@v8
@@ -103,21 +91,23 @@ jobs:
             -Dsonar.exclusions=**/__pycache__/**,**/*.pyc,.venv/**
             -Dsonar.scanner.skipJreProvisioning=true
 
-  deploy:
-    name: Deploy
+  package:
+    name: Package
     runs-on: ubuntu-latest
     needs: test
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
     permissions:
-      id-token: write   # Required for requesting the JWT (Azure OIDC)
       contents: read
 
     steps:
       - name: Checkout Curator
         uses: actions/checkout@v6
 
-      # Assemble the deploy payload with only what production needs: source, the SQL migration, and the
-      # install manifest — excludes tests/, .github/, and local caches.
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
+
       - name: Assemble deployment package
         run: |
           mkdir -p publish
@@ -127,12 +117,6 @@ jobs:
           cp poetry.lock publish/poetry.lock
           cp app.py publish/app.py
 
-      # Installs from the assembled publish/ payload itself (not the repo root) into a throwaway venv, the
-      # same way Oryx's production build will, then imports the real gunicorn entrypoint with dummy secrets.
-      # This exists because a dependency present in pyproject.toml's dev extras but missing from the
-      # production manifest once passed every CI check (ruff/mypy/pytest all installed it via the dev
-      # extras) and only surfaced as a ModuleNotFoundError crash loop after deploying to Azure — this step
-      # fails the same way, in CI, before anything touches Azure.
       - name: Verify deployment package boots
         working-directory: publish
         run: |
@@ -150,43 +134,79 @@ jobs:
           print('Smoke test OK:', app.app)
           "
 
-      - name: Login to Azure
-        uses: azure/login@532459ea530d8321f2fb9bb10d1e0bcf23869a43  # v3.0.0
+      - name: Upload deployment package
+        uses: actions/upload-artifact@v4
         with:
-          client-id: ${{ secrets.AZUREAPPSERVICE_CLIENTID_29C8B941EEC941B3B025951A74F5176F }}
-          tenant-id: ${{ secrets.AZUREAPPSERVICE_TENANTID_7933356A53994B7987CBFABB49879C36 }}
-          subscription-id: ${{ secrets.AZUREAPPSERVICE_SUBSCRIPTIONID_1FCCBD0626644623AC4FF179F9E82B74 }}
+          name: curator-package
+          path: publish/
+
+  migrate:
+    name: Migrate
+    runs-on: ubuntu-latest
+    needs: package
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout Curator
+        uses: actions/checkout@v6
 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.14'
 
-      # Runs BEFORE the app deploy (matching Identity's SqlPackage-before-app-deploy pattern) so the new
-      # code never starts against a schema it doesn't expect. db/run_migrations.py is idempotent -- it
-      # tracks applied filenames in a schema_migrations table and only runs files not already recorded --
-      # so this is safe to run on every deploy, not just ones that actually changed db/migrations/.
+      - name: Install Poetry
+        run: python -m pip install poetry
+
+      - name: Verify poetry.lock matches pyproject.toml
+        run: poetry check --lock
+
+      - name: Install dependencies
+        run: |
+          poetry config virtualenvs.create false
+          poetry install --no-root
+
       - name: Run database migrations against the test database
         env:
           CURATOR_TEST_DATABASE_URL: ${{ secrets.CURATOR_TEST_DATABASE_URL }}
-        run: |
-          python -m pip install "psycopg[binary]>=3.1.0,<4.0.0"
-          python db/run_migrations.py "$CURATOR_TEST_DATABASE_URL"
+        run: python db/run_migrations.py "$CURATOR_TEST_DATABASE_URL"
 
-      - name: Run database migrations
+      - name: Run database migrations against production
         env:
           CURATOR_DATABASE_URL: ${{ secrets.CURATOR_DATABASE_URL }}
-        run: |
-          python db/run_migrations.py "$CURATOR_DATABASE_URL"
+        run: python db/run_migrations.py "$CURATOR_DATABASE_URL"
 
-      - name: Re-encrypt secrets at rest
+      - name: Verify secrets at rest are readable
         env:
           CURATOR_DATABASE_URL: ${{ secrets.CURATOR_DATABASE_URL }}
           CURATOR_TOKEN_KEY: ${{ secrets.CURATOR_TOKEN_KEY }}
           PYTHONPATH: src
-        run: |
-          python -m pip install "cryptography"
-          python db/reencrypt_tokens.py "$CURATOR_DATABASE_URL"
+        run: python db/reencrypt_tokens.py "$CURATOR_DATABASE_URL" --dry-run
+
+  deploy:
+    name: Deploy
+    runs-on: ubuntu-latest
+    needs: migrate
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    permissions:
+      id-token: write
+      contents: read
+
+    steps:
+      - name: Download deployment package
+        uses: actions/download-artifact@v4
+        with:
+          name: curator-package
+          path: publish
+
+      - name: Login to Azure
+        uses: azure/login@532459ea530d8321f2fb9bb10d1e0bcf23869a43  # v3.0.0
+        with:
+          client-id: ${{ secrets.AZUREAPPSERVICE_CLIENTID_29C8B941EEC941B3B025951A74F5176F }}
+          tenant-id: ${{ secrets.AZUREAPPSERVICE_TENANTID_7933356A53994B7987CBFABB49879C36 }}
+          subscription-id: ${{ secrets.AZUREAPPSERVICE_SUBSCRIPTIONID_1FCCBD0626644623AC4FF179F9E82B74 }}
 
       - name: Deploy to Azure Web App
         id: deploy-to-webapp
