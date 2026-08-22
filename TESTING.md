@@ -41,6 +41,22 @@ leak — A's requests only ever read/write A's row in the fake repository, B's i
 route in the app exposes a path parameter at all (the obvious place a caller-supplied "target user"
 identifier could sneak in), which the test locks in via introspecting `app.routes`.
 
+**`_BEARER_REQUIRED_ROUTES` is a hand-maintained list, and a route missing from it is silently unswept.**
+The four `/me/profile-link*` routes shipped without entries and so had nothing proving they reject a
+missing or garbage token. When you add a protected route, add it there in the same change.
+
+Two properties of `tests/test_profile_routes.py` that its assertions cannot state for themselves:
+
+- **`test_profile_body_declares_every_field_it_returns` pins the response's whole key set, and it is the
+  only test that can catch an ungated new field.** Every other profile-body assertion in that module reads
+  keys individually, so a field added to `PublicProfileResponse` without gating sails past all of them —
+  including the private-profile test whose *name* claims it sees "only counts and follow status". Do not
+  relax it into a subset check.
+- **The count-suppression tests seed real, non-empty data on purpose.** `library_count`/`collections_count`
+  returning `None` for a viewer of a private profile only proves suppression if the underlying library and
+  collections are non-empty; against empty fixtures the same `None` proves nothing. The owner-side test
+  reads the same fixtures and gets numbers, which is what makes the pair discriminate.
+
 Run:
 
 ```powershell

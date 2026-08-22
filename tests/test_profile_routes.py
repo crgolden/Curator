@@ -448,12 +448,6 @@ def test_non_owner_viewing_a_private_profile_sees_only_counts_and_follow_status(
 
 
 def test_profile_body_declares_every_field_it_returns():
-    """Pins the response's whole key set, so a new field cannot be added without a deliberate choice.
-
-    Every other assertion in this module checks keys individually, which means an ungated field added to
-    ``PublicProfileResponse`` would sail past all of them -- including the private-profile test whose
-    name claims it sees "only counts and follow status". This is the test that fails instead.
-    """
     repository = FakeRepository()
     _seed_users(repository, SUB_A, SUB_B)
     client, *_ = _build(repository=repository)
@@ -481,13 +475,6 @@ def test_profile_body_declares_every_field_it_returns():
 
 
 def test_private_profile_withholds_both_counts_from_a_non_owner():
-    """The information-leak test. Paired with a non-empty dataset on purpose.
-
-    ``GET /users/{sub}/library`` already 403s here, so a count in the profile body would hand the viewer
-    the most useful fact behind that 403. Seeding real rows is what makes the ``None`` provably
-    suppression rather than an empty library -- see the owner-side test below, which reads the same
-    fixtures and gets numbers.
-    """
     repository = FakeRepository()
     _seed_users(repository, SUB_A, SUB_B)
     profile_repository = FakeProfileRepository()
@@ -536,11 +523,6 @@ def test_owner_sees_real_counts_from_the_same_fixtures_the_viewer_is_denied():
 
 
 def test_collections_count_for_a_non_owner_excludes_private_and_unlisted():
-    """Must match what ``GET /users/{sub}/collections`` lists, which is ``visibility == "public"``.
-
-    Counting with ``!= 'private'`` -- the predicate the *share-slug* lookup uses -- would include the
-    unlisted one and visibly contradict the list beneath it.
-    """
     repository = FakeRepository()
     _seed_users(repository, SUB_A, SUB_B)
     profile_repository = FakeProfileRepository()
@@ -569,10 +551,6 @@ def test_collections_count_for_a_non_owner_excludes_private_and_unlisted():
 
 
 def test_library_count_includes_inactive_entries():
-    """Matches ``list_entries_with_enrichment``, which applies no ``is_active`` filter either.
-
-    Filtering here would make the profile tile disagree with the total the library page itself reports.
-    """
     repository = FakeRepository()
     _seed_users(repository, SUB_A)
     profile_repository = FakeProfileRepository()
@@ -598,8 +576,6 @@ def test_library_count_includes_inactive_entries():
 
 
 def test_created_at_is_returned_even_to_a_viewer_of_a_private_profile():
-    """Ungated on purpose: it describes the account, not its content, and the existing 404-vs-200 on an
-    unknown sub already discloses that the account exists."""
     repository = FakeRepository()
     _seed_users(repository, SUB_A, SUB_B)
     profile_repository = FakeProfileRepository()
@@ -615,8 +591,6 @@ def test_created_at_is_returned_even_to_a_viewer_of_a_private_profile():
 
 
 def test_trophies_hidden_by_owner_setting_is_owner_only():
-    """A viewer must never learn *why* another user's trophy section is absent -- that would leak the
-    target's own settings, which is exactly what this module's gating exists to prevent."""
     repository = FakeRepository()
     _seed_users(repository, SUB_A, SUB_B)
     profile_repository = FakeProfileRepository()
@@ -636,7 +610,6 @@ def test_trophies_hidden_by_owner_setting_is_owner_only():
 
 
 def test_trophies_hidden_flag_is_false_when_the_owner_has_no_psn_link_at_all():
-    """An unlinked owner has nothing to switch on, so pointing them at a toggle would be wrong advice."""
     repository = FakeRepository()
     _seed_users(repository, SUB_A)
     profile_repository = FakeProfileRepository()
@@ -683,8 +656,6 @@ def test_profile_links_are_withheld_from_a_viewer_of_a_private_profile():
 
 
 def test_setting_a_profile_link_builds_the_url_from_the_site_template():
-    """The stored value is a handle; Curator builds the URL. A caller never supplies one, which is what
-    keeps an attacker-controlled string out of the ``href`` a different user clicks."""
     repository = FakeRepository()
     _seed_users(repository, SUB_A)
     client, *_ = _build(repository=repository)
@@ -723,8 +694,6 @@ def test_setting_a_profile_link_rejects_a_site_outside_the_allowlist():
     ],
 )
 def test_setting_a_profile_link_rejects_a_handle_that_is_not_a_handle(handle):
-    """The handle is the only user-controlled part of the rendered URL, so its charset is the whole
-    boundary. Rejected at the route so the caller sees a 400 rather than a CHECK violation as a 500."""
     repository = FakeRepository()
     _seed_users(repository, SUB_A)
     client, *_ = _build(repository=repository)

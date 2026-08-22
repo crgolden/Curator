@@ -400,18 +400,6 @@ def _trophies_hidden_by_owner_setting(
     target_link: LinkRecord | None,
     trophies: ProfileTrophySummaryResponse | None,
 ) -> bool:
-    """Whether the owner's *own* toggles are why they see no trophy section.
-
-    A blank trophy section has three indistinguishable causes -- no PSN link, a harvest/display toggle
-    switched off, or simply no matched trophy data -- and only the second is something the user can act
-    on. All four ``psn_links.harvest_*`` flags default ``False`` (``0002``), so "off" is the *default*
-    experience rather than an edge case, and a user has no way to learn that a toggle they never saw is
-    the cause.
-
-    **Owner-only, and that asymmetry is the point.** Telling a viewer *why* another user's section is
-    absent would leak that user's settings, which is exactly what this module's gating exists to
-    prevent. A non-owner always gets ``False`` regardless of the target's real configuration.
-    """
     if not viewer_is_owner or trophies is not None:
         return False
     if target_link is None or target_link.psn_account_id is None:

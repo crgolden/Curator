@@ -85,9 +85,8 @@ class Repository:
     async def user_exists(self, sub: str) -> bool:
         """Check whether ``sub`` has an ``app_users`` row at all.
 
-        Backs the 404-if-target-unknown check every profile/follow route (``curator.profile_routes``)
-        performs before treating a path ``sub`` as a real target -- distinct from :meth:`get_link`, which
-        answers "does this user have a PSN link", not "does this user exist".
+        Distinct from :meth:`get_link`, which answers "does this user have a PSN link", not "does this
+        user exist".
 
         :param sub: The Identity ``sub`` claim to check.
         """
