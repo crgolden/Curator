@@ -99,11 +99,6 @@ class Repository:
     async def get_created_at(self, sub: str) -> datetime | None:
         """Return when ``sub``'s account was first created, or ``None`` if they have no row.
 
-        ``app_users.created_at`` has existed since ``0001_initial.sql`` and was read by nothing until
-        the profile overview surfaced it. First-party Curator data describing the account rather than
-        its content, so unlike the library/collections counts it is never gated on visibility -- see
-        ``curator.profile_routes``.
-
         :param sub: The Identity ``sub`` claim.
         """
         sql = "SELECT created_at FROM app_users WHERE identity_sub = %s"

@@ -45,7 +45,7 @@ identifier could sneak in), which the test locks in via introspecting `app.route
 The four `/me/profile-link*` routes shipped without entries and so had nothing proving they reject a
 missing or garbage token. When you add a protected route, add it there in the same change.
 
-Two properties of `tests/test_profile_routes.py` that its assertions cannot state for themselves:
+Three properties of `tests/test_profile_routes.py` that its assertions cannot state for themselves:
 
 - **`test_profile_body_declares_every_field_it_returns` pins the response's whole key set, and it is the
   only test that can catch an ungated new field.** Every other profile-body assertion in that module reads
@@ -56,6 +56,12 @@ Two properties of `tests/test_profile_routes.py` that its assertions cannot stat
   returning `None` for a viewer of a private profile only proves suppression if the underlying library and
   collections are non-empty; against empty fixtures the same `None` proves nothing. The owner-side test
   reads the same fixtures and gets numbers, which is what makes the pair discriminate.
+- **`test_created_at_is_returned_even_to_a_viewer_of_a_private_profile` is asserting a deliberate
+  asymmetry, not an oversight.** `created_at` sits in the same response as the two counts the bullet
+  above proves are suppressed, and it is ungated on purpose: it is first-party Curator data describing
+  the account rather than its content, and the endpoint's existing 404-vs-200 on an unknown `sub`
+  already discloses that the account exists. Follower counts are the older precedent for the same
+  reasoning. Anyone tempted to "fix" the inconsistency by gating it should change this test knowingly.
 
 Run:
 
