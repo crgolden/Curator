@@ -37,7 +37,7 @@ dev = [
     "pytest-xdist>=3.8.0",
     "httpx2>=2.10.0,<3.0.0",
     "ruff>=0.15.22",
-    "mypy>=2.3.0",
+    "mypy>=2.3.1",
 ]
 
 [build-system]
