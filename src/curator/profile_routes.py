@@ -332,7 +332,8 @@ async def get_user_profile(
     :raises fastapi.HTTPException: 404, if ``sub`` has no ``app_users`` row at all.
     """
     repository: Repository = request.app.state.repository
-    if not await repository.user_exists(sub):
+    created_at = await repository.get_created_at(sub)
+    if created_at is None:
         raise HTTPException(status_code=404, detail=_USER_NOT_FOUND_DETAIL)
 
     profile_repository: ProfileRepository = request.app.state.profile_repository
@@ -353,10 +354,6 @@ async def get_user_profile(
 
     trophies = await _cross_user_trophies(request, claims, target_settings, target_link, viewer_can_see_public_sections)
     identity = await _cross_user_identity(request, claims, target_settings, target_link, viewer_can_see_public_sections)
-
-    created_at = await repository.get_created_at(sub)
-    if created_at is None:
-        raise HTTPException(status_code=404, detail=_USER_NOT_FOUND_DETAIL)
 
     library_repository: LibraryRepository = request.app.state.library_repository
     collections_repository: CollectionsRepository = request.app.state.collections_repository

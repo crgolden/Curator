@@ -69,6 +69,10 @@ _BEARER_REQUIRED_ROUTES = [
             }
         },
     ),
+    ("get", "/me/profile-link-sites", {}),
+    ("get", "/me/profile-links", {}),
+    ("put", "/me/profile-links/psnprofiles", {"json": {"handle": "someone"}}),
+    ("delete", "/me/profile-links/psnprofiles", {}),
     ("get", "/users/sub-x/profile", {}),
     ("post", "/users/sub-x/follow", {}),
     ("delete", "/users/sub-x/follow", {}),
