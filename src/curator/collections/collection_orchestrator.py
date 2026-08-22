@@ -205,7 +205,7 @@ class CollectionOrchestrator:
             game_id=row.game_id,
             title=row.title,
             genre=row.genre or "",
-            aaa_tier=row.aaa_tier or "",
+            aaa_tier=row.aaa_tier,
             franchise=row.franchise or "",
             composite_score=comp,
             rank_score=points,

@@ -42,7 +42,7 @@ jobs:
           fetch-depth: 0
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7
         with:
           python-version: '3.14'
 
@@ -104,7 +104,7 @@ jobs:
         uses: actions/checkout@v6
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7
         with:
           python-version: '3.14'
 
@@ -135,7 +135,7 @@ jobs:
           "
 
       - name: Upload deployment package
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: curator-package
           path: publish/
@@ -153,7 +153,7 @@ jobs:
         uses: actions/checkout@v6
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7
         with:
           python-version: '3.14'
 
@@ -196,13 +196,13 @@ jobs:
 
     steps:
       - name: Download deployment package
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v7
         with:
           name: curator-package
           path: publish
 
       - name: Login to Azure
-        uses: azure/login@532459ea530d8321f2fb9bb10d1e0bcf23869a43  # v3.0.0
+        uses: azure/login@f5d393ae46f8fde4be8b75f32e3fc50e654ad0ca  # v3.0.1
         with:
           client-id: ${{ secrets.AZUREAPPSERVICE_CLIENTID_29C8B941EEC941B3B025951A74F5176F }}
           tenant-id: ${{ secrets.AZUREAPPSERVICE_TENANTID_7933356A53994B7987CBFABB49879C36 }}

@@ -12,12 +12,14 @@ from __future__ import annotations
 import asyncio
 from datetime import datetime, timedelta, timezone
 
+import pytest
 from fastapi.testclient import TestClient
 
 from curator.app import create_app
 from curator.collections.repository import CollectionDefinition
 from curator.persistence.crypto import TokenCrypto
 from curator.persistence.follow_repository import FollowEdge
+from curator.persistence.profile_link_repository import ProfileLink, ProfileLinkSite
 from curator.persistence.profile_repository import ProfileSettings
 from curator.persistence.repository import LinkRecord
 from curator.profile_routes import ProfileIdentityResponse
@@ -153,6 +155,9 @@ class FakeLibraryRepository:
     def __init__(self, games_by_sub=None) -> None:
         self._games_by_sub = games_by_sub or {}
 
+    async def count_entries(self, identity_sub: str) -> int:
+        return len(self._games_by_sub.get(identity_sub, []))
+
     async def list_entries_with_enrichment(
         self, identity_sub: str, *, search=None, category=None, sort="title", sort_dir="asc", limit=20, offset=0
     ):
@@ -196,9 +201,47 @@ class FakeLibraryGameView:
         self.platforms = platforms
 
 
+class FakeProfileLinkRepository:
+    def __init__(self, links_by_sub=None, sites=None) -> None:
+        self._links_by_sub = links_by_sub or {}
+        self._sites = sites or [
+            ProfileLinkSite(
+                site_key="psnprofiles",
+                display_name="PSNProfiles",
+                url_template="https://psnprofiles.com/{handle}",
+                sort_order=1,
+            )
+        ]
+
+    async def list_sites(self):
+        return self._sites
+
+    async def list_for_user(self, sub: str):
+        return self._links_by_sub.get(sub, [])
+
+    async def upsert_link(self, sub: str, site_key: str, handle: str) -> None:
+        site = next(s for s in self._sites if s.site_key == site_key)
+        link = ProfileLink(
+            site_key=site_key,
+            display_name=site.display_name,
+            handle=handle,
+            url=site.url_template.replace("{handle}", handle),
+        )
+        self._links_by_sub[sub] = [x for x in self._links_by_sub.get(sub, []) if x.site_key != site_key] + [link]
+
+    async def delete_link(self, sub: str, site_key: str) -> None:
+        self._links_by_sub[sub] = [x for x in self._links_by_sub.get(sub, []) if x.site_key != site_key]
+
+
 class FakeCollectionsRepository:
     def __init__(self, definitions_by_sub=None) -> None:
         self._definitions_by_sub = definitions_by_sub or {}
+
+    async def count_definitions(self, identity_sub: str, *, public_only: bool = False) -> int:
+        definitions = self._definitions_by_sub.get(identity_sub, [])
+        if public_only:
+            return len([d for d in definitions if d.visibility == "public"])
+        return len(definitions)
 
     async def list_definitions(self, identity_sub: str):
         return self._definitions_by_sub.get(identity_sub, [])
@@ -208,6 +251,7 @@ def _build(
     *,
     repository=None,
     profile_repository=None,
+    profile_link_repository=None,
     follow_repository=None,
     trophy_client_factory=None,
     social_client_factory=None,
@@ -218,6 +262,9 @@ def _build(
     settings = _make_settings()
     repository = repository if repository is not None else FakeRepository()
     profile_repository = profile_repository if profile_repository is not None else FakeProfileRepository()
+    profile_link_repository = (
+        profile_link_repository if profile_link_repository is not None else FakeProfileLinkRepository()
+    )
     follow_repository = follow_repository if follow_repository is not None else FakeFollowRepository()
     trophy_client_factory = (
         trophy_client_factory if trophy_client_factory is not None else FakeProfileTrophyClientFactory()
@@ -241,6 +288,7 @@ def _build(
         token_crypto=TokenCrypto(TokenCrypto.generate_key()),
         token_validator=validator,
         profile_repository=profile_repository,
+        profile_link_repository=profile_link_repository,
         follow_repository=follow_repository,
         trophy_client_factory=trophy_client_factory,
         social_client_factory=social_client_factory,
@@ -397,6 +445,308 @@ def test_non_owner_viewing_a_private_profile_sees_only_counts_and_follow_status(
     assert body["collections_visible"] is False
     assert body["trophies"] is None
     assert body["identity"] is None
+
+
+def test_profile_body_declares_every_field_it_returns():
+    """Pins the response's whole key set, so a new field cannot be added without a deliberate choice.
+
+    Every other assertion in this module checks keys individually, which means an ungated field added to
+    ``PublicProfileResponse`` would sail past all of them -- including the private-profile test whose
+    name claims it sees "only counts and follow status". This is the test that fails instead.
+    """
+    repository = FakeRepository()
+    _seed_users(repository, SUB_A, SUB_B)
+    client, *_ = _build(repository=repository)
+
+    body = client.get(f"/users/{SUB_A}/profile", headers=_bearer("token-b")).json()
+
+    assert set(body) == {
+        "sub",
+        "psn_account_id",
+        "is_public",
+        "viewer_is_owner",
+        "viewer_is_following",
+        "follower_count",
+        "following_count",
+        "library_visible",
+        "collections_visible",
+        "trophies",
+        "identity",
+        "created_at",
+        "library_count",
+        "collections_count",
+        "trophies_hidden_by_owner_setting",
+        "profile_links",
+    }
+
+
+def test_private_profile_withholds_both_counts_from_a_non_owner():
+    """The information-leak test. Paired with a non-empty dataset on purpose.
+
+    ``GET /users/{sub}/library`` already 403s here, so a count in the profile body would hand the viewer
+    the most useful fact behind that 403. Seeding real rows is what makes the ``None`` provably
+    suppression rather than an empty library -- see the owner-side test below, which reads the same
+    fixtures and gets numbers.
+    """
+    repository = FakeRepository()
+    _seed_users(repository, SUB_A, SUB_B)
+    profile_repository = FakeProfileRepository()
+    profile_repository.settings[SUB_A] = ProfileSettings(
+        is_public=False, show_library=True, show_collections=True, show_trophies=False, show_identity=False
+    )
+    library_repository = FakeLibraryRepository({SUB_A: [FakeLibraryGameView("g1", "Elden Ring")]})
+    collections_repository = FakeCollectionsRepository({SUB_A: [_definition("d1", visibility="public")]})
+
+    client, *_ = _build(
+        repository=repository,
+        profile_repository=profile_repository,
+        library_repository=library_repository,
+        collections_repository=collections_repository,
+    )
+
+    body = client.get(f"/users/{SUB_A}/profile", headers=_bearer("token-b")).json()
+
+    assert body["library_visible"] is False
+    assert body["collections_visible"] is False
+    assert body["library_count"] is None
+    assert body["collections_count"] is None
+
+
+def test_owner_sees_real_counts_from_the_same_fixtures_the_viewer_is_denied():
+    repository = FakeRepository()
+    _seed_users(repository, SUB_A)
+    profile_repository = FakeProfileRepository()
+    profile_repository.settings[SUB_A] = ProfileSettings(
+        is_public=False, show_library=False, show_collections=False, show_trophies=False, show_identity=False
+    )
+    library_repository = FakeLibraryRepository({SUB_A: [FakeLibraryGameView("g1", "Elden Ring")]})
+    collections_repository = FakeCollectionsRepository({SUB_A: [_definition("d1", visibility="public")]})
+
+    client, *_ = _build(
+        repository=repository,
+        profile_repository=profile_repository,
+        library_repository=library_repository,
+        collections_repository=collections_repository,
+    )
+
+    body = client.get(f"/users/{SUB_A}/profile", headers=_bearer("token-a")).json()
+
+    assert body["library_count"] == 1
+    assert body["collections_count"] == 1
+
+
+def test_collections_count_for_a_non_owner_excludes_private_and_unlisted():
+    """Must match what ``GET /users/{sub}/collections`` lists, which is ``visibility == "public"``.
+
+    Counting with ``!= 'private'`` -- the predicate the *share-slug* lookup uses -- would include the
+    unlisted one and visibly contradict the list beneath it.
+    """
+    repository = FakeRepository()
+    _seed_users(repository, SUB_A, SUB_B)
+    profile_repository = FakeProfileRepository()
+    profile_repository.settings[SUB_A] = ProfileSettings(
+        is_public=True, show_library=False, show_collections=True, show_trophies=False, show_identity=False
+    )
+    collections_repository = FakeCollectionsRepository(
+        {
+            SUB_A: [
+                _definition("d-public", visibility="public"),
+                _definition("d-unlisted", visibility="unlisted"),
+                _definition("d-private", visibility="private"),
+            ]
+        }
+    )
+
+    client, *_ = _build(
+        repository=repository, profile_repository=profile_repository, collections_repository=collections_repository
+    )
+
+    viewer_body = client.get(f"/users/{SUB_A}/profile", headers=_bearer("token-b")).json()
+    owner_body = client.get(f"/users/{SUB_A}/profile", headers=_bearer("token-a")).json()
+
+    assert viewer_body["collections_count"] == 1
+    assert owner_body["collections_count"] == 3
+
+
+def test_library_count_includes_inactive_entries():
+    """Matches ``list_entries_with_enrichment``, which applies no ``is_active`` filter either.
+
+    Filtering here would make the profile tile disagree with the total the library page itself reports.
+    """
+    repository = FakeRepository()
+    _seed_users(repository, SUB_A)
+    profile_repository = FakeProfileRepository()
+    profile_repository.settings[SUB_A] = ProfileSettings(
+        is_public=False, show_library=True, show_collections=False, show_trophies=False, show_identity=False
+    )
+    library_repository = FakeLibraryRepository(
+        {
+            SUB_A: [
+                FakeLibraryGameView("g1", "Active game", is_active=True),
+                FakeLibraryGameView("g2", "Delisted game", is_active=False),
+            ]
+        }
+    )
+
+    client, *_ = _build(
+        repository=repository, profile_repository=profile_repository, library_repository=library_repository
+    )
+
+    body = client.get(f"/users/{SUB_A}/profile", headers=_bearer("token-a")).json()
+
+    assert body["library_count"] == 2
+
+
+def test_created_at_is_returned_even_to_a_viewer_of_a_private_profile():
+    """Ungated on purpose: it describes the account, not its content, and the existing 404-vs-200 on an
+    unknown sub already discloses that the account exists."""
+    repository = FakeRepository()
+    _seed_users(repository, SUB_A, SUB_B)
+    profile_repository = FakeProfileRepository()
+    profile_repository.settings[SUB_A] = ProfileSettings(
+        is_public=False, show_library=False, show_collections=False, show_trophies=False, show_identity=False
+    )
+
+    client, *_ = _build(repository=repository, profile_repository=profile_repository)
+
+    body = client.get(f"/users/{SUB_A}/profile", headers=_bearer("token-b")).json()
+
+    assert body["created_at"] == "2026-01-02T03:04:05+00:00"
+
+
+def test_trophies_hidden_by_owner_setting_is_owner_only():
+    """A viewer must never learn *why* another user's trophy section is absent -- that would leak the
+    target's own settings, which is exactly what this module's gating exists to prevent."""
+    repository = FakeRepository()
+    _seed_users(repository, SUB_A, SUB_B)
+    profile_repository = FakeProfileRepository()
+    profile_repository.settings[SUB_A] = ProfileSettings(
+        is_public=True, show_library=False, show_collections=False, show_trophies=False, show_identity=False
+    )
+    repository.links[SUB_A] = _link(psn_account_id="acct-a", harvest_trophies=False)
+
+    client, *_ = _build(repository=repository, profile_repository=profile_repository)
+
+    owner_body = client.get(f"/users/{SUB_A}/profile", headers=_bearer("token-a")).json()
+    viewer_body = client.get(f"/users/{SUB_A}/profile", headers=_bearer("token-b")).json()
+
+    assert owner_body["trophies"] is None
+    assert owner_body["trophies_hidden_by_owner_setting"] is True
+    assert viewer_body["trophies_hidden_by_owner_setting"] is False
+
+
+def test_trophies_hidden_flag_is_false_when_the_owner_has_no_psn_link_at_all():
+    """An unlinked owner has nothing to switch on, so pointing them at a toggle would be wrong advice."""
+    repository = FakeRepository()
+    _seed_users(repository, SUB_A)
+    profile_repository = FakeProfileRepository()
+    profile_repository.settings[SUB_A] = ProfileSettings(
+        is_public=False, show_library=False, show_collections=False, show_trophies=False, show_identity=False
+    )
+
+    client, *_ = _build(repository=repository, profile_repository=profile_repository)
+
+    body = client.get(f"/users/{SUB_A}/profile", headers=_bearer("token-a")).json()
+
+    assert body["trophies_hidden_by_owner_setting"] is False
+
+
+def test_profile_links_are_withheld_from_a_viewer_of_a_private_profile():
+    repository = FakeRepository()
+    _seed_users(repository, SUB_A, SUB_B)
+    profile_repository = FakeProfileRepository()
+    profile_repository.settings[SUB_A] = ProfileSettings(
+        is_public=False, show_library=False, show_collections=False, show_trophies=False, show_identity=False
+    )
+    link_repository = FakeProfileLinkRepository(
+        {
+            SUB_A: [
+                ProfileLink(
+                    site_key="psnprofiles",
+                    display_name="PSNProfiles",
+                    handle="deeprog",
+                    url="https://psnprofiles.com/deeprog",
+                )
+            ]
+        }
+    )
+
+    client, *_ = _build(
+        repository=repository, profile_repository=profile_repository, profile_link_repository=link_repository
+    )
+
+    viewer_body = client.get(f"/users/{SUB_A}/profile", headers=_bearer("token-b")).json()
+    owner_body = client.get(f"/users/{SUB_A}/profile", headers=_bearer("token-a")).json()
+
+    assert viewer_body["profile_links"] == []
+    assert owner_body["profile_links"][0]["url"] == "https://psnprofiles.com/deeprog"
+
+
+def test_setting_a_profile_link_builds_the_url_from_the_site_template():
+    """The stored value is a handle; Curator builds the URL. A caller never supplies one, which is what
+    keeps an attacker-controlled string out of the ``href`` a different user clicks."""
+    repository = FakeRepository()
+    _seed_users(repository, SUB_A)
+    client, *_ = _build(repository=repository)
+
+    response = client.put("/me/profile-links/psnprofiles", json={"handle": "deeprog"}, headers=_bearer("token-a"))
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "site_key": "psnprofiles",
+        "display_name": "PSNProfiles",
+        "handle": "deeprog",
+        "url": "https://psnprofiles.com/deeprog",
+    }
+
+
+def test_setting_a_profile_link_rejects_a_site_outside_the_allowlist():
+    repository = FakeRepository()
+    _seed_users(repository, SUB_A)
+    client, *_ = _build(repository=repository)
+
+    response = client.put("/me/profile-links/evil-site", json={"handle": "deeprog"}, headers=_bearer("token-a"))
+
+    assert response.status_code == 400
+
+
+@pytest.mark.parametrize(
+    "handle",
+    [
+        "javascript:alert(1)",
+        "../../etc/passwd",
+        "deeprog?x=1",
+        "deep rog",
+        "ab",
+        "a" * 17,
+        "<script>",
+    ],
+)
+def test_setting_a_profile_link_rejects_a_handle_that_is_not_a_handle(handle):
+    """The handle is the only user-controlled part of the rendered URL, so its charset is the whole
+    boundary. Rejected at the route so the caller sees a 400 rather than a CHECK violation as a 500."""
+    repository = FakeRepository()
+    _seed_users(repository, SUB_A)
+    client, *_ = _build(repository=repository)
+
+    response = client.put("/me/profile-links/psnprofiles", json={"handle": handle}, headers=_bearer("token-a"))
+
+    assert response.status_code == 400
+
+
+def test_deleting_a_profile_link_is_idempotent():
+    repository = FakeRepository()
+    _seed_users(repository, SUB_A)
+    client, *_ = _build(repository=repository)
+
+    client.put("/me/profile-links/psnprofiles", json={"handle": "deeprog"}, headers=_bearer("token-a"))
+
+    first = client.delete("/me/profile-links/psnprofiles", headers=_bearer("token-a"))
+    second = client.delete("/me/profile-links/psnprofiles", headers=_bearer("token-a"))
+
+    assert first.status_code == 204
+    assert second.status_code == 204
+    assert client.get("/me/profile-links", headers=_bearer("token-a")).json() == []
 
 
 def test_show_trophies_true_but_harvest_trophies_false_is_none():
@@ -837,6 +1187,22 @@ def test_collections_200_for_owner_regardless_of_flags():
     response = client.get(f"/users/{SUB_A}/collections", headers=_bearer("token-a"))
     assert response.status_code == 200
     assert len(response.json()) == 1
+
+
+def _definition(definition_id, *, visibility="private", identity_sub=None):
+    return CollectionDefinition(
+        definition_id=definition_id,
+        identity_sub=identity_sub or SUB_A,
+        name=definition_id,
+        kind="filter_list",
+        console_id=None,
+        genre_filter=(),
+        min_score=None,
+        aaa_tier_filter=None,
+        sort_order=None,
+        visibility=visibility,
+        item_count=0,
+    )
 
 
 def _link(*, psn_account_id, harvest_trophies=False, harvest_identity=False):

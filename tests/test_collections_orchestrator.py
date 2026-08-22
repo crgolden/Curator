@@ -327,16 +327,23 @@ async def test_free_to_play_penalizes_rank_score():
     assert by_id["f2p"].rank_score < by_id["paid"].rank_score
 
 
-async def test_missing_aaa_tier_defaults_to_empty_string_not_indie():
+async def test_missing_aaa_tier_stays_none_rather_than_indie_or_empty_string():
     """WP8: a game with no recorded tier must not silently satisfy an Indie-tier predicate/filter -- see
     CollectionOrchestrator._score's own comment and AGENTS/PARKING_LOT.md's WP8 section for the full
-    diagnosis (defaulting to "Indie" here previously misclassified two real-world titles)."""
+    diagnosis (defaulting to "Indie" here previously misclassified two real-world titles).
+
+    The absent value is ``None``. It was ``""`` until the null sweep reached this field: the WP8 fix
+    needed *something* that matched no tier and ``""`` was the smallest change at the time, with the
+    real correction deferred because it ripples into ``CollectionGameResponse`` and Librarian's item
+    template. ``None`` is the honest spelling -- ``""`` is a value, and a value invites an equality
+    check that should never succeed.
+    """
     repository = FakeCollectionsRepository(candidates=[_row("g1", aaa_tier=None)])
     orchestrator = CollectionOrchestrator(repository)
 
     result = await orchestrator.generate("sub-1", CollectionSpec(kind="filter_list"), size_estimates=[])
 
-    assert result.included[0].aaa_tier == ""
+    assert result.included[0].aaa_tier is None
 
 
 async def test_missing_aaa_tier_does_not_satisfy_an_indie_tier_filter():

@@ -26,6 +26,7 @@ see).
 from __future__ import annotations
 
 import logging
+import re
 from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
@@ -37,6 +38,7 @@ from curator.deps import require_bearer
 from curator.library.repository import LibraryRepository, LibrarySortField
 from curator.library_routes import LibraryCategoriesResponse
 from curator.persistence.follow_repository import FollowEdge, FollowRepository
+from curator.persistence.profile_link_repository import ProfileLink, ProfileLinkRepository
 from curator.persistence.profile_repository import ProfileRepository, ProfileSettings
 from curator.persistence.repository import LinkRecord, Repository
 from curator.psn.errors import PsnAuthError
@@ -50,6 +52,8 @@ router = APIRouter(tags=["profile"])
 logger = logging.getLogger("curator")
 
 _USER_NOT_FOUND_DETAIL = "User not found."
+
+_HANDLE_PATTERN = re.compile(r"[A-Za-z0-9_-]{3,16}")
 
 
 class ProfileSettingsResponse(BaseModel):
@@ -92,7 +96,15 @@ class ProfileIdentityResponse(BaseModel):
 
 
 class PublicProfileResponse(BaseModel):
-    """The ``GET /users/{sub}/profile`` response body."""
+    """The ``GET /users/{sub}/profile`` response body.
+
+    **Any field added here must state whether it is gated.** ``library_count``/``collections_count`` are
+    null whenever the matching ``*_visible`` flag is false, because ``GET /users/{sub}/library`` already
+    403s for a viewer of a private profile -- returning the count would hand that viewer the single most
+    useful fact behind the 403 through the front door. ``created_at`` and the follower counts are
+    ungated: they describe the account rather than its content, and the existing 404-vs-200 on an
+    unknown sub already discloses that an account exists.
+    """
 
     sub: str
     psn_account_id: str | None
@@ -105,6 +117,38 @@ class PublicProfileResponse(BaseModel):
     collections_visible: bool
     trophies: ProfileTrophySummaryResponse | None
     identity: ProfileIdentityResponse | None
+    created_at: str
+    library_count: int | None
+    collections_count: int | None
+    trophies_hidden_by_owner_setting: bool
+    profile_links: list[ProfileLinkResponse]
+
+
+class ProfileLinkSiteResponse(BaseModel):
+    """One allowlisted site, for the settings form's options."""
+
+    site_key: str
+    display_name: str
+
+
+class ProfileLinkResponse(BaseModel):
+    """One of a user's declared profile links, with its URL resolved from the site's own template.
+
+    ``url`` is built by Curator from ``profile_link_sites.url_template``, never supplied by a caller --
+    the only user-controlled part is ``handle``, and it is charset-validated before it is stored. A
+    client may render ``url`` into an ``href`` without treating it as untrusted input.
+    """
+
+    site_key: str
+    display_name: str
+    handle: str
+    url: str
+
+
+class ProfileLinkRequest(BaseModel):
+    """The ``PUT /me/profile-links/{site_key}`` request body."""
+
+    handle: str
 
 
 class FollowListEntryResponse(BaseModel):
@@ -205,6 +249,68 @@ async def set_my_profile_settings(
     )
 
 
+@router.get("/me/profile-link-sites", response_model=list[ProfileLinkSiteResponse])
+async def list_profile_link_sites(
+    request: Request, claims: TokenClaims = Depends(require_bearer)
+) -> list[ProfileLinkSiteResponse]:
+    """Return every site a profile link may point at, in display order.
+
+    An allowlist rather than free-form URLs: see ``db/migrations/0042_user_profile_links.sql`` for why.
+    """
+    repository: ProfileLinkRepository = request.app.state.profile_link_repository
+    sites = await repository.list_sites()
+    return [ProfileLinkSiteResponse(site_key=site.site_key, display_name=site.display_name) for site in sites]
+
+
+@router.get("/me/profile-links", response_model=list[ProfileLinkResponse])
+async def get_my_profile_links(
+    request: Request, claims: TokenClaims = Depends(require_bearer)
+) -> list[ProfileLinkResponse]:
+    """Return the caller's own declared profile links. Always answerable; never 404s."""
+    repository: ProfileLinkRepository = request.app.state.profile_link_repository
+    return [_link_response(link) for link in await repository.list_for_user(claims.sub)]
+
+
+@router.put("/me/profile-links/{site_key}", response_model=ProfileLinkResponse)
+async def set_my_profile_link(
+    site_key: str, body: ProfileLinkRequest, request: Request, claims: TokenClaims = Depends(require_bearer)
+) -> ProfileLinkResponse:
+    """Declare (or replace) the caller's handle on one allowlisted site.
+
+    :raises fastapi.HTTPException: 400, if ``site_key`` is not allowlisted or ``handle`` is not a valid
+        handle. Both are checked here so the caller gets a clean error rather than a foreign-key or CHECK
+        violation surfacing as a 500.
+    """
+    repository: ProfileLinkRepository = request.app.state.profile_link_repository
+
+    sites = {site.site_key: site for site in await repository.list_sites()}
+    if site_key not in sites:
+        raise HTTPException(status_code=400, detail="Unknown site.")
+
+    handle = body.handle.strip()
+    if not _HANDLE_PATTERN.fullmatch(handle):
+        raise HTTPException(status_code=400, detail="Handle must be 3-16 characters: letters, digits, - or _.")
+
+    await repository.upsert_link(claims.sub, site_key, handle)
+    site = sites[site_key]
+    return ProfileLinkResponse(
+        site_key=site.site_key,
+        display_name=site.display_name,
+        handle=handle,
+        url=site.url_template.replace("{handle}", handle),
+    )
+
+
+@router.delete("/me/profile-links/{site_key}", status_code=204)
+async def delete_my_profile_link(
+    site_key: str, request: Request, claims: TokenClaims = Depends(require_bearer)
+) -> Response:
+    """Remove the caller's link for one site. Idempotent -- always 204."""
+    repository: ProfileLinkRepository = request.app.state.profile_link_repository
+    await repository.delete_link(claims.sub, site_key)
+    return Response(status_code=204)
+
+
 @router.get("/users/{sub}/profile", response_model=PublicProfileResponse)
 async def get_user_profile(
     sub: str, request: Request, claims: TokenClaims = Depends(require_bearer)
@@ -213,8 +319,15 @@ async def get_user_profile(
 
     Follow status/counts are never gated by ``is_public`` (see the module docstring). A non-owner viewing
     a private profile still gets ``200`` -- with ``psn_account_id=None``, ``library_visible=False``,
-    ``collections_visible=False``, ``trophies=None``, ``identity=None`` -- rather than a 403 or 404, since
-    the follow graph and counts are always real and visible regardless.
+    ``collections_visible=False``, ``trophies=None``, ``identity=None``, ``library_count=None`` and
+    ``collections_count=None`` -- rather than a 403 or 404, since the follow graph and counts are always
+    real and visible regardless.
+
+    ``library_count``/``collections_count`` are gated on the same ``library_visible``/``collections_visible``
+    booleans as the links they label, so a count and its link flip together by construction rather than
+    through a second gate somebody has to remember. ``collections_count`` additionally counts only
+    publicly-listed definitions for a non-owner, matching what ``GET /users/{sub}/collections`` lists --
+    an unfiltered count would leak how many private/unlisted collections exist *and* contradict the list.
 
     :raises fastapi.HTTPException: 404, if ``sub`` has no ``app_users`` row at all.
     """
@@ -241,6 +354,27 @@ async def get_user_profile(
     trophies = await _cross_user_trophies(request, claims, target_settings, target_link, viewer_can_see_public_sections)
     identity = await _cross_user_identity(request, claims, target_settings, target_link, viewer_can_see_public_sections)
 
+    created_at = await repository.get_created_at(sub)
+    if created_at is None:
+        raise HTTPException(status_code=404, detail=_USER_NOT_FOUND_DETAIL)
+
+    library_repository: LibraryRepository = request.app.state.library_repository
+    collections_repository: CollectionsRepository = request.app.state.collections_repository
+
+    link_repository: ProfileLinkRepository = request.app.state.profile_link_repository
+    profile_links = (
+        [_link_response(link) for link in await link_repository.list_for_user(sub)]
+        if viewer_can_see_public_sections
+        else []
+    )
+
+    library_count = await library_repository.count_entries(sub) if library_visible else None
+    collections_count = (
+        await collections_repository.count_definitions(sub, public_only=not viewer_is_owner)
+        if collections_visible
+        else None
+    )
+
     return PublicProfileResponse(
         sub=sub,
         psn_account_id=psn_account_id,
@@ -253,7 +387,39 @@ async def get_user_profile(
         collections_visible=collections_visible,
         trophies=trophies,
         identity=identity,
+        created_at=created_at.isoformat(),
+        library_count=library_count,
+        collections_count=collections_count,
+        trophies_hidden_by_owner_setting=_trophies_hidden_by_owner_setting(
+            viewer_is_owner, target_settings, target_link, trophies
+        ),
+        profile_links=profile_links,
     )
+
+
+def _trophies_hidden_by_owner_setting(
+    viewer_is_owner: bool,
+    target_settings: ProfileSettings,
+    target_link: LinkRecord | None,
+    trophies: ProfileTrophySummaryResponse | None,
+) -> bool:
+    """Whether the owner's *own* toggles are why they see no trophy section.
+
+    A blank trophy section has three indistinguishable causes -- no PSN link, a harvest/display toggle
+    switched off, or simply no matched trophy data -- and only the second is something the user can act
+    on. All four ``psn_links.harvest_*`` flags default ``False`` (``0002``), so "off" is the *default*
+    experience rather than an edge case, and a user has no way to learn that a toggle they never saw is
+    the cause.
+
+    **Owner-only, and that asymmetry is the point.** Telling a viewer *why* another user's section is
+    absent would leak that user's settings, which is exactly what this module's gating exists to
+    prevent. A non-owner always gets ``False`` regardless of the target's real configuration.
+    """
+    if not viewer_is_owner or trophies is not None:
+        return False
+    if target_link is None or target_link.psn_account_id is None:
+        return False
+    return not (target_settings.show_trophies and target_link.harvest_trophies)
 
 
 async def _cross_user_trophies(
@@ -541,6 +707,10 @@ async def _require_visible_section(request: Request, sub: str, claims: TokenClai
     settings = await profile_repository.get_settings(sub)
     if not (settings.is_public and getattr(settings, flag)):
         raise HTTPException(status_code=403, detail="This section of the user's profile is not public.")
+
+
+def _link_response(link: ProfileLink) -> ProfileLinkResponse:
+    return ProfileLinkResponse(site_key=link.site_key, display_name=link.display_name, handle=link.handle, url=link.url)
 
 
 def _counts_response(counts: TrophyCounts) -> TrophyCountsResponse:

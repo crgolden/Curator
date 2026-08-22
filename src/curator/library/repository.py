@@ -172,6 +172,22 @@ class LibraryRepository:
             )
             return cur.rowcount
 
+    async def count_entries(self, identity_sub: str) -> int:
+        """Return how many library entries ``identity_sub`` has, for the profile overview's tile.
+
+        Deliberately does **not** filter ``is_active``. :meth:`list_entries_with_enrichment` builds its
+        conditions from ``identity_sub``/``search``/``category`` only, so its ``total`` counts inactive
+        rows too -- filtering here would make the profile tile disagree with the number the library page
+        itself reports, which is the more confusing of the two failures.
+
+        :param identity_sub: The Curator user id (Identity's ``sub``).
+        """
+        sql = "SELECT count(*) FROM library_entries WHERE identity_sub = %s"
+        async with self._pool.connection() as conn, conn.cursor() as cur:
+            await cur.execute(sql, (identity_sub,))
+            row = await cur.fetchone()
+        return int(row[0]) if row is not None else 0
+
     async def list_entries_with_enrichment(
         self,
         identity_sub: str,

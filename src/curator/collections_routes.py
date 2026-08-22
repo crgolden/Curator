@@ -77,7 +77,7 @@ class CollectionGameResponse(BaseModel):
     game_id: str
     title: str
     genre: str
-    aaa_tier: str
+    aaa_tier: str | None
     franchise: str
     composite_score: float | None
     rank_score: int
@@ -86,19 +86,47 @@ class CollectionGameResponse(BaseModel):
 
 
 class CollectionPreviewResponse(BaseModel):
-    """The ``POST /collections/preview`` response body."""
+    """The ``POST /collections/preview`` response body.
+
+    ``included``/``excluded`` are one capped page each; ``included_total``/``excluded_total`` count the
+    whole generated result so a caller can size its pager. Both lists are paged by the *same*
+    ``limit``/``offset``, which is what makes a single pager control meaningful over the pair.
+
+    ``included_game_ids`` carries **every** included id, unpaged, because ``POST /collections`` takes the
+    membership to save as a list of ids and the only place that list exists is this response -- preview
+    persists nothing, so there is no run to re-read. Without it, capping the body would silently truncate
+    what a save stores, turning a display change into data loss. Ids are cheap (a uuid each) and were
+    never the payload problem: the 878-game body that motivated paging was 878 *full game objects* with
+    titles, genres, franchises and scores.
+    """
 
     included: list[CollectionGameResponse]
     excluded: list[CollectionGameResponse]
+    included_total: int
+    excluded_total: int
+    included_game_ids: list[str]
     used_gb: float | None
 
 
 @router.post("/preview", response_model=CollectionPreviewResponse)
 async def preview_collection(
-    request: Request, spec: CollectionSpecRequest, claims: TokenClaims = Depends(require_bearer)
+    request: Request,
+    spec: CollectionSpecRequest,
+    limit: int = Query(default=50, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
+    claims: TokenClaims = Depends(require_bearer),
 ) -> CollectionPreviewResponse:
     """Generate a collection from an inline spec for the caller's own library, without persisting it.
 
+    **Capped per request rather than paged from storage, deliberately.** This endpoint computes a result
+    set instead of querying one, and its whole contract is that it persists nothing -- so there is no row
+    a later page could be served from, and adding one to make paging symmetric with a stored read would
+    undo the property the endpoint exists for. The generation runs in full either way; only the response
+    is capped. Unbounded, an ADVENTURE filter serialised 878 games into one body and the client rendered
+    every one of them.
+
+    :param limit: Page size, applied to ``included`` and ``excluded`` alike.
+    :param offset: How many entries of each list to skip.
     :returns: The generated :class:`CollectionPreviewResponse`.
     :raises fastapi.HTTPException: 400, if ``kind`` is invalid or (for ``"capacity_fill"``) ``console_id``
         is missing or unknown.
@@ -132,8 +160,11 @@ async def preview_collection(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     return CollectionPreviewResponse(
-        included=[_to_response(candidate) for candidate in result.included],
-        excluded=[_to_response(candidate) for candidate in result.excluded],
+        included=[_to_response(candidate) for candidate in result.included[offset : offset + limit]],
+        excluded=[_to_response(candidate) for candidate in result.excluded[offset : offset + limit]],
+        included_total=len(result.included),
+        excluded_total=len(result.excluded),
+        included_game_ids=[candidate.game_id for candidate in result.included],
         used_gb=result.used_gb,
     )
 
@@ -247,11 +278,25 @@ class CollectionItemsPageResponse(BaseModel):
 
 
 class CollectionRunResponse(BaseModel):
-    """The ``POST /collections/{definition_id}/runs`` response body: the persisted run plus its results."""
+    """The ``POST /collections/{definition_id}/runs`` response body: the persisted run plus its results.
+
+    Same capped-page shape as :class:`CollectionPreviewResponse`, including ``included_game_ids``: a run
+    is *adopted* by ``PATCH /collections/{id}`` with the ids to keep, so the same truncation hazard
+    applies -- deriving that list from the rendered page would adopt only the first page of a proposal.
+
+    The run itself persists both complete lists via ``save_run``, so a future
+    ``GET .../runs/{run_id}/items`` could serve later pages from storage -- but no such reader exists
+    today (nothing in the repository reads ``collection_items`` or ``collection_runs`` back), so this
+    response is capped per request like preview's. Building that reader is a separate piece of work, not
+    a prerequisite for bounding the body.
+    """
 
     run_id: str
     included: list[CollectionGameResponse]
     excluded: list[CollectionGameResponse]
+    included_total: int
+    excluded_total: int
+    included_game_ids: list[str]
     used_gb: float | None
 
 
@@ -569,7 +614,11 @@ async def unfollow_definition(
 
 @router.post("/{definition_id}/runs", response_model=CollectionRunResponse, status_code=201)
 async def run_definition(
-    request: Request, definition_id: str, claims: TokenClaims = Depends(require_bearer)
+    request: Request,
+    definition_id: str,
+    limit: int = Query(default=50, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
+    claims: TokenClaims = Depends(require_bearer),
 ) -> CollectionRunResponse:
     """Generate and persist a run against one of the caller's saved definitions.
 
@@ -622,8 +671,11 @@ async def run_definition(
 
     return CollectionRunResponse(
         run_id=run_id,
-        included=[_to_response(candidate) for candidate in result.included],
-        excluded=[_to_response(candidate) for candidate in result.excluded],
+        included=[_to_response(candidate) for candidate in result.included[offset : offset + limit]],
+        excluded=[_to_response(candidate) for candidate in result.excluded[offset : offset + limit]],
+        included_total=len(result.included),
+        excluded_total=len(result.excluded),
+        included_game_ids=[candidate.game_id for candidate in result.included],
         used_gb=result.used_gb,
     )
 

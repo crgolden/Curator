@@ -62,6 +62,7 @@ from curator.persistence.crypto import TokenCrypto
 from curator.persistence.db_token_store import DbTokenStore
 from curator.persistence.enrichment_keys_repository import EnrichmentKeysRepository
 from curator.persistence.follow_repository import FollowRepository
+from curator.persistence.profile_link_repository import ProfileLinkRepository
 from curator.persistence.profile_repository import ProfileRepository
 from curator.persistence.refresh_schedules_repository import RefreshSchedulesRepository
 from curator.persistence.repository import Repository
@@ -108,6 +109,7 @@ def create_app(
     audit_repository: AccountActionLogRepository | None = None,
     enrichment_keys_repository: EnrichmentKeysRepository | None = None,
     profile_repository: ProfileRepository | None = None,
+    profile_link_repository: ProfileLinkRepository | None = None,
     follow_repository: FollowRepository | None = None,
     refresh_schedules_repository: RefreshSchedulesRepository | None = None,
     redis_client: Redis | None = None,
@@ -155,6 +157,8 @@ def create_app(
         ``pool``.
     :param profile_repository: The per-user public-profile display-settings repository; defaults to a real
         :class:`~curator.persistence.profile_repository.ProfileRepository` over ``pool``.
+    :param profile_link_repository: The declared-PS-profile-links repository; defaults to a real
+        :class:`~curator.persistence.profile_link_repository.ProfileLinkRepository` over ``pool``.
     :param follow_repository: The follow-graph repository; defaults to a real
         :class:`~curator.persistence.follow_repository.FollowRepository` over ``pool``.
     :param redis_client: The shared Redis client backing the distributed PSN rate limiter
@@ -225,6 +229,7 @@ def create_app(
     audit_repository = audit_repository or AccountActionLogRepository(shared_pool)
     enrichment_keys_repository = enrichment_keys_repository or EnrichmentKeysRepository(shared_pool)
     profile_repository = profile_repository or ProfileRepository(shared_pool)
+    profile_link_repository = profile_link_repository or ProfileLinkRepository(shared_pool)
     follow_repository = follow_repository or FollowRepository(shared_pool)
     refresh_schedules_repository = refresh_schedules_repository or RefreshSchedulesRepository(shared_pool)
     mutation_service_factory = mutation_service_factory or _default_mutation_service_factory(
@@ -314,6 +319,7 @@ def create_app(
     app.state.audit_repository = audit_repository
     app.state.enrichment_keys_repository = enrichment_keys_repository
     app.state.profile_repository = profile_repository
+    app.state.profile_link_repository = profile_link_repository
     app.state.follow_repository = follow_repository
     app.state.refresh_schedules_repository = refresh_schedules_repository
     app.state.mutation_service_factory = mutation_service_factory

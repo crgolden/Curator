@@ -54,6 +54,9 @@ class FakeRepository:
     async def user_exists(self, sub):
         return sub in self.users
 
+    async def get_created_at(self, sub):
+        return datetime(2026, 1, 2, 3, 4, 5, tzinfo=timezone.utc) if sub in self.users else None
+
     async def touch_login(self, sub):
         self.login_touches.append(sub)
 

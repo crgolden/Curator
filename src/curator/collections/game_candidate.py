@@ -18,7 +18,7 @@ class GameCandidate:
     game_id: str
     title: str
     genre: str
-    aaa_tier: str
+    aaa_tier: str | None
     franchise: str
     composite_score: float | None
     rank_score: int

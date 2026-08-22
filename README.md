@@ -82,6 +82,14 @@ stranger ever sees it. The owner viewing their own profile always sees their own
 their own `show_*`/`harvest_*` settings, never by `is_public` — `is_public` only controls what *other*
 viewers see.
 
+An owner may also declare their handle on other PlayStation sites, which appear on the profile alongside
+everything else `is_public` governs. These are stored as a site key plus a handle, never as a URL: the
+sites are an allowlist (`profile_link_sites`, seeded by `db/migrations/0042_user_profile_links.sql`) and
+the `href` a client renders is built from that site's own `url_template`. The only user-supplied part is
+the handle, constrained to `[A-Za-z0-9_-]{3,16}` by both the API and a CHECK constraint, so a stored
+value can never carry a `javascript:` scheme or an off-allowlist host into an anchor. Growing the list is
+an INSERT into `profile_link_sites`, not a code change.
+
 Following is a simple, first-party directed graph (`follows`), unrelated to PSN. Follow/unfollow is
 idempotent — following someone already followed, or unfollowing someone not followed, is a no-op, not an
 error. **Follower/following counts and lists are always visible on any profile, regardless of whether
@@ -339,6 +347,7 @@ src/curator/
   measured_sizes_routes.py                    # GET/PUT /games/{gameId}/measured-sizes[/{platform}]
   social_routes.py                            # PUT/DELETE /me/friends/{onlineId}, PSN chat group create/leave
   profile_routes.py                             # GET/PUT /me/profile-settings, GET /users/{sub}/profile,
+                                                 # GET /me/profile-link-sites, GET/PUT/DELETE /me/profile-links,
                                                  # POST/DELETE /users/{sub}/follow, followers/following,
                                                  # library/collections passthrough for another user's sub
   jobs/                 # queue publishing and job_runs status; the runs themselves execute in the worker service

@@ -97,6 +97,22 @@ class Repository:
             row = await cur.fetchone()
         return row is not None
 
+    async def get_created_at(self, sub: str) -> datetime | None:
+        """Return when ``sub``'s account was first created, or ``None`` if they have no row.
+
+        ``app_users.created_at`` has existed since ``0001_initial.sql`` and was read by nothing until
+        the profile overview surfaced it. First-party Curator data describing the account rather than
+        its content, so unlike the library/collections counts it is never gated on visibility -- see
+        ``curator.profile_routes``.
+
+        :param sub: The Identity ``sub`` claim.
+        """
+        sql = "SELECT created_at FROM app_users WHERE identity_sub = %s"
+        async with self._pool.connection() as conn, conn.cursor() as cur:
+            await cur.execute(sql, (sub,))
+            row = await cur.fetchone()
+        return row[0] if row is not None else None
+
     async def touch_login(self, sub: str) -> None:
         """Record a login: set ``last_login_at`` (and ``updated_at``) to now.
 

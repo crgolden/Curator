@@ -273,6 +273,93 @@ def test_returns_generated_candidates():
     assert orchestrator.generate_calls[0][1].kind == "filter_list"
 
 
+def _candidate(game_id: str, *, aaa_tier: str | None = "AAA") -> GameCandidate:
+    return GameCandidate(
+        game_id=game_id,
+        title=game_id,
+        genre="Action",
+        aaa_tier=aaa_tier,
+        franchise="",
+        composite_score=90.0,
+        rank_score=3,
+        size_gb=50.0,
+    )
+
+
+def test_preview_caps_both_lists_and_reports_their_real_totals():
+    """The whole result is generated; only the body is capped. An ADVENTURE filter previously
+    serialised 878 games into one response and the client rendered every one of them."""
+    result = CollectionResult(
+        included=tuple(_candidate(f"inc-{i}") for i in range(7)),
+        excluded=tuple(_candidate(f"exc-{i}") for i in range(9)),
+        used_gb=None,
+    )
+    client, validator = _build(FakeOrchestrator(result=result))
+    validator.register("token-a", _claims(sub="sub-a"))
+
+    body = client.post("/collections/preview?limit=2", json={"kind": "filter_list"}, headers=_bearer("token-a")).json()
+
+    assert [g["game_id"] for g in body["included"]] == ["inc-0", "inc-1"]
+    assert [g["game_id"] for g in body["excluded"]] == ["exc-0", "exc-1"]
+    assert body["included_total"] == 7
+    assert body["excluded_total"] == 9
+
+
+def test_preview_returns_every_included_id_even_when_the_body_is_capped():
+    """Capping the display must not truncate what a save stores.
+
+    ``POST /collections`` takes membership as a list of ids, and preview persists nothing, so this
+    response is the only place the complete set exists. Paging the objects while paging the ids too
+    would turn a presentational change into silent data loss on save.
+    """
+    result = CollectionResult(included=tuple(_candidate(f"inc-{i}") for i in range(7)), excluded=(), used_gb=None)
+    client, validator = _build(FakeOrchestrator(result=result))
+    validator.register("token-a", _claims(sub="sub-a"))
+
+    body = client.post("/collections/preview?limit=2", json={"kind": "filter_list"}, headers=_bearer("token-a")).json()
+
+    assert len(body["included"]) == 2
+    assert body["included_game_ids"] == [f"inc-{i}" for i in range(7)]
+
+
+def test_preview_offset_pages_both_lists_together():
+    """One offset drives both lists, which is what makes a single pager control meaningful over the pair."""
+    result = CollectionResult(
+        included=tuple(_candidate(f"inc-{i}") for i in range(5)),
+        excluded=tuple(_candidate(f"exc-{i}") for i in range(5)),
+        used_gb=None,
+    )
+    client, validator = _build(FakeOrchestrator(result=result))
+    validator.register("token-a", _claims(sub="sub-a"))
+
+    body = client.post(
+        "/collections/preview?limit=2&offset=4", json={"kind": "filter_list"}, headers=_bearer("token-a")
+    ).json()
+
+    assert [g["game_id"] for g in body["included"]] == ["inc-4"]
+    assert [g["game_id"] for g in body["excluded"]] == ["exc-4"]
+    assert body["included_total"] == 5
+
+
+def test_preview_rejects_a_page_size_above_the_ceiling():
+    client, validator = _build(FakeOrchestrator())
+    validator.register("token-a", _claims(sub="sub-a"))
+
+    response = client.post("/collections/preview?limit=101", json={"kind": "filter_list"}, headers=_bearer("token-a"))
+
+    assert response.status_code == 422
+
+
+def test_preview_renders_a_tier_less_game_as_null_not_empty_string():
+    result = CollectionResult(included=(_candidate("g1", aaa_tier=None),), excluded=(), used_gb=None)
+    client, validator = _build(FakeOrchestrator(result=result))
+    validator.register("token-a", _claims(sub="sub-a"))
+
+    body = client.post("/collections/preview", json={"kind": "filter_list"}, headers=_bearer("token-a")).json()
+
+    assert body["included"][0]["aaa_tier"] is None
+
+
 def test_preview_passes_min_percent_completed_through_to_spec():
     orchestrator = FakeOrchestrator()
     client, validator = _build(orchestrator)
@@ -1119,3 +1206,39 @@ def test_run_definition_generates_and_persists():
     assert body["included"][0]["game_id"] == "g1"
     assert len(collections_repository.saved_runs) == 1
     assert orchestrator.generate_calls[0][1].genre_filter == ("RPG",)
+
+
+def test_run_caps_the_response_but_still_persists_every_result():
+    """The cap is presentational. Truncating what `save_run` stores would silently discard run history,
+    which is the opposite of what bounding the response body is for -- and would foreclose ever serving
+    later pages from the stored run.
+    """
+    definition = CollectionDefinition(
+        definition_id="def-a",
+        identity_sub="sub-a",
+        name="My RPGs",
+        kind="filter_list",
+        console_id=None,
+        genre_filter=(),
+        min_score=None,
+        aaa_tier_filter=None,
+        sort_order=None,
+    )
+    result = CollectionResult(
+        included=tuple(_candidate(f"inc-{i}") for i in range(6)),
+        excluded=tuple(_candidate(f"exc-{i}") for i in range(4)),
+        used_gb=None,
+    )
+    collections_repository = FakeCollectionsRepository([definition])
+    client, validator = _build(FakeOrchestrator(result=result), collections_repository)
+    validator.register("token-a", _claims(sub="sub-a"))
+
+    body = client.post("/collections/def-a/runs?limit=2", headers=_bearer("token-a")).json()
+
+    assert [g["game_id"] for g in body["included"]] == ["inc-0", "inc-1"]
+    assert body["included_total"] == 6
+    assert body["excluded_total"] == 4
+
+    _, _, _, saved_included, saved_excluded = collections_repository.saved_runs[0]
+    assert len(saved_included) == 6
+    assert len(saved_excluded) == 4

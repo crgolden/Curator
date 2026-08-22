@@ -853,6 +853,27 @@ class CollectionsRepository:
             rows = await cur.fetchall()
         return [self._to_definition(row) for row in rows]
 
+    async def count_definitions(self, identity_sub: str, *, public_only: bool = False) -> int:
+        """Return how many collection definitions ``identity_sub`` has, for the profile overview's tile.
+
+        ``public_only`` must match what the caller's *list* shows, and the predicate is
+        ``visibility = 'public'`` rather than ``visibility != 'private'``. Those differ, deliberately:
+        :meth:`get_definition_by_share_slug` uses ``!= 'private'`` so an *unlisted* collection stays
+        reachable by its share link, while ``curator.profile_routes``'s ``GET /users/{sub}/collections``
+        shows a non-owner only ``visibility == "public"`` rows. Counting with the share-slug predicate
+        would overcount by every unlisted collection and visibly contradict the list beneath it.
+
+        :param identity_sub: The Curator user id (Identity's ``sub``).
+        :param public_only: Count only publicly-listed definitions -- what a non-owner viewer sees.
+        """
+        sql = "SELECT count(*) FROM collection_definitions WHERE identity_sub = %s"
+        if public_only:
+            sql += " AND visibility = 'public'"
+        async with self._pool.connection() as conn, conn.cursor() as cur:
+            await cur.execute(sql, (identity_sub,))
+            row = await cur.fetchone()
+        return int(row[0]) if row is not None else 0
+
     async def get_definition(self, identity_sub: str, definition_id: str) -> CollectionDefinition | None:
         """Return one of a user's saved definitions, or ``None`` if it doesn't exist or isn't theirs.
 
