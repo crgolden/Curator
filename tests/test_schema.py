@@ -264,6 +264,28 @@ def test_job_runs_rejects_invalid_status(db_connection):
         )
 
 
+def test_job_runs_accepts_the_abandoned_error_code(db_connection):
+    reaped_run_id = str(uuid.uuid4())
+    with db_connection.cursor() as cur:
+        cur.execute(
+            "INSERT INTO job_runs (run_id, kind, status, error_code) VALUES (%s, %s, %s, %s)",
+            (reaped_run_id, "library_refresh", "failed", "abandoned"),
+        )
+        cur.execute("SELECT error_code FROM job_runs WHERE run_id = %s", (reaped_run_id,))
+        (error_code,) = cur.fetchone()
+    assert error_code == "abandoned"
+
+
+def test_job_runs_rejects_an_error_code_outside_the_closed_vocabulary(db_connection):
+    uncoded_run_id = str(uuid.uuid4())
+    unknown_error_code = str(uuid.uuid4())
+    with pytest.raises(psycopg_errors.CheckViolation), db_connection.cursor() as cur:
+        cur.execute(
+            "INSERT INTO job_runs (run_id, kind, status, error_code) VALUES (%s, %s, %s, %s)",
+            (uncoded_run_id, "library_refresh", "failed", unknown_error_code),
+        )
+
+
 def test_follows_rejects_self_follow(db_connection, seeded_user_and_game):
     user_sub, _game_id = seeded_user_and_game
     with pytest.raises(psycopg_errors.CheckViolation), db_connection.cursor() as cur:
