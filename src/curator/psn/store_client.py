@@ -29,6 +29,10 @@ INSERTION_IMMUNE_SORT = {"name": "productReleaseDate", "isAscending": True}
 
 CLASSIFICATION_FACET = "storeDisplayClassification"
 
+PRODUCT_GENRES_FACET = "productGenres"
+
+PS4_GAMES_CATEGORY_ID = "44d8bb20-653e-431e-8ad0-c0a365f68d2f"
+
 FULL_GAME_FACET_KEY = "FULL_GAME"
 
 FULL_GAME_FILTER = f"{CLASSIFICATION_FACET}:{FULL_GAME_FACET_KEY}"
@@ -110,11 +114,40 @@ class StoreCatalogClient:
         :raises StoreFilterIgnoredError: If a requested filter did not take effect.
         :raises StoreCatalogError: On any other unusable response.
         """
+        grid = await self._retrieve_grid(category_id, offset=offset, size=size, filter_by=tuple(filter_by))
+        page_info = grid.get("pageInfo") or {}
+        total_count = int(page_info.get("totalCount") or 0)
+        _raise_for_ignored_filters(grid, tuple(filter_by), total_count, category_id)
+        return StoreCategoryPage(
+            products=tuple(_to_product(raw) for raw in (grid.get("products") or []) if raw.get("id")),
+            total_count=total_count,
+            offset=int(page_info.get("offset", offset)),
+            is_last=bool(page_info.get("isLast")),
+        )
+
+    async def facet_census(self, category_id: str, facet_name: str) -> dict[str, int] | None:
+        """Read one facet's whole published vocabulary and per-key counts in a single page request.
+
+        The census is computed by the gateway over the entire category, not over the page, so ``size=1``
+        returns the same census a full page would.
+
+        :param category_id: The storefront category to read.
+        :param facet_name: The facet to census, e.g. ``"productGenres"``.
+        :returns: ``{facetKey: count}``, or ``None`` if this category publishes no such facet.
+        :raises StoreQueryRotatedError: If *every* configured hash is rejected as no longer whitelisted.
+        :raises StoreCatalogError: On any other unusable response.
+        """
+        grid = await self._retrieve_grid(category_id, offset=0, size=1, filter_by=())
+        return _facet_census(grid, facet_name)
+
+    async def _retrieve_grid(
+        self, category_id: str, *, offset: int, size: int, filter_by: tuple[str, ...]
+    ) -> dict[str, Any]:
         rotated: StoreQueryRotatedError | None = None
         for sha256_hash in self._query_hashes:
             try:
-                return await self._category_page(
-                    category_id, offset=offset, size=size, sha256_hash=sha256_hash, filter_by=tuple(filter_by)
+                return await self._request_grid(
+                    category_id, offset=offset, size=size, sha256_hash=sha256_hash, filter_by=filter_by
                 )
             except StoreQueryRotatedError as error:
                 rotated = error
@@ -122,9 +155,9 @@ class StoreCatalogClient:
 
         raise rotated or StoreQueryRotatedError("No persisted-query hash is configured for categoryGridRetrieve.")
 
-    async def _category_page(
+    async def _request_grid(
         self, category_id: str, *, offset: int, size: int, sha256_hash: str, filter_by: tuple[str, ...]
-    ) -> StoreCategoryPage:
+    ) -> dict[str, Any]:
         operation_name = CATEGORY_GRID_RETRIEVE_OPERATION
         params = {
             "operationName": operation_name,
@@ -152,16 +185,8 @@ class StoreCatalogClient:
         payload: dict[str, Any] = response.json()
         _raise_for_store_errors(payload, operation_name)
 
-        grid = (payload.get("data") or {}).get("categoryGridRetrieve") or {}
-        page_info = grid.get("pageInfo") or {}
-        total_count = int(page_info.get("totalCount") or 0)
-        _raise_for_ignored_filters(grid, filter_by, total_count, category_id)
-        return StoreCategoryPage(
-            products=tuple(_to_product(raw) for raw in (grid.get("products") or []) if raw.get("id")),
-            total_count=total_count,
-            offset=int(page_info.get("offset", offset)),
-            is_last=bool(page_info.get("isLast")),
-        )
+        grid: dict[str, Any] = (payload.get("data") or {}).get("categoryGridRetrieve") or {}
+        return grid
 
 
 def _facet_census(grid: dict[str, Any], facet_name: str) -> dict[str, int] | None:

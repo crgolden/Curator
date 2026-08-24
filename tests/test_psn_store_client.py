@@ -249,6 +249,58 @@ async def test_the_rotated_error_only_surfaces_once_every_candidate_is_exhausted
         await client.category_page("cat-1")
 
 
+async def test_facet_census_returns_every_published_key_with_its_count():
+    def handler(request):
+        return httpx.Response(
+            200, json=_grid([_product()], 7604, facets={"productGenres": {"SHOOTER": 812, "PUZZLE": 391}})
+        )
+
+    census = await _client(handler).facet_census("cat-1", "productGenres")
+
+    assert census == {"SHOOTER": 812, "PUZZLE": 391}
+
+
+async def test_facet_census_is_none_when_the_category_publishes_no_such_facet():
+    def handler(request):
+        return httpx.Response(200, json=_grid([_product()], 143, facets={"targetPlatforms": {"PS5": 143}}))
+
+    census = await _client(handler).facet_census("cat-1", "productGenres")
+
+    assert census is None
+
+
+async def test_facet_census_costs_one_product_page_because_the_census_spans_the_category():
+    seen = {}
+
+    def handler(request):
+        seen["variables"] = json.loads(request.url.params["variables"])
+        return httpx.Response(200, json=_grid([_product()], 7604, facets={"productGenres": {"SHOOTER": 812}}))
+
+    await _client(handler).facet_census("cat-1", "productGenres")
+
+    assert seen["variables"]["pageArgs"] == {"size": 1, "offset": 0}
+    assert seen["variables"]["filterBy"] == []
+
+
+async def test_facet_census_shares_the_hash_rotation_rather_than_reimplementing_it():
+    tried = []
+
+    def handler(request):
+        sha = json.loads(request.url.params["extensions"])["persistedQuery"]["sha256Hash"]
+        tried.append(sha)
+        if sha == "dead":
+            return httpx.Response(400, json={"message": "Query dead not whitelisted"})
+        return httpx.Response(200, json=_grid([_product()], 1, facets={"productGenres": {"SHOOTER": 1}}))
+
+    client = StoreCatalogClient(
+        httpx.AsyncClient(transport=httpx.MockTransport(handler)), query_hashes=("dead", "live")
+    )
+    census = await client.facet_census("cat-1", "productGenres")
+
+    assert tried == ["dead", "live"]
+    assert census == {"SHOOTER": 1}
+
+
 async def test_walks_in_ascending_release_date_so_a_new_release_cannot_shift_the_walk():
     seen = {}
 

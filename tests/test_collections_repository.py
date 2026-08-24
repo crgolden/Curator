@@ -461,6 +461,65 @@ async def test_get_definition_scopes_to_identity_sub():
     assert params == ("sub-1", "def-1")
 
 
+async def test_count_definitions_for_a_non_owner_filters_on_public_in_sql():
+    profile_owner_sub = str(uuid4())
+    public_definition_count = randint(1, 20)
+    pool = FakePool(fetchone_results=[(public_definition_count,)])
+    repo = CollectionsRepository(pool)
+
+    count = await repo.count_definitions(profile_owner_sub, public_only=True)
+
+    sql, params = pool.connections[0].executed[0]
+    assert count == public_definition_count
+    assert "visibility = 'public'" in sql
+    assert "!= 'private'" not in sql
+    assert params == (profile_owner_sub,)
+
+
+async def test_count_definitions_for_the_owner_carries_no_visibility_clause_at_all():
+    profile_owner_sub = str(uuid4())
+    owned_definition_count = randint(1, 20)
+    pool = FakePool(fetchone_results=[(owned_definition_count,)])
+    repo = CollectionsRepository(pool)
+
+    count = await repo.count_definitions(profile_owner_sub)
+
+    sql, params = pool.connections[0].executed[0]
+    assert count == owned_definition_count
+    assert "visibility" not in sql
+    assert params == (profile_owner_sub,)
+
+
+async def test_get_definition_by_share_slug_filters_on_not_private_in_sql():
+    shared_slug = str(uuid4())
+    pool = FakePool()
+    repo = CollectionsRepository(pool)
+
+    await repo.get_definition_by_share_slug(shared_slug)
+
+    sql, params = pool.connections[0].executed[0]
+    assert "cd.share_slug = %s" in sql
+    assert "cd.visibility != 'private'" in sql
+    assert params == (shared_slug,)
+
+
+async def test_the_share_slug_predicate_admits_unlisted_while_the_public_count_does_not():
+    profile_owner_sub = str(uuid4())
+    shared_slug = str(uuid4())
+    count_pool = FakePool(fetchone_results=[(randint(1, 20),)])
+    slug_pool = FakePool()
+
+    await CollectionsRepository(count_pool).count_definitions(profile_owner_sub, public_only=True)
+    await CollectionsRepository(slug_pool).get_definition_by_share_slug(shared_slug)
+
+    count_sql, _count_params = count_pool.connections[0].executed[0]
+    slug_sql, _slug_params = slug_pool.connections[0].executed[0]
+    assert "visibility = 'public'" in count_sql
+    assert "visibility != 'private'" in slug_sql
+    assert "visibility != 'private'" not in count_sql
+    assert "visibility = 'public'" not in slug_sql
+
+
 async def test_existing_game_ids_casts_to_uuid_array():
     pool = FakePool(fetchall_results=[[("g1",)]])
     repo = CollectionsRepository(pool)

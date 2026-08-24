@@ -218,13 +218,11 @@ def create_app(
     library_repository = library_repository or LibraryRepository(shared_pool)
     collections_repository = collections_repository or CollectionsRepository(shared_pool)
     collection_orchestrator = CollectionOrchestrator(collections_repository)
-    store_backfill_service = StoreBackfillService(
-        StoreCatalogClient(
-            httpx.AsyncClient(timeout=45.0, verify=shared_ssl_context()),
-            query_hashes=(*settings.store_query_hashes, *CATEGORY_GRID_RETRIEVE_HASHES),
-        ),
-        catalog_repository,
+    store_catalog_client = StoreCatalogClient(
+        httpx.AsyncClient(timeout=45.0, verify=shared_ssl_context()),
+        query_hashes=(*settings.store_query_hashes, *CATEGORY_GRID_RETRIEVE_HASHES),
     )
+    store_backfill_service = StoreBackfillService(store_catalog_client, catalog_repository)
     job_runs_repository = job_runs_repository or JobRunsRepository(shared_pool)
     audit_repository = audit_repository or AccountActionLogRepository(shared_pool)
     enrichment_keys_repository = enrichment_keys_repository or EnrichmentKeysRepository(shared_pool)
@@ -312,6 +310,7 @@ def create_app(
     app.state.token_validator = token_validator
     app.state.catalog_repository = catalog_repository
     app.state.store_backfill_service = store_backfill_service
+    app.state.store_catalog_client = store_catalog_client
     app.state.library_repository = library_repository
     app.state.collections_repository = collections_repository
     app.state.collection_orchestrator = collection_orchestrator

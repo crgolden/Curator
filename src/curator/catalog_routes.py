@@ -1,5 +1,7 @@
-"""``GET /catalog/games`` -- paginated, filterable browsing of the shared game catalog, plus the
-``GET /catalog/genres`` vocabulary its genre filter draws from."""
+"""``GET /catalog/games`` -- paginated, filterable browsing of the shared game catalog -- plus
+``GET /catalog/games/{game_id}``, the ``GET /catalog/genres`` vocabulary its genre filter draws from,
+the admin-scoped ``GET /catalog/genres/drift`` that compares that vocabulary against the storefront's
+live facet, and the admin-scoped ``POST /catalog/backfill`` that seeds the catalog from it."""
 
 from __future__ import annotations
 
@@ -9,6 +11,7 @@ from pydantic import BaseModel
 from curator.catalog.repository import CatalogRepository, GameSummary
 from curator.catalog.store_backfill_service import StoreBackfillService
 from curator.deps import optional_bearer, require_admin
+from curator.psn.store_client import PRODUCT_GENRES_FACET, PS4_GAMES_CATEGORY_ID, StoreCatalogClient
 from curator.token_validation import TokenClaims
 
 router = APIRouter(prefix="/catalog", tags=["catalog"])
@@ -41,6 +44,15 @@ class CatalogGenresResponse(BaseModel):
     """The ``GET /catalog/genres`` response body."""
 
     genres: list[str] = []
+
+
+class CatalogGenreDriftResponse(BaseModel):
+    """The ``GET /catalog/genres/drift`` response body."""
+
+    category_id: str
+    missing_from_table: list[str] = []
+    missing_from_facet: list[str] = []
+    matched: int = 0
 
 
 class CategoryBackfillResult(BaseModel):
@@ -151,6 +163,59 @@ async def list_genres(request: Request) -> CatalogGenresResponse:
     return CatalogGenresResponse(genres=await repository.list_genres())
 
 
+@router.get("/genres/drift", response_model=CatalogGenreDriftResponse)
+async def genre_vocabulary_drift(
+    request: Request,
+    category_id: str = Query(default=PS4_GAMES_CATEGORY_ID, alias="categoryId"),
+    _claims: TokenClaims = Depends(require_admin),
+) -> CatalogGenreDriftResponse:
+    """Report where the ``genres`` reference table and the storefront's live ``productGenres`` facet
+    disagree. Admin-scoped.
+
+    **This endpoint writes nothing.** It never inserts, updates or deletes a genre, and it never
+    auto-syncs one. Migration ``0036`` seeds the vocabulary from a migration precisely so a rebuilt
+    database is byte-identical and independent of PSN being reachable; a reported delta is material for a
+    human to turn into the next migration, and applying it here would reintroduce exactly the
+    nondeterminism ``0036`` removed. That is a contract, not an implementation detail.
+
+    Comparison is on ``genres.name`` only. ``display_name`` and ``priority`` are Curator's own editorial
+    judgment and are deliberately not sourced from PSN, so a difference in either is not facet drift and
+    is not reported as one.
+
+    :param category_id: Which storefront category to read the facet from. Must be one that publishes
+        ``productGenres``; a category that does not is rejected rather than reported as no drift.
+    :returns: Live facet keys with no ``genres`` row, ``genres`` rows the storefront no longer publishes,
+        and how many names matched.
+    :raises fastapi.HTTPException: 502, if the storefront answered but published no ``productGenres``
+        facet for that category. 503 if ``app.state.store_catalog_client`` is absent -- ``create_app``
+        always constructs one, so no deployment reaches that arm; it is a guard against a test or a
+        future factory that leaves the attribute unset, not a deployment mode.
+    """
+    store_client: StoreCatalogClient | None = getattr(request.app.state, "store_catalog_client", None)
+    if store_client is None:
+        raise HTTPException(status_code=503, detail="PlayStation Store catalog client is not configured.")
+
+    census = await store_client.facet_census(category_id, PRODUCT_GENRES_FACET)
+    if census is None:
+        raise HTTPException(
+            status_code=502,
+            detail=(
+                f"Category {category_id} publishes no '{PRODUCT_GENRES_FACET}' facet, so it cannot answer "
+                f"this question. An empty delta here would read as 'no drift' when nothing was compared."
+            ),
+        )
+
+    repository: CatalogRepository = request.app.state.catalog_repository
+    stored = set(await repository.list_genre_vocabulary())
+    live = set(census)
+    return CatalogGenreDriftResponse(
+        category_id=category_id,
+        missing_from_table=sorted(live - stored),
+        missing_from_facet=sorted(stored - live),
+        matched=len(live & stored),
+    )
+
+
 @router.post("/backfill", response_model=CatalogBackfillResponse)
 async def backfill_catalog(
     request: Request, body: CatalogBackfillRequest, _claims: TokenClaims = Depends(require_admin)
@@ -160,11 +225,12 @@ async def backfill_catalog(
     Bounded by ``max_pages_per_category``; each category reports a ``next_offset`` to resume from.
 
     :returns: Per-category progress plus run totals.
-    :raises fastapi.HTTPException: 503, if the store client isn't configured on this deployment.
+    :raises fastapi.HTTPException: 503, if ``app.state.store_backfill_service`` is absent --
+        ``create_app`` always constructs one, so no deployment reaches that arm.
     """
     backfill_service: StoreBackfillService | None = request.app.state.store_backfill_service
     if backfill_service is None:
-        raise HTTPException(status_code=503, detail="PlayStation Store catalog client is not configured.")
+        raise HTTPException(status_code=503, detail="PlayStation Store backfill service is not configured.")
 
     summary = await backfill_service.backfill(
         body.category_ids,

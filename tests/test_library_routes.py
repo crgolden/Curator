@@ -121,8 +121,11 @@ _SORT_ATTRS = {
 
 
 class FakeLibraryRepository:
-    """Hand-written fake that actually implements search/category/sort/paging in memory, so tests
-    against it exercise real filter/sort/page behavior, not just a passthrough."""
+    """Route-level stand-in that reimplements search/category/sort/paging in memory so the route's own
+    parameter plumbing can be exercised. It proves nothing about the SQL: the production predicates live
+    in ``curator.library.repository`` and are asserted on their query text in
+    ``tests/test_library_repository.py`` (ILIKE, ``gen.name = %s``, and the NULLS LAST ordering
+    on both sortable enrichment columns)."""
 
     def __init__(self, games_by_sub=None):
         self._games_by_sub = games_by_sub or {}

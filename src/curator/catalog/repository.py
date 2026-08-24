@@ -187,6 +187,20 @@ class CatalogRepository:
             rows = await cur.fetchall()
         return [row[0] for row in rows]
 
+    async def list_genre_vocabulary(self) -> list[str]:
+        """Return the whole ``genres`` reference table, including names no game is assigned to.
+
+        Distinct from :meth:`list_genres`, which answers "what can browsing be filtered by" and therefore
+        joins ``game_enrichment``. Vocabulary drift is a question about the reference table itself, so an
+        unassigned seeded genre must count as present rather than as missing.
+
+        :returns: Every ``genres.name``, ordered by ``genres.priority`` ascending.
+        """
+        async with self._pool.connection() as conn, conn.cursor() as cur:
+            await cur.execute("SELECT name FROM genres ORDER BY priority")
+            rows = await cur.fetchall()
+        return [row[0] for row in rows]
+
     async def backfill_store_products(self, products: Sequence[StoreProduct]) -> tuple[int, int]:
         """Seed the shared catalog from a storefront page: create missing ``games``, cache cover art.
 
