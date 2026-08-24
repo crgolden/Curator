@@ -63,8 +63,6 @@ EXPECTED_TABLES = {
     "rawg_cache",
     "opencritic_cache",
     "psn_catalog_cache",
-    "psn_game_search_cache",
-    "psn_player_search_cache",
     "data_quality_flags",
     "data_quality_flag_games",
     "exclusion_rules",
@@ -147,6 +145,28 @@ def test_migration_creates_all_expected_tables(db_connection):
         cur.execute("SELECT table_name FROM information_schema.tables WHERE table_schema = 'public'")
         actual_tables = {row[0] for row in cur.fetchall()}
     assert actual_tables >= EXPECTED_TABLES
+
+
+def test_the_two_psn_search_cache_tables_no_longer_exist(db_connection):
+    with db_connection.cursor() as cur:
+        cur.execute(
+            "SELECT table_name FROM information_schema.tables WHERE table_schema = 'public' AND table_name IN (%s, %s)",
+            ("psn_game_search_cache", "psn_player_search_cache"),
+        )
+        surviving = cur.fetchall()
+    assert surviving == []
+
+
+def test_the_two_never_populated_catalog_columns_no_longer_exist(db_connection):
+    with db_connection.cursor() as cur:
+        cur.execute(
+            "SELECT table_name, column_name FROM information_schema.columns "
+            "WHERE table_schema = 'public' "
+            "AND ((table_name = %s AND column_name = %s) OR (table_name = %s AND column_name = %s))",
+            ("games", "search_names", "game_enrichment", "collection_tier"),
+        )
+        surviving = cur.fetchall()
+    assert surviving == []
 
 
 def test_collection_items_rejects_invalid_collection_status(db_connection, seeded_user_and_game):
