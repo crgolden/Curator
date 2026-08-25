@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import contextlib
 import logging
+import os
 import sys
 import threading
 from datetime import datetime, timezone
@@ -58,6 +59,9 @@ _METRIC_EXPORT_INTERVAL_MILLIS = 15_000
 _EXPORT_TIMEOUT_SECONDS = 30
 
 _OTLP_EXPORTER_LOGGER = "opentelemetry.exporter.otlp.proto.grpc.exporter"
+
+_SEMCONV_STABILITY_OPT_IN_ENV = "OTEL_SEMCONV_STABILITY_OPT_IN"
+_SEMCONV_STABILITY_OPT_IN = "http"
 
 _REDACT_QUERY_PARAM_HOSTS = ("api.rawg.io",)
 _REDACT_QUERY_PARAM_NAME = "key"
@@ -123,8 +127,21 @@ def _configure_tracing_and_metrics(app: FastAPI, settings: Settings) -> None:
     if not settings.alloy_endpoint:
         return
 
+    _opt_in_to_stable_http_semconv()
     _register_otlp_providers(settings.alloy_endpoint)
     _instrument_app(app)
+
+
+def _opt_in_to_stable_http_semconv() -> None:
+    """Select the stable OpenTelemetry HTTP semantic conventions before anything is instrumented.
+
+    The HTTP instrumentations read this variable once per process, lazily, on the first
+    ``_instrument()`` call, so it has to be set before :func:`_register_otlp_providers` and
+    :func:`_instrument_app` run. Left unset, they emit the pre-1.0 names
+    (``http.server.duration`` in milliseconds, ``http.status_code``, ``http.target``), which no
+    other service in the fleet still produces and which no fleet-wide alert or dashboard matches.
+    """
+    os.environ.setdefault(_SEMCONV_STABILITY_OPT_IN_ENV, _SEMCONV_STABILITY_OPT_IN)
 
 
 def _register_otlp_providers(alloy_endpoint: str) -> None:

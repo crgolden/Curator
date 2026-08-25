@@ -12,6 +12,7 @@ another test module.
 from __future__ import annotations
 
 import logging
+import os
 import sys
 from datetime import datetime
 from typing import Any, ClassVar
@@ -33,6 +34,13 @@ _SETTINGS_NO_TELEMETRY = Settings(
     oidc_authority="https://identity.example.test",
     token_key="token-key",
     database_url="postgresql://unused",
+)
+
+_SETTINGS_WITH_TELEMETRY = Settings(
+    oidc_authority="https://identity.example.test",
+    token_key="token-key",
+    database_url="postgresql://unused",
+    alloy_endpoint="https://alloy.example.test:4317",
 )
 
 
@@ -274,6 +282,49 @@ def test_configure_tracing_and_metrics_noop_when_alloy_endpoint_absent(monkeypat
     assert _FakeTracerProvider.instances == 0
     assert _FakeMeterProvider.instances == 0
     assert telemetry._otel_configured is False
+
+
+def test_configure_tracing_and_metrics_selects_the_stable_http_semconv(monkeypatch):
+    monkeypatch.delenv(telemetry._SEMCONV_STABILITY_OPT_IN_ENV, raising=False)
+    monkeypatch.setattr(telemetry, "_register_otlp_providers", lambda endpoint: None)
+    monkeypatch.setattr(telemetry, "_instrument_app", lambda app: None)
+
+    telemetry._configure_tracing_and_metrics(app=object(), settings=_SETTINGS_WITH_TELEMETRY)
+
+    assert os.environ[telemetry._SEMCONV_STABILITY_OPT_IN_ENV] == "http"
+
+
+def test_configure_tracing_and_metrics_selects_the_semconv_before_anything_is_instrumented(monkeypatch):
+    monkeypatch.delenv(telemetry._SEMCONV_STABILITY_OPT_IN_ENV, raising=False)
+    seen: list[str | None] = []
+
+    def record(_):
+        seen.append(os.environ.get(telemetry._SEMCONV_STABILITY_OPT_IN_ENV))
+
+    monkeypatch.setattr(telemetry, "_register_otlp_providers", record)
+    monkeypatch.setattr(telemetry, "_instrument_app", record)
+
+    telemetry._configure_tracing_and_metrics(app=object(), settings=_SETTINGS_WITH_TELEMETRY)
+
+    assert seen == ["http", "http"]
+
+
+def test_configure_tracing_and_metrics_leaves_an_explicit_semconv_value_alone(monkeypatch):
+    monkeypatch.setenv(telemetry._SEMCONV_STABILITY_OPT_IN_ENV, "http/dup")
+    monkeypatch.setattr(telemetry, "_register_otlp_providers", lambda endpoint: None)
+    monkeypatch.setattr(telemetry, "_instrument_app", lambda app: None)
+
+    telemetry._configure_tracing_and_metrics(app=object(), settings=_SETTINGS_WITH_TELEMETRY)
+
+    assert os.environ[telemetry._SEMCONV_STABILITY_OPT_IN_ENV] == "http/dup"
+
+
+def test_configure_tracing_and_metrics_does_not_select_a_semconv_when_telemetry_is_off(monkeypatch):
+    monkeypatch.delenv(telemetry._SEMCONV_STABILITY_OPT_IN_ENV, raising=False)
+
+    telemetry._configure_tracing_and_metrics(app=object(), settings=_SETTINGS_NO_TELEMETRY)
+
+    assert telemetry._SEMCONV_STABILITY_OPT_IN_ENV not in os.environ
 
 
 def test_instrument_app_excludes_health_from_tracing(monkeypatch):

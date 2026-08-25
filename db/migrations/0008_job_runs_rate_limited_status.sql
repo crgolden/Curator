@@ -6,8 +6,8 @@
 -- error -- it's an expected, self-resolving pause) nor 'succeeded' (the run isn't actually done yet). The
 -- run is republished to curator-library-refresh-continuation (same run_id, via Service Bus's scheduled-
 -- message feature) to resume once the limit lifts, repeating as many times as it takes -- see
--- curator.jobs.repository.JobRunsRepository.mark_rate_limited and
--- curator.jobs.queue_publisher.QueuePublisher.publish_library_refresh_continuation.
+-- curator.jobs.repository.JobRunsRepository.mark_rate_limited, and the republisher itself, which lives in
+-- the Functions repo at Functions/Curator/Library/LibraryRefreshQueuePublisher.cs rather than in Curator.
 --
 -- Same drop-constraint/add-constraint pattern 0004_user_enrichment_keys.sql/0006_follows.sql already used
 -- for account_action_log_action_check.

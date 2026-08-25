@@ -8,9 +8,12 @@ request. This module owns publishing only; nothing in this codebase consumes the
 
 ``LIBRARY_REFRESH_CONTINUATION_QUEUE`` is a separate queue (not just another message shape on
 ``LIBRARY_REFRESH_QUEUE``) because its messages are always sent via Service Bus's native scheduled-message
-feature (``schedule_messages``) -- a rate limit hit part-way through a refresh republishes the remaining
-games with a future ``schedule_time_utc`` so it isn't picked up again until the limit should have lifted,
-mirroring the same run id (see ``curator.jobs.queue_publisher.QueuePublisher.publish_library_refresh_continuation``).
+feature -- a rate limit hit part-way through a refresh republishes the remaining games with a future
+``schedule_time_utc`` so it isn't picked up again until the limit should have lifted, mirroring the same
+run id. **Curator names that queue but never publishes to it**: the continuation is republished by the
+worker that hit the rate limit, in the Functions repo
+(``Functions/Curator/Library/LibraryRefreshQueuePublisher.cs``), which is also where the ``seq``
+staleness checkpoint is stamped.
 """
 
 from __future__ import annotations

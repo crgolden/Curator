@@ -3,9 +3,10 @@
 --
 -- Adds job_runs.seq: a monotonic checkpoint counter, bumped by JobRunsRepository.mark_rate_limited on
 -- every real checkpoint a library-refresh run reaches, and stamped into the resulting continuation
--- message's payload at publish time (QueuePublisher.publish_library_refresh_continuation's seq
--- parameter). QueueConsumer._handle() compares a delivered message's seq against the row's current seq
--- via a new compare-and-swap, JobRunsRepository.try_begin_delivery, before doing any work.
+-- message's payload at publish time (the seq parameter of LibraryRefreshQueuePublisher, which lives in the
+-- Functions repo at Functions/Curator/Library/LibraryRefreshQueuePublisher.cs rather than in Curator).
+-- QueueConsumer._handle() compares a delivered message's seq against the row's current seq via a new
+-- compare-and-swap, JobRunsRepository.try_begin_delivery, before doing any work.
 --
 -- This closes a redelivery race identified from production Elasticsearch logs: a library-refresh (or
 -- continuation) message that takes long enough to process can have its Service Bus lock expire before

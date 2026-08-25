@@ -16,8 +16,40 @@ from datetime import datetime
 from typing import Any, Protocol
 
 from azure.servicebus import ServiceBusMessage
+from opentelemetry.propagate import inject
 
 from curator.jobs.repository import JobRunsRepository
+
+_DIAGNOSTIC_ID_PROPERTY = "Diagnostic-Id"
+_TRACE_PARENT_KEY = "traceparent"
+
+
+def _message_carrying_trace_context(body: str) -> ServiceBusMessage:
+    """Build a message stamped with the caller's W3C trace context, so the worker joins this trace.
+
+    ``azure-servicebus`` can do this itself, but only when ``azure-core``'s tracing *plugin* is
+    installed: :func:`azure.servicebus._common.tracing.is_tracing_enabled` reads
+    ``settings.tracing_implementation()``, which resolves by importing
+    ``azure.core.tracing.ext.opentelemetry_span`` from ``azure-core-tracing-opentelemetry``. That
+    package has no stable release, so this injects the same two application properties the SDK would
+    write, using the propagator ``opentelemetry-api`` already provides. ``Diagnostic-Id`` is the name
+    the Azure SDKs have always used; ``traceparent`` is the W3C one. The .NET
+    ``ServiceBusProcessor`` reads both.
+
+    :param body: The already-serialized message body.
+    :returns: A message whose application properties carry the current trace context, or a plain
+        message when nothing is being traced.
+    """
+    carrier: dict[str, str] = {}
+    inject(carrier)
+    trace_parent = carrier.get(_TRACE_PARENT_KEY)
+
+    if trace_parent is None:
+        return ServiceBusMessage(body)
+
+    properties: dict[str | bytes, int | float | bytes | str | uuid.UUID] = {_DIAGNOSTIC_ID_PROPERTY: trace_parent}
+    properties.update(carrier)
+    return ServiceBusMessage(body, application_properties=properties)
 
 
 class MessageSender(Protocol):
@@ -64,7 +96,7 @@ class QueuePublisher:
         run_id = str(uuid.uuid4())
         await self._job_runs_repository.create(run_id, "library_refresh", identity_sub)
         body = json.dumps({"run_id": run_id, "identity_sub": identity_sub})
-        await self._library_refresh_sender.send_messages(ServiceBusMessage(body))
+        await self._library_refresh_sender.send_messages(_message_carrying_trace_context(body))
         return run_id
 
     async def publish_scheduled_library_refresh(self, identity_sub: str, scheduled_for: datetime) -> None:
@@ -83,6 +115,11 @@ class QueuePublisher:
         without cancelling the old one, the same staleness-checkpoint approach ``seq`` already gives the
         rate-limit continuation chain.
 
+        Carries no trace context, unlike the other two publishes. A scheduled message can sit invisible
+        for a month, far longer than traces are retained, so parenting the eventual run off the request
+        that scheduled it would produce a span whose parent no longer exists -- an orphan pointing at
+        nothing, which reads worse than a clean root span.
+
         :param identity_sub: The Curator user id (Identity's ``sub``) to refresh.
         :param scheduled_for: When the refresh should become visible to the processor.
         :raises RuntimeError: If no scheduled-refresh sender is configured.
@@ -100,5 +137,5 @@ class QueuePublisher:
         run_id = str(uuid.uuid4())
         await self._job_runs_repository.create(run_id, "enrichment")
         body = json.dumps({"run_id": run_id})
-        await self._enrichment_sender.send_messages(ServiceBusMessage(body))
+        await self._enrichment_sender.send_messages(_message_carrying_trace_context(body))
         return run_id
