@@ -1,15 +1,8 @@
-"""``GET /public/collections/{share_slug}`` -- the one anonymous, unauthenticated route in this API.
-
-Every other route in Curator sits behind ``require_bearer`` (see ``curator.deps``'s module docstring).
-This route is the deliberate, narrow exception WP4 introduces: a collection's owner can turn on sharing
-(``PUT /collections/{id}/visibility``, ``curator.collections_routes``) and hand out a link that works for
-someone who has never signed in to Curator at all -- the whole point of a share link.
-
-Nothing here trusts caller identity for anything, because there is none. Access control is entirely
-``curator.collections.repository.CollectionsRepository.get_definition_by_share_slug``'s own job: an
-unknown slug and a ``"private"`` collection's slug are indistinguishable 404s, so a collection that was
-shared and later made private stops working exactly like one that never existed -- no separate
-"revoked" state to get out of sync with ``visibility``.
+"""Every other route in Curator sits behind ``require_bearer`` (see ``curator.deps``'s module docstring).
+``GET /public/collections/{share_slug}`` is the deliberate, narrow exception WP4 introduces: a collection's
+owner can turn on sharing (``PUT /collections/{id}/visibility``, ``curator.collections_routes``) and hand
+out a link that works for someone who has never signed in to Curator at all -- the whole point of a share
+link.
 """
 
 from __future__ import annotations

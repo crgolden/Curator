@@ -6,6 +6,7 @@ Same shape as :class:`curator.persistence.repository.Repository`: backed by a sh
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any, Literal
 
@@ -13,12 +14,13 @@ from psycopg import AsyncCursor
 from psycopg_pool import AsyncConnectionPool
 
 from curator.catalog.cover_art import SQUARE_COVER_ART_SQL
+from curator.psn.title_platform import ConsolePlatform
 
-LibrarySortField = Literal["title", "category", "rawg_rating", "opencritic_rating", "psn_rating", "percent_completed"]
+LibrarySortField = Literal["title", "genre", "rawg_rating", "opencritic_rating", "psn_rating", "percent_completed"]
 
 _SORT_COLUMNS: dict[str, str] = {
     "title": "g.canonical_title",
-    "category": "gen.name",
+    "genre": "gen.name",
     "rawg_rating": "ge.critical_score",
     "opencritic_rating": "ge.oc_score",
     "psn_rating": "ge.psn_rating",
@@ -39,21 +41,45 @@ three platforms stays one row and cannot inflate a ``COUNT(*)`` taken over the s
 than reaching the caller as ``None``.
 """
 
+_LIBRARY_VIEW_COLUMNS: tuple[tuple[str, str], ...] = (
+    ("game_id", "g.game_id"),
+    ("title", "g.canonical_title"),
+    ("genre", "gen.name"),
+    ("rawg_rating", "ge.critical_score"),
+    ("opencritic_rating", "ge.oc_score"),
+    ("psn_rating", "ge.psn_rating"),
+    ("psn_product_id", "le.product_id"),
+    ("rawg_enriched", "COALESCE(ge.rawg_enriched, false)"),
+    ("opencritic_enriched", "COALESCE(ge.opencritic_enriched, false)"),
+    ("psn_enriched", "COALESCE(ge.psn_enriched, false)"),
+    ("is_active", "le.is_active"),
+    ("np_communication_id", "le.np_communication_id"),
+    ("percent_completed", "le.trophy_percent_completed"),
+    ("source", "le.source"),
+    ("cover_image_url", SQUARE_COVER_ART_SQL),
+    ("platforms", _OWNED_PLATFORMS_SQL),
+)
+
+_LIBRARY_VIEW_SELECT_LIST = ", ".join(f"{expression} AS {name}" for name, expression in _LIBRARY_VIEW_COLUMNS)
+
+_LIBRARY_VIEW_COLUMN_INDEX: dict[str, int] = {name: index for index, (name, _) in enumerate(_LIBRARY_VIEW_COLUMNS)}
+
 
 @dataclass(frozen=True, slots=True)
 class LibraryGameView:
     """One row of a user's library, joined with its enrichment status -- backs ``GET /library``'s
-    rating/category columns."""
+    rating/genre columns."""
 
     game_id: str
     title: str
-    category: str | None
+    genre: str | None
     rawg_rating: float | None
     opencritic_rating: float | None
     psn_rating: float | None
     psn_product_id: str | None
     rawg_enriched: bool
     opencritic_enriched: bool
+    psn_enriched: bool
     is_active: bool = True
     np_communication_id: str | None = None
     percent_completed: int | None = None
@@ -76,19 +102,14 @@ class LibraryRepository:
         cur: AsyncCursor[Any],
         identity_sub: str,
         game_id: str,
-        *,
-        native_ps5: bool,
-        ps4_eligible: bool,
-        platforms: tuple[str, ...] = (),
+        platforms: Sequence[ConsolePlatform],
     ) -> None:
-        """Reconcile ``library_entry_platforms`` to match the entry's boolean pair, plus any extra platforms.
+        """Reconcile ``library_entry_platforms`` to exactly ``platforms`` for one entry.
 
-        :param native_ps5: Whether the entry owns the PS5 platform.
-        :param ps4_eligible: Whether the entry owns the PS4 platform.
-        :param platforms: Extra platforms to union in beyond the PS5/PS4 pair -- already-present values
-            are not duplicated.
+        :param platforms: Every platform the entry owns. Duplicates are collapsed; anything already stored
+            and absent here is deleted, so this is a replacement rather than a union.
         """
-        owned_platforms = [platform for platform, owned in (("PS5", native_ps5), ("PS4", ps4_eligible)) if owned]
+        owned_platforms: list[ConsolePlatform] = []
         for platform in platforms:
             if platform not in owned_platforms:
                 owned_platforms.append(platform)
@@ -110,9 +131,19 @@ class LibraryRepository:
             )
 
     async def upsert_manual_entry(
-        self, identity_sub: str, game_id: str, *, native_ps5: bool, ps4_eligible: bool, owned_edition: str | None
+        self, identity_sub: str, game_id: str, *, platforms: Sequence[ConsolePlatform], owned_edition: str | None
     ) -> None:
-        """Record a game the user owns that PSN has no entitlement for -- a physical disc, typically."""
+        """Record a game the user owns that PSN has no entitlement for -- a physical disc, typically.
+
+        ``library_entry_platforms`` is the platform of record. ``native_ps5``/``ps4_eligible`` are still
+        written, derived from ``platforms``, because the Functions worker's canonicalization pass reads
+        them; a manual entry on PS3, Vita or PSP therefore leaves both ``false``, which is correct rather
+        than lossy -- the pair has no spelling for those platforms.
+
+        :param platforms: Every platform the user owns this game on.
+        """
+        native_ps5 = "PS5" in platforms
+        ps4_eligible = "PS4" in platforms
         async with self._pool.connection() as conn, conn.cursor() as cur:
             await cur.execute(
                 """
@@ -130,9 +161,7 @@ class LibraryRepository:
                 (identity_sub, game_id, native_ps5, ps4_eligible, owned_edition),
             )
             if cur.rowcount:
-                await self._sync_entry_platforms(
-                    cur, identity_sub, game_id, native_ps5=native_ps5, ps4_eligible=ps4_eligible
-                )
+                await self._sync_entry_platforms(cur, identity_sub, game_id, platforms)
 
     async def delete_manual_entry(self, identity_sub: str, game_id: str) -> bool:
         """Remove a manually-added game, never a PSN-sourced one.
@@ -176,7 +205,7 @@ class LibraryRepository:
         """Return how many library entries ``identity_sub`` has, for the profile overview's tile.
 
         Deliberately does **not** filter ``is_active``. :meth:`list_entries_with_enrichment` builds its
-        conditions from ``identity_sub``/``search``/``category`` only, so its ``total`` counts inactive
+        conditions from ``identity_sub``/``search``/``genre`` only, so its ``total`` counts inactive
         rows too -- filtering here would make the profile tile disagree with the number the library page
         itself reports, which is the more confusing of the two failures.
 
@@ -193,20 +222,21 @@ class LibraryRepository:
         identity_sub: str,
         *,
         search: str | None = None,
-        category: str | None = None,
+        genre: str | None = None,
         sort: LibrarySortField = "title",
         sort_dir: str = "asc",
         limit: int = 20,
         offset: int = 0,
     ) -> tuple[list[LibraryGameView], int]:
-        """Return one page of a user's library, joined with its category/ratings/enrichment status,
+        """Return one page of a user's library, joined with its genre/ratings/enrichment status,
         for ``GET /library``'s (and ``GET /users/{sub}/library``'s) table -- plus the total count of
-        every row matching ``search``/``category``, independent of ``limit``/``offset``.
+        every row matching ``search``/``genre``, independent of ``limit``/``offset``.
 
         ``LEFT JOIN game_enrichment``/``genres`` -- a freshly-ingested-but-not-yet-enriched game has
-        no ``game_enrichment`` row yet, and every rating/category field correctly comes back ``None``
-        (not enriched yet, not an error); ``rawg_enriched``/``opencritic_enriched`` still default to
-        ``False`` via ``COALESCE``.
+        no ``game_enrichment`` row yet, and every rating/genre field correctly comes back ``None``
+        (not enriched yet, not an error); ``rawg_enriched``/``opencritic_enriched``/``psn_enriched``
+        still default to ``False`` via ``COALESCE``. All three are read as columns and never reconstructed
+        from the rating fields -- see ``0049_game_enrichment_psn_enriched.sql``.
 
         ``cover_image_url`` is :data:`~curator.catalog.cover_art.SQUARE_COVER_ART_SQL`, the same
         expression every other cover-returning query uses. ``platforms`` is
@@ -215,7 +245,7 @@ class LibraryRepository:
 
         :param identity_sub: The Curator user id (Identity's ``sub``).
         :param search: Optional case-insensitive title substring filter.
-        :param category: Optional exact-match category (resolved genre name) filter.
+        :param genre: Optional exact-match genre-name filter, matched against ``genres.name``.
         :param sort: Which column to sort by -- looked up through :data:`_SORT_COLUMNS` rather than
             trusted directly, even though the route layer already constrains it to a safe literal.
         :param sort_dir: ``"asc"`` or ``"desc"``; anything else is treated as ``"asc"``.
@@ -227,9 +257,9 @@ class LibraryRepository:
         if search:
             conditions.append("g.canonical_title ILIKE %s")
             params.append(f"%{search}%")
-        if category:
+        if genre:
             conditions.append("gen.name = %s")
-            params.append(category)
+            params.append(genre)
         where_clause = " AND ".join(conditions)
 
         sort_column = _SORT_COLUMNS[sort]
@@ -251,12 +281,7 @@ class LibraryRepository:
 
             await cur.execute(
                 f"""
-                SELECT g.game_id, g.canonical_title, gen.name, ge.critical_score, ge.oc_score,
-                       ge.psn_rating, le.product_id,
-                       COALESCE(ge.rawg_enriched, false), COALESCE(ge.opencritic_enriched, false),
-                       le.is_active, le.np_communication_id, le.trophy_percent_completed, le.source,
-                       {SQUARE_COVER_ART_SQL} AS cover_image_url,
-                       {_OWNED_PLATFORMS_SQL} AS platforms
+                SELECT {_LIBRARY_VIEW_SELECT_LIST}
                 {base_query}
                 ORDER BY {sort_column} {direction} NULLS LAST, g.canonical_title ASC
                 LIMIT %s OFFSET %s
@@ -265,31 +290,33 @@ class LibraryRepository:
             )
             rows = await cur.fetchall()
 
+        at = _LIBRARY_VIEW_COLUMN_INDEX
         games = [
             LibraryGameView(
-                game_id=str(row[0]),
-                title=row[1],
-                category=row[2],
-                rawg_rating=row[3],
-                opencritic_rating=row[4],
-                psn_rating=row[5],
-                psn_product_id=row[6],
-                rawg_enriched=row[7],
-                opencritic_enriched=row[8],
-                is_active=bool(row[9]),
-                np_communication_id=row[10],
-                percent_completed=row[11],
-                source=row[12],
-                cover_image_url=row[13],
-                platforms=tuple(row[14] or ()),
+                game_id=str(row[at["game_id"]]),
+                title=row[at["title"]],
+                genre=row[at["genre"]],
+                rawg_rating=row[at["rawg_rating"]],
+                opencritic_rating=row[at["opencritic_rating"]],
+                psn_rating=row[at["psn_rating"]],
+                psn_product_id=row[at["psn_product_id"]],
+                rawg_enriched=row[at["rawg_enriched"]],
+                opencritic_enriched=row[at["opencritic_enriched"]],
+                psn_enriched=row[at["psn_enriched"]],
+                is_active=bool(row[at["is_active"]]),
+                np_communication_id=row[at["np_communication_id"]],
+                percent_completed=row[at["percent_completed"]],
+                source=row[at["source"]],
+                cover_image_url=row[at["cover_image_url"]],
+                platforms=tuple(row[at["platforms"]] or ()),
             )
             for row in rows
         ]
         return games, total
 
-    async def list_categories(self, identity_sub: str) -> list[str]:
-        """Return the distinct, sorted set of categories (resolved genres) present in a user's
-        library -- backs the library page's category filter dropdown.
+    async def list_genres(self, identity_sub: str) -> list[str]:
+        """Return the distinct, sorted set of genres present in a user's library -- backs the library
+        page's genre filter dropdown.
 
         :param identity_sub: The Curator user id (Identity's ``sub``).
         """

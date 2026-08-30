@@ -1,13 +1,3 @@
-"""``POST/GET/PATCH/DELETE /storage-devices`` (swappable M.2/USB storage CRUD),
-``PUT /storage-devices/{device_id}/attach`` / ``DELETE .../attach`` (moving a device between consoles),
-and ``PUT /storage-devices/{device_id}/installs/{game_id}`` -- the one and only place a device's own
-install-checked-state changes.
-
-A storage device is deliberately distinct from a console (``curator.consoles_routes``): it is swappable,
-it can be unattached, and moving it to a different console is a one-field update here rather than a bulk
-rewrite of every install row it carries -- see ``storage_device_installs`` in migration ``0017`` for why.
-"""
-
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException, Request

@@ -1,12 +1,4 @@
-"""``POST/GET/PATCH/DELETE /consoles`` (console CRUD) and
-``PUT /consoles/{console_id}/installs/{game_id}`` -- the one and only place a console's own
-built-in-storage install-checked-state changes.
-
-Deliberately never a side effect of a collection run: "physically installed here" and "currently
-recommended here" stay two distinct facts, so checked state never silently auto-transfers when a game is
-reassigned to a different console or collection.
-
-A console's own storage never needs a playability check here -- it is always directly playable for both
+"""A console's own storage never needs a playability check here -- it is always directly playable for both
 platforms the console itself supports (that is what "built-in" means). The USB-can't-run-PS5-games rule
 only applies to attached swappable storage; see ``curator.storage_devices_routes``.
 """
@@ -19,7 +11,7 @@ from pydantic import BaseModel
 from curator.collections.console_model_defaults import default_capacity_gb
 from curator.collections.repository import CollectionsRepository, UserConsole
 from curator.deps import require_bearer
-from curator.psn.title_platform import ConsolePlatform, console_platform
+from curator.psn.title_platform import ConsolePlatform, console_platform, platform_vocabulary_message
 from curator.token_validation import TokenClaims
 
 router = APIRouter(prefix="/consoles", tags=["consoles"])
@@ -103,7 +95,7 @@ def _console_platform(value: str) -> ConsolePlatform:
     try:
         return console_platform(value)
     except ValueError as exc:
-        raise HTTPException(status_code=400, detail='platform must be "PS5" or "PS4".') from exc
+        raise HTTPException(status_code=400, detail=platform_vocabulary_message()) from exc
 
 
 def _to_response(console: UserConsole, *, capacity_is_default: bool = False) -> ConsoleResponse:
@@ -132,9 +124,10 @@ async def create_console(
     ``capacity_is_default`` in the response so the caller can prompt for a correction rather than silently
     trusting a guess.
 
-    :raises fastapi.HTTPException: 400, if ``platform`` isn't ``"PS5"``/``"PS4"`` (the schema's own CHECK
-        constraint would reject it anyway; validating here first gives a clearer message than a raw
-        constraint-violation 500).
+    :raises fastapi.HTTPException: 400, if ``platform`` is outside
+        :data:`~curator.psn.title_platform.CONSOLE_PLATFORM_IDS` (``user_consoles.platform``'s own foreign
+        key to ``platforms`` would reject it anyway; validating here first gives a clearer message than a
+        raw constraint-violation 500).
     """
     platform = _console_platform(body.platform)
 

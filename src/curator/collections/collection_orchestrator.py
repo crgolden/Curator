@@ -13,12 +13,34 @@ from dataclasses import dataclass
 from curator.collections.capacity_fill_strategy import StorageBin, fill_capacity_multi_bin
 from curator.collections.collection_spec import CollectionSpec
 from curator.collections.filter_list_strategy import apply_filter_list, filter_candidates
-from curator.collections.game_candidate import GameCandidate
+from curator.collections.game_candidate import (
+    DEFAULT_SIZE,
+    ESTIMATED_SIZE,
+    MEASURED_SIZE,
+    GameCandidate,
+    SizeSource,
+)
 from curator.collections.repository import CollectionsRepository, RawCandidateRow
+from curator.psn.title_platform import ConsolePlatform
 from curator.scoring.scoring_service import composite_score, rank_score
 from curator.scoring.size_estimation_service import SizeEstimate, estimate_install_size_gb
 
 _DEFAULT_SIZE_GB = 20.0
+
+_NO_CONSOLE_ESTIMATE_PLATFORM: ConsolePlatform = "PS4"
+"""Which platform's size band a collection with **no console attached** estimates against.
+
+A ``filter_list`` collection is not bound to a console, so it has no platform of its own, and the packing
+step it feeds still needs a size. PS4 is the conservative half of the pair ``0033_seed_size_estimates``
+actually seeds, and it is what this specific path already resolved to.
+
+It does **not** cover a console on a platform with no seeded bands. A PS3, Vita, PSP, PS2 or PS1
+``capacity_fill`` estimates as that platform, finds nothing in ``size_estimates``, and falls to
+:data:`_DEFAULT_SIZE_GB` rather than borrowing PS4's figures -- see
+``curator.scoring.size_estimation_service.estimate_install_size_gb``, which returns ``None`` deliberately.
+Reporting a PS3 disc as a 64 GB PS4 open-world title would be a worse answer than a flat one, and seeding
+real bands for those platforms needs published figures nobody has measured.
+"""
 
 
 @dataclass(frozen=True, slots=True)
@@ -86,15 +108,15 @@ class CollectionOrchestrator:
             caller (today, a one-off reproduction script; ``Tools/PlayStation/LIFECYCLE_AUDIT.md``) can
             compose the legacy PS4 Criterion→Blockbuster cascade without Curator inventing a saved
             collection-to-collection dependency graph (cycle rules, edit/delete semantics for a shape no
-            UI has been designed for yet -- see ``AGENTS/PARKING_LOT.md``'s §7 discipline for undesigned
-            features). A game id present in both ``chained_candidate_ids`` and this spec's own normal
+            UI has been designed for yet -- an undesigned feature does not get built ahead of a design).
+            A game id present in both ``chained_candidate_ids`` and this spec's own normal
             match is only counted once (kept in its normal-match position, not moved to the chained
             position).
         :returns: The :class:`CollectionResult`.
         :raises ValueError: If ``spec.kind == "capacity_fill"`` and ``console_id`` is missing or unknown,
             or if ``spec.exclude_installed_on`` names a console that isn't this caller's own.
         """
-        platform: str | None = None
+        platform: ConsolePlatform | None = None
         bins: list[StorageBin] = []
         routing_genres: tuple[str, ...] = ()
 
@@ -142,7 +164,7 @@ class CollectionOrchestrator:
             self._score(
                 row,
                 size_estimates,
-                is_ps5=(platform == "PS5"),
+                platform=platform,
                 percent_completed=completion_map.get(row.game_id, row.percent_completed),
             )
             for row in raw_rows
@@ -188,19 +210,13 @@ class CollectionOrchestrator:
         row: RawCandidateRow,
         size_estimates: list[SizeEstimate],
         *,
-        is_ps5: bool,
+        platform: ConsolePlatform | None,
         percent_completed: int | None = None,
     ) -> GameCandidate:
         comp = composite_score(row.critical_score, row.oc_score, row.psn_rating)
         multiplayer_text = "free to play" if row.is_free_to_play else ""
         points = rank_score(comp, multiplayer_text, row.franchise)
-        size_gb = row.measured_size_gb
-        if size_gb is None:
-            size_gb = estimate_install_size_gb(
-                row.title, row.genre or "", is_ps5, row.aaa_tier or "Indie", size_estimates
-            )
-        if size_gb is None:
-            size_gb = _DEFAULT_SIZE_GB
+        size_gb, size_source = CollectionOrchestrator._resolve_size(row, size_estimates, platform=platform)
         return GameCandidate(
             game_id=row.game_id,
             title=row.title,
@@ -209,6 +225,33 @@ class CollectionOrchestrator:
             franchise=row.franchise or "",
             composite_score=comp,
             rank_score=points,
-            size_gb=float(size_gb),
+            size_gb=size_gb,
             percent_completed=percent_completed,
+            size_source=size_source,
         )
+
+    @staticmethod
+    def _resolve_size(
+        row: RawCandidateRow, size_estimates: list[SizeEstimate], *, platform: ConsolePlatform | None
+    ) -> tuple[float, SizeSource]:
+        """The install-size ladder, and which rung answered.
+
+        Contributed measurement, then a ``size_estimates`` band, then :data:`_DEFAULT_SIZE_GB`. The rung
+        travels with the size because a bare number cannot tell a caller whether 20 GB is a fact somebody
+        measured or the flat fallback standing in for one -- the distinction ``GET``/``PUT
+        /games/{game_id}/measured-sizes`` exists to let a user close.
+        """
+        if row.measured_size_gb is not None:
+            return float(row.measured_size_gb), MEASURED_SIZE
+
+        estimated_gb = estimate_install_size_gb(
+            row.title,
+            row.genre or "",
+            platform or _NO_CONSOLE_ESTIMATE_PLATFORM,
+            row.aaa_tier or "Indie",
+            size_estimates,
+        )
+        if estimated_gb is not None:
+            return float(estimated_gb), ESTIMATED_SIZE
+
+        return _DEFAULT_SIZE_GB, DEFAULT_SIZE

@@ -61,7 +61,7 @@ _EXPORT_TIMEOUT_SECONDS = 30
 _OTLP_EXPORTER_LOGGER = "opentelemetry.exporter.otlp.proto.grpc.exporter"
 
 _SEMCONV_STABILITY_OPT_IN_ENV = "OTEL_SEMCONV_STABILITY_OPT_IN"
-_SEMCONV_STABILITY_OPT_IN = "http"
+_SEMCONV_STABILITY_OPT_IN = "http,database"
 
 _REDACT_QUERY_PARAM_HOSTS = ("api.rawg.io",)
 _REDACT_QUERY_PARAM_NAME = "key"
@@ -84,6 +84,8 @@ async def _redact_rawg_key_from_span(span: Span, request_info: RequestInfo) -> N
 
 
 _ES_DATA_STREAM = "logs-app-curator"
+
+_ES_FAILURE_REPORT_EVERY = 100
 
 _LEVEL_NAMES = {
     "DEBUG": "Debug",
@@ -127,19 +129,23 @@ def _configure_tracing_and_metrics(app: FastAPI, settings: Settings) -> None:
     if not settings.alloy_endpoint:
         return
 
-    _opt_in_to_stable_http_semconv()
+    _opt_in_to_stable_semconv()
     _register_otlp_providers(settings.alloy_endpoint)
     _instrument_app(app)
 
 
-def _opt_in_to_stable_http_semconv() -> None:
-    """Select the stable OpenTelemetry HTTP semantic conventions before anything is instrumented.
+def _opt_in_to_stable_semconv() -> None:
+    """Select the stable OpenTelemetry HTTP and database semantic conventions before anything is
+    instrumented.
 
-    The HTTP instrumentations read this variable once per process, lazily, on the first
-    ``_instrument()`` call, so it has to be set before :func:`_register_otlp_providers` and
-    :func:`_instrument_app` run. Left unset, they emit the pre-1.0 names
-    (``http.server.duration`` in milliseconds, ``http.status_code``, ``http.target``), which no
-    other service in the fleet still produces and which no fleet-wide alert or dashboard matches.
+    The instrumentations read this variable once per process, lazily, on the first ``_instrument()``
+    call, so it has to be set before :func:`_register_otlp_providers` and :func:`_instrument_app`
+    run. Left unset, they emit the pre-1.0 names (``http.server.duration`` in milliseconds,
+    ``http.status_code``, ``http.target``, and ``db.system``/``db.statement``), which no other
+    service in the fleet still produces and which no fleet-wide alert or dashboard matches.
+
+    The value is comma-delimited and both halves are needed: ``http`` alone left psycopg emitting
+    the legacy database attributes, which is why Curator was the last service still producing them.
     """
     os.environ.setdefault(_SEMCONV_STABILITY_OPT_IN_ENV, _SEMCONV_STABILITY_OPT_IN)
 
@@ -315,28 +321,42 @@ class _ElasticsearchLogHandler(logging.Handler):
         """
         super().__init__()
         self._client = client
+        self.failure_count = 0
 
     def emit(self, record: logging.LogRecord) -> None:
-        """Index one formatted log document into the ``logs-app-curator`` data stream, swallowing any
-        failure.
+        """Index one formatted log document into the ``logs-app-curator`` data stream, reporting but never
+        raising a failure.
 
         Data streams are append-only: writes must use ``op_type="create"`` (the default ``"index"`` op
         type is rejected once the target is an actual data stream, not a bare index). No document id is
         supplied -- Elasticsearch auto-generates one, exactly like the ``create`` op type expects.
-        ``require_data_stream=True`` fails the write loudly (swallowed by the ``suppress`` below, same as
-        any other transient failure) if ``_ES_DATA_STREAM`` were ever misconfigured into resolving to a
-        bare index instead of a real data stream, rather than silently succeeding against the wrong kind
-        of target the way the previous day-bucketed bare index did.
+        ``require_data_stream=True`` fails the write if ``_ES_DATA_STREAM`` were ever misconfigured into
+        resolving to a bare index instead of a real data stream, rather than silently succeeding against
+        the wrong kind of target the way the previous day-bucketed bare index did.
+
+        A failure is counted and written to stderr on the first occurrence and every
+        :data:`_ES_FAILURE_REPORT_EVERY` thereafter, then dropped. It is never raised: a down or slow node
+        must not reach application code or kill the listener thread. The counting matters because a
+        blanket suppression makes "Elasticsearch is refusing our writes" and "there was nothing to log"
+        the same observation -- which is what left ``logs-app-curator``'s nine-day silence undiagnosable.
 
         :param record: The log record to ship.
         """
-        with contextlib.suppress(Exception):
+        try:
             self._client.index(
                 index=_ES_DATA_STREAM,
                 document=format_log_record(record),
                 op_type="create",
                 require_data_stream=True,
             )
+        except Exception as exc:
+            self.failure_count += 1
+            if self.failure_count == 1 or self.failure_count % _ES_FAILURE_REPORT_EVERY == 0:
+                print(
+                    f"curator.telemetry: Elasticsearch log shipping has failed {self.failure_count} "
+                    f"time(s); most recent {type(exc).__name__}: {exc}",
+                    file=sys.stderr,
+                )
 
 
 _QUEUE_DEPTH_METER = metrics.get_meter(__name__)

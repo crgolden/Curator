@@ -119,17 +119,40 @@ correctly-configured database is left exactly as it started, and nothing here ev
 Replaying all the migrations per test instead cost roughly 11 seconds per test; building the schema once
 takes the module from ~286 s to under 2 s.
 
-Because the fixture issues plain `CREATE TABLE`, the target has to be **empty**; it cannot run against a
-database that already holds the schema.
+The target does **not** have to be empty. `run_migrations.py` records applied filenames in
+`schema_migrations` and skips them, so the fixture is idempotent against a database that already holds
+part or all of the schema — the same property the deploy job relies on.
 
-The module carries an `xdist_group` mark so `--dist loadgroup` keeps all of its tests on one worker. They
-share a single connection holding an uncommitted schema, so a second worker re-applying the same
-`CREATE TABLE` statements would block on that connection's locks rather than fail cleanly.
+The module carries an `xdist_group` mark so `--dist loadgroup` keeps all of its tests on one worker,
+rather than several workers racing to apply the same migrations.
 
-**Only ever point `CURATOR_TEST_DATABASE_URL` at a disposable, throwaway database created solely for this
-purpose — never a shared or production database, and never at the `curator` dev database itself.** The
-rollback discipline above is what makes that safe to do repeatedly, but it still assumes the target
-database is not something else's.
+## Two local databases, two jobs — do not mix them
+
+`Curator/.env` defines both, and choosing correctly is the whole of it. **No superuser is needed for
+either, and nothing here should ever create or drop a database.**
+
+| variable | database | what it is for |
+|---|---|---|
+| `CURATOR_DATABASE_URL` | `curator` | **Manual and exploratory work.** Running a new migration by hand, driving the app, Playwright CLI sessions. It holds the local fixture data you want to keep — linked accounts, libraries, collections — so it is worth something and must not be swept. |
+| `CURATOR_TEST_DATABASE_URL` | `curator_test` | **Automated testing only.** `test_schema.py` and `Functions.Tests.Integration` both target it. Nothing in it is precious, and anything that seeds it is expected to clean up after itself. |
+
+**A suite that empties tables guards on the database name, never on configuration.** Identity's E2E fixture
+is the reference: `PlaywrightFixture.CleanupDatabaseAsync` deletes every table's rows after the run, but
+returns early unless `db.Database.GetDbConnection().Database.EndsWith("Test", StringComparison.Ordinal)`.
+Point it at a non-`*Test` database and the cleanup simply does not run. Copy that shape rather than
+trusting that the right connection string was supplied.
+
+**Most of what went wrong on 2026-08-28 was this distinction not being written down.** A scratch database
+was invented, a superuser was used to create it, `curator_test` was swept while another suite depended on
+it, and a credential ended up in a transcript — none of which was necessary, because both URLs were
+already in `.env` and neither needs elevated rights.
+
+**Locally, use the `CURATOR_TEST_DATABASE_URL` already in `Curator/.env`** — it points at `curator_test`.
+There is no scratch database to create and no superuser to connect as. Never point it at the `curator`
+dev database or at production: **this module commits.** The fixture applies migrations through
+`db/run_migrations.py`, the deploy job's own runner, so the target is left *migrated* rather than
+pristine. That is deliberate — `Functions.Tests.Integration` shares `curator_test` and requires the
+schema present — and it is why the older "create a throwaway database, then drop it" recipe is gone.
 
 What it checks: every table the migration is expected to create exists; representative CHECK constraints
 reject an out-of-enum value (`game_assignments.collection_status`, `user_consoles.platform`,
@@ -139,39 +162,45 @@ accumulating history (a second `PUT` for the same pair overwrites, it doesn't ad
 0025); and no column named anything like `%email%` or `%npsso%` exists anywhere in the schema (the hard
 privacy tenet documented in the migration's own header comment).
 
+**One test here is a drift detector rather than a schema assertion, and it is the only thing holding a
+hand-written Python constant to the database.** `curator.psn.title_platform.CONSOLE_PLATFORM_IDS` is a
+`Literal`'s member list, so it cannot be built from a query at runtime;
+`test_the_python_platform_vocabulary_matches_the_platforms_table` compares it against
+`SELECT platform_id FROM platforms WHERE active ORDER BY sort_order`. Break it by adding a row to
+`platforms` in a migration and not to the tuple: the route layer then rejects a platform the schema is
+happy to store, and without this test nothing goes red.
+
 ```powershell
-# Create a throwaway database (adjust host/user for your environment)
-psql -h <host> -U postgres -d postgres -c "CREATE DATABASE curator_schema_test_scratch"
+# CURATOR_TEST_DATABASE_URL comes from Curator/.env; load it into the environment without echoing it.
+$line = Select-String -Path .env -Pattern '^CURATOR_TEST_DATABASE_URL=' -Raw
+$env:CURATOR_TEST_DATABASE_URL = ($line -split '=', 2)[1].Trim()
 
-$env:CURATOR_TEST_DATABASE_URL = "postgresql://postgres@<host>:5432/curator_schema_test_scratch"
-python -m pytest tests/test_schema.py -q
-
-# Tear down when done
-psql -h <host> -U postgres -d postgres -c "DROP DATABASE curator_schema_test_scratch"
+python -m pytest tests/test_schema.py -q -n0
 ```
 
-`CREATE DATABASE` needs a role with `CREATEDB`, which the application role deliberately does not have. If
-all you have is the app role against a local dev database you are willing to lose, reset that database's
-schema instead and use it as the target — same effect, no elevated privilege:
+**Never put the connection string on a command line.** It carries the password, and any tool that fails
+to connect prints the whole conninfo — which is how a credential reached a session transcript on
+2026-08-28. Read it into the environment as above; `psycopg` and `psql` both pick it up from there.
 
-```sql
-DROP SCHEMA public CASCADE;
-CREATE SCHEMA public;
-```
-
-Then point `CURATOR_TEST_DATABASE_URL` at it, run the tests (they roll back, leaving it empty), and run
-`python db/run_migrations.py <url>` afterwards to leave it migrated and usable.
+The application role deliberately lacks `CREATEDB`, and it no longer needs it: the fixture migrates
+whatever `CURATOR_TEST_DATABASE_URL` names rather than requiring a freshly created, empty database.
+Resetting a schema with `DROP SCHEMA public CASCADE` is no longer part of running these tests — if you
+find yourself doing it, the target is wrong, not the database.
 
 ## Testing a migration before it reaches CI
 
 **A migration is not done when the `.sql` file is written. It is done when it has run against the local
 dev database.** Do not commit a migration that has not been applied locally.
 
-CI now runs `test_schema.py` against a `postgres:17` service container (see the CI section below), so a
-migration that breaks the schema contract is caught before deploy rather than by it. That is a backstop,
-not a substitute: CI only ever exercises the **fresh** path, because a service container starts empty. The
-incremental path — the one the deploy job actually performs, against a database built by older migrations —
-still only happens locally.
+**"Locally" means the `curator` database — `CURATOR_DATABASE_URL`, not the test one.** That is the only
+place a migration meets a database built by every older migration *and* carrying real rows, which is what
+the deploy job faces. Applying it there by hand is the true test; everything below is a backstop.
+
+CI runs `test_schema.py` against a `postgres:17` service container (see the CI section below), so a
+migration that breaks the schema contract is caught before deploy rather than by it. Because that
+container starts empty, CI exercises the **fresh** path. Locally the same tests run against `curator_test`,
+which is already migrated, so they exercise the **incremental** runner — but against a database holding
+only what tests put there, not your real local data.
 
 That gap is not theoretical. Migration `0039` was rehearsed against production inside a rolled-back
 transaction, passed, and still broke `test_deleting_a_user_cascades_every_per_user_table` by adding a
@@ -183,8 +212,9 @@ Test both paths — they catch different things:
 
 | Path | How | Catches |
 |---|---|---|
-| **Fresh apply** | Reset the schema as above, then `test_schema.py` | The schema still builds from empty; new tables/constraints are asserted |
-| **Incremental apply** | `python db/run_migrations.py <url>` against an already-migrated dev database | What the deploy job actually does — an `ALTER`/`DROP CONSTRAINT` naming an object that must already exist under an exact auto-generated name |
+| **Manual apply — the real one** | `python db/run_migrations.py` against **`curator`** (`CURATOR_DATABASE_URL`) | What the deploy job actually does: an `ALTER`/`DROP CONSTRAINT` naming an object that must already exist under an exact auto-generated name, and anything that breaks against **real rows** — a `NOT NULL` added to a populated table has nowhere to hide |
+| **Automated, incremental** | `test_schema.py` against **`curator_test`** | The same runner against an already-migrated database, plus every schema assertion. Guarded to `*_test` because it commits |
+| **Automated, fresh** | CI, service container | The schema still builds from empty — the rebuild path |
 
 The incremental path is the one that matters most for a migration that modifies existing objects rather
 than adding new ones: a `DROP CONSTRAINT <name>` can pass a fresh apply (where the constraint was created

@@ -1,13 +1,3 @@
-"""``GET /me`` -- the caller's identity plus their PSN link status.
-
-Every call re-verifies any existing PSN link against the presented token (see
-:func:`curator.reverify.reverify_link`) rather than trusting whatever the link's last-known state was:
-identities can change their email, PSN accounts can be re-linked to a different email elsewhere, and a
-stale match should not silently keep working forever. The re-verify is itself cheap when there's nothing
-new to check -- it only re-hits PSN when the presented token was issued after the link's last
-verification.
-"""
-
 from __future__ import annotations
 
 from datetime import datetime

@@ -360,6 +360,32 @@ def test_backfill_reports_progress_and_totals():
     assert service.calls == [(["cat-1", "cat-2"], 5)]
 
 
+def test_an_all_empty_backfill_422s_but_still_returns_what_each_category_did():
+    """A bare detail string tells the caller the request failed and nothing about which id was wrong or
+    how far each walk got. The 422 carries the same per-category rows a 2xx would."""
+    summary = BackfillSummary(
+        categories=[
+            _progress("cat-1", pages_read=1, products_seen=0, games_created=0, stopped_reason="no_products"),
+            _progress("cat-2", pages_read=1, products_seen=0, games_created=0, stopped_reason="no_products"),
+        ]
+    )
+    client, validator = _build(backfill_service=FakeBackfillService(summary))
+    validator.register("admin-token", _claims(is_admin=True))
+
+    response = client.post(
+        "/catalog/backfill",
+        json={"category_ids": ["cat-1", "cat-2"]},
+        headers=_bearer("admin-token"),
+    )
+
+    assert response.status_code == 422
+    detail = response.json()["detail"]
+    assert "empty grid" in detail["message"]
+    assert [row["category_id"] for row in detail["categories"]] == ["cat-1", "cat-2"]
+    assert all(row["stopped_reason"] == "no_products" for row in detail["categories"])
+    assert detail["categories"][0]["pages_read"] == 1
+
+
 def test_reading_one_game_needs_no_token():
     catalog_repository = FakeCatalogRepository(
         [

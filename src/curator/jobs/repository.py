@@ -9,9 +9,20 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any
+from typing import Any, Final
 
 from psycopg_pool import AsyncConnectionPool
+
+TERMINAL_STATUSES: Final[tuple[str, ...]] = ("succeeded", "failed", "cancelled")
+"""Every ``job_runs.status`` a run can never leave.
+
+Non-terminal is expressed as the complement of this set, never as its own list, so a status added to
+``job_runs_status_check`` (``0046``) can only be non-terminal by omission from here -- the failure mode
+worth designing out is a new terminal status that every "is this run still active" predicate keeps
+reporting as active.
+"""
+
+_NOT_TERMINAL_SQL: Final = "status <> ALL(%s)"
 
 
 @dataclass(frozen=True, slots=True)
@@ -77,6 +88,26 @@ class JobRunsRepository:
             return None
         return self._row_to_job_run(row)
 
+    async def cancel(self, run_id: str, reason: str) -> bool:
+        """Stand a non-terminal run down, recording ``reason`` in ``error``.
+
+        The row is kept rather than deleted -- ``job_runs`` is the audit trail ``ExpiredLeaseReaper`` and
+        every operator query read. The lease is cleared so nothing renews it, and the guard is the
+        non-terminal predicate, so cancelling an already-``succeeded`` run cannot rewrite its outcome.
+
+        :param run_id: The run to cancel.
+        :param reason: Operator-visible text stored in ``error``.
+        :returns: ``True`` if a run moved to ``cancelled``, ``False`` if ``run_id`` is unknown or already
+            terminal.
+        """
+        async with self._pool.connection() as conn, conn.cursor() as cur:
+            await cur.execute(
+                "UPDATE job_runs SET status = 'cancelled', error = %s, updated_at = now(), "
+                f"lease_expires_at = NULL WHERE run_id = %s AND {_NOT_TERMINAL_SQL}",
+                (reason, run_id, list(TERMINAL_STATUSES)),
+            )
+            return bool(cur.rowcount)
+
     async def find_active_run(self, identity_sub: str, kind: str) -> JobRun | None:
         """Return the caller's own most recent non-terminal (``queued``/``running``/``rate_limited``) run
         of this kind, or ``None`` if none exists.
@@ -88,9 +119,9 @@ class JobRunsRepository:
             await cur.execute(
                 "SELECT run_id, kind, identity_sub, status, error, result_summary, updated_at, lease_expires_at "
                 "FROM job_runs WHERE identity_sub = %s AND kind = %s "
-                "AND status NOT IN ('succeeded', 'failed') "
+                f"AND {_NOT_TERMINAL_SQL} "
                 "ORDER BY created_at DESC LIMIT 1",
-                (identity_sub, kind),
+                (identity_sub, kind, list(TERMINAL_STATUSES)),
             )
             row = await cur.fetchone()
         return self._row_to_job_run(row) if row is not None else None
@@ -106,9 +137,9 @@ class JobRunsRepository:
             await cur.execute(
                 "SELECT run_id, kind, identity_sub, status, error, result_summary, updated_at, lease_expires_at "
                 "FROM job_runs WHERE identity_sub IS NULL AND kind = %s "
-                "AND status NOT IN ('succeeded', 'failed') "
+                f"AND {_NOT_TERMINAL_SQL} "
                 "ORDER BY created_at DESC LIMIT 1",
-                (kind,),
+                (kind, list(TERMINAL_STATUSES)),
             )
             row = await cur.fetchone()
         return self._row_to_job_run(row) if row is not None else None

@@ -1,10 +1,3 @@
-"""``GET /devices`` -- the consoles/devices registered to the caller's own PSN account.
-
-Gated on the caller's own ``harvest_devices`` preference via ``curator.deps.require_preference`` -- see
-that function's docstring and ``curator.trophy_routes``'s module docstring for the shared no-link-is-404 /
-PsnAuthError-is-401 pattern every PSN-data route in this app follows.
-"""
-
 from __future__ import annotations
 
 from dataclasses import replace

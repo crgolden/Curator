@@ -5,6 +5,7 @@ reading/writing another user's console.
 
 from __future__ import annotations
 
+import pytest
 from fastapi.testclient import TestClient
 
 from curator.app import create_app
@@ -219,6 +220,35 @@ def test_create_console_rejects_unknown_platform():
     )
 
     assert response.status_code == 400
+
+
+@pytest.mark.parametrize("platform", ["PS3", "PSVITA", "PSP", "PS2", "PS1"])
+def test_create_console_accepts_every_platform_the_platforms_table_carries(platform):
+    """user_consoles.platform stopped being a two-value CHECK in 0032 and became a foreign key to a
+    seven-row reference table. The route kept rejecting five of them."""
+    client, validator = _build()
+    validator.register("token-a", _claims(sub="sub-a"))
+
+    response = client.post(
+        "/consoles",
+        json={"name": f"Old {platform}", "platform": platform, "raw_capacity_gb": 320.0},
+        headers=_bearer("token-a"),
+    )
+
+    assert response.status_code == 201
+    assert response.json()["platform"] == platform
+
+
+def test_a_console_on_a_platform_with_no_published_capacity_is_flagged_rather_than_refused():
+    """default_capacity_gb has published usable-storage figures for PS5 and PS4 models only. WP3's rule is
+    'never refuse the edit, flag loudly' -- capacity_is_default is that flag."""
+    client, validator = _build()
+    validator.register("token-a", _claims(sub="sub-a"))
+
+    response = client.post("/consoles", json={"name": "Old PS3", "platform": "PS3"}, headers=_bearer("token-a"))
+
+    assert response.status_code == 201
+    assert response.json()["capacity_is_default"] is True
 
 
 def test_gets_one_owned_console():

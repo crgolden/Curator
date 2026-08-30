@@ -1,8 +1,11 @@
-"""``GET``/``PUT``/``DELETE /me/refresh-schedule`` -- the caller's own recurring library-refresh opt-in.
+"""``GET`` and ``PUT`` require a PSN link -- a schedule exists to spend a stored PSN token, so one without a
+link has nothing to act on. ``DELETE`` deliberately does not, and that asymmetry is the point: unlinking
+already removes any schedule, so requiring a link to delete one would make an orphaned schedule
+undeletable by the only person entitled to remove it. The delete is scoped to the caller's own ``sub`` and
+is idempotent, so a caller with no link simply gets a 204 and nothing happens.
 
-All three require a PSN link: a schedule exists to spend a stored PSN token, so one without a link has
-nothing to act on. Saving a schedule also publishes its first scheduled message; the runtime that consumes
-it is not this one (see ``AGENTS/PARKING_LOT.md`` for the message contract).
+Saving a schedule also publishes its first scheduled message; the runtime that consumes it is not this one
+(see ``AGENTS/Functions.md`` for the message contract).
 """
 
 from __future__ import annotations

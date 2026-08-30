@@ -159,14 +159,14 @@ class FakeLibraryRepository:
         return len(self._games_by_sub.get(identity_sub, []))
 
     async def list_entries_with_enrichment(
-        self, identity_sub: str, *, search=None, category=None, sort="title", sort_dir="asc", limit=20, offset=0
+        self, identity_sub: str, *, search=None, genre=None, sort="title", sort_dir="asc", limit=20, offset=0
     ):
         games = self._games_by_sub.get(identity_sub, [])
         return games[offset : offset + limit], len(games)
 
-    async def list_categories(self, identity_sub: str):
+    async def list_genres(self, identity_sub: str):
         games = self._games_by_sub.get(identity_sub, [])
-        return sorted({g.category for g in games if g.category is not None})
+        return sorted({g.genre for g in games if g.genre is not None})
 
 
 class FakeLibraryGameView:
@@ -174,13 +174,14 @@ class FakeLibraryGameView:
         self,
         game_id,
         title,
-        category=None,
+        genre=None,
         rawg_rating=None,
         opencritic_rating=None,
         psn_rating=None,
         psn_product_id=None,
         rawg_enriched=False,
         opencritic_enriched=False,
+        psn_enriched=False,
         is_active=True,
         percent_completed=None,
         cover_image_url=None,
@@ -188,13 +189,14 @@ class FakeLibraryGameView:
     ) -> None:
         self.game_id = game_id
         self.title = title
-        self.category = category
+        self.genre = genre
         self.rawg_rating = rawg_rating
         self.opencritic_rating = opencritic_rating
         self.psn_rating = psn_rating
         self.psn_product_id = psn_product_id
         self.rawg_enriched = rawg_enriched
         self.opencritic_enriched = opencritic_enriched
+        self.psn_enriched = psn_enriched
         self.is_active = is_active
         self.percent_completed = percent_completed
         self.cover_image_url = cover_image_url
@@ -927,6 +929,7 @@ def test_library_200_with_data_when_public_and_show_library_true():
                     "Elden Ring",
                     rawg_enriched=True,
                     opencritic_enriched=False,
+                    psn_enriched=True,
                     cover_image_url="https://cdn.example/elden-ring.jpg",
                     platforms=("PS5", "PS3"),
                 )
@@ -944,13 +947,14 @@ def test_library_200_with_data_when_public_and_show_library_true():
             {
                 "game_id": "game-1",
                 "title": "Elden Ring",
-                "category": None,
+                "genre": None,
                 "rawg_rating": None,
                 "opencritic_rating": None,
                 "psn_rating": None,
                 "psn_product_id": None,
                 "rawg_enriched": True,
                 "opencritic_enriched": False,
+                "psn_enriched": True,
                 "is_active": True,
                 "percent_completed": None,
                 "cover_image_url": "https://cdn.example/elden-ring.jpg",
@@ -980,7 +984,7 @@ def test_library_200_for_owner_regardless_of_flags():
     assert body["total"] == 1
 
 
-def test_library_categories_returns_distinct_categories_when_visible():
+def test_library_genres_returns_distinct_genres_when_visible():
     repository = FakeRepository()
     _seed_users(repository, SUB_A, SUB_B)
     profile_repository = FakeProfileRepository()
@@ -988,18 +992,18 @@ def test_library_categories_returns_distinct_categories_when_visible():
         is_public=True, show_library=True, show_collections=False, show_trophies=False, show_identity=False
     )
     library_repository = FakeLibraryRepository(
-        {SUB_A: [FakeLibraryGameView("g1", "A", category="RPG"), FakeLibraryGameView("g2", "B", category="Puzzle")]}
+        {SUB_A: [FakeLibraryGameView("g1", "A", genre="RPG"), FakeLibraryGameView("g2", "B", genre="Puzzle")]}
     )
     client, *_ = _build(
         repository=repository, profile_repository=profile_repository, library_repository=library_repository
     )
 
-    response = client.get(f"/users/{SUB_A}/library/categories", headers=_bearer("token-b"))
+    response = client.get(f"/users/{SUB_A}/library/genres", headers=_bearer("token-b"))
     assert response.status_code == 200
-    assert response.json() == {"categories": ["Puzzle", "RPG"]}
+    assert response.json() == {"genres": ["Puzzle", "RPG"]}
 
 
-def test_library_categories_403_when_private():
+def test_library_genres_403_when_private():
     repository = FakeRepository()
     _seed_users(repository, SUB_A, SUB_B)
     profile_repository = FakeProfileRepository()
@@ -1008,7 +1012,7 @@ def test_library_categories_403_when_private():
     )
     client, *_ = _build(repository=repository, profile_repository=profile_repository)
 
-    response = client.get(f"/users/{SUB_A}/library/categories", headers=_bearer("token-b"))
+    response = client.get(f"/users/{SUB_A}/library/genres", headers=_bearer("token-b"))
     assert response.status_code == 403
 
 

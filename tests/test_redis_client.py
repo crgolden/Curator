@@ -35,8 +35,8 @@ def test_build_redis_client_builds_real_client_when_host_set():
 
 def test_build_redis_client_configures_connection_resilience():
     """A dropped/reset idle connection (production: `redis.exceptions.ConnectionError: ... Connection
-    reset by peer` mid library-refresh job -- see 504_TRACKING.md's Librarian/Churches node-redis
-    incidents for the same idle-connection-death mechanism hitting a different client library) must be
+    reset by peer` mid library-refresh job -- Azure SNAT reaps an idle flow, and Python's redis.asyncio
+    fails fast where node-redis hung silently; AGENTS/TELEMETRY.md carries the mechanism) must be
     retried against a fresh connection rather than surfacing straight into the caller, and a
     long-idle pooled connection must be health-checked before reuse.
     """

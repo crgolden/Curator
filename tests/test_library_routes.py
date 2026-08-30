@@ -79,13 +79,14 @@ class FakeLibraryGameView:
         self,
         game_id,
         title,
-        category=None,
+        genre=None,
         rawg_rating=None,
         opencritic_rating=None,
         psn_rating=None,
         psn_product_id=None,
         rawg_enriched=False,
         opencritic_enriched=False,
+        psn_enriched=False,
         is_active=True,
         np_communication_id=None,
         percent_completed=None,
@@ -95,13 +96,14 @@ class FakeLibraryGameView:
     ):
         self.game_id = game_id
         self.title = title
-        self.category = category
+        self.genre = genre
         self.rawg_rating = rawg_rating
         self.opencritic_rating = opencritic_rating
         self.psn_rating = psn_rating
         self.psn_product_id = psn_product_id
         self.rawg_enriched = rawg_enriched
         self.opencritic_enriched = opencritic_enriched
+        self.psn_enriched = psn_enriched
         self.is_active = is_active
         self.np_communication_id = np_communication_id
         self.percent_completed = percent_completed
@@ -112,7 +114,7 @@ class FakeLibraryGameView:
 
 _SORT_ATTRS = {
     "title": "title",
-    "category": "category",
+    "genre": "genre",
     "rawg_rating": "rawg_rating",
     "opencritic_rating": "opencritic_rating",
     "psn_rating": "psn_rating",
@@ -121,7 +123,7 @@ _SORT_ATTRS = {
 
 
 class FakeLibraryRepository:
-    """Route-level stand-in that reimplements search/category/sort/paging in memory so the route's own
+    """Route-level stand-in that reimplements search/genre/sort/paging in memory so the route's own
     parameter plumbing can be exercised. It proves nothing about the SQL: the production predicates live
     in ``curator.library.repository`` and are asserted on their query text in
     ``tests/test_library_repository.py`` (ILIKE, ``gen.name = %s``, and the NULLS LAST ordering
@@ -129,15 +131,16 @@ class FakeLibraryRepository:
 
     def __init__(self, games_by_sub=None):
         self._games_by_sub = games_by_sub or {}
+        self.manual_entries: list[tuple[str, str, tuple[str, ...], str | None]] = []
 
     async def list_entries_with_enrichment(
-        self, identity_sub, *, search=None, category=None, sort="title", sort_dir="asc", limit=20, offset=0
+        self, identity_sub, *, search=None, genre=None, sort="title", sort_dir="asc", limit=20, offset=0
     ):
         games = list(self._games_by_sub.get(identity_sub, []))
         if search:
             games = [g for g in games if search.lower() in g.title.lower()]
-        if category:
-            games = [g for g in games if g.category == category]
+        if genre:
+            games = [g for g in games if g.genre == genre]
 
         attr = _SORT_ATTRS[sort]
         reverse = sort_dir == "desc"
@@ -151,12 +154,33 @@ class FakeLibraryRepository:
         total = len(games)
         return games[offset : offset + limit], total
 
-    async def list_categories(self, identity_sub):
+    async def list_genres(self, identity_sub):
         games = self._games_by_sub.get(identity_sub, [])
-        return sorted({g.category for g in games if g.category is not None})
+        return sorted({g.genre for g in games if g.genre is not None})
+
+    async def upsert_manual_entry(self, identity_sub, game_id, *, platforms, owned_edition):
+        self.manual_entries.append((identity_sub, game_id, tuple(platforms), owned_edition))
 
 
-def _build(job_runs_repository=None, library_repository=None, repository=None, trophy_client_factory=None):
+class FakeCatalogRepository:
+    def __init__(self, known_games=(), title_ids_by_game=None):
+        self._known_games = set(known_games)
+        self._title_ids_by_game = title_ids_by_game or {}
+
+    async def game_exists(self, game_id):
+        return game_id in self._known_games
+
+    async def title_id_for_game(self, game_id):
+        return self._title_ids_by_game.get(game_id)
+
+
+def _build(
+    job_runs_repository=None,
+    library_repository=None,
+    repository=None,
+    trophy_client_factory=None,
+    catalog_repository=None,
+):
     repository = repository if repository is not None else FakeRepository()
     token_crypto = TokenCrypto(TokenCrypto.generate_key())
     validator = FakeTokenValidator()
@@ -172,7 +196,119 @@ def _build(job_runs_repository=None, library_repository=None, repository=None, t
     app.state.queue_publisher = publisher
     app.state.job_runs_repository = job_runs_repository or FakeJobRunsRepository()
     app.state.library_repository = library_repository or FakeLibraryRepository()
+    if catalog_repository is not None:
+        app.state.catalog_repository = catalog_repository
     return TestClient(app), validator, publisher
+
+
+def _build_manual(known_games=("game-1",), title_ids_by_game=None):
+    library = FakeLibraryRepository()
+    client, validator, _publisher = _build(
+        library_repository=library,
+        catalog_repository=FakeCatalogRepository(known_games, title_ids_by_game),
+    )
+    validator.register("token-a", _claims(sub="sub-a"))
+    return client, library
+
+
+def test_add_manual_game_records_every_platform_the_caller_named():
+    client, library = _build_manual()
+
+    response = client.post(
+        "/library/manual",
+        json={"game_id": "game-1", "platforms": ["PS3", "PSVITA"]},
+        headers=_bearer("token-a"),
+    )
+
+    assert response.status_code == 204
+    assert library.manual_entries == [("sub-a", "game-1", ("PS3", "PSVITA"), None)]
+
+
+def test_add_manual_game_still_accepts_the_deprecated_boolean_pair():
+    """Librarian sends native_ps5/ps4_eligible today, so dropping them would break the running client."""
+    client, library = _build_manual()
+
+    response = client.post(
+        "/library/manual",
+        json={"game_id": "game-1", "native_ps5": True, "ps4_eligible": True},
+        headers=_bearer("token-a"),
+    )
+
+    assert response.status_code == 204
+    assert library.manual_entries[0][2] == ("PS5", "PS4")
+
+
+def test_add_manual_game_does_not_duplicate_a_platform_named_both_ways():
+    client, library = _build_manual()
+
+    client.post(
+        "/library/manual",
+        json={"game_id": "game-1", "platforms": ["PS5"], "native_ps5": True},
+        headers=_bearer("token-a"),
+    )
+
+    assert library.manual_entries[0][2] == ("PS5",)
+
+
+def test_add_manual_game_derives_the_platform_from_the_catalogs_own_title_id():
+    """A PS3 disc has no boolean to set and the client has no reason to know PSN's prefix table."""
+    client, library = _build_manual(title_ids_by_game={"game-1": "BLUS30443_00"})
+
+    response = client.post("/library/manual", json={"game_id": "game-1"}, headers=_bearer("token-a"))
+
+    assert response.status_code == 204
+    assert library.manual_entries[0][2] == ("PS3",)
+
+
+def test_a_caller_supplied_platform_wins_over_the_derived_one():
+    client, library = _build_manual(title_ids_by_game={"game-1": "BLUS30443_00"})
+
+    client.post("/library/manual", json={"game_id": "game-1", "platforms": ["PS5"]}, headers=_bearer("token-a"))
+
+    assert library.manual_entries[0][2] == ("PS5",)
+
+
+def test_add_manual_game_records_no_platform_when_the_prefix_is_not_a_title():
+    """NPIA is PS Plus SKUs and their reward children, not a PS3 prefix -- deriving one would put a
+    discount coupon's platform on a real game."""
+    client, library = _build_manual(title_ids_by_game={"game-1": "NPIA90007_01"})
+
+    client.post("/library/manual", json={"game_id": "game-1"}, headers=_bearer("token-a"))
+
+    assert library.manual_entries[0][2] == ()
+
+
+def test_add_manual_game_rejects_a_platform_outside_the_vocabulary():
+    client, library = _build_manual()
+
+    response = client.post(
+        "/library/manual", json={"game_id": "game-1", "platforms": ["Xbox"]}, headers=_bearer("token-a")
+    )
+
+    assert response.status_code == 400
+    assert "PSVITA" in response.json()["detail"]
+    assert library.manual_entries == []
+
+
+def test_add_manual_game_404s_for_a_game_the_catalog_has_never_seen():
+    client, library = _build_manual(known_games=())
+
+    response = client.post("/library/manual", json={"game_id": "game-1"}, headers=_bearer("token-a"))
+
+    assert response.status_code == 404
+    assert library.manual_entries == []
+
+
+def test_an_unknown_game_reports_404_even_when_the_platform_is_also_wrong():
+    """Which error a caller sees must not depend on validation order, so the resource check stays first."""
+    client, library = _build_manual(known_games=())
+
+    response = client.post(
+        "/library/manual", json={"game_id": "game-1", "platforms": ["Xbox"]}, headers=_bearer("token-a")
+    )
+
+    assert response.status_code == 404
+    assert library.manual_entries == []
 
 
 def test_requires_bearer_token():
@@ -404,22 +540,29 @@ def test_get_library_requires_bearer_token():
     assert client.get("/library").status_code == 401
 
 
-def test_get_library_returns_callers_own_games_with_ratings_and_category():
+def test_get_library_returns_callers_own_games_with_ratings_and_genre():
+    """The two rows pair the three provenance booleans against the ratings anti-correlated on purpose:
+    game-1 carries a ``psn_rating`` with ``psn_enriched`` false (0049 deliberately backfilled nothing, so
+    every row enriched before it reads false), and game-2 carries no rating at all with ``psn_enriched``
+    true. A response field reconstructed from ``psn_rating`` is wrong on both."""
     games = [
         FakeLibraryGameView(
             "game-1",
             "Elden Ring",
-            category="Action RPG",
+            genre="Action RPG",
             rawg_rating=96.0,
             opencritic_rating=94.0,
             psn_rating=4.8,
             psn_product_id="UP0700-CUSA23100_00-ELDENRING0000000",
             rawg_enriched=True,
             opencritic_enriched=True,
+            psn_enriched=False,
             cover_image_url="https://cdn.example/elden-ring.jpg",
             platforms=("PS5", "PS4"),
         ),
-        FakeLibraryGameView("game-2", "Unmatched Game", rawg_enriched=False, opencritic_enriched=False),
+        FakeLibraryGameView(
+            "game-2", "Store Enriched Only", rawg_enriched=False, opencritic_enriched=False, psn_enriched=True
+        ),
     ]
     client, validator, _publisher = _build(library_repository=FakeLibraryRepository({"sub-a": games}))
     validator.register("token-a", _claims(sub="sub-a"))
@@ -432,13 +575,14 @@ def test_get_library_returns_callers_own_games_with_ratings_and_category():
             {
                 "game_id": "game-1",
                 "title": "Elden Ring",
-                "category": "Action RPG",
+                "genre": "Action RPG",
                 "rawg_rating": 96.0,
                 "opencritic_rating": 94.0,
                 "psn_rating": 4.8,
                 "psn_product_id": "UP0700-CUSA23100_00-ELDENRING0000000",
                 "rawg_enriched": True,
                 "opencritic_enriched": True,
+                "psn_enriched": False,
                 "is_active": True,
                 "percent_completed": None,
                 "source": "psn",
@@ -447,14 +591,15 @@ def test_get_library_returns_callers_own_games_with_ratings_and_category():
             },
             {
                 "game_id": "game-2",
-                "title": "Unmatched Game",
-                "category": None,
+                "title": "Store Enriched Only",
+                "genre": None,
                 "rawg_rating": None,
                 "opencritic_rating": None,
                 "psn_rating": None,
                 "psn_product_id": None,
                 "rawg_enriched": False,
                 "opencritic_enriched": False,
+                "psn_enriched": True,
                 "is_active": True,
                 "percent_completed": None,
                 "source": "psn",
@@ -530,15 +675,15 @@ def test_get_library_search_filters_by_title_substring_case_insensitively():
     assert body["total"] == 1
 
 
-def test_get_library_category_filters_exact_match():
+def test_get_library_genre_filters_exact_match():
     games = [
-        FakeLibraryGameView("game-1", "Elden Ring", category="Action RPG"),
-        FakeLibraryGameView("game-2", "Tetris Effect", category="Puzzle"),
+        FakeLibraryGameView("game-1", "Elden Ring", genre="Action RPG"),
+        FakeLibraryGameView("game-2", "Tetris Effect", genre="Puzzle"),
     ]
     client, validator, _publisher = _build(library_repository=FakeLibraryRepository({"sub-a": games}))
     validator.register("token-a", _claims(sub="sub-a"))
 
-    response = client.get("/library?category=Puzzle", headers=_bearer("token-a"))
+    response = client.get("/library?genre=Puzzle", headers=_bearer("token-a"))
 
     body = response.json()
     assert [g["title"] for g in body["games"]] == ["Tetris Effect"]
@@ -598,30 +743,30 @@ def test_get_library_pagination_limit_and_offset():
     assert body["total"] == 5
 
 
-def test_get_library_categories_returns_distinct_sorted_categories():
+def test_get_library_genres_returns_distinct_sorted_genres():
     games = [
-        FakeLibraryGameView("g1", "A", category="RPG"),
-        FakeLibraryGameView("g2", "B", category="Puzzle"),
-        FakeLibraryGameView("g3", "C", category="RPG"),
-        FakeLibraryGameView("g4", "D", category=None),
+        FakeLibraryGameView("g1", "A", genre="RPG"),
+        FakeLibraryGameView("g2", "B", genre="Puzzle"),
+        FakeLibraryGameView("g3", "C", genre="RPG"),
+        FakeLibraryGameView("g4", "D", genre=None),
     ]
     client, validator, _publisher = _build(library_repository=FakeLibraryRepository({"sub-a": games}))
     validator.register("token-a", _claims(sub="sub-a"))
 
-    response = client.get("/library/categories", headers=_bearer("token-a"))
+    response = client.get("/library/genres", headers=_bearer("token-a"))
 
     assert response.status_code == 200
-    assert response.json() == {"categories": ["Puzzle", "RPG"]}
+    assert response.json() == {"genres": ["Puzzle", "RPG"]}
 
 
-def test_get_library_categories_empty_for_user_with_no_categorized_games():
+def test_get_library_genres_empty_for_user_with_no_enriched_genres():
     client, validator, _publisher = _build()
     validator.register("token-a", _claims(sub="sub-a"))
 
-    response = client.get("/library/categories", headers=_bearer("token-a"))
+    response = client.get("/library/genres", headers=_bearer("token-a"))
 
     assert response.status_code == 200
-    assert response.json() == {"categories": []}
+    assert response.json() == {"genres": []}
 
 
 def test_get_library_percent_completed_comes_from_the_stored_column():

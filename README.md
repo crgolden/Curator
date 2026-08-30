@@ -237,9 +237,11 @@ to it via `psql` before starting the app.
 
 ## CI
 
-`.github/workflows/main.yml` runs Ruff lint, Ruff format check, mypy, the offline unit test suite (with
+`.github/workflows/main_crgolden-curator.yml` runs Ruff lint, Ruff format check, mypy, the test suite (with
 coverage), and a SonarCloud analysis on push to `main`, on pull requests, and on `workflow_dispatch`. It
-never sets `CURATOR_TEST_DATABASE_URL`, so the schema integration tests always auto-skip there. See
+**does** set `CURATOR_TEST_DATABASE_URL`, against a PostgreSQL service container, so the schema
+integration tests run there — they are skipped only in a plain local `pytest` run that leaves the variable
+unset. A local total therefore excludes them and is not evidence about a migration. See
 [TESTING.md](TESTING.md#ci) for the local lint/type-check commands.
 
 Run the app itself locally (once `.env` is filled in — see Quick Start above) with:
@@ -330,7 +332,10 @@ src/curator/
   identity_routes.py                    # GET /identity
   presence_routes.py                      # GET /presence
   devices_routes.py                         # GET /devices
-  library_routes.py                           # GET /library, GET /library/categories, POST/GET /library/refresh
+  library_routes.py                           # GET /library, GET /library/genres, POST/GET /library/refresh,
+                                               # POST/DELETE /library/manual[/{gameId}] -- POST also admits a
+                                               # searched store title to the shared catalog,
+                                               # GET /library/manual/search -- PS Store name lookup
   catalog_routes.py                           # GET /catalog/games
   collections_routes.py                       # POST /collections/preview, POST/GET /collections,
                                                # GET/PATCH/DELETE /collections/{id}, POST /collections/{id}/runs,
@@ -342,7 +347,8 @@ src/curator/
   storage_devices_routes.py                   # POST/GET/PATCH/DELETE /storage-devices,
                                                # PUT/DELETE /storage-devices/{id}/attach[/{consoleId}],
                                                # GET/PUT /storage-devices/{id}/installs[/{gameId}]
-  enrichment_routes.py                        # POST /enrichment/runs, GET /enrichment/runs/latest|{run_id} (admin-only)
+  enrichment_routes.py                        # POST /enrichment/runs, POST /enrichment/runs/{run_id}/cancel,
+                                               # GET /enrichment/runs/latest|{run_id} (all admin-only)
   refresh_schedules_routes.py                 # GET/PUT/DELETE /me/refresh-schedule: the standing weekly/monthly refresh
   measured_sizes_routes.py                    # GET/PUT /games/{gameId}/measured-sizes[/{platform}]
   social_routes.py                            # PUT/DELETE /me/friends/{onlineId}, PSN chat group create/leave

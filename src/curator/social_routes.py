@@ -1,17 +1,3 @@
-"""PSN social and chat write routes -- the state-changing half of the caller's own PSN account.
-
-Each route gates on its own capability flag via ``curator.deps.require_preference``
-(``allow_friend_writes`` or ``allow_chat_writes``), and :class:`~curator.psn.safety.MutationGuard` then
-re-checks live that the authenticated PSN account is still the linked one before anything is sent. Each
-successful mutation is recorded in ``account_action_log``, which is also what the daily mutation cap counts
--- but a failed log write is swallowed rather than reported, since the change has already landed on PSN and
-cannot be undone by returning an error. The cap can therefore undercount; it can never overcount.
-
-``send_message``, ``kick_from_group``, ``rename_group`` and ``invite_to_group`` are implemented in
-:class:`~curator.psn.mutation_service.MutationService` but deliberately have no route here -- see
-``AGENTS/DESIGNS.md`` §7 item 7 for the reason each is held back.
-"""
-
 from __future__ import annotations
 
 import logging

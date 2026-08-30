@@ -1,8 +1,8 @@
-"""``POST /enrichment/runs`` (queue a global catalog re-enrichment job) and ``GET
-/enrichment/runs/latest``/``{run_id}`` (poll one). Admin-scoped.
-
-Publishing to the ``curator-enrichment`` Service Bus queue is all this API does; a separate worker
-service consumes that queue and writes the ``job_runs`` row the GET routes read.
+"""``POST`` creates the ``job_runs`` row itself and only then sends the queue message
+(:meth:`curator.jobs.queue_publisher.QueuePublisher.publish_enrichment_run`). That order is the contract:
+a caller may poll ``GET /enrichment/runs/{run_id}`` immediately after the 202 and must not get a 404. This
+is deliberately unlike ``publish_scheduled_library_refresh``, which creates no row -- a schedule's run does
+not exist until the worker actually starts it.
 """
 
 from __future__ import annotations
@@ -20,6 +20,8 @@ from curator.jobs.staleness import abandoned_run_reason
 from curator.token_validation import TokenClaims
 
 router = APIRouter(prefix="/enrichment", tags=["enrichment"])
+
+CANCELLED_BY_ADMIN = "An administrator cancelled this enrichment run before it finished."
 
 
 class EnrichmentRunResponse(BaseModel):
@@ -63,6 +65,39 @@ async def start_enrichment_run(
 
     run_id = await queue_publisher.publish_enrichment_run()
     return EnrichmentRunResponse(run_id=run_id)
+
+
+@router.post("/runs/{run_id}/cancel", response_model=EnrichmentRunStatusResponse)
+async def cancel_enrichment_run(
+    request: Request, run_id: str, _claims: TokenClaims = Depends(require_admin)
+) -> EnrichmentRunStatusResponse:
+    """Stand a still-running enrichment run down, so a fresh one can be queued. Admin-scoped.
+
+    Cancelling is a terminal ``job_runs.status``, not a row deletion -- see
+    ``0046_job_runs_cancelled_status.sql``. Deploy order matters: the migration must be applied to the
+    target database before any writer sends the value.
+
+    :returns: The run as it now stands.
+    :raises fastapi.HTTPException: 404, if ``run_id`` doesn't exist or isn't an enrichment run; 409, if it
+        has already finished, failed or been cancelled.
+    """
+    job_runs_repository: JobRunsRepository = request.app.state.job_runs_repository
+    run = await job_runs_repository.get(run_id)
+    if run is None or run.kind != "enrichment":
+        raise HTTPException(status_code=404, detail="Enrichment run not found.")
+
+    if not await job_runs_repository.cancel(run_id, CANCELLED_BY_ADMIN):
+        raise HTTPException(status_code=409, detail="This enrichment run has already finished.")
+
+    cancelled = await job_runs_repository.get(run_id)
+    if cancelled is None:
+        raise HTTPException(status_code=404, detail="Enrichment run not found.")
+    return EnrichmentRunStatusResponse(
+        run_id=cancelled.run_id,
+        status=cancelled.status,
+        error=cancelled.error,
+        result_summary=cancelled.result_summary,
+    )
 
 
 @router.get("/runs/latest", response_model=EnrichmentRunStatusResponse)

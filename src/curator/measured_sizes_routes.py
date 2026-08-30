@@ -1,7 +1,3 @@
-"""``GET /games/{game_id}/measured-sizes`` and ``PUT /games/{game_id}/measured-sizes/{platform}`` -- the
-global, per-(game, platform) contributed install-size cache. Writable by any authenticated caller.
-"""
-
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -9,7 +5,7 @@ from pydantic import BaseModel
 
 from curator.collections.repository import CollectionsRepository, MeasuredSize
 from curator.deps import require_bearer
-from curator.psn.title_platform import ConsolePlatform, console_platform
+from curator.psn.title_platform import ConsolePlatform, console_platform, platform_vocabulary_message
 from curator.token_validation import TokenClaims
 
 router = APIRouter(prefix="/games/{game_id}/measured-sizes", tags=["measured-sizes"])
@@ -35,7 +31,7 @@ def _console_platform(value: str) -> ConsolePlatform:
     try:
         return console_platform(value)
     except ValueError as exc:
-        raise HTTPException(status_code=400, detail='platform must be "PS5" or "PS4".') from exc
+        raise HTTPException(status_code=400, detail=platform_vocabulary_message()) from exc
 
 
 def _to_response(measured_size: MeasuredSize) -> MeasuredSizeResponse:
@@ -68,7 +64,8 @@ async def set_measured_size(
 ) -> MeasuredSizeResponse:
     """Record this game's measured install size for ``platform``, superseding any existing value.
 
-    :raises fastapi.HTTPException: 400, if ``platform`` isn't ``"PS5"`` or ``"PS4"``.
+    :raises fastapi.HTTPException: 400, if ``platform`` is outside
+        :data:`~curator.psn.title_platform.CONSOLE_PLATFORM_IDS`.
     """
     narrowed_platform = _console_platform(platform)
 

@@ -1,10 +1,4 @@
-"""``GET /presence`` -- the caller's own current PSN online presence.
-
-Gated on the caller's own ``harvest_presence`` preference via ``curator.deps.require_preference`` -- see
-that function's docstring and ``curator.trophy_routes``'s module docstring for the shared no-link-is-404 /
-PsnAuthError-is-401 pattern every PSN-data route in this app follows. Never cached (see
-``curator.psn.presence_client``'s module docstring): presence is live-only.
-"""
+"""Never cached (see ``curator.psn.presence_client``'s module docstring): presence is live-only."""
 
 from __future__ import annotations
 

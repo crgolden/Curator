@@ -10,7 +10,7 @@ from fastapi.testclient import TestClient
 from curator.app import create_app
 from curator.collections.collection_orchestrator import CollectionResult
 from curator.collections.filter_predicate import And, GenreIn, Or, ScoreAtLeast, TierIn
-from curator.collections.game_candidate import GameCandidate
+from curator.collections.game_candidate import DEFAULT_SIZE, MEASURED_SIZE, GameCandidate
 from curator.collections.repository import CollectionDefinition, CollectionItem, UserConsole
 from curator.persistence.crypto import TokenCrypto
 from test_routes import (
@@ -50,6 +50,8 @@ class FakeCollectionsRepository:
         self.definitions: dict[str, CollectionDefinition] = {d.definition_id: d for d in (definitions or [])}
         self.items: dict[str, tuple[str, ...]] = {}
         self.saved_runs: list[tuple] = []
+        self.saved_install_targets: list[str | None] = []
+        self.retarget_calls: list[tuple[bool, str | None]] = []
         self.consoles: list[UserConsole] = list(consoles or [])
         self.duplicate_names = set(duplicate_names)
         self.known_games = set(known_games)
@@ -69,7 +71,10 @@ class FakeCollectionsRepository:
             raise psycopg.errors.InvalidTextRepresentation("invalid input syntax for type uuid")
         return {game_id for game_id in game_ids if game_id in self.known_games}
 
-    async def save_definition(self, identity_sub, name, spec, *, description=None, game_ids=()):
+    async def save_definition(
+        self, identity_sub, name, spec, *, description=None, game_ids=(), install_target_console_id=None
+    ):
+        self.saved_install_targets.append(install_target_console_id)
         if name in self.duplicate_names:
             raise psycopg.errors.UniqueViolation(
                 'duplicate key value violates unique constraint "collection_definitions_identity_sub_name_key"'
@@ -174,7 +179,17 @@ class FakeCollectionsRepository:
         self.items[definition_id] = tuple(member for member in members if member != game_id)
         return True
 
-    async def update_definition(self, definition_id, *, name, description, game_ids=None):
+    async def update_definition(
+        self,
+        definition_id,
+        *,
+        name,
+        description,
+        game_ids=None,
+        install_target_console_id=None,
+        retarget_install_console=False,
+    ):
+        self.retarget_calls.append((retarget_install_console, install_target_console_id))
         if name in self.duplicate_names:
             raise psycopg.errors.UniqueViolation(
                 'duplicate key value violates unique constraint "collection_definitions_identity_sub_name_key"'
@@ -339,6 +354,20 @@ def test_preview_offset_pages_both_lists_together():
     assert [g["game_id"] for g in body["included"]] == ["inc-4"]
     assert [g["game_id"] for g in body["excluded"]] == ["exc-4"]
     assert body["included_total"] == 5
+
+
+def test_preview_says_where_each_size_came_from():
+    """A bare size_gb cannot tell a client whether 20 GB is a figure somebody measured or the flat
+    fallback standing in for one, and only the latter is worth prompting its owner about."""
+    measured_candidate = replace(_candidate("measured"), size_source=MEASURED_SIZE)
+    unknown_candidate = replace(_candidate("unknown"), size_source=DEFAULT_SIZE)
+    result = CollectionResult(included=(measured_candidate, unknown_candidate), excluded=(), used_gb=None)
+    client, validator = _build(FakeOrchestrator(result=result))
+    validator.register("token-a", _claims(sub="sub-a"))
+
+    body = client.post("/collections/preview", json={"kind": "filter_list"}, headers=_bearer("token-a")).json()
+
+    assert [game["size_source"] for game in body["included"]] == [MEASURED_SIZE, DEFAULT_SIZE]
 
 
 def test_preview_rejects_a_page_size_above_the_ceiling():

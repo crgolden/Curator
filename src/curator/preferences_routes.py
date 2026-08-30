@@ -1,13 +1,3 @@
-"""``GET``/``PUT /me/psn-preferences`` -- the caller's own PSN data-harvest opt-in flags.
-
-Unlike ``curator.trophy_routes``/``curator.identity_routes``/``curator.presence_routes``/
-``curator.devices_routes``, these two routes are not themselves gated by ``curator.deps.require_preference``
--- reading or changing your own preferences is always allowed once you have a PSN link at all; it's the
-*other* PSN-data routes that consult the flags this route lets a caller set. Both routes 404 when the
-caller has no PSN link (``curator.persistence.repository.Repository.set_psn_preferences`` would otherwise
-silently no-op on a write with nothing to update).
-"""
-
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException, Request

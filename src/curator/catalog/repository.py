@@ -9,6 +9,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any
 
+from psycopg.types.json import Jsonb
 from psycopg_pool import AsyncConnectionPool
 
 from curator.catalog.cover_art import SQUARE_COVER_ART_SQL
@@ -31,6 +32,12 @@ class GameSummary:
     oc_score: float | None = None
     psn_rating: float | None = None
     percent_completed: int | None = None
+
+
+GAME_UPSERT_ADVISORY_LOCK_CLASS = 1
+"""Must equal ``Functions``' own ``CuratorAdvisoryLocks.GameUpsert`` -- Postgres keeps the single-bigint
+and two-int ``pg_advisory_xact_lock`` forms in separate lock spaces, so both the form and this classid have
+to match for the two repos to contend for the same lock."""
 
 
 class CatalogRepository:
@@ -211,10 +218,10 @@ class CatalogRepository:
         covers_cached = 0
         async with self._pool.connection() as conn, conn.cursor() as cur:
             for product in products:
-                normalized_title = product.name.strip().lower()
-                if not normalized_title:
+                if product.name is None:
                     continue
 
+                normalized_title = product.name.lower()
                 await cur.execute("SELECT game_id FROM games WHERE normalized_title = %s", (normalized_title,))
                 row = await cur.fetchone()
                 if row is None:
@@ -230,15 +237,23 @@ class CatalogRepository:
                 if product.np_title_id:
                     await cur.execute(
                         """
-                        INSERT INTO psn_catalog_cache (title_id, game_id, store_product_id, cover_image_url, fetched_at)
-                        VALUES (%s, %s, %s, %s, now())
+                        INSERT INTO psn_catalog_cache
+                            (title_id, game_id, store_product_id, cover_image_url, raw, fetched_at)
+                        VALUES (%s, %s, %s, %s, %s, now())
                         ON CONFLICT (title_id) DO UPDATE SET
                             game_id = EXCLUDED.game_id,
                             store_product_id = EXCLUDED.store_product_id,
                             cover_image_url = COALESCE(EXCLUDED.cover_image_url, psn_catalog_cache.cover_image_url),
+                            raw = CASE WHEN EXCLUDED.raw = '{}'::jsonb THEN psn_catalog_cache.raw ELSE EXCLUDED.raw END,
                             fetched_at = now()
                         """,
-                        (product.np_title_id, game_id, product.product_id, product.cover_image_url),
+                        (
+                            product.np_title_id,
+                            game_id,
+                            product.product_id,
+                            product.cover_image_url,
+                            Jsonb(dict(product.raw)),
+                        ),
                     )
                     if product.cover_image_url:
                         covers_cached += 1
@@ -249,6 +264,129 @@ class CatalogRepository:
         async with self._pool.connection() as conn, conn.cursor() as cur:
             await cur.execute("SELECT 1 FROM games WHERE game_id = %s", (game_id,))
             return await cur.fetchone() is not None
+
+    async def game_ids_for_store_ids(self, store_ids: Sequence[str]) -> dict[str, str]:
+        """Resolve PSN universal-search result ids to the games the catalog already holds for them.
+
+        Answers "is this store hit already in the catalog" for a whole page of hits in one round trip.
+        Only a positive answer means anything: ``store_product_id`` is populated solely by
+        ``POST /catalog/backfill`` and was added to an already-in-use table by ``0029``, so a missing entry
+        is as likely to mean "no walk has covered this title" as "the catalog has never seen this game".
+
+        Three id spaces are tried in a fixed order, and the order is the evidence. ``game_concepts
+        .concept_id`` is the primary key, is populated for every row, and is what a ``MobileGames`` hit's
+        own id is, so it goes first. ``game_concepts.product_id`` is neither unique nor a safe merge key --
+        ``0001_initial.sql`` records that Sony reuses one product id across genuinely different games --
+        so it is a fallback, ordered to make the pick deterministic rather than arbitrary.
+        ``psn_catalog_cache.store_product_id`` is last because it is the sparsest.
+
+        :param store_ids: Result ids as :class:`~curator.psn.models.GameSearchResult` reports them.
+        :returns: ``{store_id: game_id}``, carrying only the ids that resolved.
+        """
+        if not store_ids:
+            return {}
+
+        async with self._pool.connection() as conn, conn.cursor() as cur:
+            await cur.execute(
+                """
+                SELECT candidate.store_id,
+                       COALESCE(
+                           (SELECT gc.game_id FROM game_concepts gc WHERE gc.concept_id = candidate.store_id),
+                           (
+                               SELECT gc.game_id FROM game_concepts gc
+                               WHERE gc.product_id = candidate.store_id
+                               ORDER BY gc.concept_id LIMIT 1
+                           ),
+                           (
+                               SELECT pcc.game_id FROM psn_catalog_cache pcc
+                               WHERE pcc.store_product_id = candidate.store_id AND pcc.game_id IS NOT NULL
+                               ORDER BY pcc.title_id LIMIT 1
+                           )
+                       ) AS game_id
+                FROM unnest(%s::text[]) AS candidate(store_id)
+                """,
+                (list(store_ids),),
+            )
+            rows = await cur.fetchall()
+        return {str(row[0]): str(row[1]) for row in rows if row[1] is not None}
+
+    async def admit_store_game(self, *, concept_id: str, name: str, product_id: str | None = None) -> tuple[str, bool]:
+        """Admit a PlayStation Store title to the shared catalog, and return the game it now maps to.
+
+        Idempotent by concept id first and normalized title second, so two users admitting the same title
+        -- or one user admitting a title a library refresh has already ingested -- converge on one game
+        rather than forking the catalog. The advisory lock covers the read-then-insert on ``games``, which
+        has an index on ``normalized_title`` but no unique constraint; it takes the exact classid+key pair
+        ``Functions``' ``UpsertGameAsync`` takes over the same key (see :data:`GAME_UPSERT_ADVISORY_LOCK_CLASS`
+        on why the classid has to match, not just the key), so the two writers cannot interleave into a
+        duplicate.
+
+        ``game_enrichment`` gets a bare row, leaving ``rawg_attempted_at`` NULL. That is the "never
+        reached, still eligible" state of the pair ``AGENTS/Curator.md`` documents, and
+        ``EnrichmentRunProcessor`` unions ``GetGameIdsNeverAskedOfRawgAsync`` (``rawg_attempted_at IS
+        NULL``) into its candidate set, so the row makes the game reachable by the catalog-wide pass
+        instead of stranding it.
+
+        **No ``psn_catalog_cache`` row is written**, because a search hit carries no npTitleId and that
+        table is keyed by one -- see ``AGENTS/Curator.md``.
+
+        :param concept_id: The hit's PSN concept id.
+        :param name: The title exactly as PSN published it; also the source of ``normalized_title``.
+        :param product_id: The concept's current ``defaultProduct`` id, when it published one.
+        :returns: ``(game_id, created)`` -- ``created`` distinguishes a newly admitted game from one the
+            catalog already held.
+        """
+        normalized_title = name.strip().lower()
+        async with self._pool.connection() as conn, conn.transaction(), conn.cursor() as cur:
+            await cur.execute(
+                "SELECT pg_advisory_xact_lock(%s, hashtext(%s))",
+                (GAME_UPSERT_ADVISORY_LOCK_CLASS, normalized_title),
+            )
+
+            await cur.execute("SELECT game_id FROM game_concepts WHERE concept_id = %s", (concept_id,))
+            row = await cur.fetchone()
+            if row is not None:
+                return str(row[0]), False
+
+            await cur.execute("SELECT game_id FROM games WHERE normalized_title = %s", (normalized_title,))
+            row = await cur.fetchone()
+            created = row is None
+            if row is None:
+                await cur.execute(
+                    "INSERT INTO games (canonical_title, normalized_title) VALUES (%s, %s) RETURNING game_id",
+                    (name.strip(), normalized_title),
+                )
+                row = await cur.fetchone()
+                assert row is not None
+            game_id = str(row[0])
+
+            await cur.execute(
+                """
+                INSERT INTO game_concepts (concept_id, game_id, product_id)
+                VALUES (%s, %s, %s)
+                ON CONFLICT (concept_id) DO NOTHING
+                """,
+                (concept_id, game_id, product_id),
+            )
+            await cur.execute(
+                "INSERT INTO game_enrichment (game_id) VALUES (%s) ON CONFLICT (game_id) DO NOTHING",
+                (game_id,),
+            )
+        return game_id, created
+
+    async def title_id_for_game(self, game_id: str) -> str | None:
+        """Return the PSN npTitleId the catalog holds for a game, or ``None`` if it holds none.
+
+        ``psn_catalog_cache`` is keyed on ``title_id`` and a concept can carry several editions, so the
+        most recently fetched row wins rather than an arbitrary one.
+        """
+        async with self._pool.connection() as conn, conn.cursor() as cur:
+            await cur.execute(
+                "SELECT title_id FROM psn_catalog_cache WHERE game_id = %s ORDER BY fetched_at DESC LIMIT 1",
+                (game_id,),
+            )
+            row = await cur.fetchone()
+        return str(row[0]) if row is not None else None
 
     async def get_size_estimates(self) -> list[SizeEstimate]:
         """Return every install-size estimate row (per-title overrides and generic tier/genre-class bands)."""

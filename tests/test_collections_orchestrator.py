@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import random
+
 import pytest
 
-from curator.collections.collection_orchestrator import CollectionOrchestrator
+from curator.collections.collection_orchestrator import _DEFAULT_SIZE_GB, CollectionOrchestrator
 from curator.collections.collection_spec import CollectionSpec
+from curator.collections.game_candidate import DEFAULT_SIZE, ESTIMATED_SIZE, MEASURED_SIZE
 from curator.collections.repository import RawCandidateRow, StorageDevice, UserConsole
 from curator.scoring.size_estimation_service import SizeEstimate
 
@@ -153,6 +156,47 @@ async def test_capacity_fill_falls_back_to_estimate_when_no_measured_size():
     )
 
     assert result.included[0].size_gb == 59.0
+
+
+async def _resolve_one(candidate_row, *, platform="PS5", size_estimates=_SIZE_ESTIMATES):
+    console = UserConsole(
+        console_id="c1",
+        name=platform,
+        platform=platform,
+        raw_capacity_gb=10_000.0,
+        update_buffer_gb=0.0,
+        routing_genres=(),
+        fill_order=0,
+    )
+    repository = FakeCollectionsRepository(consoles=[console], candidates=[candidate_row])
+    orchestrator = CollectionOrchestrator(repository)
+    result = await orchestrator.generate(
+        "sub-1", CollectionSpec(kind="capacity_fill", console_id="c1"), size_estimates=size_estimates
+    )
+    return result.included[0]
+
+
+async def test_a_contributed_measurement_reports_itself_as_measured():
+    contributed_size_gb = float(random.randrange(20, 200))
+
+    candidate = await _resolve_one(_row("g1", measured_size_gb=contributed_size_gb))
+
+    assert (candidate.size_gb, candidate.size_source) == (contributed_size_gb, MEASURED_SIZE)
+
+
+async def test_a_size_estimates_band_reports_itself_as_estimated():
+    candidate = await _resolve_one(_row("g1", aaa_tier="AAA", measured_size_gb=None))
+
+    assert (candidate.size_gb, candidate.size_source) == (59.0, ESTIMATED_SIZE)
+
+
+async def test_a_platform_with_no_seeded_band_reports_the_flat_fallback_as_default_not_as_an_estimate():
+    """0033 seeds PS5 and PS4 bands only, so every PS3, Vita, PSP, PS2 and PS1 title packs at the flat
+    size. Reporting that as an estimate makes a number nobody computed indistinguishable from one somebody
+    did, and it is exactly the case a client should prompt its owner to measure."""
+    candidate = await _resolve_one(_row("g1", aaa_tier="AAA", measured_size_gb=None), platform="PS3")
+
+    assert (candidate.size_gb, candidate.size_source) == (_DEFAULT_SIZE_GB, DEFAULT_SIZE)
 
 
 def _device(device_id, *, identity_sub="sub-1", console_id="c1", kind="m2", capacity_gb=500.0, buffer_gb=0.0):
@@ -329,8 +373,8 @@ async def test_free_to_play_penalizes_rank_score():
 
 async def test_missing_aaa_tier_stays_none_rather_than_indie_or_empty_string():
     """WP8: a game with no recorded tier must not silently satisfy an Indie-tier predicate/filter -- see
-    CollectionOrchestrator._score's own comment and AGENTS/PARKING_LOT.md's WP8 section for the full
-    diagnosis (defaulting to "Indie" here previously misclassified two real-world titles).
+    CollectionOrchestrator._score's own comment for the full diagnosis (defaulting to "Indie" here
+    previously misclassified two real-world titles).
 
     The absent value is ``None``. It was ``""`` until the null sweep reached this field: the WP8 fix
     needed *something* that matched no tier and ``""`` was the smallest change at the time, with the

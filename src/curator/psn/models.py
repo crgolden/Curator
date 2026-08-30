@@ -384,13 +384,39 @@ class LibraryGame:
 
 @dataclass(frozen=True, slots=True)
 class GameSearchResult:
-    """A game or add-on returned by universal search (store/catalog surface, no ownership implied)."""
+    """A game or add-on returned by PSN's universal search (store surface, no ownership implied).
+
+    ``id`` is the id of the ``result`` node itself, never the enclosing search item's own ``id``. That
+    distinction is the whole reason :attr:`kind` exists: the item's id is a composite
+    (``201930:UP1004-PPSA03420_00-GTAVPS5CASHPLUS4``) and joins to nothing, while ``result.id`` lands in
+    one of two catalog id spaces depending on :attr:`kind`.
+
+    ``kind="Concept"`` (the ``MobileGames`` domain) gives a bare numeric **concept id** that joins to
+    ``game_concepts.concept_id``. ``kind="Product"`` (``MobileAddOns``) gives a three-segment
+    ``UP1004-PPSA03420_00-GTAOSTANDALONE01`` **product id**, the same id space as
+    ``game_concepts.product_id`` and ``psn_catalog_cache.store_product_id``. Neither is an npTitleId, and
+    one cannot be derived from the other -- see ``AGENTS/Curator.md`` on why splitting a product id to
+    reach ``psn_catalog_cache.title_id`` is measurably wrong.
+
+    :attr:`default_product_id` is the concept's own ``defaultProduct.id``, which PSN chooses for
+    merchandising rather than canonicality -- it is sometimes a bundle or a standalone mode, and it
+    drifts. Treat it as the concept's current store link, never as an identity.
+
+    The payload carries three type-ish fields -- ``__typename``, ``type`` and ``itemType``. Only
+    ``__typename`` is modelled, as :attr:`kind`, because it is the one that decides how :attr:`id` may be
+    used. Product/add-on-ness is :attr:`classification` instead, read from the same
+    ``localizedStoreDisplayClassification`` the storefront walk projects onto
+    :attr:`~curator.psn.store_client.StoreProduct.classification`, so both surfaces answer "is this a full
+    game" with one vocabulary (:data:`~curator.psn.store_client.FULL_GAME_CLASSIFICATION`).
+    """
 
     id: str | None
+    kind: str | None = None
+    default_product_id: str | None = None
     name: str | None = None
-    type: str | None = None
     platforms: tuple[str, ...] = ()
-    image_url: str | None = None
+    cover_image_url: str | None = None
+    classification: str | None = None
     price: str | None = None
     discounted_price: str | None = None
     is_free: bool | None = None

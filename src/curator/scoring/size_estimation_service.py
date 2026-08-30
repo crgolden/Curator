@@ -32,7 +32,7 @@ class SizeEstimate:
 def estimate_install_size_gb(
     title: str,
     genre: str,
-    is_ps5: bool,
+    platform: ConsolePlatform,
     aaa_tier: str,
     estimates: list[SizeEstimate],
 ) -> float | None:
@@ -42,16 +42,17 @@ def estimate_install_size_gb(
     (2) the most specific matching AAA/AA/Indie x genre-class band for that platform, else (3) that tier's
     generic (no genre-class) band for that platform. Returns ``None`` if nothing matches at all -- there
     is deliberately no catch-all fallback size: an unestimatable title is a real gap the ``size_estimates``
-    table should be extended to cover, not something to silently paper over here.
+    table should be extended to cover, not something to silently paper over here. ``0033_seed_size_estimates``
+    seeds PS5 and PS4 only, so every other platform resolves to ``None`` today and the caller's own
+    fallback applies.
 
     :param title: The game's canonical title.
     :param genre: The game's resolved genre, as stored in ``game_enrichment``.
-    :param is_ps5: Whether to estimate for the PS5 edition (``False`` estimates the PS4 edition).
+    :param platform: Which platform's edition to estimate.
     :param aaa_tier: The game's publisher tier (``"AAA"``/``"AA"``/``"Indie"``), already resolved by the caller.
     :param estimates: Every row from ``size_estimates``.
     :returns: The estimated size in GB, or ``None`` if no row matches.
     """
-    platform = "PS5" if is_ps5 else "PS4"
     title_lower = title.lower()
 
     title_matches = [

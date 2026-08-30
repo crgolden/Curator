@@ -6,6 +6,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
+import pytest
 from fastapi.testclient import TestClient
 
 from curator.app import create_app
@@ -102,13 +103,26 @@ def test_any_authenticated_user_may_contribute_a_measured_size_not_only_the_firs
     assert response.json()["size_gb"] == 45.0
 
 
-def test_rejects_an_unknown_platform():
+def test_rejects_a_platform_outside_the_platforms_table():
     client, validator = _build()
     validator.register("token-a", _claims(sub="sub-a"))
 
-    response = client.put("/games/g1/measured-sizes/PS3", json={"size_gb": 42.5}, headers=_bearer("token-a"))
+    response = client.put("/games/g1/measured-sizes/Switch", json={"size_gb": 42.5}, headers=_bearer("token-a"))
 
     assert response.status_code == 400
+
+
+@pytest.mark.parametrize("platform", ["PS3", "PSVITA", "PSP", "PS2", "PS1"])
+def test_accepts_a_legacy_platform_the_schema_already_allows(platform):
+    """game_measured_sizes.platform is a foreign key to platforms, which carries seven rows. Narrowing
+    the route to the PS5/PS4 pair rejected five platforms the database was happy to store."""
+    client, validator = _build()
+    validator.register("token-a", _claims(sub="sub-a"))
+
+    response = client.put(f"/games/g1/measured-sizes/{platform}", json={"size_gb": 8.5}, headers=_bearer("token-a"))
+
+    assert response.status_code == 200
+    assert response.json()["platform"] == platform
 
 
 def test_lists_measured_sizes_for_both_platforms():

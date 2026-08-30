@@ -1,17 +1,3 @@
-"""``GET /trophies/*`` -- the caller's own PSN trophy data.
-
-Every route targets exclusively the authenticated caller (``claims.sub``) -- never an ``online_id``/
-``account_id`` a caller could supply to name another PSN user's data, matching every other route in this
-app (see ``curator.deps``'s module docstring and ``tests/test_authz.py``). ``np_communication_id`` (a
-title identifier, not a user identifier) is the sole path parameter, the same "names a resource, not a
-user" exception ``PUT /consoles/{console_id}/installs/{game_id}`` already establishes.
-
-Two failure modes are common to every route here and handled the same way: no PSN link at all (the
-``trophy_client_factory`` seam raises ``RuntimeError`` -- see ``curator.app._default_trophy_client_factory``)
-maps to 404, and PSN rejecting the stored/refreshed token (``PsnAuthError``) maps to 401 -- the caller's
-link exists but is no longer usable, so they need to re-link (``POST /psn/link``) before retrying.
-"""
-
 from __future__ import annotations
 
 import logging

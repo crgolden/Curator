@@ -83,6 +83,23 @@ async def test_carries_the_np_title_id_that_joins_onto_existing_curator_rows():
     )
 
 
+async def test_the_whole_product_node_survives_the_projection():
+    """price, sortingOptions, skus and the sibling concepts collection arrive inside a response the walk
+    already pays for. Projecting six fields and dropping the rest means a second full walk to get any of
+    them back, so the node is carried through and persisted by 0047."""
+    node = _product()
+    node["price"] = {"basePrice": "$19.99", "discountedPrice": "$9.99", "isFree": False}
+    node["skus"] = [{"id": "sku-1"}]
+
+    def handler(request):
+        return httpx.Response(200, json=_grid([node], 1))
+
+    page = await _client(handler).category_page("cat-1")
+
+    assert page.products[0].raw["price"]["discountedPrice"] == "$9.99"
+    assert page.products[0].raw["skus"] == [{"id": "sku-1"}]
+
+
 async def test_resolves_cover_art_by_role_preference_not_array_order():
     media = [
         {"role": "SCREENSHOT", "type": "IMAGE", "url": "shot.jpg"},
@@ -118,6 +135,92 @@ async def test_falls_back_through_the_role_preference_and_ignores_video():
     page = await _client(handler).category_page("cat-1")
 
     assert page.products[0].cover_image_url == "portrait.jpg"
+
+
+async def test_an_image_entry_with_no_url_is_skipped_rather_than_stringified_to_the_word_none():
+    """An entry PSN sent without a ``url`` must not become the literal four-character cover URL ``"None"``
+    -- that would be stored, served and rendered as a broken image with nothing failing."""
+
+    def handler(request):
+        return httpx.Response(
+            200,
+            json=_grid(
+                [
+                    _product(
+                        media=[
+                            {"role": "GAMEHUB_COVER_ART", "type": "IMAGE"},
+                            {"role": "EDITION_KEY_ART", "type": "IMAGE", "url": None},
+                        ]
+                    )
+                ],
+                1,
+            ),
+        )
+
+    page = await _client(handler).category_page("cat-1")
+
+    assert page.products[0].cover_image_url is None
+
+
+async def test_an_image_entry_with_no_role_is_skipped_rather_than_stringified_to_the_word_none():
+    """Same defect on the other key: a role-less entry keyed as ``"None"`` never matches the preference
+    list, so it is silently dead weight rather than a cover."""
+
+    def handler(request):
+        return httpx.Response(
+            200,
+            json=_grid(
+                [
+                    _product(
+                        media=[
+                            {"type": "IMAGE", "url": "roleless.jpg"},
+                            {"role": "PORTRAIT_BANNER", "type": "IMAGE", "url": "portrait.jpg"},
+                        ]
+                    )
+                ],
+                1,
+            ),
+        )
+
+    page = await _client(handler).category_page("cat-1")
+
+    assert page.products[0].cover_image_url == "portrait.jpg"
+
+
+async def test_a_role_published_twice_resolves_to_the_last_entry_the_gateway_listed():
+    """PSN can repeat a role. Last-wins is the policy both consolidated originals had; it is pinned here
+    so a future rewrite to a first-match loop is a visible change rather than a silent one."""
+
+    def handler(request):
+        return httpx.Response(
+            200,
+            json=_grid(
+                [
+                    _product(
+                        media=[
+                            {"role": "GAMEHUB_COVER_ART", "type": "IMAGE", "url": "first.jpg"},
+                            {"role": "GAMEHUB_COVER_ART", "type": "IMAGE", "url": "second.jpg"},
+                        ]
+                    )
+                ],
+                1,
+            ),
+        )
+
+    page = await _client(handler).category_page("cat-1")
+
+    assert page.products[0].cover_image_url == "second.jpg"
+
+
+async def test_a_product_the_gateway_left_unnamed_reports_no_name_rather_than_a_blank_one():
+    """A blank title would be inserted as a game called "" -- ``None`` is what lets the repository skip it."""
+
+    def handler(request):
+        return httpx.Response(200, json=_grid([_product(name="   ")], 1))
+
+    page = await _client(handler).category_page("cat-1")
+
+    assert page.products[0].name is None
 
 
 async def test_a_product_with_no_usable_image_reports_none_rather_than_a_video_url():

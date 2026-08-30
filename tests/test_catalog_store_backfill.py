@@ -309,11 +309,29 @@ async def test_summary_totals_across_categories():
     assert summary.covers_cached == 3
 
 
-async def test_an_empty_category_completes_without_writing():
+async def test_a_category_yielding_no_products_at_all_does_not_report_success():
     client = FakeStoreClient([page([], is_last=False)])
     repository = FakeCatalogRepository()
 
     progress = await _service(client, repository).backfill_category("cat-1")
 
-    assert progress.completed is True, "an empty page ends the walk even if the gateway did not set isLast"
+    assert progress.stopped_reason == "no_products", (
+        "a mistyped category id answers 200 with an empty grid, and reporting that as a completed walk "
+        "is indistinguishable from having backfilled the whole category"
+    )
+    assert progress.completed is False
+    assert repository.written == []
+
+
+async def test_resuming_past_the_end_of_a_category_still_completes():
+    client = FakeStoreClient([page([], is_last=True)])
+    repository = FakeCatalogRepository()
+
+    progress = await _service(client, repository).backfill_category("cat-1", start_offset=500)
+
+    assert progress.completed is True, (
+        "an empty page from a non-zero offset is the end of a walk that already read products, not a "
+        "category that yielded nothing"
+    )
+    assert progress.stopped_reason is None
     assert repository.written == []

@@ -7,6 +7,8 @@ from datetime import datetime, timedelta, timezone
 from fastapi.testclient import TestClient
 
 from curator.app import create_app
+from curator.enrichment_routes import CANCELLED_BY_ADMIN
+from curator.jobs.repository import TERMINAL_STATUSES
 from curator.persistence.crypto import TokenCrypto
 from test_routes import FakeAgentFactory, FakeRepository, FakeTokenValidator, _bearer, _claims, _make_settings
 
@@ -54,7 +56,7 @@ class FakeJobRunsRepository:
         return matching[-1] if matching else None
 
     async def find_active_global_run(self, kind):
-        matching = [run for run in self.runs.values() if run.kind == kind and run.status not in ("succeeded", "failed")]
+        matching = [run for run in self.runs.values() if run.kind == kind and run.status not in TERMINAL_STATUSES]
         return matching[-1] if matching else None
 
     async def mark_failed(self, run_id, error):
@@ -63,6 +65,14 @@ class FakeJobRunsRepository:
         if run is not None:
             run.status = "failed"
             run.error = error
+
+    async def cancel(self, run_id, reason):
+        run = self.runs.get(run_id)
+        if run is None or run.status in TERMINAL_STATUSES:
+            return False
+        run.status = "cancelled"
+        run.error = reason
+        return True
 
 
 def _build(job_runs_repository=None):
@@ -288,5 +298,87 @@ def test_get_run_status_404_when_run_is_not_an_enrichment_kind():
     validator.register("token-a", _claims(is_admin=True))
 
     response = client.get("/enrichment/runs/run-1", headers=_bearer("token-a"))
+
+    assert response.status_code == 404
+
+
+def test_cancel_requires_bearer_token():
+    client, _validator, _publisher = _build()
+
+    response = client.post("/enrichment/runs/run-1/cancel")
+
+    assert response.status_code == 401
+
+
+def test_cancel_non_admin_scope_is_forbidden():
+    job_runs = FakeJobRunsRepository([FakeJobRun("run-1", "enrichment", "queued")])
+    client, validator, _publisher = _build(job_runs)
+    validator.register("token-a", _claims(is_admin=False))
+
+    response = client.post("/enrichment/runs/run-1/cancel", headers=_bearer("token-a"))
+
+    assert response.status_code == 403
+    assert job_runs.runs["run-1"].status == "queued"
+
+
+def test_cancel_stands_a_stuck_queued_run_down_and_returns_it():
+    job_runs = FakeJobRunsRepository([FakeJobRun("run-1", "enrichment", "queued")])
+    client, validator, _publisher = _build(job_runs)
+    validator.register("token-a", _claims(is_admin=True))
+
+    response = client.post("/enrichment/runs/run-1/cancel", headers=_bearer("token-a"))
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "run_id": "run-1",
+        "status": "cancelled",
+        "error": CANCELLED_BY_ADMIN,
+        "result_summary": None,
+    }
+
+
+def test_a_cancelled_run_no_longer_blocks_a_fresh_one():
+    """The whole point of cancelling: POST /enrichment/runs returned the stuck run's id until 24h of
+    staleness elapsed, so an operator had no remedy at all."""
+    job_runs = FakeJobRunsRepository([FakeJobRun("run-stuck", "enrichment", "queued")])
+    client, validator, publisher = _build(job_runs)
+    validator.register("token-a", _claims(is_admin=True))
+
+    client.post("/enrichment/runs/run-stuck/cancel", headers=_bearer("token-a"))
+    response = client.post("/enrichment/runs", headers=_bearer("token-a"))
+
+    assert response.json() == {"run_id": "run-1"}
+    assert publisher.enrichment_calls == 1
+
+
+def test_cancel_409_when_the_run_has_already_finished():
+    job_runs = FakeJobRunsRepository([FakeJobRun("run-1", "enrichment", "succeeded")])
+    client, validator, _publisher = _build(job_runs)
+    validator.register("token-a", _claims(is_admin=True))
+
+    response = client.post("/enrichment/runs/run-1/cancel", headers=_bearer("token-a"))
+
+    assert response.status_code == 409
+    assert job_runs.runs["run-1"].status == "succeeded", "a late cancel must not rewrite a finished outcome"
+
+
+def test_cancel_404_when_run_is_not_an_enrichment_kind():
+    job_runs = FakeJobRunsRepository([FakeJobRun("run-1", "library_refresh", "queued")])
+    client, validator, _publisher = _build(job_runs)
+    validator.register("token-a", _claims(is_admin=True))
+
+    response = client.post("/enrichment/runs/run-1/cancel", headers=_bearer("token-a"))
+
+    assert response.status_code == 404
+    assert job_runs.runs["run-1"].status == "queued", (
+        "a library refresh is ownership-checked, so it must not be cancellable through the admin route"
+    )
+
+
+def test_cancel_404_when_unknown_run_id():
+    client, validator, _publisher = _build()
+    validator.register("token-a", _claims(is_admin=True))
+
+    response = client.post("/enrichment/runs/unknown/cancel", headers=_bearer("token-a"))
 
     assert response.status_code == 404

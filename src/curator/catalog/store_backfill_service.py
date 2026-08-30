@@ -172,19 +172,27 @@ class StoreBackfillService:
 
             offset = self._next_offset(page, offset)
             if page.is_last or not page.products:
+                walked_the_whole_category_and_found_nothing = products_seen == 0 and start_offset == 0
                 progress = self._progress(
                     category_id,
                     offset,
-                    True,
+                    not walked_the_whole_category_and_found_nothing,
                     pages_read,
                     products_seen,
                     games_created,
                     covers_cached,
-                    None,
+                    "no_products" if walked_the_whole_category_and_found_nothing else None,
                     seen_product_ids,
                     reported_total,
                     start_offset,
                 )
+                if walked_the_whole_category_and_found_nothing:
+                    logger.warning(
+                        "Store backfill of category %s read a first page containing no products at all. "
+                        "The storefront answered, so this is not a transport failure -- the id is most "
+                        "likely not a category, or is one that publishes nothing.",
+                        category_id,
+                    )
                 if progress.coverage_shortfall:
                     logger.warning(
                         "Store backfill of category %s saw %d of %d products; %d were missed because the "

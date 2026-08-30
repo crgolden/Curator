@@ -284,14 +284,16 @@ def test_configure_tracing_and_metrics_noop_when_alloy_endpoint_absent(monkeypat
     assert telemetry._otel_configured is False
 
 
-def test_configure_tracing_and_metrics_selects_the_stable_http_semconv(monkeypatch):
+def test_configure_tracing_and_metrics_selects_the_stable_http_and_database_semconv(monkeypatch):
     monkeypatch.delenv(telemetry._SEMCONV_STABILITY_OPT_IN_ENV, raising=False)
     monkeypatch.setattr(telemetry, "_register_otlp_providers", lambda endpoint: None)
     monkeypatch.setattr(telemetry, "_instrument_app", lambda app: None)
 
     telemetry._configure_tracing_and_metrics(app=object(), settings=_SETTINGS_WITH_TELEMETRY)
 
-    assert os.environ[telemetry._SEMCONV_STABILITY_OPT_IN_ENV] == "http"
+    selected = os.environ[telemetry._SEMCONV_STABILITY_OPT_IN_ENV]
+    assert selected == "http,database"
+    assert "database" in selected.split(",")
 
 
 def test_configure_tracing_and_metrics_selects_the_semconv_before_anything_is_instrumented(monkeypatch):
@@ -306,7 +308,7 @@ def test_configure_tracing_and_metrics_selects_the_semconv_before_anything_is_in
 
     telemetry._configure_tracing_and_metrics(app=object(), settings=_SETTINGS_WITH_TELEMETRY)
 
-    assert seen == ["http", "http"]
+    assert seen == ["http,database", "http,database"]
 
 
 def test_configure_tracing_and_metrics_leaves_an_explicit_semconv_value_alone(monkeypatch):
@@ -566,6 +568,45 @@ def test_elasticsearch_log_handler_swallows_index_failures():
     )
 
     handler.emit(record)
+
+
+def test_elasticsearch_log_handler_counts_and_reports_a_failure_rather_than_dropping_it_silently(capsys):
+    class _FailingClient(_FakeElasticsearchClient):
+        def index(self, **kwargs):
+            raise RuntimeError("elasticsearch unreachable")
+
+    handler = telemetry._ElasticsearchLogHandler(_FailingClient())
+    record = logging.LogRecord(
+        name="curator.app", level=logging.INFO, pathname=__file__, lineno=1, msg="x", args=(), exc_info=None
+    )
+
+    handler.emit(record)
+
+    assert handler.failure_count == 1
+    assert "elasticsearch unreachable" in capsys.readouterr().err, (
+        "a silently suppressed failure makes 'Elasticsearch is refusing our writes' and 'there was "
+        "nothing to log' the same observation"
+    )
+
+
+def test_elasticsearch_log_handler_reports_the_first_failure_only_until_the_interval_is_reached(capsys):
+    class _FailingClient(_FakeElasticsearchClient):
+        def index(self, **kwargs):
+            raise RuntimeError("elasticsearch unreachable")
+
+    handler = telemetry._ElasticsearchLogHandler(_FailingClient())
+    record = logging.LogRecord(
+        name="curator.app", level=logging.INFO, pathname=__file__, lineno=1, msg="x", args=(), exc_info=None
+    )
+    emits = telemetry._ES_FAILURE_REPORT_EVERY
+
+    for _ in range(emits):
+        handler.emit(record)
+
+    assert handler.failure_count == emits
+    assert capsys.readouterr().err.count("Elasticsearch log shipping has failed") == 2, (
+        "reporting every failure would turn an outage into a stderr flood"
+    )
 
 
 def test_create_app_health_check_unaffected_by_telemetry_wiring(monkeypatch):

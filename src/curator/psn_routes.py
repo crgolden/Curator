@@ -1,10 +1,3 @@
-"""PSN account link/unlink routes.
-
-Both routes act exclusively on ``require_verified_caller``'s resolved caller -- the request body never
-carries (and the routes never accept) a caller-supplied user identifier, so one user can never link or
-unlink another's PSN account.
-"""
-
 from __future__ import annotations
 
 import logging

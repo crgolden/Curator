@@ -1,28 +1,3 @@
-"""``/me/profile-settings``, ``/users/{sub}/profile``, ``/users/{sub}/follow``,
-``/users/{sub}/followers``/``following``, and ``/users/{sub}/library``/``collections`` -- the public
-social-profile feature.
-
-``GET /users/{sub}/profile`` (and its follow/library/collections siblings) is a deliberate, narrow
-exception to "no caller-supplied target user" (see ``curator.deps``'s module docstring): when viewer B
-requests A's public profile, this route builds **B's own** ``TrophyClient``/``SocialClient`` (via
-``trophy_client_factory(claims.sub)`` / ``social_client_factory(claims.sub)``) and calls it with
-``account_id=A's psn_account_id``. No PSN data ever flows through A's stored token -- B's own live PSN
-session looks up A's already-public account, the same way ``SocialClient.friends()``/``.profile()``/
-``.friendship()`` already do for arbitrary ``account_id`` targets. If B has no PSN link (or PSN rejects
-B's token), PSN sections are simply omitted (not an error) -- B still sees ``psn_account_id``, follow
-status, and counts.
-
-Follower/following counts and lists are first-party Curator data (``curator.persistence.follow_repository
-.FollowRepository``), not PSN-derived, so unlike the PSN-backed sections they are **never** gated on the
-target's ``user_profiles.is_public`` flag -- see ``db/migrations/0006_follows.sql``.
-
-Every ``show_*`` toggle on ``user_profiles`` is meaningless on its own: trophies/identity additionally
-require the matching ``psn_links.harvest_*`` flag, and library/collections additionally require
-``is_public``. The owner viewing their own profile always sees their own sections (subject to their own
-``harvest_*``/``show_*`` settings, not ``is_public`` -- ``is_public`` only controls what *other* viewers
-see).
-"""
-
 from __future__ import annotations
 
 import logging
@@ -36,7 +11,7 @@ from curator.audit.repository import ACTION_FOLLOWED, ACTION_UNFOLLOWED, Account
 from curator.collections.repository import CollectionsRepository
 from curator.deps import require_bearer
 from curator.library.repository import LibraryRepository, LibrarySortField
-from curator.library_routes import LibraryCategoriesResponse
+from curator.library_routes import LibraryGenresResponse
 from curator.persistence.follow_repository import FollowEdge, FollowRepository
 from curator.persistence.profile_link_repository import ProfileLink, ProfileLinkRepository
 from curator.persistence.profile_repository import ProfileRepository, ProfileSettings
@@ -173,13 +148,14 @@ class ProfileLibraryGameResponse(BaseModel):
 
     game_id: str
     title: str
-    category: str | None
+    genre: str | None
     rawg_rating: float | None
     opencritic_rating: float | None
     psn_rating: float | None
     psn_product_id: str | None
     rawg_enriched: bool
     opencritic_enriched: bool
+    psn_enriched: bool
     is_active: bool
     percent_completed: int | None
     cover_image_url: str | None
@@ -577,12 +553,12 @@ async def _follow_entry(request: Request, edge: FollowEdge) -> FollowListEntryRe
     )
 
 
-@router.get("/users/{sub}/library/categories", response_model=LibraryCategoriesResponse)
-async def get_user_library_categories(
+@router.get("/users/{sub}/library/genres", response_model=LibraryGenresResponse)
+async def get_user_library_genres(
     sub: str, request: Request, claims: TokenClaims = Depends(require_bearer)
-) -> LibraryCategoriesResponse:
-    """Return the distinct, sorted set of categories in ``sub``'s library, read-only -- backs the
-    viewer-mode library page's category filter dropdown.
+) -> LibraryGenresResponse:
+    """Return the distinct, sorted set of genres in ``sub``'s library, read-only -- backs the
+    viewer-mode library page's genre filter dropdown.
 
     :raises fastapi.HTTPException: 404, if ``sub`` has no ``app_users`` row. 403, unless the caller is the
         owner or the target's profile is both public and ``show_library``.
@@ -590,8 +566,8 @@ async def get_user_library_categories(
     await _require_visible_section(request, sub, claims, "show_library")
 
     library_repository: LibraryRepository = request.app.state.library_repository
-    categories = await library_repository.list_categories(sub)
-    return LibraryCategoriesResponse(categories=categories)
+    genres = await library_repository.list_genres(sub)
+    return LibraryGenresResponse(genres=genres)
 
 
 @router.get("/users/{sub}/library", response_model=ProfileLibraryPageResponse)
@@ -599,7 +575,7 @@ async def get_user_library(
     sub: str,
     request: Request,
     q: str | None = Query(default=None),
-    category: str | None = Query(default=None),
+    genre: str | None = Query(default=None),
     sort: LibrarySortField = Query(default="title"),
     sort_dir: Literal["asc", "desc"] = Query(default="asc", alias="sortDir"),
     limit: int = Query(default=20, ge=1, le=100),
@@ -616,20 +592,21 @@ async def get_user_library(
 
     library_repository: LibraryRepository = request.app.state.library_repository
     games, total = await library_repository.list_entries_with_enrichment(
-        sub, search=q, category=category, sort=sort, sort_dir=sort_dir, limit=limit, offset=offset
+        sub, search=q, genre=genre, sort=sort, sort_dir=sort_dir, limit=limit, offset=offset
     )
     return ProfileLibraryPageResponse(
         games=[
             ProfileLibraryGameResponse(
                 game_id=game.game_id,
                 title=game.title,
-                category=game.category,
+                genre=game.genre,
                 rawg_rating=game.rawg_rating,
                 opencritic_rating=game.opencritic_rating,
                 psn_rating=game.psn_rating,
                 psn_product_id=game.psn_product_id,
                 rawg_enriched=game.rawg_enriched,
                 opencritic_enriched=game.opencritic_enriched,
+                psn_enriched=game.psn_enriched,
                 is_active=game.is_active,
                 percent_completed=None,
                 cover_image_url=game.cover_image_url,

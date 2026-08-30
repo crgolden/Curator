@@ -1,8 +1,3 @@
-"""``GET /catalog/games`` -- paginated, filterable browsing of the shared game catalog -- plus
-``GET /catalog/games/{game_id}``, the ``GET /catalog/genres`` vocabulary its genre filter draws from,
-the admin-scoped ``GET /catalog/genres/drift`` that compares that vocabulary against the storefront's
-live facet, and the admin-scoped ``POST /catalog/backfill`` that seeds the catalog from it."""
-
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
@@ -225,8 +220,12 @@ async def backfill_catalog(
     Bounded by ``max_pages_per_category``; each category reports a ``next_offset`` to resume from.
 
     :returns: Per-category progress plus run totals.
-    :raises fastapi.HTTPException: 503, if ``app.state.store_backfill_service`` is absent --
-        ``create_app`` always constructs one, so no deployment reaches that arm.
+    :raises fastapi.HTTPException: 422, if every requested category yielded no products at all --
+        the storefront answers 200 with an empty grid for an id that is not a category, and a 2xx
+        would report that as a completed backfill. Its ``detail`` carries the same per-category rows a
+        2xx would, so the caller can still see pages read and ``stopped_reason`` per id rather than
+        being told only that the whole request failed. 503, if ``app.state.store_backfill_service`` is
+        absent -- ``create_app`` always constructs one, so no deployment reaches that arm.
     """
     backfill_service: StoreBackfillService | None = request.app.state.store_backfill_service
     if backfill_service is None:
@@ -237,21 +236,35 @@ async def backfill_catalog(
         max_pages_per_category=body.max_pages_per_category,
         start_offsets=body.start_offsets,
     )
+    categories = [
+        CategoryBackfillResult(
+            category_id=progress.category_id,
+            next_offset=progress.next_offset,
+            completed=progress.completed,
+            pages_read=progress.pages_read,
+            products_seen=progress.products_seen,
+            games_created=progress.games_created,
+            covers_cached=progress.covers_cached,
+            stopped_reason=progress.stopped_reason,
+        )
+        for progress in summary.categories
+    ]
+    if categories and all(result.stopped_reason == "no_products" for result in categories):
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "message": (
+                    "Every requested category returned an empty grid. The storefront answered, so these "
+                    "are most likely not storefront category ids. A 2xx here would be indistinguishable "
+                    "from having backfilled every category."
+                ),
+                "categories": [result.model_dump(mode="json") for result in categories],
+            },
+        )
+
     return CatalogBackfillResponse(
         completed=summary.completed,
         games_created=summary.games_created,
         covers_cached=summary.covers_cached,
-        categories=[
-            CategoryBackfillResult(
-                category_id=progress.category_id,
-                next_offset=progress.next_offset,
-                completed=progress.completed,
-                pages_read=progress.pages_read,
-                products_seen=progress.products_seen,
-                games_created=progress.games_created,
-                covers_cached=progress.covers_cached,
-                stopped_reason=progress.stopped_reason,
-            )
-            for progress in summary.categories
-        ],
+        categories=categories,
     )

@@ -2,7 +2,7 @@
 
 Curator owns the consent record and the CRUD surface over it. Advancing a schedule after a run, recording
 failures and pausing a broken chain belong to the worker that processes the scheduled message, which is not
-in this runtime -- see ``AGENTS/PARKING_LOT.md`` for the message contract.
+in this runtime -- see ``AGENTS/Functions.md`` for the message contract.
 """
 
 from __future__ import annotations

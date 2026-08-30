@@ -66,8 +66,21 @@ class FakePool:
         return conn
 
 
-def _item_row(game_id="11111111-1111-1111-1111-111111111111", rank=1, title="Bloodborne"):
-    return (game_id, rank, title, "FromSoftware", "Action", "AAA", 92.0, 91.0, 4.5, "https://img/1.png", True)
+def _item_row(game_id="11111111-1111-1111-1111-111111111111", rank=1, title="Bloodborne", installed_on_target=None):
+    return (
+        game_id,
+        rank,
+        title,
+        "FromSoftware",
+        "Action",
+        "AAA",
+        92.0,
+        91.0,
+        4.5,
+        "https://img/1.png",
+        True,
+        installed_on_target,
+    )
 
 
 def _pool_returning(rows, total):

@@ -53,7 +53,13 @@ _ITEM_SORT_COLUMNS: dict[str, str] = {
 _ITEM_SELECT_COLUMNS = f"""cdi.game_id, cdi.rank, g.canonical_title, g.franchise, gen.name, ge.aaa_tier,
                        ge.critical_score, ge.oc_score, ge.psn_rating,
                        {SQUARE_COVER_ART_SQL} AS cover_image_url,
-                       COALESCE(le.is_active, false) AS owner_has_access"""
+                       COALESCE(le.is_active, false) AS owner_has_access,
+                       CASE WHEN cd.install_target_console_id IS NULL THEN NULL ELSE EXISTS (
+                           SELECT 1 FROM console_installs ci
+                           WHERE ci.console_id = cd.install_target_console_id
+                             AND ci.game_id = cdi.game_id
+                             AND ci.installed
+                       ) END AS installed_on_target"""
 
 _ITEM_BASE_FROM = """
                 FROM collection_definition_items cdi
@@ -160,6 +166,7 @@ class CollectionDefinition:
     share_slug: str | None = None
     item_count: int = 0
     exclude_installed_on: tuple[str, ...] = ()
+    install_target_console_id: str | None = None
 
     def to_spec(self) -> CollectionSpec:
         """Build the :class:`CollectionSpec` this definition represents, ready for
@@ -199,6 +206,8 @@ class CollectionItem:
     psn_rating: float | None
     cover_image_url: str | None
     owner_has_access: bool
+    installed_on_target: bool | None = None
+    """Installed on the collection's ``install_target_console_id``; ``None`` when it targets no console."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -612,7 +621,7 @@ class CollectionsRepository:
         self,
         identity_sub: str,
         *,
-        platform: str | None = None,
+        platform: ConsolePlatform | None = None,
         include_inactive: bool = False,
         min_percent_completed: int | None = None,
         exclude_installed_on: Sequence[str] | None = None,
@@ -631,8 +640,13 @@ class CollectionsRepository:
         -- Python's ``sorted()`` is stable, but only as good as the order it starts from, and without this
         an unordered ``SELECT`` leaves ties at the mercy of Postgres's arbitrary row order.
 
-        :param platform: If given (``"PS5"``/``"PS4"``), only games eligible for that platform
-            (``native_ps5`` for PS5, ``ps4_eligible`` for PS4).
+        :param platform: If given, only games the user owns on that platform, read from
+            ``library_entry_platforms`` (``0032_platforms.sql``) rather than from ``library_entries``'
+            ``native_ps5``/``ps4_eligible`` pair -- two booleans cannot express the seven platforms
+            ``platforms`` carries, and a PS3/Vita/PSP console filtering on the pair matched everything.
+            The measured-size lookup narrows to the same platform for the same reason: a game owned on
+            both PS4 and PS5 has two ``game_measured_sizes`` rows, and the pair-derived ``CASE`` always
+            picked the PS5 one.
         :param include_inactive: Draw on lapsed entitlements too. Off by default, so a collection is
             built from what its owner can actually launch unless they ask otherwise.
         :param min_percent_completed: Minimum stored trophy completion to include, or ``None`` for no
@@ -643,15 +657,24 @@ class CollectionsRepository:
             this caller's own is silently ignored rather than trusted, since ``console_installs`` itself
             carries no ``identity_sub`` to check against directly.
         """
-        platform_clause = ""
-        if platform == "PS5":
-            platform_clause = "AND le.native_ps5 = true"
-        elif platform == "PS4":
-            platform_clause = "AND le.ps4_eligible = true"
-
         active_clause = "" if include_inactive else "AND le.is_active = true"
 
-        params: list[Any] = [identity_sub]
+        params: list[Any] = []
+        measured_size_platform_sql = "CASE WHEN le.native_ps5 THEN 'PS5' ELSE 'PS4' END"
+        platform_clause = ""
+        if platform is not None:
+            measured_size_platform_sql = "%s"
+            params.append(platform)
+        params.append(identity_sub)
+        if platform is not None:
+            platform_clause = """
+                AND EXISTS (
+                    SELECT 1 FROM library_entry_platforms lep
+                    WHERE lep.identity_sub = le.identity_sub AND lep.game_id = le.game_id
+                      AND lep.platform = %s
+                )
+            """
+            params.append(platform)
         installed_elsewhere_clause = ""
         if exclude_installed_on:
             installed_elsewhere_clause = """
@@ -687,7 +710,7 @@ class CollectionsRepository:
                        (
                            SELECT gms.size_gb FROM game_measured_sizes gms
                            WHERE gms.game_id = g.game_id
-                             AND gms.platform = (CASE WHEN le.native_ps5 THEN 'PS5' ELSE 'PS4' END)
+                             AND gms.platform = ({measured_size_platform_sql})
                        ) AS measured_size_gb,
                        le.np_communication_id, le.trophy_percent_completed
                 FROM library_entries le
@@ -754,6 +777,7 @@ class CollectionsRepository:
         *,
         description: str | None = None,
         game_ids: tuple[str, ...] = (),
+        install_target_console_id: str | None = None,
     ) -> str:
         """Save a named collection: its metadata, its authoring spec, and its membership.
 
@@ -767,6 +791,8 @@ class CollectionsRepository:
         :param description: Optional free text describing the collection.
         :param game_ids: The collection's members, in the caller's chosen order. Duplicates are dropped
             (first occurrence wins) rather than colliding on ``collection_definition_items``' primary key.
+        :param install_target_console_id: The console this collection is aimed at, whose install state is
+            displayed against its items. Does not affect membership.
         :returns: The new definition's id.
         """
         share_slug = secrets.token_urlsafe(9)
@@ -776,8 +802,8 @@ class CollectionsRepository:
                 INSERT INTO collection_definitions
                     (identity_sub, name, description, kind, console_id, genre_filter, min_score,
                      aaa_tier_filter, sort_order, include_inactive, min_percent_completed, filter_predicate,
-                     share_slug, exclude_installed_on)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                     share_slug, exclude_installed_on, install_target_console_id)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 RETURNING definition_id
                 """,
                 (
@@ -795,6 +821,7 @@ class CollectionsRepository:
                     json.dumps(predicate_to_dict(spec.filter_predicate)) if spec.filter_predicate is not None else None,
                     share_slug,
                     list(spec.exclude_installed_on),
+                    install_target_console_id,
                 ),
             )
             row = await cur.fetchone()
@@ -837,7 +864,7 @@ class CollectionsRepository:
         cd.aaa_tier_filter, cd.sort_order, cd.description, cd.include_inactive, cd.min_percent_completed,
         cd.filter_predicate, cd.visibility, cd.share_slug,
         (SELECT count(*) FROM collection_definition_items cdi WHERE cdi.definition_id = cd.definition_id),
-        cd.exclude_installed_on
+        cd.exclude_installed_on, cd.install_target_console_id
     """
 
     async def list_definitions(self, identity_sub: str) -> list[CollectionDefinition]:
@@ -1091,10 +1118,18 @@ class CollectionsRepository:
             psn_rating=float(row[8]) if row[8] is not None else None,
             cover_image_url=row[9],
             owner_has_access=bool(row[10]),
+            installed_on_target=None if row[11] is None else bool(row[11]),
         )
 
     async def update_definition(
-        self, definition_id: str, *, name: str, description: str | None, game_ids: tuple[str, ...] | None = None
+        self,
+        definition_id: str,
+        *,
+        name: str,
+        description: str | None,
+        game_ids: tuple[str, ...] | None = None,
+        install_target_console_id: str | None = None,
+        retarget_install_console: bool = False,
     ) -> None:
         """Overwrite a definition's name and description, and optionally its whole membership.
 
@@ -1115,8 +1150,12 @@ class CollectionsRepository:
 
         Ownership is *not* checked here -- the caller establishes it with :meth:`get_definition` first.
 
+        :param install_target_console_id: The new install target, written only when
+            ``retarget_install_console`` is set. ``None`` clears the target rather than meaning "unchanged".
+        :param retarget_install_console: Whether to write ``install_target_console_id`` at all.
         :raises psycopg.errors.UniqueViolation: If ``name`` collides with another of the owner's
             collections.
+        :raises psycopg.errors.ForeignKeyViolation: If ``install_target_console_id`` is not a real console.
         """
         async with self._pool.connection() as conn, conn.cursor() as cur:
             await cur.execute(
@@ -1127,6 +1166,15 @@ class CollectionsRepository:
                 """,
                 (name, description, definition_id),
             )
+            if retarget_install_console:
+                await cur.execute(
+                    """
+                    UPDATE collection_definitions
+                    SET install_target_console_id = %s, updated_at = now()
+                    WHERE definition_id = %s
+                    """,
+                    (install_target_console_id, definition_id),
+                )
             if game_ids is not None:
                 await cur.execute("DELETE FROM collection_definition_items WHERE definition_id = %s", (definition_id,))
                 await self._insert_items(cur, definition_id, game_ids)
@@ -1228,6 +1276,7 @@ class CollectionsRepository:
             share_slug=row[14],
             item_count=row[15],
             exclude_installed_on=tuple(row[16] or ()),
+            install_target_console_id=str(row[17]) if row[17] is not None else None,
         )
 
     async def save_run(

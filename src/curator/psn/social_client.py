@@ -1,19 +1,28 @@
-"""Async client for PSN social-graph and profile data.
+"""Async client for PSN social-graph and profile data, plus the mobile gateway's universal search.
 
 No persistence anywhere in this module -- PSN is the source of truth for the social graph; every method
 here is a live passthrough.
+
+``metGetContextSearchResults`` is a **universal** search whose domain is the ``searchContext`` variable,
+not a player search: :meth:`SocialClient.universal_search_players` and
+:meth:`SocialClient.universal_search_games` are the same operation under two contexts and two persisted
+hashes. It runs against the authenticated mobile gateway (``m.np.playstation.com``), which is a different
+service from the anonymous storefront (``web.np.playstation.com``) that :mod:`curator.psn.store_client`
+calls; their persisted-query hashes are not interchangeable, and the storefront has no search at all.
 """
 
 from __future__ import annotations
 
 from collections.abc import Callable, Coroutine
-from typing import Any
+from typing import Any, Final, Literal
 
 from curator.psn import _identity
 from curator.psn._graphql import run_persisted_query
+from curator.psn._media import cover_image_url
 from curator.psn.models import (
     AccountDevice,
     Friendship,
+    GameSearchResult,
     PlayerSearchResult,
     Profile,
     ProfileShareLink,
@@ -32,14 +41,43 @@ _SEARCH_COMMON_HEADERS = {
     "apollographql-client-name": "PlayStationApp-Android",
     "apollographql-client-version": "25.4.0",
 }
-_OP_CONTEXT_SEARCH_USERS = (
+_OP_CONTEXT_SEARCH_SOCIAL = (
     "metGetContextSearchResults",
     "ac5fb2b82c4d086ca0d272fba34418ab327a7762dd2cd620e63f175bbc5aff10",
 )
-_OP_DOMAIN_SEARCH_USERS = (
+_OP_DOMAIN_SEARCH_SOCIAL = (
     "metGetDomainSearchResults",
     "23ece284bf8bdc50bfa30a4d97fd4d733e723beb7a42dff8c1ee883f8461a2e1",
 )
+_OP_CONTEXT_SEARCH_GAME = (
+    "metGetContextSearchResults",
+    "a2fbc15433b37ca7bfcd7112f741735e13268f5e9ebd5ffce51b85acc126f41d",
+)
+_OP_DOMAIN_SEARCH_GAME = (
+    "metGetDomainSearchResults",
+    "b51624299bd17b3799f77c9f097cc8887a04d3873f0329095976a841595bc902",
+)
+
+SOCIAL_SEARCH_CONTEXT: Final = "MobileUniversalSearchSocial"
+GAME_SEARCH_CONTEXT: Final = "MobileUniversalSearchGame"
+
+GameSearchDomain = Literal["MobileGames", "MobileAddOns"]
+
+FULL_GAMES_DOMAIN: Final[GameSearchDomain] = "MobileGames"
+ADD_ONS_DOMAIN: Final[GameSearchDomain] = "MobileAddOns"
+
+MAX_GAME_SEARCH_PAGES: Final = 3
+"""How many pages :meth:`SocialClient.universal_search_games` may fetch beyond the first.
+
+Bounds spend, not recursion -- the loop already terminates on its own. Every page is a request to the
+authenticated mobile gateway on one user's token, and an uncapped paginated fetch is how the admin
+OpenCritic sweep once burned a whole day's quota on its first run; ``AdminRefreshMaxPages`` is that
+incident's named constant and this is the same shape.
+
+Three is what it takes to satisfy the largest ``limit`` ``GET /library/manual/search`` accepts (50)
+against the smallest first page PSN has been observed to return (15, measured on ``"GTA"``); it has
+returned 48 on other terms, where one extra page is already more than enough.
+"""
 
 
 def _profile(data: dict[str, Any]) -> Profile:
@@ -72,6 +110,46 @@ def _player_search_result(item: dict[str, Any]) -> PlayerSearchResult:
         is_ps_plus=player.get("isPsPlus"),
         relationship=player.get("relationshipState"),
     )
+
+
+def _game_search_result(item: dict[str, Any]) -> GameSearchResult:
+    """Map one raw ``searchResults`` entry to our :class:`~curator.psn.models.GameSearchResult`.
+
+    Reads the nested ``result`` node rather than the enclosing item, which carries a composite ``id`` of
+    its own that joins to nothing -- see :class:`~curator.psn.models.GameSearchResult`. A ``Concept`` and
+    a ``Product`` node carry the same field names for everything read here except ``defaultProduct``,
+    which only a concept has, so one mapper covers both; ``invariantName`` is the fallback title, being
+    the untranslated form PSN sends when the locale has no ``name``.
+    """
+    result = item.get("result") or {}
+    price = result.get("price") or {}
+    default_product = result.get("defaultProduct") or {}
+    return GameSearchResult(
+        id=result.get("id"),
+        kind=result.get("__typename"),
+        default_product_id=default_product.get("id"),
+        name=result.get("name") or result.get("invariantName"),
+        platforms=tuple(str(platform) for platform in (result.get("platforms") or ())),
+        cover_image_url=cover_image_url(result.get("media")),
+        classification=result.get("localizedStoreDisplayClassification"),
+        price=price.get("basePrice"),
+        discounted_price=price.get("discountedPrice"),
+        is_free=price.get("isFree"),
+    )
+
+
+def _domain_container(results_by_domain: list[Any], domain: GameSearchDomain) -> dict[str, Any]:
+    """Pick the one result container whose own ``domain`` field names ``domain``.
+
+    Selected by that field rather than by ordinal position. PSNAWP's ``SearchDomain`` IntEnum indexes this
+    same list positionally (``FULL_GAMES = 0``, ``ADD_ONS = 1``), which matches what the live gateway
+    returned but asserts an ordering PSN never promised and raises ``IndexError`` on a short list. Matching
+    the label costs nothing and degrades to an empty result instead.
+    """
+    for entry in results_by_domain:
+        if isinstance(entry, dict) and entry.get("domain") == domain:
+            return entry
+    return {}
 
 
 class SocialClient:
@@ -234,20 +312,20 @@ class SocialClient:
         response = (await self._session.get(f"{_PROFILE_URI}/me/blocks")).json()
         return target_account_id in (response.get("blockList") or [])
 
-    async def search_players(self, query: str, limit: int = 20) -> list[PlayerSearchResult]:
-        """Search for PlayStation players by online id or name.
+    async def universal_search_players(self, query: str, limit: int = 20) -> list[PlayerSearchResult]:
+        """Run PSN's universal context search, scoped to the social domain.
 
         :param query: The search term.
         :param limit: Maximum number of results to return.
         :returns: A list of :class:`~curator.psn.models.PlayerSearchResult`.
         """
-        return await self._session.run_with_reauth(lambda: self._search_players(query, limit))
+        return await self._session.run_with_reauth(lambda: self._universal_search_players(query, limit))
 
-    async def _search_players(self, query: str, limit: int) -> list[PlayerSearchResult]:
+    async def _universal_search_players(self, query: str, limit: int) -> list[PlayerSearchResult]:
         response = await run_persisted_query(
             self._session,
-            _OP_CONTEXT_SEARCH_USERS,
-            {"searchTerm": query, "searchContext": "MobileUniversalSearchSocial", "displayTitleLocale": "en-US"},
+            _OP_CONTEXT_SEARCH_SOCIAL,
+            {"searchTerm": query, "searchContext": SOCIAL_SEARCH_CONTEXT, "displayTitleLocale": "en-US"},
             headers=_SEARCH_COMMON_HEADERS,
             check_errors=False,
         )
@@ -259,7 +337,7 @@ class SocialClient:
         while len(items) < limit and next_cursor:
             response = await run_persisted_query(
                 self._session,
-                _OP_DOMAIN_SEARCH_USERS,
+                _OP_DOMAIN_SEARCH_SOCIAL,
                 {
                     "searchTerm": query,
                     "searchDomain": "SocialAllAccounts",
@@ -279,6 +357,71 @@ class SocialClient:
             next_cursor = container.get("next") or ""
 
         return [_player_search_result(item) for item in items[:limit]]
+
+    async def universal_search_games(
+        self, query: str, *, domain: GameSearchDomain = FULL_GAMES_DOMAIN, limit: int = 20
+    ) -> list[GameSearchResult]:
+        """Run PSN's universal context search, scoped to a store domain.
+
+        The same operation as :meth:`universal_search_players` under a different ``searchContext`` and a
+        different persisted hash. Answers "does the PS Store carry a game by this name", which the
+        anonymous storefront gateway cannot: it has no search operation, so this needs the caller's own
+        PSN token.
+
+        Pages beyond the first through ``metGetDomainSearchResults`` under
+        :data:`_OP_DOMAIN_SEARCH_GAME`, which is a *different* persisted hash from the one
+        :meth:`universal_search_players` pages with -- the operation is shared, the registered document
+        per domain is not. The first page carries far fewer hits than the domain's total (``"GTA"``: 15
+        of 32 games), so without this a ``limit`` above the page size would silently under-answer. At
+        most :data:`MAX_GAME_SEARCH_PAGES` further pages are fetched, so one search can under-answer but
+        can never spend unbounded requests on the caller's token.
+
+        :param query: The search term.
+        :param domain: Which store domain to read: full games (the default) or add-ons.
+        :param limit: Maximum number of results to return; fewer come back when PSN runs out of hits or
+            the page cap is reached first.
+        :returns: A list of :class:`~curator.psn.models.GameSearchResult`, empty when PSN returned no
+            container for that domain.
+        """
+        return await self._session.run_with_reauth(lambda: self._universal_search_games(query, domain, limit))
+
+    async def _universal_search_games(self, query: str, domain: GameSearchDomain, limit: int) -> list[GameSearchResult]:
+        response = await run_persisted_query(
+            self._session,
+            _OP_CONTEXT_SEARCH_GAME,
+            {"searchTerm": query, "searchContext": GAME_SEARCH_CONTEXT, "displayTitleLocale": "en-US"},
+            headers=_SEARCH_COMMON_HEADERS,
+            check_errors=False,
+        )
+        results_by_domain = ((response.get("data") or {}).get("universalContextSearch") or {}).get("results") or []
+        container = _domain_container(results_by_domain, domain)
+        items = list(container.get("searchResults") or [])
+        next_cursor = container.get("next") or ""
+
+        for _page in range(MAX_GAME_SEARCH_PAGES):
+            if len(items) >= limit or not next_cursor:
+                break
+            response = await run_persisted_query(
+                self._session,
+                _OP_DOMAIN_SEARCH_GAME,
+                {
+                    "searchTerm": query,
+                    "searchDomain": domain,
+                    "pageSize": limit - len(items),
+                    "pageOffset": len(items),
+                    "nextCursor": next_cursor,
+                },
+                headers=_SEARCH_COMMON_HEADERS,
+                check_errors=False,
+            )
+            container = (response.get("data") or {}).get("universalDomainSearch") or {}
+            page_items = container.get("searchResults") or []
+            if not page_items:
+                break
+            items.extend(page_items)
+            next_cursor = container.get("next") or ""
+
+        return [_game_search_result(item) for item in items[:limit]]
 
     async def devices(self) -> list[AccountDevice]:
         """List the consoles/devices registered (activated) to the authenticated account.

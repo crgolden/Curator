@@ -1,38 +1,39 @@
 """Integration tests for every ``db/migrations/*.sql`` file, applied in order to a **real** PostgreSQL
 instance.
 
-These are the only tests in this suite that touch a live database. They are gated on the
-``CURATOR_TEST_DATABASE_URL`` environment variable via a module-level ``pytest.mark.skipif`` — when it is
-unset (the default in CI and any plain local ``pytest`` run), every test in this module is skipped, not
-run against a fake or an in-memory substitute. When you do set it, **point it at a disposable, throwaway
-database created solely for this purpose** — never a shared or production database.
+These are the only tests in this suite that touch a live database. They are gated on
+``CURATOR_TEST_DATABASE_URL``; ``Curator/TESTING.md`` owns how to set it, locally and in CI. Point it at a
+database you are willing to have migrated — never production.
 
-Every migration file (in filename order) is applied once per session, inside a transaction that is never
-committed; each test then runs inside a nested ``SAVEPOINT`` that is rolled back in teardown, and the
-session-wide transaction is itself rolled back at the end. A correctly-configured disposable database is
-therefore left exactly as it started; nothing here ever commits.
+The schema is built by ``db/run_migrations.py``, the same runner the deploy job uses, which applies only
+what its ``schema_migrations`` table does not already record.
 
-The whole module shares one connection and one schema build, so it carries an ``xdist_group`` mark: under
-``-n``/``--dist loadgroup`` every test here lands on a single worker. Split across workers, each would
-open its own connection and re-apply the same ``CREATE TABLE`` statements inside its own uncommitted
-transaction, and block on the first worker's locks.
+**This module commits**: the target database is left migrated. Individual tests leave no trace — each runs
+in a ``SAVEPOINT`` rolled back in teardown.
 
-Example (PowerShell), using a scratch database on a local/dev PostgreSQL instance you control:
+The module shares one connection, so it carries an ``xdist_group`` mark: under ``-n``/``--dist loadgroup``
+every test lands on one worker rather than contending on the same migration locks.
 
-    $env:CURATOR_TEST_DATABASE_URL = "postgresql://postgres@localhost:5432/curator_schema_test_scratch"
-    python -m pytest tests/test_schema.py -q
+Example (PowerShell):
+
+    python -m pytest tests/test_schema.py -q -n0
 """
 
 from __future__ import annotations
 
+import importlib.util
 import json
 import os
 import uuid
 from pathlib import Path
+from urllib.parse import urlsplit
 
 import psycopg
 import pytest
 from psycopg import errors as psycopg_errors
+
+from curator.collections.repository import _ITEM_BASE_FROM, _ITEM_SELECT_COLUMNS, CollectionsRepository
+from curator.psn.title_platform import CONSOLE_PLATFORM_IDS
 
 DATABASE_URL = os.environ.get("CURATOR_TEST_DATABASE_URL")
 
@@ -48,6 +49,8 @@ pytestmark = [
 ]
 
 MIGRATIONS_DIR = Path(__file__).resolve().parent.parent / "db" / "migrations"
+
+RUN_MIGRATIONS_PATH = Path(__file__).resolve().parent.parent / "db" / "run_migrations.py"
 
 EXPECTED_TABLES = {
     "app_users",
@@ -89,19 +92,36 @@ EXPECTED_TABLES = {
 }
 
 
+def _run_migrations(database_url: str) -> None:
+    """Apply pending migrations via ``db/run_migrations.py``, loaded by path because ``db/`` is a payload
+    directory rather than an importable package."""
+    spec = importlib.util.spec_from_file_location("curator_db_run_migrations", RUN_MIGRATIONS_PATH)
+    assert spec is not None
+    assert spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    module.run_migrations(database_url)
+
+
 @pytest.fixture(scope="session")
 def migrated_connection():
-    """Open one connection and apply every migration file (in filename order) inside a single transaction
-    that is never committed, then roll the whole thing back when the session ends.
+    """Migrate the target database, then open one connection shared by every test in the session.
 
-    Session-scoped because applying the migrations is the entire cost of this module: replaying them per
-    test made 26 tests take ~11 seconds each, and the schema they build is identical every time.
+    Leaves the database migrated rather than pristine; per-test isolation is ``db_connection``'s savepoint.
+
+    :raises RuntimeError: If the target database name does not end in ``_test``.
     """
+    database = urlsplit(DATABASE_URL).path.lstrip("/")
+    if not database.endswith("_test"):
+        raise RuntimeError(
+            f"CURATOR_TEST_DATABASE_URL names {database!r}, which is not a *_test database. This module "
+            "migrates and commits, so pointing it at the exploratory 'curator' database would alter the "
+            "data kept there for manual work. See Curator/TESTING.md."
+        )
+
+    _run_migrations(DATABASE_URL)
     connection = psycopg.connect(DATABASE_URL, autocommit=False)
     try:
-        with connection.cursor() as cur:
-            for migration_file in sorted(MIGRATIONS_DIR.glob("*.sql")):
-                cur.execute(migration_file.read_text(encoding="utf-8"))
         yield connection
     finally:
         connection.rollback()
@@ -233,6 +253,111 @@ def test_collection_definitions_share_slug_is_unique(db_connection, seeded_user_
         )
 
 
+def test_deleting_a_console_untargets_its_collections_rather_than_deleting_them(db_connection, seeded_user_and_game):
+    user_sub, _game_id = seeded_user_and_game
+    console_id = str(uuid.uuid4())
+    with db_connection.cursor() as cur:
+        cur.execute(
+            "INSERT INTO user_consoles (console_id, identity_sub, name, platform, raw_capacity_gb) "
+            "VALUES (%s, %s, %s, %s, %s)",
+            (console_id, user_sub, "Living room PS5", "PS5", 825),
+        )
+        cur.execute(
+            "INSERT INTO collection_definitions (identity_sub, name, kind, share_slug, install_target_console_id) "
+            "VALUES (%s, %s, %s, %s, %s) RETURNING definition_id",
+            (user_sub, "For the PS5", "filter_list", "slug-0052", console_id),
+        )
+        definition_id = cur.fetchone()[0]
+
+        cur.execute("DELETE FROM user_consoles WHERE console_id = %s", (console_id,))
+
+        cur.execute(
+            "SELECT install_target_console_id FROM collection_definitions WHERE definition_id = %s",
+            (definition_id,),
+        )
+        surviving = cur.fetchall()
+
+    assert surviving == [(None,)]
+
+
+def test_an_install_target_that_is_no_console_is_rejected_so_the_set_null_above_is_not_vacuous(
+    db_connection, seeded_user_and_game
+):
+    user_sub, _game_id = seeded_user_and_game
+    with pytest.raises(psycopg_errors.ForeignKeyViolation), db_connection.cursor() as cur:
+        cur.execute(
+            "INSERT INTO collection_definitions (identity_sub, name, kind, share_slug, install_target_console_id) "
+            "VALUES (%s, %s, %s, %s, %s)",
+            (user_sub, "Aimed at nothing", "filter_list", "slug-0052-orphan", str(uuid.uuid4())),
+        )
+
+
+def test_the_real_item_projection_reports_install_state_against_the_target_console(db_connection, seeded_user_and_game):
+    user_sub, installed_game = seeded_user_and_game
+    console_id, absent_game, definition_id = str(uuid.uuid4()), str(uuid.uuid4()), None
+    with db_connection.cursor() as cur:
+        cur.execute(
+            "INSERT INTO games (game_id, canonical_title, normalized_title) VALUES (%s, %s, %s)",
+            (absent_game, "Not Installed", "not installed"),
+        )
+        cur.execute(
+            "INSERT INTO user_consoles (console_id, identity_sub, name, platform, raw_capacity_gb) "
+            "VALUES (%s, %s, %s, %s, %s)",
+            (console_id, user_sub, "Target PS5", "PS5", 825),
+        )
+        cur.execute(
+            "INSERT INTO collection_definitions (identity_sub, name, kind, share_slug, "
+            "install_target_console_id) VALUES (%s, %s, %s, %s, %s) RETURNING definition_id",
+            (user_sub, "Aimed", "filter_list", f"slug-{uuid.uuid4()}", console_id),
+        )
+        definition_id = cur.fetchone()[0]
+        cur.executemany(
+            "INSERT INTO collection_definition_items (definition_id, game_id, rank) VALUES (%s, %s, %s)",
+            [(definition_id, installed_game, 1), (definition_id, absent_game, 2)],
+        )
+        cur.execute(
+            "INSERT INTO console_installs (console_id, game_id, installed) VALUES (%s, %s, true)",
+            (console_id, installed_game),
+        )
+
+        cur.execute(
+            f"SELECT {_ITEM_SELECT_COLUMNS} {_ITEM_BASE_FROM} WHERE cdi.definition_id = %s ORDER BY cdi.rank",
+            (definition_id,),
+        )
+        items = [CollectionsRepository._to_item(row) for row in cur.fetchall()]
+
+    assert [item.installed_on_target for item in items] == [True, False], (
+        "the projection and the row-index mapping are asserted together here because every other test of "
+        "this query builds its rows by hand, so a reordered SELECT stays green"
+    )
+
+
+def test_the_item_projection_reports_no_install_state_when_a_collection_targets_no_console(
+    db_connection, seeded_user_and_game
+):
+    user_sub, game_id = seeded_user_and_game
+    with db_connection.cursor() as cur:
+        cur.execute(
+            "INSERT INTO collection_definitions (identity_sub, name, kind, share_slug) "
+            "VALUES (%s, %s, %s, %s) RETURNING definition_id",
+            (user_sub, "Untargeted", "filter_list", f"slug-{uuid.uuid4()}"),
+        )
+        definition_id = cur.fetchone()[0]
+        cur.execute(
+            "INSERT INTO collection_definition_items (definition_id, game_id, rank) VALUES (%s, %s, 1)",
+            (definition_id, game_id),
+        )
+        cur.execute(
+            f"SELECT {_ITEM_SELECT_COLUMNS} {_ITEM_BASE_FROM} WHERE cdi.definition_id = %s",
+            (definition_id,),
+        )
+        items = [CollectionsRepository._to_item(row) for row in cur.fetchall()]
+
+    assert [item.installed_on_target for item in items] == [None], (
+        "None means the collection targets no console, which is a different fact from False"
+    )
+
+
 def test_game_measured_sizes_upserts_per_game_and_platform(db_connection, seeded_user_and_game):
     """WP13: global cache, not history -- a second contribution for the same (game_id, platform)
     overwrites the first rather than accumulating a row (the never-written `measured_sizes` table this
@@ -282,6 +407,52 @@ def test_job_runs_rejects_invalid_status(db_connection):
             "INSERT INTO job_runs (run_id, kind, status) VALUES (%s, %s, %s)",
             (run_id, "library_refresh", "bogus"),
         )
+
+
+def test_job_runs_accepts_the_cancelled_status(db_connection):
+    cancelled_run_id = str(uuid.uuid4())
+    with db_connection.cursor() as cur:
+        cur.execute(
+            "INSERT INTO job_runs (run_id, kind, status) VALUES (%s, %s, %s)",
+            (cancelled_run_id, "enrichment", "cancelled"),
+        )
+        cur.execute("SELECT status FROM job_runs WHERE run_id = %s", (cancelled_run_id,))
+        (status,) = cur.fetchone()
+    assert status == "cancelled"
+
+
+def test_the_python_platform_vocabulary_matches_the_platforms_table(db_connection):
+    """``CONSOLE_PLATFORM_IDS`` is hand-written -- a ``Literal`` cannot be built at runtime -- so this is
+    what stops it drifting from the reference table it narrows. Without it, a platform added by a
+    migration surfaces as a 400 on a console the schema already accepts, and nothing goes red."""
+    with db_connection.cursor() as cur:
+        cur.execute("SELECT platform_id FROM platforms WHERE active ORDER BY sort_order")
+        stored = tuple(row[0] for row in cur.fetchall())
+    assert stored == CONSOLE_PLATFORM_IDS
+
+
+def test_library_entry_platforms_rejects_a_platform_outside_the_platforms_table(db_connection, seeded_user_and_game):
+    user_sub, game_id = seeded_user_and_game
+    with db_connection.cursor() as cur:
+        cur.execute(
+            "INSERT INTO library_entries (identity_sub, game_id, source) VALUES (%s, %s, %s)",
+            (user_sub, game_id, "manual"),
+        )
+    with pytest.raises(psycopg_errors.ForeignKeyViolation), db_connection.cursor() as cur:
+        cur.execute(
+            "INSERT INTO library_entry_platforms (identity_sub, game_id, platform) VALUES (%s, %s, %s)",
+            (user_sub, game_id, "NOT-A-PLATFORM"),
+        )
+
+
+def test_psn_catalog_cache_raw_defaults_to_an_empty_object_rather_than_null(db_connection):
+    """A reader must never have to tell "no payload stored" from "payload stored and empty" -- both mean
+    the row predates a walk that kept it. Same shape as ``entitlement_snapshots.raw``."""
+    with db_connection.cursor() as cur:
+        cur.execute("INSERT INTO psn_catalog_cache (title_id) VALUES (%s)", ("CUSA00207_00",))
+        cur.execute("SELECT raw FROM psn_catalog_cache WHERE title_id = %s", ("CUSA00207_00",))
+        (raw,) = cur.fetchone()
+    assert raw == {}
 
 
 def test_job_runs_accepts_the_abandoned_error_code(db_connection):
@@ -726,3 +897,201 @@ def test_collection_definitions_filter_predicate_round_trips_as_jsonb(db_connect
         cur.execute("SELECT filter_predicate FROM collection_definitions WHERE identity_sub = %s", (user_sub,))
         (filter_predicate,) = cur.fetchone()
     assert filter_predicate == predicate
+
+
+TYPOGRAPHIC_APOSTROPHE = chr(0x2019)
+
+SECOND_TYPOGRAPHIC_APOSTROPHE = chr(0x2018)
+
+ASCII_APOSTROPHE = chr(0x27)
+
+REMATCH_MIGRATION = MIGRATIONS_DIR / "0050_rematch_typographic_apostrophe_keys.sql"
+
+
+def apply_rematch(cur):
+    """Run migration 0050 against the current savepoint.
+
+    The session fixture already applied it once over an empty database, where every statement was a no-op.
+    Re-running it here against seeded rows is what exercises it, and re-running it a second time is what
+    proves the idempotence its header claims -- the migration drops its own helper function, so each
+    application starts from the same state the deploy job starts from.
+    """
+    cur.execute(REMATCH_MIGRATION.read_text(encoding="utf-8"))
+
+
+def seed_possessive_game(cur, *, apostrophe, rawg_enriched, opencritic_enriched, attempted):
+    """Insert one ``games`` row whose title is a possessive spelled with ``apostrophe``, plus its
+    enrichment row.
+
+    :returns: the new ``game_id``.
+    """
+    game_id = str(uuid.uuid4())
+    title = f"Studio{uuid.uuid4().hex[:8]}{apostrophe}s Adventure"
+    cur.execute(
+        "INSERT INTO games (game_id, canonical_title, normalized_title) VALUES (%s, %s, %s)",
+        (game_id, title, title.lower()),
+    )
+    cur.execute(
+        "INSERT INTO game_enrichment (game_id, rawg_enriched, opencritic_enriched, rawg_attempted_at) "
+        "VALUES (%s, %s, %s, %s)",
+        (game_id, rawg_enriched, opencritic_enriched, "2026-08-01T00:00:00+00:00" if attempted else None),
+    )
+    return game_id
+
+
+def rawg_payload(marker):
+    return json.dumps({"slug": marker})
+
+
+def test_rematch_rekeys_a_stale_rawg_cache_row_and_keeps_its_payload(db_connection):
+    stale_key = f"studio{uuid.uuid4().hex[:8]}{TYPOGRAPHIC_APOSTROPHE}s adventure"
+    fresh_key = stale_key.replace(TYPOGRAPHIC_APOSTROPHE, ASCII_APOSTROPHE)
+    rawg_game_id = uuid.uuid4().int % 1_000_000
+    payload = rawg_payload(uuid.uuid4().hex)
+    with db_connection.cursor() as cur:
+        cur.execute(
+            "INSERT INTO rawg_cache (normalized_title, rawg_game_id, raw) VALUES (%s, %s, %s::jsonb)",
+            (stale_key, rawg_game_id, payload),
+        )
+        apply_rematch(cur)
+        cur.execute(
+            "SELECT normalized_title, rawg_game_id, raw FROM rawg_cache WHERE normalized_title IN (%s, %s)",
+            (stale_key, fresh_key),
+        )
+        surviving = cur.fetchall()
+    assert surviving == [(fresh_key, rawg_game_id, json.loads(payload))]
+
+
+def test_rematch_leaves_an_already_normalized_rawg_cache_row_untouched(db_connection):
+    fresh_key = f"studio{uuid.uuid4().hex[:8]}'s adventure"
+    rawg_game_id = uuid.uuid4().int % 1_000_000
+    with db_connection.cursor() as cur:
+        cur.execute(
+            "INSERT INTO rawg_cache (normalized_title, rawg_game_id, raw) VALUES (%s, %s, %s::jsonb)",
+            (fresh_key, rawg_game_id, rawg_payload(uuid.uuid4().hex)),
+        )
+        cur.execute("SELECT fetched_at FROM rawg_cache WHERE normalized_title = %s", (fresh_key,))
+        (before,) = cur.fetchone()
+        apply_rematch(cur)
+        cur.execute(
+            "SELECT normalized_title, rawg_game_id, fetched_at FROM rawg_cache WHERE normalized_title = %s",
+            (fresh_key,),
+        )
+        after = cur.fetchone()
+    assert after == (fresh_key, rawg_game_id, before)
+
+
+def test_rematch_lets_a_colliding_stale_positive_replace_the_cached_miss_it_lands_on(db_connection):
+    stale_key = f"studio{uuid.uuid4().hex[:8]}{TYPOGRAPHIC_APOSTROPHE}s adventure"
+    fresh_key = stale_key.replace(TYPOGRAPHIC_APOSTROPHE, ASCII_APOSTROPHE)
+    rawg_game_id = uuid.uuid4().int % 1_000_000
+    payload = rawg_payload(uuid.uuid4().hex)
+    with db_connection.cursor() as cur:
+        cur.execute(
+            "INSERT INTO rawg_cache (normalized_title, rawg_game_id, raw) VALUES (%s, NULL, NULL)", (fresh_key,)
+        )
+        cur.execute(
+            "INSERT INTO rawg_cache (normalized_title, rawg_game_id, raw) VALUES (%s, %s, %s::jsonb)",
+            (stale_key, rawg_game_id, payload),
+        )
+        apply_rematch(cur)
+        cur.execute(
+            "SELECT normalized_title, rawg_game_id, raw FROM rawg_cache WHERE normalized_title IN (%s, %s)",
+            (stale_key, fresh_key),
+        )
+        surviving = cur.fetchall()
+    assert surviving == [(fresh_key, rawg_game_id, json.loads(payload))]
+
+
+def test_rematch_never_lets_a_stale_cached_miss_overwrite_the_payload_it_lands_on(db_connection):
+    stale_key = f"studio{uuid.uuid4().hex[:8]}{TYPOGRAPHIC_APOSTROPHE}s adventure"
+    fresh_key = stale_key.replace(TYPOGRAPHIC_APOSTROPHE, ASCII_APOSTROPHE)
+    rawg_game_id = uuid.uuid4().int % 1_000_000
+    payload = rawg_payload(uuid.uuid4().hex)
+    with db_connection.cursor() as cur:
+        cur.execute(
+            "INSERT INTO rawg_cache (normalized_title, rawg_game_id, raw) VALUES (%s, %s, %s::jsonb)",
+            (fresh_key, rawg_game_id, payload),
+        )
+        cur.execute(
+            "INSERT INTO rawg_cache (normalized_title, rawg_game_id, raw) VALUES (%s, NULL, NULL)", (stale_key,)
+        )
+        apply_rematch(cur)
+        cur.execute(
+            "SELECT normalized_title, rawg_game_id, raw FROM rawg_cache WHERE normalized_title IN (%s, %s)",
+            (stale_key, fresh_key),
+        )
+        surviving = cur.fetchall()
+    assert surviving == [(fresh_key, rawg_game_id, json.loads(payload))]
+
+
+def test_rematch_folds_two_stale_spellings_of_one_title_onto_a_single_surviving_row(db_connection):
+    """Two typographic spellings of the same title fold to the same fresh key. Re-keying both in place
+    would collide on rawg_cache's primary key and abort the whole migration -- and a migration that fails
+    is never recorded in schema_migrations, so every later deploy would retry and fail the same way."""
+    base = f"studio{uuid.uuid4().hex[:8]}"
+    right_single_quote_key = f"{base}{TYPOGRAPHIC_APOSTROPHE}s adventure"
+    left_single_quote_key = f"{base}{SECOND_TYPOGRAPHIC_APOSTROPHE}s adventure"
+    fresh_key = f"{base}{ASCII_APOSTROPHE}s adventure"
+    rawg_game_id = uuid.uuid4().int % 1_000_000
+    payload = rawg_payload(uuid.uuid4().hex)
+    with db_connection.cursor() as cur:
+        cur.execute(
+            "INSERT INTO rawg_cache (normalized_title, rawg_game_id, raw) VALUES (%s, NULL, NULL)",
+            (left_single_quote_key,),
+        )
+        cur.execute(
+            "INSERT INTO rawg_cache (normalized_title, rawg_game_id, raw) VALUES (%s, %s, %s::jsonb)",
+            (right_single_quote_key, rawg_game_id, payload),
+        )
+        apply_rematch(cur)
+        cur.execute(
+            "SELECT normalized_title, rawg_game_id, raw FROM rawg_cache WHERE normalized_title IN (%s, %s, %s)",
+            (right_single_quote_key, left_single_quote_key, fresh_key),
+        )
+        surviving = cur.fetchall()
+    assert surviving == [(fresh_key, rawg_game_id, json.loads(payload))]
+
+
+def test_rematch_clears_the_tombstone_only_where_a_provider_actually_missed(db_connection):
+    with db_connection.cursor() as cur:
+        missed_id = seed_possessive_game(
+            cur, apostrophe=TYPOGRAPHIC_APOSTROPHE, rawg_enriched=True, opencritic_enriched=False, attempted=True
+        )
+        matched_id = seed_possessive_game(
+            cur, apostrophe=TYPOGRAPHIC_APOSTROPHE, rawg_enriched=True, opencritic_enriched=True, attempted=True
+        )
+        ascii_id = seed_possessive_game(
+            cur, apostrophe=ASCII_APOSTROPHE, rawg_enriched=True, opencritic_enriched=False, attempted=True
+        )
+        apply_rematch(cur)
+        cur.execute(
+            "SELECT game_id FROM game_enrichment WHERE rawg_attempted_at IS NULL AND game_id IN (%s, %s, %s)",
+            (missed_id, matched_id, ascii_id),
+        )
+        re_enrolled = [str(row[0]) for row in cur.fetchall()]
+    assert re_enrolled == [missed_id]
+
+
+def test_rematch_is_a_no_op_on_a_second_application(db_connection):
+    stale_key = f"studio{uuid.uuid4().hex[:8]}{TYPOGRAPHIC_APOSTROPHE}s adventure"
+    fresh_key = stale_key.replace(TYPOGRAPHIC_APOSTROPHE, ASCII_APOSTROPHE)
+    with db_connection.cursor() as cur:
+        cur.execute(
+            "INSERT INTO rawg_cache (normalized_title, rawg_game_id, raw) VALUES (%s, %s, %s::jsonb)",
+            (stale_key, uuid.uuid4().int % 1_000_000, rawg_payload(uuid.uuid4().hex)),
+        )
+        apply_rematch(cur)
+        cur.execute(
+            "SELECT normalized_title, rawg_game_id, raw, fetched_at FROM rawg_cache WHERE normalized_title = %s",
+            (fresh_key,),
+        )
+        after_first = cur.fetchone()
+        apply_rematch(cur)
+        cur.execute(
+            "SELECT normalized_title, rawg_game_id, raw, fetched_at FROM rawg_cache WHERE normalized_title = %s",
+            (fresh_key,),
+        )
+        after_second = cur.fetchone()
+    assert after_first is not None
+    assert after_second == after_first

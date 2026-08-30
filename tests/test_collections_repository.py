@@ -6,6 +6,8 @@ from datetime import datetime, timezone
 from random import randint
 from uuid import uuid4
 
+import pytest
+
 from curator.catalog.cover_art import SQUARE_COVER_ART_SQL
 from curator.collections.collection_spec import CollectionSpec
 from curator.collections.filter_predicate import GenreIn
@@ -119,8 +121,7 @@ async def test_list_candidates_no_platform_filter():
     assert candidates[0].percent_completed == 63
     conn = pool.connections[0]
     sql, params = conn.executed[0]
-    assert "native_ps5 = true" not in sql
-    assert "ps4_eligible = true" not in sql
+    assert "library_entry_platforms" not in sql
     assert params == ("sub-1",)
 
 
@@ -164,24 +165,35 @@ async def test_list_candidates_omits_the_completion_clause_when_no_floor_is_set(
     assert params == ("sub-1",)
 
 
-async def test_list_candidates_filters_by_ps5_platform():
+@pytest.mark.parametrize("platform", ["PS5", "PS4", "PS3", "PSVITA", "PSP", "PS2", "PS1"])
+async def test_list_candidates_filters_every_platform_through_library_entry_platforms(platform):
+    """The boolean pair could only express PS5 and PS4, so a PS3/Vita/PSP console fell through to an
+    unfiltered candidate list -- every game in the library, including PS5-only ones."""
     pool = FakePool(fetchall_results=[[]])
     repo = CollectionsRepository(pool)
 
-    await repo.list_candidates("sub-1", platform="PS5")
+    await repo.list_candidates("sub-1", platform=platform)
 
-    sql, _params = pool.connections[0].executed[0]
-    assert "le.native_ps5 = true" in sql
+    sql, params = pool.connections[0].executed[0]
+    assert "FROM library_entry_platforms lep" in sql
+    assert "le.native_ps5" not in sql, "the boolean pair must not decide platform membership any more"
+    assert "le.ps4_eligible" not in sql
+    assert params == (platform, "sub-1", platform)
 
 
-async def test_list_candidates_filters_by_ps4_platform():
+async def test_list_candidates_reads_the_measured_size_for_the_platform_being_filled():
+    """A game owned on both PS4 and PS5 has two game_measured_sizes rows. The pair-derived CASE always
+    picked the PS5 one, so a PS4 capacity fill packed against PS5 sizes."""
     pool = FakePool(fetchall_results=[[]])
     repo = CollectionsRepository(pool)
 
     await repo.list_candidates("sub-1", platform="PS4")
 
-    sql, _params = pool.connections[0].executed[0]
-    assert "le.ps4_eligible = true" in sql
+    sql, params = pool.connections[0].executed[0]
+    assert "CASE WHEN le.native_ps5" not in sql
+    assert params == ("PS4", "sub-1", "PS4"), (
+        "the measured-size subquery is in the SELECT list, so its parameter binds before the WHERE clause's"
+    )
 
 
 async def test_list_candidates_excludes_inactive_entitlements_by_default():
@@ -252,7 +264,7 @@ async def test_save_definition_returns_new_id_and_serializes_genre_filter():
     sql, params = pool.connections[0].executed[0]
     assert "INSERT INTO collection_definitions" in sql
     assert params is not None
-    assert params[:-2] == (
+    assert params[:-3] == (
         "sub-1",
         "My RPGs",
         None,
@@ -266,9 +278,10 @@ async def test_save_definition_returns_new_id_and_serializes_genre_filter():
         None,
         None,
     )
-    assert isinstance(params[-2], str)
-    assert len(params[-2]) > 0
-    assert params[-1] == []
+    assert isinstance(params[-3], str)
+    assert len(params[-3]) > 0
+    assert params[-2] == []
+    assert params[-1] is None
 
 
 async def test_save_definition_persists_min_percent_completed():
@@ -280,9 +293,10 @@ async def test_save_definition_persists_min_percent_completed():
 
     _sql, params = pool.connections[0].executed[0]
     assert params is not None
-    assert params[:-2] == ("sub-1", "Nearly Done", None, "filter_list", None, [], None, None, None, False, 75, None)
-    assert isinstance(params[-2], str)
-    assert len(params[-2]) > 0
+    assert params[:-3] == ("sub-1", "Nearly Done", None, "filter_list", None, [], None, None, None, False, 75, None)
+    assert params[-1] is None, "a new collection targets no console until one is assigned"
+    assert isinstance(params[-3], str)
+    assert len(params[-3]) > 0
 
 
 async def test_save_definition_persists_exclude_installed_on():
@@ -294,7 +308,7 @@ async def test_save_definition_persists_exclude_installed_on():
 
     _sql, params = pool.connections[0].executed[0]
     assert params is not None
-    assert params[-1] == ["c1", "c2"]
+    assert params[-2] == ["c1", "c2"]
 
 
 async def test_save_definition_serializes_filter_predicate_as_json():
@@ -306,7 +320,7 @@ async def test_save_definition_serializes_filter_predicate_as_json():
 
     _sql, params = pool.connections[0].executed[0]
     assert params is not None
-    assert params[-3] == '{"op": "genre_in", "values": ["RPG", "Action"]}'
+    assert params[-4] == '{"op": "genre_in", "values": ["RPG", "Action"]}'
 
 
 async def test_save_definition_leaves_filter_predicate_null_when_not_supplied():
@@ -317,7 +331,7 @@ async def test_save_definition_leaves_filter_predicate_null_when_not_supplied():
 
     _sql, params = pool.connections[0].executed[0]
     assert params is not None
-    assert params[-3] is None
+    assert params[-4] is None
 
 
 async def test_save_definition_stores_membership_ranked_by_position():
@@ -367,6 +381,7 @@ async def test_list_definitions_maps_rows():
                     "abc123",
                     3,
                     ["c1"],
+                    None,
                 )
             ],
         ]
@@ -414,6 +429,7 @@ async def test_list_definitions_parses_a_stored_filter_predicate():
                     None,
                     0,
                     [],
+                    None,
                 )
             ],
         ]
@@ -447,6 +463,7 @@ async def test_get_definition_scopes_to_identity_sub():
                 "xyz789",
                 0,
                 [],
+                None,
             )
         ]
     )
@@ -541,7 +558,7 @@ async def test_existing_game_ids_short_circuits_on_empty_input():
 
 
 async def test_list_definition_items_takes_no_identity_sub_and_orders_by_rank():
-    row = ("g1", 1, "God of War", "God of War", "Action", "AAA", 94.0, 92.0, 4.5, "a.png", True)
+    row = ("g1", 1, "God of War", "God of War", "Action", "AAA", 94.0, 92.0, 4.5, "a.png", True, None)
     pool = FakePool(fetchall_results=[[row]])
     repo = CollectionsRepository(pool)
 
@@ -559,7 +576,7 @@ async def test_list_definition_items_takes_no_identity_sub_and_orders_by_rank():
 
 
 async def test_list_definition_items_reports_a_game_the_owner_lost_access_to():
-    row = ("g1", 1, "Lapsed Title", None, None, None, None, None, None, None, False)
+    row = ("g1", 1, "Lapsed Title", None, None, None, None, None, None, None, False, None)
     pool = FakePool(fetchall_results=[[row]])
     repo = CollectionsRepository(pool)
 
@@ -571,7 +588,7 @@ async def test_list_definition_items_reports_a_game_the_owner_lost_access_to():
 async def test_list_definition_items_reads_entitlement_artwork():
     """Collection items carry the square entitlement icon, identity-free so a collection of
     freshly-imported games renders for a viewer who is not the importer."""
-    row = ("g1", 1, "God of War", None, None, None, None, None, None, "entitlement.png", True)
+    row = ("g1", 1, "God of War", None, None, None, None, None, None, "entitlement.png", True, None)
     pool = FakePool(fetchall_results=[[row]])
     repo = CollectionsRepository(pool)
 

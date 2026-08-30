@@ -80,6 +80,7 @@ _BEARER_REQUIRED_ROUTES = [
     ("get", "/users/sub-x/following", {}),
     ("get", "/users/sub-x/library", {}),
     ("get", "/users/sub-x/collections", {}),
+    ("post", "/enrichment/runs/run-x/cancel", {}),
 ]
 
 

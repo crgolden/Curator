@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 from cryptography.fernet import Fernet
 
-from curator.persistence.crypto import TokenCrypto
+from curator.persistence.crypto import SCHEME_AES_GCM_V1, TokenCrypto
 
 _SCRIPT = Path(__file__).resolve().parents[1] / "db" / "reencrypt_tokens.py"
 _SPEC = importlib.util.spec_from_file_location("reencrypt_tokens", _SCRIPT)
@@ -50,6 +50,20 @@ def test_already_migrated_blob_is_left_alone_so_a_rerun_is_a_noop(key: bytes) ->
 
     disposition, plaintext = classify(crypto.encrypt(SECRET), crypto, Fernet(key))
 
+    assert disposition is Disposition.ALREADY_AES
+    assert plaintext is None
+
+
+def test_scheme_byte_led_blob_is_left_alone_rather_than_failing_the_deploy(key: bytes) -> None:
+    """The deploy gate is a third reader of these columns. Once either runtime writes the scheme byte, a
+    versioned blob must classify as already-migrated -- classifying it UNREADABLE would exit non-zero and
+    block every subsequent deploy."""
+    crypto = TokenCrypto(key)
+    versioned = crypto.encrypt(SECRET)
+
+    disposition, plaintext = classify(versioned, crypto, Fernet(key))
+
+    assert versioned[0] == SCHEME_AES_GCM_V1
     assert disposition is Disposition.ALREADY_AES
     assert plaintext is None
 

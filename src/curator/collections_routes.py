@@ -1,23 +1,3 @@
-"""``/collections`` -- create, read, edit, delete and re-run a user's named collections.
-
-A collection is an **explicit, ordered list of games the owner chose**, stored in
-``collection_definition_items``. It is not a live predicate. The owner can edit that list whenever they
-like via ``PATCH``; what it never does is change on its own. The filter fields on a definition
-(``genre_filter``/``min_score``/``aaa_tier_filter``) are provenance and an authoring aid -- they say how
-the list was first assembled and let the owner ask for a fresh proposal -- but membership only ever
-changes when the owner asks for it.
-
-That distinction is what makes a collection shareable: a viewer who is not the owner sees exactly the
-titles the owner put in it, rather than whatever re-running a filter against somebody's library would
-produce.
-
-``POST /collections/preview`` is the "try before you save" entry point to :mod:`curator.collections` --
-the same on-demand pipeline, run against a spec supplied inline, persisting nothing. ``POST /collections``
-saves a collection; ``GET``/``PATCH``/``DELETE /collections/{id}`` read one (with its items), edit it, and
-remove it; ``POST /collections/{id}/runs`` generates and persists a run against the saved spec, and is the
-one path that deliberately does *not* touch membership.
-"""
-
 from __future__ import annotations
 
 from typing import Any, Literal
@@ -72,7 +52,14 @@ class CollectionSpecRequest(BaseModel):
 
 
 class CollectionGameResponse(BaseModel):
-    """One game in a collection-preview result."""
+    """One game in a collection-preview result.
+
+    :param size_source: Where ``size_gb`` came from -- ``"measured"`` (a contributed
+        ``game_measured_sizes`` row), ``"estimated"`` (a ``size_estimates`` band) or ``"default"`` (the
+        flat fallback, meaning nothing knows this title's size). ``"default"`` is what a client prompts
+        on: ``PUT /games/{game_id}/measured-sizes/{platform}`` takes the answer, and it feeds the global
+        table every owner's packing then draws on, not a private per-user value.
+    """
 
     game_id: str
     title: str
@@ -82,6 +69,7 @@ class CollectionGameResponse(BaseModel):
     composite_score: float | None
     rank_score: int
     size_gb: float
+    size_source: str
     percent_completed: int | None
 
 
@@ -179,6 +167,7 @@ def _to_response(candidate: GameCandidate) -> CollectionGameResponse:
         composite_score=candidate.composite_score,
         rank_score=candidate.rank_score,
         size_gb=candidate.size_gb,
+        size_source=candidate.size_source,
         percent_completed=candidate.percent_completed,
     )
 
@@ -204,14 +193,21 @@ class SaveDefinitionRequest(BaseModel):
     min_percent_completed: int | None = None
     sort_order: str | None = None
     exclude_installed_on: list[str] = []
+    install_target_console_id: str | None = None
 
 
 class UpdateDefinitionRequest(BaseModel):
-    """The ``PATCH /collections/{id}`` request body. Omitted fields are left as they are."""
+    """The ``PATCH /collections/{id}`` request body. Omitted fields are left as they are.
+
+    ``install_target_console_id`` is the one field where omitted and ``null`` mean different things --
+    omitting it keeps the current target, sending ``null`` clears it -- so the route reads
+    ``model_fields_set`` rather than the value.
+    """
 
     name: str | None = None
     description: str | None = None
     game_ids: list[str] | None = None
+    install_target_console_id: str | None = None
 
 
 class DefinitionResponse(BaseModel):
@@ -230,6 +226,7 @@ class DefinitionResponse(BaseModel):
     min_percent_completed: int | None
     sort_order: str | None
     exclude_installed_on: list[str]
+    install_target_console_id: str | None
     visibility: str
     share_slug: str | None
     item_count: int
@@ -255,6 +252,7 @@ class CollectionItemResponse(BaseModel):
     psn_rating: float | None
     cover_image_url: str | None
     owner_has_access: bool
+    installed_on_target: bool | None = None
 
 
 class DefinitionDetailResponse(DefinitionResponse):
@@ -320,7 +318,7 @@ async def save_definition(
     filter_predicate = _parse_filter_predicate(body.filter_predicate)
     collections_repository: CollectionsRepository = request.app.state.collections_repository
 
-    if body.console_id is not None or body.exclude_installed_on:
+    if body.console_id is not None or body.exclude_installed_on or body.install_target_console_id is not None:
         consoles = await collections_repository.list_user_consoles(claims.sub)
         owned_console_ids = {console.console_id for console in consoles}
         if body.console_id is not None and body.console_id not in owned_console_ids:
@@ -330,6 +328,11 @@ async def save_definition(
             raise HTTPException(
                 status_code=400,
                 detail=f"Unknown console_id(s) for this user in exclude_installed_on: {unknown_exclusions!r}.",
+            )
+        if body.install_target_console_id is not None and body.install_target_console_id not in owned_console_ids:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Unknown install_target_console_id {body.install_target_console_id!r} for this user.",
             )
 
     game_ids = _normalize_game_ids(body.game_ids)
@@ -353,6 +356,7 @@ async def save_definition(
             ),
             description=body.description,
             game_ids=game_ids,
+            install_target_console_id=body.install_target_console_id,
         )
     except psycopg.errors.UniqueViolation as exc:
         raise HTTPException(status_code=409, detail=f"You already have a collection named {body.name!r}.") from exc
@@ -525,9 +529,23 @@ async def update_definition(
     if game_ids is not None:
         await _reject_unknown_games(collections_repository, game_ids)
 
+    retarget = "install_target_console_id" in supplied
+    if retarget and body.install_target_console_id is not None:
+        consoles = await collections_repository.list_user_consoles(claims.sub)
+        if body.install_target_console_id not in {console.console_id for console in consoles}:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Unknown install_target_console_id {body.install_target_console_id!r} for this user.",
+            )
+
     try:
         await collections_repository.update_definition(
-            definition_id, name=name, description=description, game_ids=game_ids
+            definition_id,
+            name=name,
+            description=description,
+            game_ids=game_ids,
+            install_target_console_id=body.install_target_console_id,
+            retarget_install_console=retarget,
         )
     except psycopg.errors.UniqueViolation as exc:
         raise HTTPException(status_code=409, detail=f"You already have a collection named {name!r}.") from exc
@@ -697,6 +715,7 @@ def _definition_to_response(definition: CollectionDefinition) -> DefinitionRespo
         min_percent_completed=definition.min_percent_completed,
         sort_order=definition.sort_order,
         exclude_installed_on=list(definition.exclude_installed_on),
+        install_target_console_id=definition.install_target_console_id,
         visibility=definition.visibility,
         share_slug=definition.share_slug,
         item_count=definition.item_count,
@@ -716,4 +735,5 @@ def _to_item_response(item: CollectionItem) -> CollectionItemResponse:
         psn_rating=item.psn_rating,
         cover_image_url=item.cover_image_url,
         owner_has_access=item.owner_has_access,
+        installed_on_target=item.installed_on_target,
     )

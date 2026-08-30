@@ -8,11 +8,13 @@ from __future__ import annotations
 
 import json
 import logging
-from collections.abc import Sequence
-from dataclasses import dataclass
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass, field
 from typing import Any
 
 import httpx
+
+from curator.psn._media import cover_image_url
 
 logger = logging.getLogger("curator")
 
@@ -50,21 +52,31 @@ class StoreFilterIgnoredError(StoreCatalogError):
     """Raised when a requested ``filterBy`` provably did not take effect."""
 
 
-_COVER_ART_ROLE_PREFERENCE = ("GAMEHUB_COVER_ART", "EDITION_KEY_ART", "PORTRAIT_BANNER", "BACKGROUND")
-
 FULL_GAME_CLASSIFICATION = "Full Game"
 
 
 @dataclass(frozen=True, slots=True)
 class StoreProduct:
-    """One product as the storefront lists it."""
+    """One product as the storefront lists it.
+
+    :param name: The storefront's own title, already trimmed, or ``None`` when the gateway published none
+        that can be used as a title. It is never a blank string: a product with nothing to be called is a
+        product the catalog cannot store, and saying so with ``None`` is what lets the repository skip it
+        instead of inserting a game named "".
+    :param raw: The whole product node as the gateway sent it. The named fields above are a convenience
+        projection over it, not the extent of what arrived: ``price``, ``sortingOptions``, ``skus`` and the
+        sibling ``concepts`` collection are all in this response and none of them has a column yet. Keeping
+        the node is what stops a later decision to use one of them costing a second full catalog walk --
+        see ``0047_psn_catalog_cache_raw.sql``.
+    """
 
     product_id: str
-    name: str
+    name: str | None
     platforms: tuple[str, ...]
     np_title_id: str | None
     cover_image_url: str | None
     classification: str | None
+    raw: Mapping[str, Any] = field(default_factory=dict)
 
     @property
     def is_full_game(self) -> bool:
@@ -248,22 +260,23 @@ def _raise_for_store_errors(payload: dict[str, Any], operation_name: str) -> Non
         raise StoreCatalogError(f"PlayStation Store '{operation_name}' failed: {detail}")
 
 
-def _cover_image_url(media: list[dict[str, Any]]) -> str | None:
-    by_role = {str(item.get("role")): str(item.get("url")) for item in media if item.get("type") == "IMAGE"}
-    for role in _COVER_ART_ROLE_PREFERENCE:
-        if role in by_role:
-            return by_role[role]
-    return None
+def _product_name(raw: dict[str, Any]) -> str | None:
+    name = raw.get("name")
+    if not isinstance(name, str):
+        return None
+
+    return name.strip() or None
 
 
 def _to_product(raw: dict[str, Any]) -> StoreProduct:
     return StoreProduct(
         product_id=str(raw["id"]),
-        name=str(raw.get("name") or ""),
+        name=_product_name(raw),
         platforms=tuple(str(platform) for platform in (raw.get("platforms") or [])),
         np_title_id=str(raw["npTitleId"]) if raw.get("npTitleId") else None,
-        cover_image_url=_cover_image_url(raw.get("media") or []),
+        cover_image_url=cover_image_url(raw.get("media")),
         classification=str(raw["localizedStoreDisplayClassification"])
         if raw.get("localizedStoreDisplayClassification")
         else None,
+        raw=raw,
     )
