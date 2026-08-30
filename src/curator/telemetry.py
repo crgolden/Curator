@@ -140,12 +140,21 @@ def _opt_in_to_stable_semconv() -> None:
 
     The instrumentations read this variable once per process, lazily, on the first ``_instrument()``
     call, so it has to be set before :func:`_register_otlp_providers` and :func:`_instrument_app`
-    run. Left unset, they emit the pre-1.0 names (``http.server.duration`` in milliseconds,
-    ``http.status_code``, ``http.target``, and ``db.system``/``db.statement``), which no other
-    service in the fleet still produces and which no fleet-wide alert or dashboard matches.
+    run. The non-``/dup`` modes are the ones that actually *stop* the old attributes rather than
+    emitting both.
 
-    The value is comma-delimited and both halves are needed: ``http`` alone left psycopg emitting
-    the legacy database attributes, which is why Curator was the last service still producing them.
+    Left unset, the HTTP leg emits the pre-1.0 names (``http.server.duration`` in milliseconds,
+    ``http.status_code``, ``http.target``) and the psycopg leg emits ``db.name``/``db.system``/
+    ``db.statement``/``net.peer.name``. No other service in the fleet still produces either set, and
+    no fleet-wide alert or dashboard matches them. Both halves of the comma-delimited value are
+    needed: ``http`` alone left psycopg emitting the legacy database attributes, which is why
+    Curator was the last service still producing them.
+
+    Selecting ``database`` also changes how Curator's database renders on the Grafana service map:
+    Tempo names a database node from ``peer.service``, then ``server.address``, then the database
+    name, so spans that reach the fallback today draw a separate ``curator`` circle. Once they carry
+    ``db.namespace`` and ``server.address`` they resolve one rule earlier and merge into the shared
+    host node. See ``AGENTS/TELEMETRY.md``.
     """
     os.environ.setdefault(_SEMCONV_STABILITY_OPT_IN_ENV, _SEMCONV_STABILITY_OPT_IN)
 

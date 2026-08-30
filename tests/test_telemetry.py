@@ -291,9 +291,7 @@ def test_configure_tracing_and_metrics_selects_the_stable_http_and_database_semc
 
     telemetry._configure_tracing_and_metrics(app=object(), settings=_SETTINGS_WITH_TELEMETRY)
 
-    selected = os.environ[telemetry._SEMCONV_STABILITY_OPT_IN_ENV]
-    assert selected == "http,database"
-    assert "database" in selected.split(",")
+    assert os.environ[telemetry._SEMCONV_STABILITY_OPT_IN_ENV] == "http,database"
 
 
 def test_configure_tracing_and_metrics_selects_the_semconv_before_anything_is_instrumented(monkeypatch):
