@@ -142,6 +142,18 @@ returns early unless `db.Database.GetDbConnection().Database.EndsWith("Test", St
 Point it at a non-`*Test` database and the cleanup simply does not run. Copy that shape rather than
 trusting that the right connection string was supplied.
 
+**The `*_test` suffix binds CI too, and its service container is named `curator_test` for that reason
+alone.** Nothing about a container that is created and destroyed inside one job needs a careful name — but
+the guard reads the name, not the lifetime, so an arbitrary one fails. It was `curator_ci` and every schema
+test errored, taking Package, Migrate and Deploy down as skipped. **The failure is invisible locally by
+construction**: the local target already ends in `_test`, so the guard's rejecting branch is the one branch
+a local run can never take. Whenever a guard's predicate reads a value CI supplies and the developer
+supplies separately, only CI exercises half of it.
+
+**When that happens the guard is the thing to keep, and the supplied value is the thing to change.**
+Relaxing the suffix would have deleted the only barrier between a suite that commits and the exploratory
+database, to fix a name that was free to change.
+
 **Most of what went wrong on 2026-08-28 was this distinction not being written down.** A scratch database
 was invented, a superuser was used to create it, `curator_test` was swept while another suite depended on
 it, and a credential ended up in a transcript — none of which was necessary, because both URLs were

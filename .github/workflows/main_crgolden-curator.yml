@@ -16,7 +16,7 @@ jobs:
       contents: read
 
     env:
-      POSTGRES_DB: curator_ci
+      POSTGRES_DB: curator_test
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: postgres
 
