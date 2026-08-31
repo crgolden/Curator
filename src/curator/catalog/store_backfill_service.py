@@ -1,6 +1,6 @@
 """Walks the public PlayStation Store and seeds the shared catalog from it.
 
-Design rationale and the decisions behind the walk are in ``AGENTS/DESIGNS.md`` (§7 item 4).
+The decisions behind the walk are in ``AGENTS/Curator.md``'s catalog backfill section.
 """
 
 from __future__ import annotations

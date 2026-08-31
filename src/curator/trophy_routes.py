@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable, Coroutine
-from typing import Any, TypeVar
+from typing import Annotated, Any, TypeVar
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel
@@ -110,8 +110,10 @@ class TrophyGroupsResponse(BaseModel):
     last_updated: str | None
 
 
-@router.get("/summary", response_model=TrophySummaryResponse)
-async def get_trophy_summary(request: Request, claims: TokenClaims = Depends(require_bearer)) -> TrophySummaryResponse:
+@router.get("/summary")
+async def get_trophy_summary(
+    request: Request, claims: Annotated[TokenClaims, Depends(require_bearer)]
+) -> TrophySummaryResponse:
     """Return the caller's overall trophy standing (level, tier, earned counts).
 
     :raises fastapi.HTTPException: 404, if the caller has no PSN link; 403, if ``harvest_trophies`` is not
@@ -123,11 +125,11 @@ async def get_trophy_summary(request: Request, claims: TokenClaims = Depends(req
     return _summary_response(summary)
 
 
-@router.get("/titles", response_model=TrophyTitlesResponse)
+@router.get("/titles")
 async def get_trophy_titles(
     request: Request,
+    claims: Annotated[TokenClaims, Depends(require_bearer)],
     limit: int = Query(default=100, ge=1, le=500),
-    claims: TokenClaims = Depends(require_bearer),
 ) -> TrophyTitlesResponse:
     """List the caller's games that have trophies, with per-game progress.
 
@@ -140,13 +142,13 @@ async def get_trophy_titles(
     return TrophyTitlesResponse(titles=[_title_response(title) for title in titles])
 
 
-@router.get("/titles/{np_communication_id}", response_model=TitleTrophiesResponse)
+@router.get("/titles/{np_communication_id}")
 async def get_title_trophies(
     request: Request,
     np_communication_id: str,
+    claims: Annotated[TokenClaims, Depends(require_bearer)],
     platform: str = Query(...),
     group: str = Query(default="all"),
-    claims: TokenClaims = Depends(require_bearer),
 ) -> TitleTrophiesResponse:
     """List every trophy in a title, merged with the caller's earned progress and rarity.
 
@@ -164,12 +166,12 @@ async def get_title_trophies(
     return TitleTrophiesResponse(trophies=[_detail_response(trophy) for trophy in trophies])
 
 
-@router.get("/titles/{np_communication_id}/groups", response_model=TrophyGroupsResponse)
+@router.get("/titles/{np_communication_id}/groups")
 async def get_trophy_groups(
     request: Request,
     np_communication_id: str,
+    claims: Annotated[TokenClaims, Depends(require_bearer)],
     platform: str = Query(...),
-    claims: TokenClaims = Depends(require_bearer),
 ) -> TrophyGroupsResponse:
     """Get a title's trophy-group breakdown (base game + each DLC), with the caller's earned progress.
 

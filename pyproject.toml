@@ -66,11 +66,7 @@ src = ["src", "tests"]
 
 [tool.ruff.lint]
 select = ["E", "W", "F", "I", "UP", "B", "SIM", "RUF", "PT", "ERA"]
-# B008 (function call in a default argument) is a real anti-pattern in general, but FastAPI's dependency
-# injection is *built* on `Depends(...)` as a parameter default (see `curator.deps.require_verified_caller`,
-# `curator.me_routes.me`, `curator.psn_routes.psn_link`/`psn_unlink`) -- there is no alternative spelling
-# that keeps the DI working, and FastAPI's own docs use this exact shape. Ignored repo-wide rather than
-# per-line `# noqa` clutter on every route handler.
+# B008: FastAPI's Query/Path/Body parameter defaults -- see AGENTS/Curator.md "Dependency injection style".
 ignore = ["B008"]
 
 [tool.ruff.lint.isort]

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Annotated
+
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel
 
@@ -80,7 +82,7 @@ class CatalogBackfillRequest(BaseModel):
     start_offsets: dict[str, int] = {}
 
 
-@router.get("/games", response_model=CatalogGamesResponse)
+@router.get("/games")
 async def list_games(
     request: Request,
     q: str | None = Query(default=None),
@@ -120,9 +122,9 @@ async def list_games(
     )
 
 
-@router.get("/games/{game_id}", response_model=GameSummaryResponse)
+@router.get("/games/{game_id}")
 async def get_game(
-    request: Request, game_id: str, claims: TokenClaims | None = Depends(optional_bearer)
+    request: Request, game_id: str, claims: Annotated[TokenClaims | None, Depends(optional_bearer)]
 ) -> GameSummaryResponse:
     """Read one catalogued game, including the caller's own trophy progress when they are signed in.
 
@@ -148,7 +150,7 @@ async def get_game(
     )
 
 
-@router.get("/genres", response_model=CatalogGenresResponse)
+@router.get("/genres")
 async def list_genres(request: Request) -> CatalogGenresResponse:
     """List the genres ``GET /catalog/games`` can actually be filtered by.
 
@@ -158,11 +160,11 @@ async def list_genres(request: Request) -> CatalogGenresResponse:
     return CatalogGenresResponse(genres=await repository.list_genres())
 
 
-@router.get("/genres/drift", response_model=CatalogGenreDriftResponse)
+@router.get("/genres/drift")
 async def genre_vocabulary_drift(
     request: Request,
+    _claims: Annotated[TokenClaims, Depends(require_admin)],
     category_id: str = Query(default=PS4_GAMES_CATEGORY_ID, alias="categoryId"),
-    _claims: TokenClaims = Depends(require_admin),
 ) -> CatalogGenreDriftResponse:
     """Report where the ``genres`` reference table and the storefront's live ``productGenres`` facet
     disagree. Admin-scoped.
@@ -211,9 +213,9 @@ async def genre_vocabulary_drift(
     )
 
 
-@router.post("/backfill", response_model=CatalogBackfillResponse)
+@router.post("/backfill")
 async def backfill_catalog(
-    request: Request, body: CatalogBackfillRequest, _claims: TokenClaims = Depends(require_admin)
+    request: Request, body: CatalogBackfillRequest, _claims: Annotated[TokenClaims, Depends(require_admin)]
 ) -> CatalogBackfillResponse:
     """Seed the shared catalog by walking public PlayStation Store categories. Admin-scoped.
 

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import logging
-from typing import Literal
+from typing import Annotated, Literal
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
@@ -50,9 +50,9 @@ class SetEnrichmentKeyRequest(BaseModel):
     api_key: str
 
 
-@router.get("/me/enrichment-keys", response_model=EnrichmentKeyStatusResponse)
+@router.get("/me/enrichment-keys")
 async def get_enrichment_key_status(
-    request: Request, claims: TokenClaims = Depends(require_bearer)
+    request: Request, claims: Annotated[TokenClaims, Depends(require_bearer)]
 ) -> EnrichmentKeyStatusResponse:
     """Return whether the caller has a RAWG/OpenCritic key configured, and when each was added.
 
@@ -79,7 +79,7 @@ async def set_enrichment_key(
     provider: Provider,
     body: SetEnrichmentKeyRequest,
     request: Request,
-    claims: TokenClaims = Depends(require_bearer),
+    claims: Annotated[TokenClaims, Depends(require_bearer)],
 ) -> Response:
     """Set (or replace) the caller's key for ``provider``.
 
@@ -109,7 +109,7 @@ async def set_enrichment_key(
 
 @router.delete("/me/enrichment-keys/{provider}", status_code=204)
 async def delete_enrichment_key(
-    provider: Provider, request: Request, claims: TokenClaims = Depends(require_bearer)
+    provider: Provider, request: Request, claims: Annotated[TokenClaims, Depends(require_bearer)]
 ) -> Response:
     """Delete the caller's key for ``provider``, if one is configured."""
     enrichment_keys_repository: EnrichmentKeysRepository = request.app.state.enrichment_keys_repository

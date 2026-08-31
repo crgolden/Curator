@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Annotated
+
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 
@@ -26,8 +28,8 @@ class PresenceResponse(BaseModel):
     game_title: str | None
 
 
-@router.get("/presence", response_model=PresenceResponse)
-async def get_presence(request: Request, claims: TokenClaims = Depends(require_bearer)) -> PresenceResponse:
+@router.get("/presence")
+async def get_presence(request: Request, claims: Annotated[TokenClaims, Depends(require_bearer)]) -> PresenceResponse:
     """Return the caller's own current PSN online presence.
 
     :raises fastapi.HTTPException: 404, if the caller has no PSN link; 403, if ``harvest_presence`` is not

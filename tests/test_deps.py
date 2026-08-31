@@ -57,9 +57,10 @@ def _request(repository: FakeRepository) -> SimpleNamespace:
 
 async def test_require_preference_raises_404_when_no_link():
     repository = FakeRepository()
+    request = _request(repository)
 
     with pytest.raises(HTTPException) as exc_info:
-        await require_preference(_request(repository), SUB, "harvest_trophies")
+        await require_preference(request, SUB, "harvest_trophies")
 
     assert exc_info.value.status_code == 404
 
@@ -67,9 +68,10 @@ async def test_require_preference_raises_404_when_no_link():
 async def test_require_preference_raises_403_when_category_flag_off():
     repository = FakeRepository()
     repository.links[SUB] = _link(harvest_trophies=False)
+    request = _request(repository)
 
     with pytest.raises(HTTPException) as exc_info:
-        await require_preference(_request(repository), SUB, "harvest_trophies")
+        await require_preference(request, SUB, "harvest_trophies")
 
     assert exc_info.value.status_code == 403
     assert "harvest_trophies" in exc_info.value.detail
@@ -89,8 +91,9 @@ async def test_require_preference_returns_link_when_category_flag_on():
 async def test_require_preference_checks_the_named_category_independently(category):
     repository = FakeRepository()
     repository.links[SUB] = _link(harvest_trophies=True)
+    request = _request(repository)
 
     with pytest.raises(HTTPException) as exc_info:
-        await require_preference(_request(repository), SUB, category)
+        await require_preference(request, SUB, category)
 
     assert exc_info.value.status_code == 403

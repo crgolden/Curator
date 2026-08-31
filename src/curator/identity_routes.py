@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Annotated
+
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 
@@ -22,8 +24,8 @@ class IdentityResponse(BaseModel):
     region: str | None
 
 
-@router.get("/identity", response_model=IdentityResponse)
-async def get_identity(request: Request, claims: TokenClaims = Depends(require_bearer)) -> IdentityResponse:
+@router.get("/identity")
+async def get_identity(request: Request, claims: Annotated[TokenClaims, Depends(require_bearer)]) -> IdentityResponse:
     """Return the caller's own PSN account identity.
 
     :raises fastapi.HTTPException: 404, if the caller has no PSN link; 403, if ``harvest_identity`` is not

@@ -205,8 +205,10 @@ async def test_expired_cached_token_triggers_refresh_and_persists_it():
 
 
 async def test_restore_requires_npsso_or_cached_token():
+    empty_store = FakeTokenStore(saved=None)
+
     with pytest.raises(ValueError, match="No cached token and no npsso"):
-        await PsnSession.restore(None, FakeTokenStore(saved=None))
+        await PsnSession.restore(None, empty_store)
 
 
 async def test_get_attaches_bearer_and_ensures_fresh_token():

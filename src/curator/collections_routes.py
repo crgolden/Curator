@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
 import psycopg
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
@@ -96,13 +96,13 @@ class CollectionPreviewResponse(BaseModel):
     used_gb: float | None
 
 
-@router.post("/preview", response_model=CollectionPreviewResponse)
+@router.post("/preview")
 async def preview_collection(
     request: Request,
     spec: CollectionSpecRequest,
+    claims: Annotated[TokenClaims, Depends(require_bearer)],
     limit: int = Query(default=50, ge=1, le=100),
     offset: int = Query(default=0, ge=0),
-    claims: TokenClaims = Depends(require_bearer),
 ) -> CollectionPreviewResponse:
     """Generate a collection from an inline spec for the caller's own library, without persisting it.
 
@@ -298,9 +298,9 @@ class CollectionRunResponse(BaseModel):
     used_gb: float | None
 
 
-@router.post("", response_model=DefinitionResponse, status_code=201)
+@router.post("", status_code=201)
 async def save_definition(
-    request: Request, body: SaveDefinitionRequest, claims: TokenClaims = Depends(require_bearer)
+    request: Request, body: SaveDefinitionRequest, claims: Annotated[TokenClaims, Depends(require_bearer)]
 ) -> DefinitionResponse:
     """Save a named collection for the caller, freezing ``game_ids`` as its membership.
 
@@ -398,8 +398,10 @@ async def _reject_unknown_games(collections_repository: CollectionsRepository, g
         raise HTTPException(status_code=400, detail=f"Unknown game_ids: {', '.join(sorted(set(unknown)))}.")
 
 
-@router.get("", response_model=list[DefinitionResponse])
-async def list_definitions(request: Request, claims: TokenClaims = Depends(require_bearer)) -> list[DefinitionResponse]:
+@router.get("")
+async def list_definitions(
+    request: Request, claims: Annotated[TokenClaims, Depends(require_bearer)]
+) -> list[DefinitionResponse]:
     """List the caller's saved collection definitions.
 
     :returns: The caller's :class:`DefinitionResponse` list, newest first.
@@ -409,9 +411,9 @@ async def list_definitions(request: Request, claims: TokenClaims = Depends(requi
     return [_definition_to_response(definition) for definition in definitions]
 
 
-@router.get("/followed", response_model=list[DefinitionResponse])
+@router.get("/followed")
 async def list_followed_collections(
-    request: Request, claims: TokenClaims = Depends(require_bearer)
+    request: Request, claims: Annotated[TokenClaims, Depends(require_bearer)]
 ) -> list[DefinitionResponse]:
     """List every collection the caller follows, most recently followed first.
 
@@ -425,9 +427,9 @@ async def list_followed_collections(
     return [_definition_to_response(definition) for definition in definitions]
 
 
-@router.get("/{definition_id}", response_model=DefinitionDetailResponse)
+@router.get("/{definition_id}")
 async def get_definition(
-    request: Request, definition_id: str, claims: TokenClaims = Depends(require_bearer)
+    request: Request, definition_id: str, claims: Annotated[TokenClaims, Depends(require_bearer)]
 ) -> DefinitionDetailResponse:
     """Return one of the caller's collections together with the *first page* of its stored membership.
 
@@ -448,17 +450,17 @@ async def get_definition(
     )
 
 
-@router.get("/{definition_id}/items", response_model=CollectionItemsPageResponse)
+@router.get("/{definition_id}/items")
 async def get_definition_items(
     request: Request,
     definition_id: str,
+    claims: Annotated[TokenClaims, Depends(require_bearer)],
     q: str | None = Query(default=None),
     genre: str | None = Query(default=None),
     sort: CollectionItemSortField = Query(default="rank"),
     sort_dir: Literal["asc", "desc"] = Query(default="asc", alias="sortDir"),
     limit: int = Query(default=50, ge=1, le=100),
     offset: int = Query(default=0, ge=0),
-    claims: TokenClaims = Depends(require_bearer),
 ) -> CollectionItemsPageResponse:
     """Return one filtered, sorted page of a collection's membership.
 
@@ -485,7 +487,7 @@ async def get_definition_items(
 
 @router.delete("/{definition_id}/items/{game_id}", status_code=204)
 async def remove_definition_item(
-    request: Request, definition_id: str, game_id: str, claims: TokenClaims = Depends(require_bearer)
+    request: Request, definition_id: str, game_id: str, claims: Annotated[TokenClaims, Depends(require_bearer)]
 ) -> Response:
     """Remove one title from a collection, leaving the rest of its membership untouched.
 
@@ -502,9 +504,12 @@ async def remove_definition_item(
     return Response(status_code=204)
 
 
-@router.patch("/{definition_id}", response_model=DefinitionDetailResponse)
+@router.patch("/{definition_id}")
 async def update_definition(
-    request: Request, definition_id: str, body: UpdateDefinitionRequest, claims: TokenClaims = Depends(require_bearer)
+    request: Request,
+    definition_id: str,
+    body: UpdateDefinitionRequest,
+    claims: Annotated[TokenClaims, Depends(require_bearer)],
 ) -> DefinitionDetailResponse:
     """Rename a collection, change its description, and/or replace its membership.
 
@@ -558,12 +563,12 @@ async def update_definition(
     )
 
 
-@router.put("/{definition_id}/visibility", response_model=DefinitionResponse)
+@router.put("/{definition_id}/visibility")
 async def set_visibility(
     request: Request,
     definition_id: str,
     body: VisibilityUpdateRequest,
-    claims: TokenClaims = Depends(require_bearer),
+    claims: Annotated[TokenClaims, Depends(require_bearer)],
 ) -> DefinitionResponse:
     """Change a collection's visibility. ``share_slug`` (already assigned at creation regardless of
     visibility -- see migration 0019) starts working as a public link the moment this leaves
@@ -584,7 +589,7 @@ async def set_visibility(
 
 @router.delete("/{definition_id}", status_code=204)
 async def delete_definition(
-    request: Request, definition_id: str, claims: TokenClaims = Depends(require_bearer)
+    request: Request, definition_id: str, claims: Annotated[TokenClaims, Depends(require_bearer)]
 ) -> Response:
     """Delete one of the caller's collections, along with its items and run history.
 
@@ -599,7 +604,7 @@ async def delete_definition(
 
 @router.post("/{definition_id}/follow", status_code=204)
 async def follow_definition(
-    request: Request, definition_id: str, claims: TokenClaims = Depends(require_bearer)
+    request: Request, definition_id: str, claims: Annotated[TokenClaims, Depends(require_bearer)]
 ) -> Response:
     """Follow a collection that isn't the caller's own.
 
@@ -621,7 +626,7 @@ async def follow_definition(
 
 @router.delete("/{definition_id}/follow", status_code=204)
 async def unfollow_definition(
-    request: Request, definition_id: str, claims: TokenClaims = Depends(require_bearer)
+    request: Request, definition_id: str, claims: Annotated[TokenClaims, Depends(require_bearer)]
 ) -> Response:
     """Unfollow a collection. Idempotent -- always 204, even if it wasn't followed, doesn't exist, or has
     since been made private (unfollowing must always be possible, unlike following)."""
@@ -630,13 +635,13 @@ async def unfollow_definition(
     return Response(status_code=204)
 
 
-@router.post("/{definition_id}/runs", response_model=CollectionRunResponse, status_code=201)
+@router.post("/{definition_id}/runs", status_code=201)
 async def run_definition(
     request: Request,
     definition_id: str,
+    claims: Annotated[TokenClaims, Depends(require_bearer)],
     limit: int = Query(default=50, ge=1, le=100),
     offset: int = Query(default=0, ge=0),
-    claims: TokenClaims = Depends(require_bearer),
 ) -> CollectionRunResponse:
     """Generate and persist a run against one of the caller's saved definitions.
 

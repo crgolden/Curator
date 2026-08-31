@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable, Coroutine
-from typing import Any, TypeVar
+from typing import Annotated, Any, TypeVar
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import BaseModel
@@ -50,7 +50,9 @@ class CreateGroupResponse(BaseModel):
 
 
 @router.put("/me/friends/{online_id}", status_code=204)
-async def add_friend(online_id: str, request: Request, claims: TokenClaims = Depends(require_bearer)) -> Response:
+async def add_friend(
+    online_id: str, request: Request, claims: Annotated[TokenClaims, Depends(require_bearer)]
+) -> Response:
     """Send or accept a friend request to ``online_id`` on the caller's own PSN account.
 
     :raises fastapi.HTTPException: 422, if ``online_id`` is not a PSN online id; 404, if the caller has no
@@ -67,7 +69,9 @@ async def add_friend(online_id: str, request: Request, claims: TokenClaims = Dep
 
 
 @router.delete("/me/friends/{online_id}", status_code=204)
-async def remove_friend(online_id: str, request: Request, claims: TokenClaims = Depends(require_bearer)) -> Response:
+async def remove_friend(
+    online_id: str, request: Request, claims: Annotated[TokenClaims, Depends(require_bearer)]
+) -> Response:
     """Remove ``online_id`` from the caller's PSN friends, or decline their pending request.
 
     :raises fastapi.HTTPException: 422, if ``online_id`` is not a PSN online id; 404, if the caller has no
@@ -83,9 +87,9 @@ async def remove_friend(online_id: str, request: Request, claims: TokenClaims = 
     return Response(status_code=204)
 
 
-@router.post("/me/chat/groups", response_model=CreateGroupResponse)
+@router.post("/me/chat/groups")
 async def create_chat_group(
-    body: CreateGroupRequest, request: Request, claims: TokenClaims = Depends(require_bearer)
+    body: CreateGroupRequest, request: Request, claims: Annotated[TokenClaims, Depends(require_bearer)]
 ) -> CreateGroupResponse:
     """Create a PSN chat group with the given members, on the caller's own account.
 
@@ -104,7 +108,9 @@ async def create_chat_group(
 
 
 @router.delete("/me/chat/groups/{group_id}/members/me", status_code=204)
-async def leave_chat_group(group_id: str, request: Request, claims: TokenClaims = Depends(require_bearer)) -> Response:
+async def leave_chat_group(
+    group_id: str, request: Request, claims: Annotated[TokenClaims, Depends(require_bearer)]
+) -> Response:
     """Leave a PSN chat group. Not reversible from Curator -- rejoining needs an invite.
 
     :raises fastapi.HTTPException: 422, if ``group_id`` is not a PSN chat group id; 404, if the caller has

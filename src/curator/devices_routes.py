@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
@@ -36,8 +37,8 @@ class DevicesResponse(BaseModel):
     devices: list[AccountDeviceResponse]
 
 
-@router.get("/devices", response_model=DevicesResponse)
-async def get_devices(request: Request, claims: TokenClaims = Depends(require_bearer)) -> DevicesResponse:
+@router.get("/devices")
+async def get_devices(request: Request, claims: Annotated[TokenClaims, Depends(require_bearer)]) -> DevicesResponse:
     """Return the consoles/devices registered to the caller's own PSN account.
 
     :raises fastapi.HTTPException: 404, if the caller has no PSN link; 403, if ``harvest_devices`` is not

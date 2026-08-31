@@ -317,8 +317,10 @@ async def test_a_rotated_persisted_query_hash_is_its_own_error():
     def handler(request):
         return httpx.Response(400, json={"message": "Query 000000 not whitelisted"})
 
+    client = _client(handler)
+
     with pytest.raises(StoreQueryRotatedError) as excinfo:
-        await _client(handler).category_page("cat-1")
+        await client.category_page("cat-1")
 
     assert "refresh it" in str(excinfo.value), "the message must point at the fix, not just report failure"
 
@@ -441,8 +443,10 @@ async def test_a_silently_ignored_filter_is_rejected_rather_than_trusted():
     def handler(request):
         return httpx.Response(200, json=_grid([_product()], 9190, facets=_CLASSIFICATION_FACETS))
 
+    client = _client(handler)
+
     with pytest.raises(StoreFilterIgnoredError) as excinfo:
-        await _client(handler).category_page("cat-1", filter_by=(FULL_GAME_FILTER,))
+        await client.category_page("cat-1", filter_by=(FULL_GAME_FILTER,))
 
     message = str(excinfo.value)
     assert "6952" in message, "the message must name what the category says the facet holds"
@@ -453,8 +457,10 @@ async def test_a_filter_matching_nothing_is_rejected_rather_than_ending_the_walk
     def handler(request):
         return httpx.Response(200, json=_grid([], 0, is_last=True, facets=_CLASSIFICATION_FACETS))
 
+    client = _client(handler)
+
     with pytest.raises(StoreFilterIgnoredError) as excinfo:
-        await _client(handler).category_page("cat-1", filter_by=("storeDisplayClassification:NOT_REAL",))
+        await client.category_page("cat-1", filter_by=("storeDisplayClassification:NOT_REAL",))
 
     assert "publishes no 'NOT_REAL' value" in str(excinfo.value)
 
@@ -463,8 +469,10 @@ async def test_a_zero_result_on_a_published_key_is_rejected_too():
     def handler(request):
         return httpx.Response(200, json=_grid([], 0, is_last=True, facets=_CLASSIFICATION_FACETS))
 
+    client = _client(handler)
+
     with pytest.raises(StoreFilterIgnoredError):
-        await _client(handler).category_page("cat-1", filter_by=(FULL_GAME_FILTER,))
+        await client.category_page("cat-1", filter_by=(FULL_GAME_FILTER,))
 
 
 async def test_an_unfiltered_page_is_never_checked_against_facets():
@@ -498,8 +506,10 @@ async def test_other_graphql_errors_are_not_reported_as_a_rotated_hash():
     def handler(request):
         return httpx.Response(200, json={"errors": [{"message": "Category not found"}]})
 
+    client = _client(handler)
+
     with pytest.raises(StoreCatalogError) as excinfo:
-        await _client(handler).category_page("cat-1")
+        await client.category_page("cat-1")
 
     assert not isinstance(excinfo.value, StoreQueryRotatedError)
 
@@ -508,8 +518,10 @@ async def test_a_server_error_is_surfaced_without_parsing_the_body():
     def handler(request):
         return httpx.Response(503, text="<html>upstream</html>")
 
+    client = _client(handler)
+
     with pytest.raises(StoreCatalogError):
-        await _client(handler).category_page("cat-1")
+        await client.category_page("cat-1")
 
 
 async def test_the_csrf_rejection_is_not_mistaken_for_a_rotated_hash():
@@ -519,8 +531,10 @@ async def test_the_csrf_rejection_is_not_mistaken_for_a_rotated_hash():
             json={"errors": [{"message": "This operation has been blocked as a potential Cross-Site Request Forgery"}]},
         )
 
+    client = _client(handler)
+
     with pytest.raises(StoreCatalogError) as excinfo:
-        await _client(handler).category_page("cat-1")
+        await client.category_page("cat-1")
 
     assert not isinstance(excinfo.value, StoreQueryRotatedError)
 

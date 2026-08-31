@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Annotated
 
 from fastapi import APIRouter, Depends, Request, Response
 from pydantic import BaseModel
@@ -48,8 +49,8 @@ class AccountActionsResponse(BaseModel):
     actions: list[AccountActionResponse]
 
 
-@router.get("/me", response_model=MeResponse)
-async def me(request: Request, claims: TokenClaims = Depends(require_verified_caller)) -> MeResponse:
+@router.get("/me")
+async def me(request: Request, claims: Annotated[TokenClaims, Depends(require_verified_caller)]) -> MeResponse:
     """Return the caller's identity plus their PSN link status.
 
     :returns: ``{"sub", "email", "linked", "psn", "is_admin"}`` where ``psn`` is ``None`` when unlinked,
@@ -75,7 +76,7 @@ async def me(request: Request, claims: TokenClaims = Depends(require_verified_ca
 
 
 @router.delete("/me", status_code=204)
-async def delete_me(request: Request, claims: TokenClaims = Depends(require_verified_caller)) -> Response:
+async def delete_me(request: Request, claims: Annotated[TokenClaims, Depends(require_verified_caller)]) -> Response:
     """Delete the caller's account and every trace of data Curator has stored about them.
 
     Removes the ``app_users`` row for the caller's ``sub``; the ``ON DELETE CASCADE``/FK relationships in
@@ -105,9 +106,9 @@ async def delete_me(request: Request, claims: TokenClaims = Depends(require_veri
     return Response(status_code=204)
 
 
-@router.get("/me/actions", response_model=AccountActionsResponse)
+@router.get("/me/actions")
 async def get_my_actions(
-    request: Request, claims: TokenClaims = Depends(require_verified_caller)
+    request: Request, claims: Annotated[TokenClaims, Depends(require_verified_caller)]
 ) -> AccountActionsResponse:
     """Return the caller's own account-action history, oldest first.
 

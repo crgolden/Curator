@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 import re
-from typing import Literal
+from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from pydantic import BaseModel
@@ -186,9 +186,9 @@ class ProfileDefinitionResponse(BaseModel):
     item_count: int
 
 
-@router.get("/me/profile-settings", response_model=ProfileSettingsResponse)
+@router.get("/me/profile-settings")
 async def get_my_profile_settings(
-    request: Request, claims: TokenClaims = Depends(require_bearer)
+    request: Request, claims: Annotated[TokenClaims, Depends(require_bearer)]
 ) -> ProfileSettingsResponse:
     """Return the caller's own profile display-visibility toggles.
 
@@ -199,9 +199,9 @@ async def get_my_profile_settings(
     return _settings_response(settings)
 
 
-@router.put("/me/profile-settings", response_model=ProfileSettingsResponse)
+@router.put("/me/profile-settings")
 async def set_my_profile_settings(
-    body: ProfileSettingsRequest, request: Request, claims: TokenClaims = Depends(require_bearer)
+    body: ProfileSettingsRequest, request: Request, claims: Annotated[TokenClaims, Depends(require_bearer)]
 ) -> ProfileSettingsResponse:
     """Set the caller's own profile display-visibility toggles.
 
@@ -225,9 +225,9 @@ async def set_my_profile_settings(
     )
 
 
-@router.get("/me/profile-link-sites", response_model=list[ProfileLinkSiteResponse])
+@router.get("/me/profile-link-sites")
 async def list_profile_link_sites(
-    request: Request, claims: TokenClaims = Depends(require_bearer)
+    request: Request, claims: Annotated[TokenClaims, Depends(require_bearer)]
 ) -> list[ProfileLinkSiteResponse]:
     """Return every site a profile link may point at, in display order.
 
@@ -238,18 +238,18 @@ async def list_profile_link_sites(
     return [ProfileLinkSiteResponse(site_key=site.site_key, display_name=site.display_name) for site in sites]
 
 
-@router.get("/me/profile-links", response_model=list[ProfileLinkResponse])
+@router.get("/me/profile-links")
 async def get_my_profile_links(
-    request: Request, claims: TokenClaims = Depends(require_bearer)
+    request: Request, claims: Annotated[TokenClaims, Depends(require_bearer)]
 ) -> list[ProfileLinkResponse]:
     """Return the caller's own declared profile links. Always answerable; never 404s."""
     repository: ProfileLinkRepository = request.app.state.profile_link_repository
     return [_link_response(link) for link in await repository.list_for_user(claims.sub)]
 
 
-@router.put("/me/profile-links/{site_key}", response_model=ProfileLinkResponse)
+@router.put("/me/profile-links/{site_key}")
 async def set_my_profile_link(
-    site_key: str, body: ProfileLinkRequest, request: Request, claims: TokenClaims = Depends(require_bearer)
+    site_key: str, body: ProfileLinkRequest, request: Request, claims: Annotated[TokenClaims, Depends(require_bearer)]
 ) -> ProfileLinkResponse:
     """Declare (or replace) the caller's handle on one allowlisted site.
 
@@ -279,7 +279,7 @@ async def set_my_profile_link(
 
 @router.delete("/me/profile-links/{site_key}", status_code=204)
 async def delete_my_profile_link(
-    site_key: str, request: Request, claims: TokenClaims = Depends(require_bearer)
+    site_key: str, request: Request, claims: Annotated[TokenClaims, Depends(require_bearer)]
 ) -> Response:
     """Remove the caller's link for one site. Idempotent -- always 204."""
     repository: ProfileLinkRepository = request.app.state.profile_link_repository
@@ -287,9 +287,9 @@ async def delete_my_profile_link(
     return Response(status_code=204)
 
 
-@router.get("/users/{sub}/profile", response_model=PublicProfileResponse)
+@router.get("/users/{sub}/profile")
 async def get_user_profile(
-    sub: str, request: Request, claims: TokenClaims = Depends(require_bearer)
+    sub: str, request: Request, claims: Annotated[TokenClaims, Depends(require_bearer)]
 ) -> PublicProfileResponse:
     """Return ``sub``'s public profile, as seen by the caller.
 
@@ -452,7 +452,7 @@ async def _cross_user_identity(
 
 
 @router.post("/users/{sub}/follow", status_code=204)
-async def follow_user(sub: str, request: Request, claims: TokenClaims = Depends(require_bearer)) -> Response:
+async def follow_user(sub: str, request: Request, claims: Annotated[TokenClaims, Depends(require_bearer)]) -> Response:
     """Follow ``sub``.
 
     Idempotent -- following a user already followed still returns 204. Every call (including a repeat) is
@@ -476,7 +476,9 @@ async def follow_user(sub: str, request: Request, claims: TokenClaims = Depends(
 
 
 @router.delete("/users/{sub}/follow", status_code=204)
-async def unfollow_user(sub: str, request: Request, claims: TokenClaims = Depends(require_bearer)) -> Response:
+async def unfollow_user(
+    sub: str, request: Request, claims: Annotated[TokenClaims, Depends(require_bearer)]
+) -> Response:
     """Unfollow ``sub``.
 
     Idempotent -- always returns 204, even if ``sub`` wasn't followed (or doesn't exist). ``ACTION_UNFOLLOWED``
@@ -489,13 +491,13 @@ async def unfollow_user(sub: str, request: Request, claims: TokenClaims = Depend
     return Response(status_code=204)
 
 
-@router.get("/users/{sub}/followers", response_model=FollowListResponse)
+@router.get("/users/{sub}/followers")
 async def get_followers(
     sub: str,
     request: Request,
+    claims: Annotated[TokenClaims, Depends(require_bearer)],
     limit: int = Query(default=50, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
-    claims: TokenClaims = Depends(require_bearer),
 ) -> FollowListResponse:
     """List the users following ``sub``, newest first. Not gated by ``is_public`` (see the module docstring).
 
@@ -512,13 +514,13 @@ async def get_followers(
     return FollowListResponse(entries=entries, total=total)
 
 
-@router.get("/users/{sub}/following", response_model=FollowListResponse)
+@router.get("/users/{sub}/following")
 async def get_following(
     sub: str,
     request: Request,
+    claims: Annotated[TokenClaims, Depends(require_bearer)],
     limit: int = Query(default=50, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
-    claims: TokenClaims = Depends(require_bearer),
 ) -> FollowListResponse:
     """List the users ``sub`` follows, newest first. Not gated by ``is_public`` (see the module docstring).
 
@@ -553,9 +555,9 @@ async def _follow_entry(request: Request, edge: FollowEdge) -> FollowListEntryRe
     )
 
 
-@router.get("/users/{sub}/library/genres", response_model=LibraryGenresResponse)
+@router.get("/users/{sub}/library/genres")
 async def get_user_library_genres(
-    sub: str, request: Request, claims: TokenClaims = Depends(require_bearer)
+    sub: str, request: Request, claims: Annotated[TokenClaims, Depends(require_bearer)]
 ) -> LibraryGenresResponse:
     """Return the distinct, sorted set of genres in ``sub``'s library, read-only -- backs the
     viewer-mode library page's genre filter dropdown.
@@ -570,17 +572,17 @@ async def get_user_library_genres(
     return LibraryGenresResponse(genres=genres)
 
 
-@router.get("/users/{sub}/library", response_model=ProfileLibraryPageResponse)
+@router.get("/users/{sub}/library")
 async def get_user_library(
     sub: str,
     request: Request,
+    claims: Annotated[TokenClaims, Depends(require_bearer)],
     q: str | None = Query(default=None),
     genre: str | None = Query(default=None),
     sort: LibrarySortField = Query(default="title"),
     sort_dir: Literal["asc", "desc"] = Query(default="asc", alias="sortDir"),
     limit: int = Query(default=20, ge=1, le=100),
     offset: int = Query(default=0, ge=0),
-    claims: TokenClaims = Depends(require_bearer),
 ) -> ProfileLibraryPageResponse:
     """Return one page of ``sub``'s library, read-only -- same search/filter/sort/paging support as
     the caller's-own ``GET /library``.
@@ -618,9 +620,9 @@ async def get_user_library(
     )
 
 
-@router.get("/users/{sub}/collections", response_model=list[ProfileDefinitionResponse])
+@router.get("/users/{sub}/collections")
 async def get_user_collections(
-    sub: str, request: Request, claims: TokenClaims = Depends(require_bearer)
+    sub: str, request: Request, claims: Annotated[TokenClaims, Depends(require_bearer)]
 ) -> list[ProfileDefinitionResponse]:
     """Return ``sub``'s saved collection definitions, read-only.
 

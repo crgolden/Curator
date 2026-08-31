@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, timezone
-from typing import Any, Final, Literal
+from typing import Annotated, Any, Final, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from pydantic import BaseModel, Field, model_validator
@@ -210,13 +210,13 @@ class StoreSearchResponse(BaseModel):
     results: list[StoreSearchResultResponse]
 
 
-@router.get("/manual/search", response_model=StoreSearchResponse)
+@router.get("/manual/search")
 async def search_store_for_manual_add(
     request: Request,
+    claims: Annotated[TokenClaims, Depends(require_bearer)],
     q: str = Query(min_length=1),
     domain: GameSearchDomain = Query(default=FULL_GAMES_DOMAIN),
     limit: int = Query(default=20, ge=1, le=MAX_STORE_SEARCH_LIMIT),
-    claims: TokenClaims = Depends(require_bearer),
 ) -> StoreSearchResponse:
     """Search the PlayStation Store by name, so a manual add can be checked against a real store entry.
 
@@ -284,7 +284,7 @@ async def _search_the_store(
 
 @router.post("/manual", status_code=204)
 async def add_manual_game(
-    request: Request, body: ManualGameRequest, claims: TokenClaims = Depends(require_bearer)
+    request: Request, body: ManualGameRequest, claims: Annotated[TokenClaims, Depends(require_bearer)]
 ) -> Response:
     """Add a game the user owns that PSN's entitlement API has no record of -- a physical disc, typically.
 
@@ -369,7 +369,9 @@ async def _admit_store_hit(
 
 
 @router.delete("/manual/{game_id}", status_code=204)
-async def remove_manual_game(request: Request, game_id: str, claims: TokenClaims = Depends(require_bearer)) -> Response:
+async def remove_manual_game(
+    request: Request, game_id: str, claims: Annotated[TokenClaims, Depends(require_bearer)]
+) -> Response:
     """Remove a manually-added game. Never deletes a PSN-sourced row.
 
     :raises fastapi.HTTPException: 404, if the caller has no manual entry for that game.
@@ -380,8 +382,10 @@ async def remove_manual_game(request: Request, game_id: str, claims: TokenClaims
     return Response(status_code=204)
 
 
-@router.get("/genres", response_model=LibraryGenresResponse)
-async def get_library_genres(request: Request, claims: TokenClaims = Depends(require_bearer)) -> LibraryGenresResponse:
+@router.get("/genres")
+async def get_library_genres(
+    request: Request, claims: Annotated[TokenClaims, Depends(require_bearer)]
+) -> LibraryGenresResponse:
     """Return the distinct, sorted set of genres present in the caller's own library -- backs the
     library page's genre filter dropdown."""
     library_repository: LibraryRepository = request.app.state.library_repository
@@ -389,16 +393,16 @@ async def get_library_genres(request: Request, claims: TokenClaims = Depends(req
     return LibraryGenresResponse(genres=genres)
 
 
-@router.get("", response_model=LibraryPageResponse)
+@router.get("")
 async def get_library(
     request: Request,
+    claims: Annotated[TokenClaims, Depends(require_bearer)],
     q: str | None = Query(default=None),
     genre: str | None = Query(default=None),
     sort: LibrarySortField = Query(default="title"),
     sort_dir: Literal["asc", "desc"] = Query(default="asc", alias="sortDir"),
     limit: int = Query(default=20, ge=1, le=100),
     offset: int = Query(default=0, ge=0),
-    claims: TokenClaims = Depends(require_bearer),
 ) -> LibraryPageResponse:
     """Return one page of the caller's own library, with per-provider (RAWG/OpenCritic) ratings,
     the resolved genre, and PSN's own catalog rating/product id per game.
@@ -443,8 +447,10 @@ async def get_library(
     )
 
 
-@router.post("/refresh", response_model=LibraryRefreshResponse, status_code=202)
-async def refresh_library(request: Request, claims: TokenClaims = Depends(require_bearer)) -> LibraryRefreshResponse:
+@router.post("/refresh", status_code=202)
+async def refresh_library(
+    request: Request, claims: Annotated[TokenClaims, Depends(require_bearer)]
+) -> LibraryRefreshResponse:
     """Queue a library-refresh job for the caller's own PSN entitlements.
 
     :returns: The caller's live non-terminal run's id if one exists, otherwise a newly queued run's id --
@@ -475,9 +481,9 @@ async def refresh_library(request: Request, claims: TokenClaims = Depends(requir
     return LibraryRefreshResponse(run_id=run_id)
 
 
-@router.get("/refresh/{run_id}", response_model=LibraryRefreshStatusResponse)
+@router.get("/refresh/{run_id}")
 async def get_library_refresh_status(
-    request: Request, run_id: str, claims: TokenClaims = Depends(require_bearer)
+    request: Request, run_id: str, claims: Annotated[TokenClaims, Depends(require_bearer)]
 ) -> LibraryRefreshStatusResponse:
     """Poll the status of a previously queued library-refresh job.
 

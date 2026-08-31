@@ -32,6 +32,8 @@ performs using the *viewer's* own stored PSN session.
 
 from __future__ import annotations
 
+from typing import Annotated
+
 from fastapi import Depends, HTTPException, Request
 
 from curator.persistence.repository import LinkRecord, Repository
@@ -103,7 +105,7 @@ async def optional_bearer(request: Request) -> TokenClaims | None:
     return await require_bearer(request)
 
 
-def require_verified_caller(claims: TokenClaims = Depends(require_bearer)) -> TokenClaims:
+def require_verified_caller(claims: Annotated[TokenClaims, Depends(require_bearer)]) -> TokenClaims:
     """Require an authenticated, in-scope caller whose token also carries a verified Identity email.
 
     :param claims: The caller resolved by :func:`require_bearer`.
@@ -118,7 +120,7 @@ def require_verified_caller(claims: TokenClaims = Depends(require_bearer)) -> To
     return claims
 
 
-def require_admin(claims: TokenClaims = Depends(require_bearer)) -> TokenClaims:
+def require_admin(claims: Annotated[TokenClaims, Depends(require_bearer)]) -> TokenClaims:
     """Require an authenticated, in-scope caller whose token also carries the ``curator.admin`` claim.
 
     Mirrors the ``Directory`` API's ``ChurchesMod`` elevated-claim pattern: the plain ``curator`` scope

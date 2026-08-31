@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Annotated
+
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 
@@ -28,8 +30,10 @@ class PsnPreferences(BaseModel):
     allow_chat_writes: bool = False
 
 
-@router.get("/me/psn-preferences", response_model=PsnPreferences)
-async def get_psn_preferences(request: Request, claims: TokenClaims = Depends(require_bearer)) -> PsnPreferences:
+@router.get("/me/psn-preferences")
+async def get_psn_preferences(
+    request: Request, claims: Annotated[TokenClaims, Depends(require_bearer)]
+) -> PsnPreferences:
     """Return the caller's current PSN data-harvest preferences.
 
     :raises fastapi.HTTPException: 404, if the caller has no PSN link.
@@ -41,11 +45,11 @@ async def get_psn_preferences(request: Request, claims: TokenClaims = Depends(re
     return _response(link)
 
 
-@router.put("/me/psn-preferences", response_model=PsnPreferences)
+@router.put("/me/psn-preferences")
 async def set_psn_preferences(
     body: PsnPreferences,
     request: Request,
-    claims: TokenClaims = Depends(require_bearer),
+    claims: Annotated[TokenClaims, Depends(require_bearer)],
 ) -> PsnPreferences:
     """Set the caller's PSN data-harvest preferences (all four flags, in one call).
 

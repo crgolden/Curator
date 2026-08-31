@@ -81,17 +81,19 @@ def _row(
 async def test_capacity_fill_requires_console_id():
     orchestrator = CollectionOrchestrator(FakeCollectionsRepository())
 
+    spec_without_console = CollectionSpec(kind="capacity_fill")
+
     with pytest.raises(ValueError, match="requires a console_id"):
-        await orchestrator.generate("sub-1", CollectionSpec(kind="capacity_fill"), size_estimates=[])
+        await orchestrator.generate("sub-1", spec_without_console, size_estimates=[])
 
 
 async def test_capacity_fill_requires_known_console():
     orchestrator = CollectionOrchestrator(FakeCollectionsRepository(consoles=[]))
 
+    spec_with_missing_console = CollectionSpec(kind="capacity_fill", console_id="missing")
+
     with pytest.raises(ValueError, match="Unknown console_id"):
-        await orchestrator.generate(
-            "sub-1", CollectionSpec(kind="capacity_fill", console_id="missing"), size_estimates=[]
-        )
+        await orchestrator.generate("sub-1", spec_with_missing_console, size_estimates=[])
 
 
 async def test_capacity_fill_uses_console_effective_capacity_and_platform():

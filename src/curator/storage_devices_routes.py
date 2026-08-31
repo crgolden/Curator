@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Annotated
+
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 
@@ -96,9 +98,9 @@ async def _require_owned_console(repository: CollectionsRepository, identity_sub
         raise HTTPException(status_code=400, detail=f"Unknown console_id {console_id!r} for this user.")
 
 
-@router.post("", response_model=StorageDeviceResponse, status_code=201)
+@router.post("", status_code=201)
 async def create_storage_device(
-    request: Request, body: StorageDeviceRequest, claims: TokenClaims = Depends(require_bearer)
+    request: Request, body: StorageDeviceRequest, claims: Annotated[TokenClaims, Depends(require_bearer)]
 ) -> StorageDeviceResponse:
     """Create a storage device for the caller, optionally already attached to one of their consoles.
 
@@ -120,9 +122,9 @@ async def create_storage_device(
     return _to_response(device)
 
 
-@router.get("", response_model=list[StorageDeviceResponse])
+@router.get("")
 async def list_storage_devices(
-    request: Request, claims: TokenClaims = Depends(require_bearer)
+    request: Request, claims: Annotated[TokenClaims, Depends(require_bearer)]
 ) -> list[StorageDeviceResponse]:
     """List every storage device the caller owns, attached or not."""
     repository: CollectionsRepository = request.app.state.collections_repository
@@ -130,9 +132,9 @@ async def list_storage_devices(
     return [_to_response(device) for device in devices]
 
 
-@router.get("/{device_id}", response_model=StorageDeviceResponse)
+@router.get("/{device_id}")
 async def get_storage_device(
-    request: Request, device_id: str, claims: TokenClaims = Depends(require_bearer)
+    request: Request, device_id: str, claims: Annotated[TokenClaims, Depends(require_bearer)]
 ) -> StorageDeviceResponse:
     """Read one storage device.
 
@@ -145,12 +147,12 @@ async def get_storage_device(
     return _to_response(device)
 
 
-@router.patch("/{device_id}", response_model=StorageDeviceResponse)
+@router.patch("/{device_id}")
 async def update_storage_device(
     request: Request,
     device_id: str,
     body: StorageDeviceUpdateRequest,
-    claims: TokenClaims = Depends(require_bearer),
+    claims: Annotated[TokenClaims, Depends(require_bearer)],
 ) -> StorageDeviceResponse:
     """Patch a device's editable fields.
 
@@ -167,7 +169,7 @@ async def update_storage_device(
 
 @router.delete("/{device_id}", status_code=204)
 async def delete_storage_device(
-    request: Request, device_id: str, claims: TokenClaims = Depends(require_bearer)
+    request: Request, device_id: str, claims: Annotated[TokenClaims, Depends(require_bearer)]
 ) -> None:
     """Delete a storage device (cascades to its own install rows).
 
@@ -179,9 +181,9 @@ async def delete_storage_device(
         raise HTTPException(status_code=404, detail="Storage device not found.")
 
 
-@router.put("/{device_id}/attach/{console_id}", response_model=StorageDeviceResponse)
+@router.put("/{device_id}/attach/{console_id}")
 async def attach_storage_device(
-    request: Request, device_id: str, console_id: str, claims: TokenClaims = Depends(require_bearer)
+    request: Request, device_id: str, console_id: str, claims: Annotated[TokenClaims, Depends(require_bearer)]
 ) -> StorageDeviceResponse:
     """Attach a device to a console -- e.g. plugging a USB drive or an M.2 expansion into it. Its
     existing installs travel with it (see the module docstring); nothing else changes.
@@ -198,9 +200,9 @@ async def attach_storage_device(
     return _to_response(device)
 
 
-@router.delete("/{device_id}/attach", response_model=StorageDeviceResponse)
+@router.delete("/{device_id}/attach")
 async def detach_storage_device(
-    request: Request, device_id: str, claims: TokenClaims = Depends(require_bearer)
+    request: Request, device_id: str, claims: Annotated[TokenClaims, Depends(require_bearer)]
 ) -> StorageDeviceResponse:
     """Detach a device from whichever console it's currently attached to -- e.g. unplugging a USB drive.
     Its installs stay recorded on the device itself; they simply aren't attributed to any console until
@@ -216,9 +218,9 @@ async def detach_storage_device(
     return _to_response(device)
 
 
-@router.get("/{device_id}/installs", response_model=StorageDeviceInstallsResponse)
+@router.get("/{device_id}/installs")
 async def get_storage_device_installs(
-    request: Request, device_id: str, claims: TokenClaims = Depends(require_bearer)
+    request: Request, device_id: str, claims: Annotated[TokenClaims, Depends(require_bearer)]
 ) -> StorageDeviceInstallsResponse:
     """Every game id currently marked installed on this device.
 
@@ -231,13 +233,13 @@ async def get_storage_device_installs(
     return StorageDeviceInstallsResponse(game_ids=sorted(game_ids))
 
 
-@router.put("/{device_id}/installs/{game_id}", response_model=StorageDeviceInstallResponse)
+@router.put("/{device_id}/installs/{game_id}")
 async def set_storage_device_install(
     request: Request,
     device_id: str,
     game_id: str,
     body: StorageDeviceInstallRequest,
-    claims: TokenClaims = Depends(require_bearer),
+    claims: Annotated[TokenClaims, Depends(require_bearer)],
 ) -> StorageDeviceInstallResponse:
     """Set a game's current install state on a specific storage device.
 

@@ -67,7 +67,7 @@ class PublicCollectionResponse(BaseModel):
     items: list[CollectionItemResponse]
 
 
-@router.get("/{share_slug}", response_model=PublicCollectionResponse)
+@router.get("/{share_slug}")
 async def get_public_collection(request: Request, share_slug: str) -> PublicCollectionResponse:
     """Return a shared collection by its public link -- no ``Authorization`` header, no caller identity.
 

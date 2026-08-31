@@ -149,45 +149,52 @@ async def test_pinned_state_is_per_user():
     guard_a = MutationGuard("sub-a", repo)
     guard_b = MutationGuard("sub-b", repo)
 
-    await guard_a.require_pinned(Account(account_id="acct-a", online_id="a"))
+    pinned_account = Account(account_id="acct-a", online_id="a")
+
+    await guard_a.require_pinned(pinned_account)
 
     with pytest.raises(MutationNotAllowedError):
-        await guard_b.require_pinned(Account(account_id="acct-a", online_id="a"))
+        await guard_b.require_pinned(pinned_account)
 
 
 async def test_require_allowed_raises_when_no_link_store_is_configured():
     guard = MutationGuard("sub-1", FakePinnedAccountRepository())
+    linked_account = Account(account_id="acct-linked", online_id="me")
 
     with pytest.raises(MutationNotAllowedError, match="No PSN link store is configured"):
-        await guard.require_allowed(Account(account_id="acct-linked", online_id="me"), FRIEND_WRITES)
+        await guard.require_allowed(linked_account, FRIEND_WRITES)
 
 
 async def test_require_allowed_raises_when_user_has_no_link():
     guard = MutationGuard("sub-1", FakePinnedAccountRepository(), links=FakeLinkReader(None))
+    linked_account = Account(account_id="acct-linked", online_id="me")
 
     with pytest.raises(MutationNotAllowedError, match="No PSN account is linked"):
-        await guard.require_allowed(Account(account_id="acct-linked", online_id="me"), FRIEND_WRITES)
+        await guard.require_allowed(linked_account, FRIEND_WRITES)
 
 
 async def test_require_allowed_raises_when_live_account_is_not_the_linked_one():
     guard, _ = _consenting_guard(allow_friend_writes=True)
+    unlinked_account = Account(account_id="acct-other", online_id="someone-else")
 
     with pytest.raises(MutationNotAllowedError, match=r"not the .*linked"):
-        await guard.require_allowed(Account(account_id="acct-other", online_id="someone-else"), FRIEND_WRITES)
+        await guard.require_allowed(unlinked_account, FRIEND_WRITES)
 
 
 async def test_require_allowed_raises_when_capability_is_not_consented():
     guard, _ = _consenting_guard(allow_friend_writes=False)
+    linked_account = Account(account_id="acct-linked", online_id="me")
 
     with pytest.raises(MutationNotAllowedError, match=FRIEND_WRITES):
-        await guard.require_allowed(Account(account_id="acct-linked", online_id="me"), FRIEND_WRITES)
+        await guard.require_allowed(linked_account, FRIEND_WRITES)
 
 
 async def test_require_allowed_does_not_let_one_capability_authorize_the_other():
     guard, _ = _consenting_guard(allow_friend_writes=True, allow_chat_writes=False)
+    linked_account = Account(account_id="acct-linked", online_id="me")
 
     with pytest.raises(MutationNotAllowedError, match=CHAT_WRITES):
-        await guard.require_allowed(Account(account_id="acct-linked", online_id="me"), CHAT_WRITES)
+        await guard.require_allowed(linked_account, CHAT_WRITES)
 
 
 async def test_require_allowed_succeeds_for_linked_and_consented_account():
@@ -209,9 +216,10 @@ async def test_require_allowed_counts_mutations_over_a_rolling_24_hours():
 
 async def test_require_allowed_raises_when_daily_cap_is_spent():
     guard, _ = _consenting_guard(spent=MUTATION_DAILY_CAP, allow_chat_writes=True)
+    linked_account = Account(account_id="acct-linked", online_id="me")
 
     with pytest.raises(MutationNotAllowedError, match="Daily PSN change limit reached"):
-        await guard.require_allowed(Account(account_id="acct-linked", online_id="me"), CHAT_WRITES)
+        await guard.require_allowed(linked_account, CHAT_WRITES)
 
 
 async def test_require_allowed_permits_the_last_mutation_under_the_cap():
@@ -232,6 +240,7 @@ async def test_require_allowed_skips_the_cap_when_no_counter_is_configured():
 
 async def test_require_allowed_rejects_an_unknown_capability():
     guard, _ = _consenting_guard(allow_chat_writes=True)
+    linked_account = Account(account_id="acct-linked", online_id="me")
 
     with pytest.raises(AssertionError):
-        await guard.require_allowed(Account(account_id="acct-linked", online_id="me"), "harvest_trophies")
+        await guard.require_allowed(linked_account, "harvest_trophies")

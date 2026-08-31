@@ -8,7 +8,7 @@ not exist until the worker actually starts it.
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from typing import Any
+from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
@@ -40,9 +40,9 @@ class EnrichmentRunStatusResponse(BaseModel):
     result_summary: dict[str, Any] | None
 
 
-@router.post("/runs", response_model=EnrichmentRunResponse, status_code=202)
+@router.post("/runs", status_code=202)
 async def start_enrichment_run(
-    request: Request, _claims: TokenClaims = Depends(require_admin)
+    request: Request, _claims: Annotated[TokenClaims, Depends(require_admin)]
 ) -> EnrichmentRunResponse:
     """Queue a global catalog re-enrichment job. Admin-scoped.
 
@@ -67,9 +67,9 @@ async def start_enrichment_run(
     return EnrichmentRunResponse(run_id=run_id)
 
 
-@router.post("/runs/{run_id}/cancel", response_model=EnrichmentRunStatusResponse)
+@router.post("/runs/{run_id}/cancel")
 async def cancel_enrichment_run(
-    request: Request, run_id: str, _claims: TokenClaims = Depends(require_admin)
+    request: Request, run_id: str, _claims: Annotated[TokenClaims, Depends(require_admin)]
 ) -> EnrichmentRunStatusResponse:
     """Stand a still-running enrichment run down, so a fresh one can be queued. Admin-scoped.
 
@@ -100,9 +100,9 @@ async def cancel_enrichment_run(
     )
 
 
-@router.get("/runs/latest", response_model=EnrichmentRunStatusResponse)
+@router.get("/runs/latest")
 async def get_latest_enrichment_run(
-    request: Request, _claims: TokenClaims = Depends(require_admin)
+    request: Request, _claims: Annotated[TokenClaims, Depends(require_admin)]
 ) -> EnrichmentRunStatusResponse:
     """Return the most recently queued enrichment run's status. Admin-scoped.
 
@@ -121,9 +121,9 @@ async def get_latest_enrichment_run(
     )
 
 
-@router.get("/runs/{run_id}", response_model=EnrichmentRunStatusResponse)
+@router.get("/runs/{run_id}")
 async def get_enrichment_run_status(
-    request: Request, run_id: str, _claims: TokenClaims = Depends(require_admin)
+    request: Request, run_id: str, _claims: Annotated[TokenClaims, Depends(require_admin)]
 ) -> EnrichmentRunStatusResponse:
     """Poll one previously queued enrichment run's status. Admin-scoped.
 

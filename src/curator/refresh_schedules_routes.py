@@ -11,6 +11,7 @@ Saving a schedule also publishes its first scheduled message; the runtime that c
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import BaseModel
@@ -58,9 +59,9 @@ class RefreshScheduleResponse(BaseModel):
     paused_reason: str | None
 
 
-@router.get("/me/refresh-schedule", response_model=RefreshScheduleResponse)
+@router.get("/me/refresh-schedule")
 async def get_refresh_schedule(
-    request: Request, claims: TokenClaims = Depends(require_bearer)
+    request: Request, claims: Annotated[TokenClaims, Depends(require_bearer)]
 ) -> RefreshScheduleResponse:
     """Return the caller's recurring-refresh schedule.
 
@@ -74,11 +75,11 @@ async def get_refresh_schedule(
     return _response(schedule)
 
 
-@router.put("/me/refresh-schedule", response_model=RefreshScheduleResponse)
+@router.put("/me/refresh-schedule")
 async def set_refresh_schedule(
     body: RefreshScheduleRequest,
     request: Request,
-    claims: TokenClaims = Depends(require_bearer),
+    claims: Annotated[TokenClaims, Depends(require_bearer)],
 ) -> RefreshScheduleResponse:
     """Create or replace the caller's schedule and publish its first run.
 
@@ -100,7 +101,9 @@ async def set_refresh_schedule(
 
 
 @router.delete("/me/refresh-schedule", status_code=204)
-async def delete_refresh_schedule(request: Request, claims: TokenClaims = Depends(require_bearer)) -> Response:
+async def delete_refresh_schedule(
+    request: Request, claims: Annotated[TokenClaims, Depends(require_bearer)]
+) -> Response:
     """Remove the caller's schedule, withdrawing the opt-in.
 
     Any message already scheduled is left to fire and be discarded by the processor, which finds no row to

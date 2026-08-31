@@ -5,6 +5,8 @@ only applies to attached swappable storage; see ``curator.storage_devices_routes
 
 from __future__ import annotations
 
+from typing import Annotated
+
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 
@@ -113,9 +115,9 @@ def _to_response(console: UserConsole, *, capacity_is_default: bool = False) -> 
     )
 
 
-@router.post("", response_model=ConsoleResponse, status_code=201)
+@router.post("", status_code=201)
 async def create_console(
-    request: Request, body: ConsoleRequest, claims: TokenClaims = Depends(require_bearer)
+    request: Request, body: ConsoleRequest, claims: Annotated[TokenClaims, Depends(require_bearer)]
 ) -> ConsoleResponse:
     """Create a console for the caller.
 
@@ -150,17 +152,19 @@ async def create_console(
     return _to_response(console, capacity_is_default=capacity_is_default)
 
 
-@router.get("", response_model=list[ConsoleResponse])
-async def list_consoles(request: Request, claims: TokenClaims = Depends(require_bearer)) -> list[ConsoleResponse]:
+@router.get("")
+async def list_consoles(
+    request: Request, claims: Annotated[TokenClaims, Depends(require_bearer)]
+) -> list[ConsoleResponse]:
     """List every console the caller owns, ordered by ``fill_order``."""
     repository: CollectionsRepository = request.app.state.collections_repository
     consoles = await repository.list_user_consoles(claims.sub)
     return [_to_response(console) for console in consoles]
 
 
-@router.get("/{console_id}", response_model=ConsoleResponse)
+@router.get("/{console_id}")
 async def get_console(
-    request: Request, console_id: str, claims: TokenClaims = Depends(require_bearer)
+    request: Request, console_id: str, claims: Annotated[TokenClaims, Depends(require_bearer)]
 ) -> ConsoleResponse:
     """Read one console.
 
@@ -173,9 +177,12 @@ async def get_console(
     return _to_response(console)
 
 
-@router.patch("/{console_id}", response_model=ConsoleResponse)
+@router.patch("/{console_id}")
 async def update_console(
-    request: Request, console_id: str, body: ConsoleUpdateRequest, claims: TokenClaims = Depends(require_bearer)
+    request: Request,
+    console_id: str,
+    body: ConsoleUpdateRequest,
+    claims: Annotated[TokenClaims, Depends(require_bearer)],
 ) -> ConsoleResponse:
     """Patch a console's editable fields.
 
@@ -197,7 +204,9 @@ async def update_console(
 
 
 @router.delete("/{console_id}", status_code=204)
-async def delete_console(request: Request, console_id: str, claims: TokenClaims = Depends(require_bearer)) -> None:
+async def delete_console(
+    request: Request, console_id: str, claims: Annotated[TokenClaims, Depends(require_bearer)]
+) -> None:
     """Delete a console. Cascades to its own install rows; any attached storage device is detached, not
     deleted -- see ``CollectionsRepository.delete_console``.
 
@@ -217,7 +226,7 @@ class DeviceLinkRequest(BaseModel):
 
 @router.put("/{console_id}/device-link", status_code=204)
 async def link_console_device(
-    request: Request, console_id: str, body: DeviceLinkRequest, claims: TokenClaims = Depends(require_bearer)
+    request: Request, console_id: str, body: DeviceLinkRequest, claims: Annotated[TokenClaims, Depends(require_bearer)]
 ) -> None:
     """Link this console to one of the caller's PSN-registered devices (see ``GET /devices``).
 
@@ -233,7 +242,7 @@ async def link_console_device(
 
 @router.delete("/{console_id}/device-link", status_code=204)
 async def unlink_console_device(
-    request: Request, console_id: str, claims: TokenClaims = Depends(require_bearer)
+    request: Request, console_id: str, claims: Annotated[TokenClaims, Depends(require_bearer)]
 ) -> None:
     """Remove this console's device link, leaving both the console and the PSN device untouched.
 
@@ -246,9 +255,9 @@ async def unlink_console_device(
         raise HTTPException(status_code=404, detail="Console is not linked to a device.")
 
 
-@router.get("/{console_id}/installs", response_model=ConsoleInstallsResponse)
+@router.get("/{console_id}/installs")
 async def get_console_installs(
-    request: Request, console_id: str, claims: TokenClaims = Depends(require_bearer)
+    request: Request, console_id: str, claims: Annotated[TokenClaims, Depends(require_bearer)]
 ) -> ConsoleInstallsResponse:
     """Every game id currently marked installed on this console's own built-in storage.
 
@@ -261,13 +270,13 @@ async def get_console_installs(
     return ConsoleInstallsResponse(game_ids=sorted(game_ids))
 
 
-@router.put("/{console_id}/installs/{game_id}", response_model=ConsoleInstallResponse)
+@router.put("/{console_id}/installs/{game_id}")
 async def set_console_install(
     request: Request,
     console_id: str,
     game_id: str,
     body: ConsoleInstallRequest,
-    claims: TokenClaims = Depends(require_bearer),
+    claims: Annotated[TokenClaims, Depends(require_bearer)],
 ) -> ConsoleInstallResponse:
     """Set a game's current install state on a specific console's own built-in storage.
 

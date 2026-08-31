@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Annotated
+
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 
@@ -44,9 +46,9 @@ def _to_response(measured_size: MeasuredSize) -> MeasuredSizeResponse:
     )
 
 
-@router.get("", response_model=list[MeasuredSizeResponse])
+@router.get("")
 async def list_measured_sizes(
-    request: Request, game_id: str, _claims: TokenClaims = Depends(require_bearer)
+    request: Request, game_id: str, _claims: Annotated[TokenClaims, Depends(require_bearer)]
 ) -> list[MeasuredSizeResponse]:
     """Every measured size recorded for this game -- at most one row per platform."""
     repository: CollectionsRepository = request.app.state.collections_repository
@@ -54,13 +56,13 @@ async def list_measured_sizes(
     return [_to_response(size) for size in sizes]
 
 
-@router.put("/{platform}", response_model=MeasuredSizeResponse)
+@router.put("/{platform}")
 async def set_measured_size(
     request: Request,
     game_id: str,
     platform: str,
     body: SetMeasuredSizeRequest,
-    claims: TokenClaims = Depends(require_bearer),
+    claims: Annotated[TokenClaims, Depends(require_bearer)],
 ) -> MeasuredSizeResponse:
     """Record this game's measured install size for ``platform``, superseding any existing value.
 

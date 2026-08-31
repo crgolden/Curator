@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime
+from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import BaseModel
@@ -54,11 +55,11 @@ class LinkResponse(BaseModel):
     psn: PsnSummary
 
 
-@router.post("/psn/link", response_model=LinkResponse)
+@router.post("/psn/link")
 async def psn_link(
     body: LinkRequest,
     request: Request,
-    claims: TokenClaims = Depends(require_verified_caller),
+    claims: Annotated[TokenClaims, Depends(require_verified_caller)],
 ) -> LinkResponse:
     """Link the caller's PSN account, requiring a verified-matching PSN email.
 
@@ -104,7 +105,7 @@ async def psn_link(
 @router.delete("/psn/link", status_code=204)
 async def psn_unlink(
     request: Request,
-    claims: TokenClaims = Depends(require_verified_caller),
+    claims: Annotated[TokenClaims, Depends(require_verified_caller)],
 ) -> Response:
     """Re-verify (see :func:`curator.reverify.reverify_link`), then unlink the caller's PSN account.
 
