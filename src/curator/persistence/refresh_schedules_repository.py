@@ -14,9 +14,10 @@ from typing import Any, Literal
 
 from psycopg_pool import AsyncConnectionPool
 
-Cadence = Literal["weekly", "monthly"]
+Cadence = Literal["daily", "weekly", "monthly"]
 
 _CADENCE_INTERVALS: dict[str, timedelta] = {
+    "daily": timedelta(days=1),
     "weekly": timedelta(days=7),
     "monthly": timedelta(days=30),
 }
@@ -29,7 +30,10 @@ def next_run_after(cadence: Cadence, *, now: datetime | None = None) -> datetime
     gets, and PS Plus's own "first Tuesday" convention is a publishing habit rather than a contract, so a
     few days' drift changes nothing a caller can observe.
 
-    :param cadence: ``"weekly"`` or ``"monthly"``.
+    This computes only the FIRST run. Every subsequent ``next_run_at`` is computed by Functions'
+    ``ScheduledRefreshWorker``, which holds its own copy of this table -- see ``AGENTS/Functions.md``.
+
+    :param cadence: ``"daily"``, ``"weekly"`` or ``"monthly"``.
     :param now: The instant to measure from; defaults to the current UTC time.
     """
     return (now or datetime.now(timezone.utc)) + _CADENCE_INTERVALS[cadence]

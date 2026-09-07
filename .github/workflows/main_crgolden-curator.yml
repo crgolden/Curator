@@ -120,18 +120,18 @@ jobs:
       - name: Verify deployment package boots
         working-directory: publish
         run: |
-          python -m venv /tmp/smoke-venv
-          source /tmp/smoke-venv/bin/activate
-          /tmp/smoke-venv/bin/python -m pip install poetry --quiet
-          /tmp/smoke-venv/bin/poetry config virtualenvs.create false
-          /tmp/smoke-venv/bin/poetry install --no-root
-          smoke_key="$(PYTHONPATH=src /tmp/smoke-venv/bin/python -c 'from curator.persistence.crypto import TokenCrypto; print(TokenCrypto.generate_key().decode())')"
-          export OIDC_AUTHORITY='https://smoke-test.invalid'
-          export CURATOR_TOKEN_KEY="$smoke_key"
-          export CURATOR_DATABASE_URL='postgresql://smoke:test@localhost:5432/smoke'
-          /tmp/smoke-venv/bin/python -c "
+          python -m venv /tmp/boot-check-venv
+          source /tmp/boot-check-venv/bin/activate
+          /tmp/boot-check-venv/bin/python -m pip install poetry --quiet
+          /tmp/boot-check-venv/bin/poetry config virtualenvs.create false
+          /tmp/boot-check-venv/bin/poetry install --no-root
+          boot_check_key="$(PYTHONPATH=src /tmp/boot-check-venv/bin/python -c 'from curator.persistence.crypto import TokenCrypto; print(TokenCrypto.generate_key().decode())')"
+          export OIDC_AUTHORITY='https://boot-check.invalid'
+          export CURATOR_TOKEN_KEY="$boot_check_key"
+          export CURATOR_DATABASE_URL='postgresql://boot:check@localhost:5432/bootcheck'
+          /tmp/boot-check-venv/bin/python -c "
           import app
-          print('Smoke test OK:', app.app)
+          print('Package boots OK:', app.app)
           "
 
       - name: Upload deployment package

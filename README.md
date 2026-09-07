@@ -349,7 +349,7 @@ src/curator/
                                                # GET/PUT /storage-devices/{id}/installs[/{gameId}]
   enrichment_routes.py                        # POST /enrichment/runs, POST /enrichment/runs/{run_id}/cancel,
                                                # GET /enrichment/runs/latest|{run_id} (all admin-only)
-  refresh_schedules_routes.py                 # GET/PUT/DELETE /me/refresh-schedule: the standing weekly/monthly refresh
+  refresh_schedules_routes.py                 # GET/PUT/DELETE /me/refresh-schedule: the standing daily/weekly/monthly refresh
   measured_sizes_routes.py                    # GET/PUT /games/{gameId}/measured-sizes[/{platform}]
   social_routes.py                            # PUT/DELETE /me/friends/{onlineId}, PSN chat group create/leave
   profile_routes.py                             # GET/PUT /me/profile-settings, GET /users/{sub}/profile,
@@ -383,7 +383,7 @@ src/curator/
     enrichment_keys_repository.py  # EnrichmentKeysRepository: psycopg 3 DAO over user_enrichment_keys
     profile_repository.py  # ProfileRepository: psycopg 3 DAO over user_profiles (display toggles)
     follow_repository.py   # FollowRepository: psycopg 3 DAO over follows (the follow graph)
-    refresh_schedules_repository.py  # RefreshSchedulesRepository: a user's standing weekly/monthly refresh
+    refresh_schedules_repository.py  # RefreshSchedulesRepository: a user's standing daily/weekly/monthly refresh
     db_token_store.py    # DbTokenStore: curator.psn.session.TokenStore contract, backed by Repository
 db/migrations/
   0001_initial.sql        # full schema

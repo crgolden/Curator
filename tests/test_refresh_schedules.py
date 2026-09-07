@@ -108,6 +108,10 @@ def _build(*, linked: bool, schedules=None, publisher=None):
     return TestClient(app), app.state.refresh_schedules_repository, app.state.queue_publisher
 
 
+def test_next_run_after_daily_is_one_day_out():
+    assert next_run_after("daily", now=_NOW) == _NOW + timedelta(days=1)
+
+
 def test_next_run_after_weekly_is_seven_days_out():
     assert next_run_after("weekly", now=_NOW) == _NOW + timedelta(days=7)
 
@@ -166,6 +170,21 @@ def test_put_schedule_is_refused_when_no_queue_is_configured_rather_than_storing
 
     assert response.status_code == 503
     assert schedules.schedules == {}
+
+
+def test_put_schedule_accepts_a_daily_cadence_and_schedules_the_first_run_a_day_out():
+    client, schedules, publisher = _build(linked=True)
+
+    response = client.put(
+        "/me/refresh-schedule", json={"cadence": "daily", "ps_plus_watch": False}, headers=_bearer("valid-token")
+    )
+
+    assert response.status_code == 200
+    assert response.json()["cadence"] == "daily"
+    assert schedules.schedules[SUB].cadence == "daily"
+    _, published_at = publisher.scheduled_calls[0]
+    assert published_at - datetime.now(timezone.utc) < timedelta(days=1)
+    assert published_at - datetime.now(timezone.utc) > timedelta(hours=23)
 
 
 def test_put_schedule_rejects_an_unknown_cadence():
