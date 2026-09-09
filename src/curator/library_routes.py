@@ -19,7 +19,8 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from pydantic import BaseModel, Field, model_validator
 
 from curator.audit.repository import ACTION_LIBRARY_REFRESH_REQUESTED, AccountActionLogRepository
-from curator.catalog.repository import CatalogRepository
+from curator.catalog.repository import CatalogRepository, GameSummary
+from curator.catalog_routes import GameSummaryResponse
 from curator.deps import require_bearer
 from curator.jobs.queue_publisher import QueuePublisher
 from curator.jobs.repository import JobRunsRepository
@@ -47,6 +48,7 @@ logger = logging.getLogger("curator")
 _NO_LINK_DETAIL = "PSN account not linked."
 _AUTH_FAILED_DETAIL = "PSN authentication failed; re-link your account."
 _NOT_IN_THE_STORE_DETAIL = "That title is not in the PlayStation Store results for this search."
+_ALREADY_OWNED_DETAIL = "That game is already in your library from PlayStation Network."
 
 MAX_STORE_SEARCH_LIMIT: Final = 50
 """The most hits ``GET /library/manual/search`` will return, and so the most a re-search must look through.
@@ -210,6 +212,79 @@ class StoreSearchResponse(BaseModel):
     results: list[StoreSearchResultResponse]
 
 
+class ManualCandidatesResponse(BaseModel):
+    """What the caller can still add by hand for one search term, and where each answer came from.
+
+    The whole point of this shape is that the decisions live here rather than in a client. "Should the
+    Store be consulted?", "does an empty list mean nothing matched or that you own it all?" and "why is
+    there no Store answer?" are domain questions, and a browser answering them by combining two endpoints
+    was how Librarian ended up never reaching the Store for a term the catalog partly matched.
+
+    :param catalog: Catalogued games the caller does **not** already hold, newest search first.
+    :param store: PlayStation Store candidates, empty unless ``store_consulted``.
+    :param already_owned: Catalogued matches dropped because the caller holds them. Separates "nothing
+        matches that name" from "you already have every one".
+    :param store_consulted: Whether a Store search was actually spent on this request. It costs the
+        caller's own PSN credentials, so it never happens implicitly on a term the catalog could answer.
+    :param store_unavailable: Why the Store could not be consulted when it otherwise would have been --
+        ``"no_psn_link"`` or ``"psn_auth_failed"``. ``None`` when the question did not arise.
+    """
+
+    catalog: list[GameSummaryResponse] = []
+    store: list[StoreSearchResultResponse] = []
+    already_owned: int = 0
+    store_consulted: bool = False
+    store_unavailable: Literal["no_psn_link", "psn_auth_failed"] | None = None
+
+
+@router.get("/manual/candidates")
+async def manual_add_candidates(
+    request: Request,
+    claims: Annotated[TokenClaims, Depends(require_bearer)],
+    q: str = Query(min_length=1),
+    include_store: bool = Query(default=False, alias="includeStore"),
+    limit: int = Query(default=10, ge=1, le=MAX_STORE_SEARCH_LIMIT),
+) -> ManualCandidatesResponse:
+    """Answer "what can I still add by hand for this name?" in one call.
+
+    The catalog is asked first, with the caller's own library excluded, because it costs nothing. The
+    Store is consulted when the catalog has nothing left to offer, or when the caller asks for it with
+    ``includeStore`` -- which they need, because **a catalog hit is not evidence the catalog has the game
+    they mean**. The catalog is a partial mirror of the Store, so a search can return real titles and
+    still miss the one in the caller's hands; only the caller can say "not these".
+
+    A Store search spends the caller's PSN credentials, so it is never implicit on a term the catalog
+    already answered, and its absence is reported rather than raised: an unlinked account is a state of
+    this answer, not a failure of the request.
+
+    :param q: The name to look for.
+    :param include_store: Ask for the Store even when the catalog returned candidates.
+    :param limit: Maximum candidates per source.
+    """
+    catalog_repository: CatalogRepository = request.app.state.catalog_repository
+    page = await catalog_repository.list_games(search=q, exclude_owned_by=claims.sub, limit=limit)
+    catalog = [_to_game_summary(game) for game in page.games]
+
+    if catalog and not include_store:
+        return ManualCandidatesResponse(catalog=catalog, already_owned=page.excluded_owned)
+
+    try:
+        hits = await _search_the_store(request, claims.sub, q, domain=FULL_GAMES_DOMAIN, limit=limit)
+    except HTTPException as exc:
+        unavailable = "no_psn_link" if exc.status_code == 404 else "psn_auth_failed"
+        return ManualCandidatesResponse(
+            catalog=catalog, already_owned=page.excluded_owned, store_unavailable=unavailable
+        )
+
+    game_ids = await catalog_repository.game_ids_for_store_ids([hit.id for hit in hits if hit.id])
+    return ManualCandidatesResponse(
+        catalog=catalog,
+        store=[_to_store_result(hit, game_ids) for hit in hits],
+        already_owned=page.excluded_owned,
+        store_consulted=True,
+    )
+
+
 @router.get("/manual/search")
 async def search_store_for_manual_add(
     request: Request,
@@ -243,23 +318,40 @@ async def search_store_for_manual_add(
     game_ids = await catalog_repository.game_ids_for_store_ids([result.id for result in results if result.id])
 
     return StoreSearchResponse(
-        domain=domain,
-        results=[
-            StoreSearchResultResponse(
-                id=result.id,
-                kind=result.kind,
-                game_id=game_ids.get(result.id or ""),
-                default_product_id=result.default_product_id,
-                name=result.name,
-                platforms=list(result.platforms),
-                cover_image_url=result.cover_image_url,
-                classification=result.classification,
-                price=result.price,
-                discounted_price=result.discounted_price,
-                is_free=result.is_free,
-            )
-            for result in results
-        ],
+        domain=domain, results=[_to_store_result(result, game_ids) for result in results]
+    )
+
+
+def _to_store_result(result: GameSearchResult, game_ids: dict[str, str]) -> StoreSearchResultResponse:
+    """Project one PSN search hit, resolving the catalog game it already maps to when there is one."""
+    return StoreSearchResultResponse(
+        id=result.id,
+        kind=result.kind,
+        game_id=game_ids.get(result.id) if result.id is not None else None,
+        default_product_id=result.default_product_id,
+        name=result.name,
+        platforms=list(result.platforms),
+        cover_image_url=result.cover_image_url,
+        classification=result.classification,
+        price=result.price,
+        discounted_price=result.discounted_price,
+        is_free=result.is_free,
+    )
+
+
+def _to_game_summary(game: GameSummary) -> GameSummaryResponse:
+    """Project one catalogued game into the same shape ``GET /catalog/games`` returns."""
+    return GameSummaryResponse(
+        game_id=game.game_id,
+        canonical_title=game.canonical_title,
+        franchise=game.franchise,
+        genre=game.genre,
+        aaa_tier=game.aaa_tier,
+        cover_image_url=game.cover_image_url,
+        store_product_id=game.store_product_id,
+        critical_score=game.critical_score,
+        oc_score=game.oc_score,
+        psn_rating=game.psn_rating,
     )
 
 
@@ -288,7 +380,11 @@ async def add_manual_game(
 ) -> Response:
     """Add a game the user owns that PSN's entitlement API has no record of -- a physical disc, typically.
 
-    Idempotent, and never overwrites a PSN-sourced entry for the same game.
+    Idempotent for the caller's own manual entries, and it never overwrites a PSN-sourced one. A game the
+    caller already holds from PSN answers **409** rather than 204: the guard has always declined to write,
+    but reporting success anyway told users their game had been added when nothing had changed. A lapsed
+    entitlement is exactly this shape -- the row is inactive and invisible in a filtered view, so the game
+    looks absent right up until the add silently does nothing.
 
     A ``store_hit`` body admits the title to the shared catalog first, so a game the PlayStation Store
     plainly carries stops being unaddable merely because no user's library has ever ingested it. The
@@ -302,7 +398,8 @@ async def add_manual_game(
     :raises fastapi.HTTPException: 400, if ``platforms`` names anything outside
         :data:`~curator.psn.title_platform.CONSOLE_PLATFORM_IDS`; 404, if ``game_id`` is not a known
         catalog game, if a ``store_hit`` matches nothing PSN returned for its own query, or if a
-        ``store_hit`` caller has no PSN link; 401, if PSN rejects the caller's stored token.
+        ``store_hit`` caller has no PSN link; 409, if the caller already holds the game from PSN;
+        401, if PSN rejects the caller's stored token.
     """
     library_repository: LibraryRepository = request.app.state.library_repository
     catalog_repository: CatalogRepository = request.app.state.catalog_repository
@@ -321,9 +418,11 @@ async def add_manual_game(
             derived = platform_for_title_id(await catalog_repository.title_id_for_game(game_id))
             platforms = [derived] if derived is not None else []
 
-    await library_repository.upsert_manual_entry(
+    written = await library_repository.upsert_manual_entry(
         claims.sub, game_id, platforms=platforms, owned_edition=body.owned_edition
     )
+    if not written:
+        raise HTTPException(status_code=409, detail=_ALREADY_OWNED_DETAIL)
     return Response(status_code=204)
 
 
@@ -354,7 +453,10 @@ async def _admit_store_hit(
         raise HTTPException(status_code=404, detail=_NOT_IN_THE_STORE_DETAIL)
 
     game_id, _created = await catalog_repository.admit_store_game(
-        concept_id=store_hit.id, name=hit.name, product_id=hit.default_product_id
+        concept_id=store_hit.id,
+        name=hit.name,
+        product_id=hit.default_product_id,
+        cover_image_url=hit.cover_image_url,
     )
 
     platforms: list[ConsolePlatform] = []

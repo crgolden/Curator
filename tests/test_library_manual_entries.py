@@ -76,6 +76,29 @@ async def test_manual_entry_cannot_overwrite_a_psn_sourced_row():
     )
 
 
+async def test_a_declined_manual_upsert_reports_that_it_wrote_nothing():
+    """The guard above has always declined silently. A caller that cannot tell 'added' from 'already
+    yours' reports success for a write that never happened -- which is what a lapsed PSN entitlement
+    looks like, since its row is inactive and easy to miss in the table."""
+    pool = FakePool(rowcount=0)
+    repository = LibraryRepository(pool)
+
+    written = await repository.upsert_manual_entry("sub-a", "game-1", platforms=("PS4",), owned_edition=None)
+
+    assert written is False
+    assert len(pool.connections[0].executed) == 1, "a declined upsert must not go on to rewrite platforms"
+
+
+async def test_a_written_manual_upsert_reports_success_and_reconciles_platforms():
+    pool = FakePool(rowcount=1)
+    repository = LibraryRepository(pool)
+
+    written = await repository.upsert_manual_entry("sub-a", "game-1", platforms=("PS4",), owned_edition=None)
+
+    assert written is True
+    assert len(pool.connections[0].executed) > 1, "a written upsert reconciles library_entry_platforms"
+
+
 async def test_a_legacy_platform_leaves_both_booleans_false_and_still_records_the_platform():
     pool = FakePool(rowcount=1)
     repository = LibraryRepository(pool)

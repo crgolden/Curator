@@ -78,11 +78,13 @@ class FakeCatalogRepository:
 class FakeLibraryRepository:
     """Records manual upserts so a route test can assert what reached the library."""
 
-    def __init__(self):
+    def __init__(self, written=True):
         self.manual_entries: list[tuple[str, str, tuple[str, ...], str | None]] = []
+        self._written = written
 
     async def upsert_manual_entry(self, identity_sub, game_id, *, platforms, owned_edition):
         self.manual_entries.append((identity_sub, game_id, tuple(platforms), owned_edition))
+        return self._written
 
 
 def _build(search_client=None, *, linked=True, catalog_repository=None, library_repository=None):

@@ -31,10 +31,18 @@ class GameSummaryResponse(BaseModel):
 
 
 class CatalogGamesResponse(BaseModel):
-    """The ``GET /catalog/games`` response body."""
+    """The ``GET /catalog/games`` response body.
+
+    :param excluded_owned: How many games matching the same filters were dropped because the caller
+        already holds them. Only ever non-zero for an ``excludeOwned`` request, and it is what stops a
+        client having to work out why a page came back empty -- "nothing matches that name" and "you
+        already own every match" are otherwise the same empty list, and telling them apart in the browser
+        would put a domain rule there.
+    """
 
     games: list[GameSummaryResponse]
     total: int = 0
+    excluded_owned: int = 0
 
 
 class CatalogGenresResponse(BaseModel):
@@ -85,24 +93,43 @@ class CatalogBackfillRequest(BaseModel):
 @router.get("/games")
 async def list_games(
     request: Request,
+    claims: Annotated[TokenClaims | None, Depends(optional_bearer)],
     q: str | None = Query(default=None),
     franchise: str | None = Query(default=None),
     genre: str | None = Query(default=None),
     aaa_tier: str | None = Query(default=None, alias="aaaTier"),
+    exclude_owned: bool = Query(default=False, alias="excludeOwned"),
     limit: int = Query(default=50, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
 ) -> CatalogGamesResponse:
     """Browse the shared game catalog, optionally filtered by title, franchise, genre, or publisher tier.
 
+    Anonymous, as the catalog is public. A signed-in caller may additionally ask for
+    ``excludeOwned=true``, which drops the games they already hold a library entry for -- what backs
+    Librarian's "add a game by hand" search, where offering a title the owner already has is noise and
+    adding it does nothing. The exclusion is a SQL predicate, so ``total`` and the paging stay honest;
+    filtering a returned page client-side would hide the addable games sitting behind the owned ones.
+    The parameter is ignored for an anonymous caller rather than rejected, because there is no library to
+    subtract and the route's public contract does not change.
+
     :param q: Optional case-insensitive title substring filter.
+    :param exclude_owned: Drop the caller's own library entries; honoured only when a bearer token
+        identifies them.
     :returns: A page of matching games ordered by canonical title, plus the total matching count.
     """
     repository: CatalogRepository = request.app.state.catalog_repository
-    games: list[GameSummary]
-    games, total = await repository.list_games(
-        search=q, franchise=franchise, genre=genre, aaa_tier=aaa_tier, limit=limit, offset=offset
+    page = await repository.list_games(
+        search=q,
+        franchise=franchise,
+        genre=genre,
+        aaa_tier=aaa_tier,
+        exclude_owned_by=claims.sub if exclude_owned and claims else None,
+        limit=limit,
+        offset=offset,
     )
+    games: list[GameSummary] = page.games
     return CatalogGamesResponse(
+        excluded_owned=page.excluded_owned,
         games=[
             GameSummaryResponse(
                 game_id=game.game_id,
@@ -118,7 +145,7 @@ async def list_games(
             )
             for game in games
         ],
-        total=total,
+        total=page.total,
     )
 
 

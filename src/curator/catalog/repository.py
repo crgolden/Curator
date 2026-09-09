@@ -34,6 +34,21 @@ class GameSummary:
     percent_completed: int | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class CatalogPage:
+    """One page of ``GET /catalog/games`` plus what the caller's own library removed from it.
+
+    ``excluded_owned`` exists so a client never has to infer why a page came back empty. Without it,
+    "nothing matches that name" and "you already own every match" are the same empty list, and the only
+    way to tell them apart is a second, unfiltered request the client then reasons about -- putting a
+    domain rule in the browser. Zero whenever no exclusion was asked for.
+    """
+
+    games: list[GameSummary]
+    total: int
+    excluded_owned: int = 0
+
+
 GAME_UPSERT_ADVISORY_LOCK_CLASS = 1
 """Must equal ``Functions``' own ``CuratorAdvisoryLocks.GameUpsert`` -- Postgres keeps the single-bigint
 and two-int ``pg_advisory_xact_lock`` forms in separate lock spaces, so both the form and this classid have
@@ -56,32 +71,60 @@ class CatalogRepository:
         franchise: str | None = None,
         genre: str | None = None,
         aaa_tier: str | None = None,
+        exclude_owned_by: str | None = None,
         limit: int = 50,
         offset: int = 0,
-    ) -> tuple[list[GameSummary], int]:
-        """Return a page of the shared game catalog plus the total matching count.
+    ) -> CatalogPage:
+        """Return a page of the shared game catalog, its total, and what the caller already owns.
 
         :param search: Optional case-insensitive title substring filter.
         :param franchise: Restrict to this exact franchise, if given.
         :param genre: Restrict to this exact genre name, if given.
         :param aaa_tier: Restrict to this publisher tier, if given.
+        :param exclude_owned_by: Drop games this ``identity_sub`` already holds a library entry for,
+            whatever its source. The predicate joins the WHERE clause rather than filtering the returned
+            page, so ``total`` and every subsequent page describe the same reduced set -- a caller paging
+            an unfiltered page and discarding owned rows itself would silently lose the addable games that
+            sit behind them. The matches it removed are counted into
+            :attr:`CatalogPage.excluded_owned`, so the caller is never left inferring why a page is empty.
         :param limit: Maximum number of rows to return.
         :param offset: Number of matching rows to skip (for pagination).
         """
         conditions: list[str] = []
         params: list[Any] = []
+        owned_conditions: list[str] = []
+        owned_params: list[Any] = []
         if search:
             conditions.append("g.canonical_title ILIKE %s")
             params.append(f"%{search}%")
+            owned_conditions.append("g.canonical_title ILIKE %s")
+            owned_params.append(f"%{search}%")
+        if exclude_owned_by is not None:
+            ownership = (
+                "EXISTS ("
+                "SELECT 1 FROM library_entries le "
+                "WHERE le.game_id = g.game_id AND le.identity_sub = %s"
+                ")"
+            )
+            conditions.append(f"NOT {ownership}")
+            params.append(exclude_owned_by)
+            owned_conditions.append(ownership)
+            owned_params.append(exclude_owned_by)
         if franchise is not None:
             conditions.append("g.franchise = %s")
             params.append(franchise)
+            owned_conditions.append("g.franchise = %s")
+            owned_params.append(franchise)
         if genre is not None:
             conditions.append("gen.name = %s")
             params.append(genre)
+            owned_conditions.append("gen.name = %s")
+            owned_params.append(genre)
         if aaa_tier is not None:
             conditions.append("ge.aaa_tier = %s")
             params.append(aaa_tier)
+            owned_conditions.append("ge.aaa_tier = %s")
+            owned_params.append(aaa_tier)
         where_clause = f"WHERE {' AND '.join(conditions)}" if conditions else ""
 
         base_query = f"""
@@ -113,21 +156,43 @@ class CatalogRepository:
                 (*params, limit, offset),
             )
             rows = await cur.fetchall()
-        return [
-            GameSummary(
-                game_id=str(row[0]),
-                canonical_title=row[1],
-                franchise=row[2],
-                genre=row[3],
-                aaa_tier=row[4],
-                cover_image_url=row[5],
-                store_product_id=row[6],
-                critical_score=row[7],
-                oc_score=row[8],
-                psn_rating=row[9],
-            )
-            for row in rows
-        ], total
+
+            excluded_owned = 0
+            if exclude_owned_by is not None:
+                owned_where = f"WHERE {' AND '.join(owned_conditions)}"
+                await cur.execute(
+                    f"""
+                    SELECT COUNT(*)
+                    FROM games g
+                    LEFT JOIN game_enrichment ge ON ge.game_id = g.game_id
+                    LEFT JOIN genres gen ON gen.genre_id = ge.genre_id
+                    {owned_where}
+                    """,
+                    tuple(owned_params),
+                )
+                owned_row = await cur.fetchone()
+                assert owned_row is not None
+                excluded_owned = owned_row[0]
+
+        return CatalogPage(
+            games=[
+                GameSummary(
+                    game_id=str(row[0]),
+                    canonical_title=row[1],
+                    franchise=row[2],
+                    genre=row[3],
+                    aaa_tier=row[4],
+                    cover_image_url=row[5],
+                    store_product_id=row[6],
+                    critical_score=row[7],
+                    oc_score=row[8],
+                    psn_rating=row[9],
+                )
+                for row in rows
+            ],
+            total=total,
+            excluded_owned=excluded_owned,
+        )
 
     async def get_game(self, game_id: str, identity_sub: str | None = None) -> GameSummary | None:
         """Return one catalogued game, or ``None`` if no such game exists.
@@ -310,7 +375,14 @@ class CatalogRepository:
             rows = await cur.fetchall()
         return {str(row[0]): str(row[1]) for row in rows if row[1] is not None}
 
-    async def admit_store_game(self, *, concept_id: str, name: str, product_id: str | None = None) -> tuple[str, bool]:
+    async def admit_store_game(
+        self,
+        *,
+        concept_id: str,
+        name: str,
+        product_id: str | None = None,
+        cover_image_url: str | None = None,
+    ) -> tuple[str, bool]:
         """Admit a PlayStation Store title to the shared catalog, and return the game it now maps to.
 
         Idempotent by concept id first and normalized title second, so two users admitting the same title
@@ -328,11 +400,21 @@ class CatalogRepository:
         instead of stranding it.
 
         **No ``psn_catalog_cache`` row is written**, because a search hit carries no npTitleId and that
-        table is keyed by one -- see ``AGENTS/Curator.md``.
+        table is keyed by one -- see ``AGENTS/Curator.md``. That is why the cover is kept on ``games``
+        instead: it is the only identifier a search hit carries all the way through admission, and
+        discarding the image the search already returned left a hand-added game with no art forever, since
+        nothing running later can recover it.
+
+        An existing game keeps the cover it already has; the fallback only fills a hole. A title the
+        catalog gained from a library refresh therefore keeps rendering its entitlement artwork.
 
         :param concept_id: The hit's PSN concept id.
         :param name: The title exactly as PSN published it; also the source of ``normalized_title``.
         :param product_id: The concept's current ``defaultProduct`` id, when it published one.
+        :param cover_image_url: The hit's own cover, kept as the fallback
+            :data:`~curator.catalog.cover_art.SQUARE_COVER_ART_SQL` reaches for when PSN carries no
+            entitlement artwork -- which is the common case for the back catalogue this feature exists to
+            cover.
         :returns: ``(game_id, created)`` -- ``created`` distinguishes a newly admitted game from one the
             catalog already held.
         """
@@ -353,12 +435,22 @@ class CatalogRepository:
             created = row is None
             if row is None:
                 await cur.execute(
-                    "INSERT INTO games (canonical_title, normalized_title) VALUES (%s, %s) RETURNING game_id",
-                    (name.strip(), normalized_title),
+                    """
+                    INSERT INTO games (canonical_title, normalized_title, store_cover_image_url)
+                    VALUES (%s, %s, %s)
+                    RETURNING game_id
+                    """,
+                    (name.strip(), normalized_title, cover_image_url),
                 )
                 row = await cur.fetchone()
                 assert row is not None
             game_id = str(row[0])
+
+            if cover_image_url is not None:
+                await cur.execute(
+                    "UPDATE games SET store_cover_image_url = %s WHERE game_id = %s AND store_cover_image_url IS NULL",
+                    (cover_image_url, game_id),
+                )
 
             await cur.execute(
                 """

@@ -132,8 +132,13 @@ class LibraryRepository:
 
     async def upsert_manual_entry(
         self, identity_sub: str, game_id: str, *, platforms: Sequence[ConsolePlatform], owned_edition: str | None
-    ) -> None:
+    ) -> bool:
         """Record a game the user owns that PSN has no entitlement for -- a physical disc, typically.
+
+        :returns: ``True`` when the entry was written, ``False`` when the caller already holds a
+            PSN-sourced row for that game and the guard below declined to touch it. The caller needs the
+            distinction: answering 204 either way told a user their game had been added when nothing had
+            changed, which is what a lapsed PS3 entitlement looks like from the outside.
 
         ``library_entry_platforms`` is the platform of record. ``native_ps5``/``ps4_eligible`` are still
         written, derived from ``platforms``, because the Functions worker's canonicalization pass reads
@@ -160,8 +165,10 @@ class LibraryRepository:
                 """,
                 (identity_sub, game_id, native_ps5, ps4_eligible, owned_edition),
             )
-            if cur.rowcount:
-                await self._sync_entry_platforms(cur, identity_sub, game_id, platforms)
+            if not cur.rowcount:
+                return False
+            await self._sync_entry_platforms(cur, identity_sub, game_id, platforms)
+            return True
 
     async def delete_manual_entry(self, identity_sub: str, game_id: str) -> bool:
         """Remove a manually-added game, never a PSN-sourced one.

@@ -10,7 +10,7 @@ import httpx
 from fastapi.testclient import TestClient
 
 from curator.app import create_app
-from curator.catalog.repository import CatalogRepository, GameSummary
+from curator.catalog.repository import CatalogPage, CatalogRepository, GameSummary
 from curator.catalog.store_backfill_service import BackfillProgress, BackfillSummary
 from curator.persistence.crypto import TokenCrypto
 from curator.psn.store_client import StoreCatalogClient
@@ -66,19 +66,22 @@ def _store_client(payload):
 
 
 class FakeCatalogRepository:
-    def __init__(self, games=None, genres=None, genre_vocabulary=None):
+    def __init__(self, games=None, genres=None, genre_vocabulary=None, excluded_owned=0):
         self._games = games or []
         self._genres = genres or []
         self._genre_vocabulary = list(genre_vocabulary or [])
+        self._excluded_owned = excluded_owned
         self.list_games_calls = []
         self.get_game_calls = []
 
     async def list_genre_vocabulary(self):
         return list(self._genre_vocabulary)
 
-    async def list_games(self, *, search=None, franchise=None, genre=None, aaa_tier=None, limit=50, offset=0):
-        self.list_games_calls.append((search, franchise, genre, aaa_tier, limit, offset))
-        return self._games, len(self._games)
+    async def list_games(
+        self, *, search=None, franchise=None, genre=None, aaa_tier=None, exclude_owned_by=None, limit=50, offset=0
+    ):
+        self.list_games_calls.append((search, franchise, genre, aaa_tier, exclude_owned_by, limit, offset))
+        return CatalogPage(games=self._games, total=len(self._games), excluded_owned=self._excluded_owned)
 
     async def get_game(self, game_id, identity_sub=None):
         self.get_game_calls.append((game_id, identity_sub))
@@ -155,6 +158,59 @@ def test_browsing_the_catalog_needs_no_token():
 
     assert response.status_code == 200
     assert response.json()["games"][0]["canonical_title"] == "Bloodborne"
+
+
+def test_exclude_owned_is_ignored_for_an_anonymous_caller_who_has_no_library():
+    catalog_repository = FakeCatalogRepository(
+        [GameSummary(game_id="g1", canonical_title="Bloodborne", franchise=None, genre="Action", aaa_tier="AAA")]
+    )
+    client, _validator = _build(catalog_repository)
+
+    response = client.get("/catalog/games", params={"excludeOwned": "true"})
+
+    assert response.status_code == 200
+    assert catalog_repository.list_games_calls[0][4] is None
+
+
+def test_exclude_owned_passes_the_callers_sub_so_the_database_does_the_subtraction():
+    catalog_repository = FakeCatalogRepository(
+        [GameSummary(game_id="g1", canonical_title="Bloodborne", franchise=None, genre="Action", aaa_tier="AAA")]
+    )
+    client, validator = _build(catalog_repository)
+    caller = _claims()
+    validator.register("caller-token", caller)
+
+    response = client.get("/catalog/games", params={"excludeOwned": "true"}, headers=_bearer("caller-token"))
+
+    assert response.status_code == 200
+    assert catalog_repository.list_games_calls[0][4] == caller.sub
+
+
+def test_the_response_says_how_many_matches_the_callers_library_removed():
+    """An empty page has two meanings -- no such game, or you already own them all -- and a client that
+    cannot tell them apart has to make a second request and decide for itself, which puts the rule in the
+    browser. The count is the server answering the question."""
+    catalog_repository = FakeCatalogRepository(excluded_owned=4)
+    client, validator = _build(catalog_repository)
+    validator.register("caller-token", _claims())
+
+    response = client.get("/catalog/games", params={"excludeOwned": "true"}, headers=_bearer("caller-token"))
+
+    assert response.status_code == 200
+    assert response.json()["excluded_owned"] == 4
+
+
+def test_omitting_exclude_owned_leaves_a_signed_in_browse_unfiltered():
+    catalog_repository = FakeCatalogRepository(
+        [GameSummary(game_id="g1", canonical_title="Bloodborne", franchise=None, genre="Action", aaa_tier="AAA")]
+    )
+    client, validator = _build(catalog_repository)
+    validator.register("caller-token", _claims())
+
+    response = client.get("/catalog/games", headers=_bearer("caller-token"))
+
+    assert response.status_code == 200
+    assert catalog_repository.list_games_calls[0][4] is None
 
 
 def test_catalog_carries_ratings_and_the_derived_tier():
@@ -538,7 +594,7 @@ def test_passes_query_filters_through_to_repository():
         headers=_bearer("token-a"),
     )
 
-    assert catalog_repository.list_games_calls == [(None, "God of War", "Action", "AAA", 10, 5)]
+    assert catalog_repository.list_games_calls == [(None, "God of War", "Action", "AAA", None, 10, 5)]
 
 
 def test_title_search_reaches_the_repository():
@@ -548,7 +604,7 @@ def test_title_search_reaches_the_repository():
 
     client.get("/catalog/games?q=tomb", headers=_bearer("token-a"))
 
-    assert catalog_repository.list_games_calls == [("tomb", None, None, None, 50, 0)]
+    assert catalog_repository.list_games_calls == [("tomb", None, None, None, None, 50, 0)]
 
 
 def test_default_pagination():
@@ -558,4 +614,4 @@ def test_default_pagination():
 
     client.get("/catalog/games", headers=_bearer("token-a"))
 
-    assert catalog_repository.list_games_calls == [(None, None, None, None, 50, 0)]
+    assert catalog_repository.list_games_calls == [(None, None, None, None, None, 50, 0)]

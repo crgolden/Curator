@@ -85,6 +85,46 @@ class FakePool:
         return conn
 
 
+async def test_excluding_owned_games_constrains_the_count_as_well_as_the_page():
+    """The exclusion has to be a WHERE predicate, not a filter over the rows that come back. A caller who
+    paged an unfiltered list and dropped its owned rows itself would report a total counting games it then
+    refused to show, and would lose the addable games sitting behind them on later pages."""
+    pool = FakePool(fetchone_results=[(0,), (7,)], fetchall_results=[[]])
+    repo = CatalogRepository(pool)
+    owner_sub = str(uuid.uuid4())
+
+    page = await repo.list_games(search="batman", exclude_owned_by=owner_sub)
+
+    count_sql, count_params = pool.connections[0].executed[0]
+    page_sql, page_params = pool.connections[0].executed[1]
+    owned_sql, owned_params = pool.connections[0].executed[2]
+
+    assert count_sql.strip().startswith("SELECT COUNT(*)")
+    for sql in (count_sql, page_sql):
+        assert "NOT EXISTS" in sql
+        assert "library_entries" in sql
+    assert owner_sub in count_params
+    assert owner_sub in page_params
+
+    assert "NOT EXISTS" not in owned_sql, "the excluded count asks the inverse of the page's predicate"
+    assert "EXISTS" in owned_sql
+    assert owner_sub in owned_params
+    assert "batman" in str(owned_params), "it must count only what the same search matched"
+    assert page.excluded_owned == 7
+
+
+async def test_listing_games_without_an_owner_leaves_the_catalog_unfiltered():
+    pool = FakePool(fetchone_results=[(0,)], fetchall_results=[[]])
+    repo = CatalogRepository(pool)
+
+    page = await repo.list_games(search="batman")
+
+    count_sql, _ = pool.connections[0].executed[0]
+    assert "library_entries" not in count_sql
+    assert len(pool.connections[0].executed) == 2, "an unfiltered browse pays for no ownership count"
+    assert page.excluded_owned == 0
+
+
 async def test_backfill_keeps_the_whole_product_node_the_walk_already_paid_for():
     """_to_product projected six fields and dropped price, sortingOptions, skus and the sibling concepts
     collection -- out of a response POST /catalog/backfill already makes. Recovering any of them later
@@ -254,6 +294,54 @@ async def test_admitting_a_store_title_creates_the_game_its_concept_and_an_enric
     assert "INSERT INTO game_concepts" in statements[4]
     assert "INSERT INTO game_enrichment" in statements[5]
     assert pool.connections[0].executed[4][1] == (concept_id, expected_game_id, product_id)
+
+
+async def test_admitting_a_store_title_keeps_the_cover_the_search_already_returned():
+    """Cover art resolves from entitlement_snapshots, which only a library refresh fills, and
+    psn_catalog_cache is keyed on an npTitleId a search never returns. Discarding the image the search
+    handed us left a hand-added game with no art forever: nothing running later can recover it."""
+    expected_game_id = str(uuid.uuid4())
+    cover = f"https://image.api.playstation.com/{uuid.uuid4().hex}.png"
+    pool = FakePool(fetchone_results=[None, None, (expected_game_id,)])
+    repo = CatalogRepository(pool)
+
+    await repo.admit_store_game(
+        concept_id=str(uuid.uuid4().int)[:6],
+        name=f"Ghost of {uuid.uuid4().hex}",
+        cover_image_url=cover,
+    )
+
+    insert_sql, insert_params = pool.connections[0].executed[3]
+    assert "INSERT INTO games" in insert_sql
+    assert "store_cover_image_url" in insert_sql
+    assert cover in insert_params
+
+
+async def test_admitting_a_title_the_catalog_already_holds_never_overwrites_its_cover():
+    """An existing game may already render entitlement artwork. The store cover fills a hole; it does not
+    restyle a game the catalog gained from a real refresh."""
+    pool = FakePool(fetchone_results=[None, (str(uuid.uuid4()),)])
+    repo = CatalogRepository(pool)
+
+    await repo.admit_store_game(
+        concept_id=str(uuid.uuid4().int)[:6],
+        name=f"Ghost of {uuid.uuid4().hex}",
+        cover_image_url=f"https://image.api.playstation.com/{uuid.uuid4().hex}.png",
+    )
+
+    updates = [sql for sql, _params in pool.connections[0].executed if sql.strip().startswith("UPDATE games")]
+    assert len(updates) == 1
+    assert "store_cover_image_url IS NULL" in updates[0], "an existing cover must survive an admit"
+
+
+async def test_the_shared_cover_expression_prefers_entitlement_art_over_the_store_cover():
+    """Reversing this order would silently restyle every game that already renders art, from a different
+    source, which is a far larger change than the hole it was meant to fill."""
+    subquery_position = SQUARE_COVER_ART_SQL.index("entitlement_snapshots")
+    fallback_position = SQUARE_COVER_ART_SQL.index("store_cover_image_url")
+
+    assert SQUARE_COVER_ART_SQL.strip().startswith("COALESCE(")
+    assert subquery_position < fallback_position
 
 
 async def test_admitting_a_store_title_holds_an_advisory_lock_over_the_read_then_insert():

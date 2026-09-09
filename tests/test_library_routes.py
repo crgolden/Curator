@@ -129,9 +129,10 @@ class FakeLibraryRepository:
     ``tests/test_library_repository.py`` (ILIKE, ``gen.name = %s``, and the NULLS LAST ordering
     on both sortable enrichment columns)."""
 
-    def __init__(self, games_by_sub=None):
+    def __init__(self, games_by_sub=None, manual_upsert_writes=True):
         self._games_by_sub = games_by_sub or {}
         self.manual_entries: list[tuple[str, str, tuple[str, ...], str | None]] = []
+        self.manual_upsert_writes = manual_upsert_writes
 
     async def list_entries_with_enrichment(
         self, identity_sub, *, search=None, genre=None, sort="title", sort_dir="asc", limit=20, offset=0
@@ -160,6 +161,7 @@ class FakeLibraryRepository:
 
     async def upsert_manual_entry(self, identity_sub, game_id, *, platforms, owned_edition):
         self.manual_entries.append((identity_sub, game_id, tuple(platforms), owned_edition))
+        return self.manual_upsert_writes
 
 
 class FakeCatalogRepository:
@@ -201,8 +203,8 @@ def _build(
     return TestClient(app), validator, publisher
 
 
-def _build_manual(known_games=("game-1",), title_ids_by_game=None):
-    library = FakeLibraryRepository()
+def _build_manual(known_games=("game-1",), title_ids_by_game=None, manual_upsert_writes=True):
+    library = FakeLibraryRepository(manual_upsert_writes=manual_upsert_writes)
     client, validator, _publisher = _build(
         library_repository=library,
         catalog_repository=FakeCatalogRepository(known_games, title_ids_by_game),
@@ -276,6 +278,18 @@ def test_add_manual_game_records_no_platform_when_the_prefix_is_not_a_title():
     client.post("/library/manual", json={"game_id": "game-1"}, headers=_bearer("token-a"))
 
     assert library.manual_entries[0][2] == ()
+
+
+def test_adding_a_game_the_caller_already_holds_from_psn_says_so_instead_of_reporting_success():
+    """The ON CONFLICT guard declines to touch a PSN-sourced row, and answering 204 anyway told the user
+    their game had been added. A lapsed entitlement is exactly this shape: the row is inactive and carries
+    no art or scores, so the game reads as absent right until the add quietly does nothing."""
+    client, _library = _build_manual(manual_upsert_writes=False)
+
+    response = client.post("/library/manual", json={"game_id": "game-1"}, headers=_bearer("token-a"))
+
+    assert response.status_code == 409
+    assert "already in your library" in response.json()["detail"]
 
 
 def test_add_manual_game_rejects_a_platform_outside_the_vocabulary():
