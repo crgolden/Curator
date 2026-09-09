@@ -7,7 +7,7 @@ console the schema already accepts.
 
 :data:`_PLATFORM_BY_TITLE_ID_PREFIX` and :data:`_NON_TITLE_PREFIXES` mirror
 ``Functions/Functions/Curator/Psn/TitlePlatform.cs``. Ingestion runs in that repo, so the two must agree;
-see ``AGENTS/Curator.md`` on Curator-owned vocabularies read by the Functions worker.
+see ``AGENTS/REPOS/Curator.md`` on Curator-owned vocabularies read by the Functions worker.
 """
 
 from __future__ import annotations

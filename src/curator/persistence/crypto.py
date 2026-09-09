@@ -20,7 +20,7 @@ correctly -- the versioned reading is *attempted*, and its GCM tag check is what
 
 :meth:`TokenCrypto.encrypt` writes the versioned framing, led by :data:`SCHEME_AES_GCM_V1`, as does the
 Functions .NET port of this class. Deploy ordering between the two runtimes is a real constraint and is
-recorded in ``AGENTS/Curator.md``.
+recorded in ``AGENTS/REPOS/Curator.md``.
 """
 
 from __future__ import annotations

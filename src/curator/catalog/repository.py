@@ -391,13 +391,13 @@ class CatalogRepository:
         duplicate.
 
         ``game_enrichment`` gets a bare row, leaving ``rawg_attempted_at`` NULL. That is the "never
-        reached, still eligible" state of the pair ``AGENTS/Curator.md`` documents, and
+        reached, still eligible" state of the pair ``AGENTS/REPOS/Curator.md`` documents, and
         ``EnrichmentRunProcessor`` unions ``GetGameIdsNeverAskedOfRawgAsync`` (``rawg_attempted_at IS
         NULL``) into its candidate set, so the row makes the game reachable by the catalog-wide pass
         instead of stranding it.
 
         **No ``psn_catalog_cache`` row is written**, because a search hit carries no npTitleId and that
-        table is keyed by one -- see ``AGENTS/Curator.md``. That is why the cover is kept on ``games``
+        table is keyed by one -- see ``AGENTS/REPOS/Curator.md``. That is why the cover is kept on ``games``
         instead: it is the only identifier a search hit carries all the way through admission, and
         discarding the image the search already returned left a hand-added game with no art forever, since
         nothing running later can recover it.

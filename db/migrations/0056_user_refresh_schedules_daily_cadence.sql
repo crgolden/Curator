@@ -7,7 +7,7 @@
 -- allowance is monthly (20,000 requests), which a daily cadence draws down faster but never resets early.
 -- Neither is enforced here; this migration only widens what the column will hold.
 --
--- Deploy order, from the rule in AGENTS/Curator.md: this migration is applied to the target database
+-- Deploy order, from the rule in AGENTS/REPOS/Curator.md: this migration is applied to the target database
 -- BEFORE any writer sends the new value, which Curator's own pipeline guarantees by running Migrate ahead
 -- of Deploy. The OTHER order is the one to watch, and it is not this file's to enforce: Functions'
 -- ScheduledRefreshWorker computes every next_run_at after the first, so it must already know 'daily' before

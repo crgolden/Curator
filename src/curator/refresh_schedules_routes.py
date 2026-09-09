@@ -5,7 +5,7 @@ undeletable by the only person entitled to remove it. The delete is scoped to th
 is idempotent, so a caller with no link simply gets a 204 and nothing happens.
 
 Saving a schedule also publishes its first scheduled message; the runtime that consumes it is not this one
-(see ``AGENTS/Functions.md`` for the message contract).
+(see ``AGENTS/REPOS/Functions.md`` for the message contract).
 """
 
 from __future__ import annotations

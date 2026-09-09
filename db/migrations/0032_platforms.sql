@@ -1,4 +1,4 @@
--- Widens the platform model past PS4/PS5 (AGENTS/DESIGNS.md §7 item 9).
+-- Widens the platform model past PS4/PS5 (AGENTS/PARKING-LOT.md §7 item 9).
 --
 -- Three tables carried CHECK (platform IN ('PS5','PS4')) and library_entries carried a boolean pair.
 -- Two booleans cannot express N platforms, and 354 of 1047 rows are both PS4 and PS5, so ownership is a

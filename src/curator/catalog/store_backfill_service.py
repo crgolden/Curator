@@ -1,6 +1,6 @@
 """Walks the public PlayStation Store and seeds the shared catalog from it.
 
-The decisions behind the walk are in ``AGENTS/Curator.md``'s catalog backfill section.
+The decisions behind the walk are in ``AGENTS/REPOS/Curator.md``'s catalog backfill section.
 """
 
 from __future__ import annotations

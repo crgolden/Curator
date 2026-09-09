@@ -1,7 +1,7 @@
 -- Curator schema — migration 0034 (PSN social/chat write consent)
 -- Target: PostgreSQL 17. Applied automatically by db/run_migrations.py in the deploy job.
 --
--- AGENTS/DESIGNS.md §7 item 7. Two opt-in flags join the four harvest_* flags on psn_links, letting a user
+-- AGENTS/PARKING-LOT.md §7 item 7. Two opt-in flags join the four harvest_* flags on psn_links, letting a user
 -- allow Curator to make state-changing PSN calls on their behalf. Split in two rather than one combined
 -- flag: a friend write affects one relationship PSN already models consent for, while a chat write is
 -- publication in front of third parties who never opted into Curator.

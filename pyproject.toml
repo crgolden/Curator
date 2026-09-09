@@ -66,7 +66,7 @@ src = ["src", "tests"]
 
 [tool.ruff.lint]
 select = ["E", "W", "F", "I", "UP", "B", "SIM", "RUF", "PT", "ERA"]
-# B008: FastAPI's Query/Path/Body parameter defaults -- see AGENTS/Curator.md "Dependency injection style".
+# B008: FastAPI's Query/Path/Body parameter defaults -- see AGENTS/REPOS/Curator.md "Dependency injection style".
 ignore = ["B008"]
 
 [tool.ruff.lint.isort]

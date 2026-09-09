@@ -2,7 +2,7 @@
 
 Curator owns the consent record and the CRUD surface over it. Advancing a schedule after a run, recording
 failures and pausing a broken chain belong to the worker that processes the scheduled message, which is not
-in this runtime -- see ``AGENTS/Functions.md`` for the message contract.
+in this runtime -- see ``AGENTS/REPOS/Functions.md`` for the message contract.
 """
 
 from __future__ import annotations
@@ -31,7 +31,7 @@ def next_run_after(cadence: Cadence, *, now: datetime | None = None) -> datetime
     few days' drift changes nothing a caller can observe.
 
     This computes only the FIRST run. Every subsequent ``next_run_at`` is computed by Functions'
-    ``ScheduledRefreshWorker``, which holds its own copy of this table -- see ``AGENTS/Functions.md``.
+    ``ScheduledRefreshWorker``, which holds its own copy of this table -- see ``AGENTS/REPOS/Functions.md``.
 
     :param cadence: ``"daily"``, ``"weekly"`` or ``"monthly"``.
     :param now: The instant to measure from; defaults to the current UTC time.

@@ -1,6 +1,6 @@
 """Anonymous PlayStation Store catalog client (``web.np.playstation.com``).
 
-See ``AGENTS/Curator.md`` for why this gateway is distinct from the authenticated one the rest of
+See ``AGENTS/REPOS/Curator.md`` for why this gateway is distinct from the authenticated one the rest of
 :mod:`curator.psn` uses.
 """
 

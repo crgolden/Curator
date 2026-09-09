@@ -395,7 +395,7 @@ class GameSearchResult:
     ``game_concepts.concept_id``. ``kind="Product"`` (``MobileAddOns``) gives a three-segment
     ``UP1004-PPSA03420_00-GTAOSTANDALONE01`` **product id**, the same id space as
     ``game_concepts.product_id`` and ``psn_catalog_cache.store_product_id``. Neither is an npTitleId, and
-    one cannot be derived from the other -- see ``AGENTS/Curator.md`` on why splitting a product id to
+    one cannot be derived from the other -- see ``AGENTS/REPOS/Curator.md`` on why splitting a product id to
     reach ``psn_catalog_cache.title_id`` is measurably wrong.
 
     :attr:`default_product_id` is the concept's own ``defaultProduct.id``, which PSN chooses for

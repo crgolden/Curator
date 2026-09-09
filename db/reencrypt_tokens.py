@@ -5,7 +5,7 @@ Usage::
     python db/reencrypt_tokens.py <database_url> [--dry-run]
 
 Idempotent: run it before every app deploy. ``--dry-run`` reports and writes nothing. Exits non-zero if
-any blob decrypts under neither scheme. See ``AGENTS/Curator.md`` for why this exists and when to run it.
+any blob decrypts under neither scheme. See ``AGENTS/REPOS/Curator.md`` for why this exists and when to run it.
 """
 
 from __future__ import annotations

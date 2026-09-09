@@ -14,7 +14,7 @@
 -- migration exists to clear. Curator's find_active_run/find_active_global_run are widened in the same
 -- change; Functions' JobRunsRepository.TryBeginDeliveryAsync is the other side and ships separately.
 --
--- Deploy order, from the rule in AGENTS/Curator.md: this migration is applied to the target database
+-- Deploy order, from the rule in AGENTS/REPOS/Curator.md: this migration is applied to the target database
 -- BEFORE any writer sends the new value. A Functions-first deploy is an outage of the writing job, not a
 -- partial rollout — every write fails with 23514.
 --
