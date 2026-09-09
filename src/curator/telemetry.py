@@ -154,7 +154,7 @@ def _opt_in_to_stable_semconv() -> None:
     Tempo names a database node from ``peer.service``, then ``server.address``, then the database
     name, so spans that reach the fallback today draw a separate ``curator`` circle. Once they carry
     ``db.namespace`` and ``server.address`` they resolve one rule earlier and merge into the shared
-    host node. See ``AGENTS/TELEMETRY.md``.
+    host node. See ``AGENTS/OBSERVABILITY.md``.
     """
     os.environ.setdefault(_SEMCONV_STABILITY_OPT_IN_ENV, _SEMCONV_STABILITY_OPT_IN)
 
