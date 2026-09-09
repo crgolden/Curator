@@ -99,6 +99,10 @@ async def test_excluding_owned_games_constrains_the_count_as_well_as_the_page():
     page_sql, page_params = pool.connections[0].executed[1]
     owned_sql, owned_params = pool.connections[0].executed[2]
 
+    assert count_params is not None
+    assert page_params is not None
+    assert owned_params is not None
+
     assert count_sql.strip().startswith("SELECT COUNT(*)")
     for sql in (count_sql, page_sql):
         assert "NOT EXISTS" in sql
@@ -312,6 +316,7 @@ async def test_admitting_a_store_title_keeps_the_cover_the_search_already_return
     )
 
     insert_sql, insert_params = pool.connections[0].executed[3]
+    assert insert_params is not None
     assert "INSERT INTO games" in insert_sql
     assert "store_cover_image_url" in insert_sql
     assert cover in insert_params

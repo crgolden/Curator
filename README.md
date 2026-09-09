@@ -335,6 +335,7 @@ src/curator/
   library_routes.py                           # GET /library, GET /library/genres, POST/GET /library/refresh,
                                                # POST/DELETE /library/manual[/{gameId}] -- POST also admits a
                                                # searched store title to the shared catalog,
+                                               # GET /library/manual/candidates -- what is still addable by name,
                                                # GET /library/manual/search -- PS Store name lookup
   catalog_routes.py                           # GET /catalog/games
   collections_routes.py                       # POST /collections/preview, POST/GET /collections,

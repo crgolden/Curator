@@ -1,5 +1,5 @@
-"""Tests for GET /library/manual/search -- create_app wired with a hand-written fake
-social_client_factory, mirroring test_devices_routes.py's style.
+"""Tests for GET /library/manual/candidates and GET /library/manual/search -- create_app wired with a
+hand-written fake social_client_factory, mirroring test_devices_routes.py's style.
 """
 
 from __future__ import annotations
@@ -9,6 +9,7 @@ import uuid
 from fastapi.testclient import TestClient
 
 from curator.app import create_app
+from curator.catalog.repository import CatalogPage, GameSummary
 from curator.library_routes import MAX_STORE_SEARCH_LIMIT
 from curator.persistence.crypto import TokenCrypto
 from curator.psn.errors import PsnAuthError
@@ -17,6 +18,7 @@ from curator.psn.social_client import ADD_ONS_DOMAIN, FULL_GAMES_DOMAIN, MAX_GAM
 from test_routes import SUB, FakeRepository, FakeTokenValidator, _bearer, _claims, _make_settings, _seed_link
 
 _SEARCH_URL = "/library/manual/search"
+_CANDIDATES_URL = "/library/manual/candidates"
 
 
 class FakeSearchClient:
@@ -48,13 +50,16 @@ class FakeSearchClientFactory:
 
 
 class FakeCatalogRepository:
-    """Records every admission and answers the catalog-membership lookup from a fixed mapping."""
+    """Records every admission and catalog search, and answers the membership lookup from a fixed mapping."""
 
-    def __init__(self, game_ids_by_store_id=None, admitted_game_id=None):
+    def __init__(self, game_ids_by_store_id=None, admitted_game_id=None, catalog_games=(), excluded_owned=0):
         self._game_ids_by_store_id = dict(game_ids_by_store_id or {})
         self._admitted_game_id = admitted_game_id or str(uuid.uuid4())
-        self.admitted: list[tuple[str, str, str | None]] = []
+        self._catalog_games = list(catalog_games)
+        self._excluded_owned = excluded_owned
+        self.admitted: list[tuple[str, str, str | None, str | None]] = []
         self.looked_up: list[list[str]] = []
+        self.searched: list[tuple[str | None, str | None, int]] = []
 
     async def game_ids_for_store_ids(self, store_ids):
         self.looked_up.append(list(store_ids))
@@ -64,8 +69,26 @@ class FakeCatalogRepository:
             if store_id in self._game_ids_by_store_id
         }
 
-    async def admit_store_game(self, *, concept_id, name, product_id=None):
-        self.admitted.append((concept_id, name, product_id))
+    async def list_games(
+        self,
+        *,
+        search=None,
+        franchise=None,
+        genre=None,
+        aaa_tier=None,
+        exclude_owned_by=None,
+        limit=50,
+        offset=0,
+    ):
+        self.searched.append((search, exclude_owned_by, limit))
+        return CatalogPage(
+            games=list(self._catalog_games),
+            total=len(self._catalog_games),
+            excluded_owned=self._excluded_owned,
+        )
+
+    async def admit_store_game(self, *, concept_id, name, product_id=None, cover_image_url=None):
+        self.admitted.append((concept_id, name, product_id, cover_image_url))
         return self._admitted_game_id, True
 
     async def game_exists(self, game_id):
@@ -125,6 +148,204 @@ def _hit(name, store_id=None, *, kind="Concept", platforms=("PS5",), default_pro
         discounted_price=None,
         is_free=None,
     )
+
+
+def _catalogued(title):
+    return GameSummary(
+        game_id=str(uuid.uuid4()),
+        canonical_title=title,
+        franchise=None,
+        genre=None,
+        aaa_tier=None,
+    )
+
+
+def test_the_candidates_route_requires_a_bearer_token():
+    client, _validator, _search = _build()
+
+    response = client.get(_CANDIDATES_URL, params={"q": uuid.uuid4().hex})
+
+    assert response.status_code == 401
+
+
+def test_the_candidates_route_rejects_a_blank_search_term():
+    client, validator, _search = _build()
+
+    response = client.get(_CANDIDATES_URL, params={"q": ""}, headers=_authorized(validator))
+
+    assert response.status_code == 422
+
+
+def test_a_catalog_answer_costs_the_caller_no_store_search():
+    """A store search spends the caller's own PSN credentials, so it is never implicit on a term the
+    catalog already answered."""
+    expected_title = f"Ghost of {uuid.uuid4().hex}"
+    catalog = FakeCatalogRepository(catalog_games=[_catalogued(expected_title)])
+    client, validator, search = _build(catalog_repository=catalog)
+
+    response = client.get(_CANDIDATES_URL, params={"q": expected_title}, headers=_authorized(validator))
+
+    assert response.status_code == 200
+    body = response.json()
+    assert [row["canonical_title"] for row in body["catalog"]] == [expected_title]
+    assert body["store"] == []
+    assert body["store_consulted"] is False
+    assert search.calls == []
+
+
+def test_the_catalog_is_asked_to_leave_out_what_the_caller_already_holds():
+    """The exclusion is the server's to apply: a client dropping owned rows from a returned page shrinks
+    the page, hides addable games on later pages, and cannot see past the row cap at all."""
+    searched_title = f"Ghost of {uuid.uuid4().hex}"
+    already_owned = 3
+    catalog = FakeCatalogRepository(excluded_owned=already_owned)
+    client, validator, _search = _build(catalog_repository=catalog)
+
+    response = client.get(_CANDIDATES_URL, params={"q": searched_title}, headers=_authorized(validator))
+
+    assert response.status_code == 200
+    assert response.json()["already_owned"] == already_owned
+    assert [(term, owner) for term, owner, _limit in catalog.searched] == [(searched_title, SUB)]
+
+
+def test_owning_every_match_is_an_answer_rather_than_a_reason_to_search_the_store():
+    """The remaining list is empty for a term the catalog knew perfectly well. Escalating would spend a
+    PSN search to propose a game the caller already holds, which POST /library/manual answers 409 for."""
+    already_owned = 2
+    catalog = FakeCatalogRepository(excluded_owned=already_owned)
+    client, validator, search = _build(catalog_repository=catalog)
+
+    response = client.get(_CANDIDATES_URL, params={"q": uuid.uuid4().hex}, headers=_authorized(validator))
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["catalog"] == []
+    assert body["already_owned"] == already_owned
+    assert body["store_consulted"] is False
+    assert search.calls == []
+
+
+def test_the_caller_can_still_reach_the_store_past_an_all_owned_answer():
+    expected_store_id = uuid.uuid4().hex
+    catalog = FakeCatalogRepository(excluded_owned=1)
+    client, validator, _search = _build(
+        FakeSearchClient(results=[_hit(f"Ghost of {uuid.uuid4().hex}", expected_store_id)]),
+        catalog_repository=catalog,
+    )
+
+    response = client.get(
+        _CANDIDATES_URL,
+        params={"q": uuid.uuid4().hex, "includeStore": "true"},
+        headers=_authorized(validator),
+    )
+
+    assert response.status_code == 200
+    assert [row["id"] for row in response.json()["store"]] == [expected_store_id]
+
+
+def test_an_empty_catalog_reaches_the_store_without_being_asked():
+    expected_title = f"Ghost of {uuid.uuid4().hex}"
+    expected_store_id = uuid.uuid4().hex
+    client, validator, search = _build(FakeSearchClient(results=[_hit(expected_title, expected_store_id)]))
+
+    response = client.get(_CANDIDATES_URL, params={"q": expected_title}, headers=_authorized(validator))
+
+    assert response.status_code == 200
+    body = response.json()
+    assert [(row["id"], row["name"]) for row in body["store"]] == [(expected_store_id, expected_title)]
+    assert body["store_consulted"] is True
+    assert [query for query, _domain, _limit in search.calls] == [expected_title]
+
+
+def test_the_store_is_reached_for_catalog_matches_the_caller_says_are_the_wrong_game():
+    """The catalog is a partial mirror of the Store, so a search can return real titles and still miss the
+    one in the caller's hands. Onimusha returned Warlords and Onimusha 2 while Way of the Sword was absent
+    from the catalog entirely, and a client using "the catalog answered" as a proxy for "the catalog has
+    this game" could never reach it."""
+    searched_title = f"Onimusha {uuid.uuid4().hex}"
+    expected_store_id = uuid.uuid4().hex
+    catalog = FakeCatalogRepository(catalog_games=[_catalogued(f"Onimusha {uuid.uuid4().hex}")])
+    client, validator, search = _build(
+        FakeSearchClient(results=[_hit(f"Ghost of {uuid.uuid4().hex}", expected_store_id)]),
+        catalog_repository=catalog,
+    )
+
+    response = client.get(
+        _CANDIDATES_URL,
+        params={"q": searched_title, "includeStore": "true"},
+        headers=_authorized(validator),
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert len(body["catalog"]) == 1
+    assert [row["id"] for row in body["store"]] == [expected_store_id]
+    assert body["store_consulted"] is True
+    assert [query for query, _domain, _limit in search.calls] == [searched_title]
+
+
+def test_a_store_candidate_the_catalog_already_holds_carries_its_game_id():
+    expected_store_id = uuid.uuid4().hex
+    expected_game_id = str(uuid.uuid4())
+    catalog = FakeCatalogRepository(game_ids_by_store_id={expected_store_id: expected_game_id})
+    client, validator, _search = _build(
+        FakeSearchClient(results=[_hit(f"Ghost of {uuid.uuid4().hex}", expected_store_id)]),
+        catalog_repository=catalog,
+    )
+
+    response = client.get(_CANDIDATES_URL, params={"q": uuid.uuid4().hex}, headers=_authorized(validator))
+
+    assert [row["game_id"] for row in response.json()["store"]] == [expected_game_id]
+
+
+def test_an_unlinked_caller_is_told_the_store_is_unavailable_rather_than_getting_an_error():
+    """An unlinked account is a state of this answer, not a failure of the request -- the catalog half is
+    still worth returning, and the panel has to say why the Store half is missing."""
+    client, validator, _search = _build(linked=False)
+
+    response = client.get(_CANDIDATES_URL, params={"q": uuid.uuid4().hex}, headers=_authorized(validator))
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["store_unavailable"] == "no_psn_link"
+    assert body["store_consulted"] is False
+
+
+def test_a_rejected_psn_token_is_reported_as_an_unavailable_store_not_a_401():
+    client, validator, _search = _build(FakeSearchClient(raise_auth_error=True))
+
+    response = client.get(_CANDIDATES_URL, params={"q": uuid.uuid4().hex}, headers=_authorized(validator))
+
+    assert response.status_code == 200
+    assert response.json()["store_unavailable"] == "psn_auth_failed"
+
+
+def test_one_limit_bounds_both_sources():
+    requested_limit = 4
+    catalog = FakeCatalogRepository()
+    client, validator, search = _build(catalog_repository=catalog)
+
+    response = client.get(
+        _CANDIDATES_URL,
+        params={"q": uuid.uuid4().hex, "limit": requested_limit},
+        headers=_authorized(validator),
+    )
+
+    assert response.status_code == 200
+    assert [limit for _term, _owner, limit in catalog.searched] == [requested_limit]
+    assert [limit for _query, _domain, limit in search.calls] == [requested_limit]
+
+
+def test_the_candidates_route_will_not_spend_more_than_the_accept_route_can_find():
+    client, validator, _search = _build()
+
+    response = client.get(
+        _CANDIDATES_URL,
+        params={"q": uuid.uuid4().hex, "limit": MAX_STORE_SEARCH_LIMIT + 1},
+        headers=_authorized(validator),
+    )
+
+    assert response.status_code == 422
 
 
 def test_requires_a_bearer_token():
@@ -271,7 +492,7 @@ def test_accepting_a_store_hit_admits_it_and_adds_the_library_entry():
     )
 
     assert response.status_code == 204
-    assert catalog.admitted == [(expected_concept_id, expected_title, expected_product_id)]
+    assert [row[:3] for row in catalog.admitted] == [(expected_concept_id, expected_title, expected_product_id)]
     assert library.manual_entries == [(SUB, expected_game_id, ("PS4", "PS5"), None)]
     assert search.calls == [(search_term, FULL_GAMES_DOMAIN, MAX_STORE_SEARCH_LIMIT)]
 
@@ -296,7 +517,26 @@ def test_accepting_a_store_hit_never_trusts_the_clients_own_copy_of_the_title():
         headers=_authorized(validator),
     )
 
-    assert [name for _concept, name, _product in catalog.admitted] == [psn_title]
+    assert [name for _concept, name, _product, _cover in catalog.admitted] == [psn_title]
+
+
+def test_admitting_a_store_hit_keeps_the_cover_the_search_returned():
+    """The image is otherwise unrecoverable: psn_catalog_cache is keyed on an npTitleId a store search
+    never returns, so nothing running later can fetch what admission discarded. PSN carries no entitlement
+    artwork for much of the PS3/Vita/PSP back catalogue, which is exactly where a hand-added disc lands."""
+    concept_id = uuid.uuid4().hex
+    hit = _hit(f"Ghost of {uuid.uuid4().hex}", concept_id)
+    catalog = FakeCatalogRepository()
+    client, validator, _search = _build(FakeSearchClient(results=[hit]), catalog_repository=catalog)
+
+    response = client.post(
+        "/library/manual",
+        json={"store_hit": {"query": uuid.uuid4().hex, "id": concept_id}},
+        headers=_authorized(validator),
+    )
+
+    assert response.status_code == 204
+    assert [cover for _concept, _name, _product, cover in catalog.admitted] == [hit.cover_image_url]
 
 
 def test_a_store_hit_id_psn_did_not_return_is_404_and_admits_nothing():

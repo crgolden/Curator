@@ -339,13 +339,15 @@ last asked. It is stored as the concept's current store link and nothing keys on
 unique either — Sony has been observed pointing two genuinely different games at one product id, which is
 why a merge on product id additionally requires the names to agree.
 
-**A store-admitted game therefore has no cover art, and will not until something gives it an npTitleId.**
-Cover art resolves from `entitlement_snapshots`, which only a library refresh writes, and the one other
-place a URL could live — `psn_catalog_cache.cover_image_url` — is in the table this path cannot key. The
-search hit does carry usable art and `GET /library/manual/search` returns it, so the picker shows a
-thumbnail; it is the admitted row that has nowhere to keep one. Games with no artwork are already an
-expected state (PSN publishes none at all for much of the PS3/Vita/PSP back catalogue), so this renders
-correctly rather than breaking — but closing it needs a column, not a code change.
+**A store-admitted game therefore keeps its cover in a column of its own.** Cover art normally resolves
+from `entitlement_snapshots`, which only a library refresh writes, and the one other place a URL could
+live — `psn_catalog_cache.cover_image_url` — is in the table this path cannot key. The search hit does
+carry usable art, so `0057` gives `games` a `store_cover_image_url` that admission fills from the hit and
+the shared cover expression falls back to when there is no entitlement artwork. **Entitlement art comes
+first**, so a game that already renders art is unaffected. Without the column the image was unrecoverable:
+nothing running later can re-fetch what admission discarded. A game with neither source still renders
+without artwork, which is an expected state — PSN publishes none at all for much of the PS3/Vita/PSP back
+catalogue.
 
 ## Job lifecycle
 

@@ -3,8 +3,11 @@ immediately; the actual ingest -> canonicalize -> persist -> enrich-delta pipeli
 since it can involve many uncached RAWG/OpenCritic/PSN calls bound by those services' own rate limits.
 ``GET /library/refresh/{run_id}`` polls the resulting :class:`~curator.jobs.repository.JobRun`'s status.
 
-``POST``/``DELETE /library/manual`` add and remove a game PSN has no entitlement for, and
-``GET /library/manual/search`` checks a name against the real PlayStation Store before one is added.
+``POST``/``DELETE /library/manual`` add and remove a game PSN has no entitlement for.
+``GET /library/manual/candidates`` answers what a caller can still add by hand for one name -- the shared
+catalog minus what they already hold, and the PlayStation Store when that is warranted -- so no client has
+to decide when a Store search is worth the caller's own PSN credentials.
+``GET /library/manual/search`` is the bare Store lookup that produces a ``store_hit``.
 ``POST /library/manual`` also admits a searched title to the shared catalog when it names one, which is
 the only path in this repo that creates a ``games`` row outside ``POST /catalog/backfill``.
 """
@@ -45,17 +48,21 @@ from curator.token_validation import TokenClaims
 router = APIRouter(prefix="/library", tags=["library"])
 logger = logging.getLogger("curator")
 
+StoreUnavailableReason = Literal["no_psn_link", "psn_auth_failed"]
+"""Why a Store search a caller asked for could not be run, as ``GET /library/manual/candidates`` reports it."""
+
 _NO_LINK_DETAIL = "PSN account not linked."
 _AUTH_FAILED_DETAIL = "PSN authentication failed; re-link your account."
 _NOT_IN_THE_STORE_DETAIL = "That title is not in the PlayStation Store results for this search."
 _ALREADY_OWNED_DETAIL = "That game is already in your library from PlayStation Network."
 
 MAX_STORE_SEARCH_LIMIT: Final = 50
-"""The most hits ``GET /library/manual/search`` will return, and so the most a re-search must look through.
+"""The most Store hits either read route will return, and so the most a re-search must look through.
 
 Accepting a hit re-runs the caller's search server-side and finds their chosen id in the result, so this
-bound has to be the same on both routes: a hit the search route was willing to show and the accept route
-was unwilling to look far enough to find would be addable-looking and unaddable.
+bound has to be the same on every route that shows one: a hit ``GET /library/manual/candidates`` or
+``GET /library/manual/search`` was willing to show and the accept route was unwilling to look far enough
+to find would be addable-looking and unaddable.
 :data:`~curator.psn.social_client.MAX_GAME_SEARCH_PAGES` has to be large enough to reach it.
 """
 
@@ -234,7 +241,7 @@ class ManualCandidatesResponse(BaseModel):
     store: list[StoreSearchResultResponse] = []
     already_owned: int = 0
     store_consulted: bool = False
-    store_unavailable: Literal["no_psn_link", "psn_auth_failed"] | None = None
+    store_unavailable: StoreUnavailableReason | None = None
 
 
 @router.get("/manual/candidates")
@@ -248,30 +255,35 @@ async def manual_add_candidates(
     """Answer "what can I still add by hand for this name?" in one call.
 
     The catalog is asked first, with the caller's own library excluded, because it costs nothing. The
-    Store is consulted when the catalog has nothing left to offer, or when the caller asks for it with
-    ``includeStore`` -- which they need, because **a catalog hit is not evidence the catalog has the game
-    they mean**. The catalog is a partial mirror of the Store, so a search can return real titles and
+    Store is consulted when the catalog knew nothing about the term at all, or when the caller asks for it
+    with ``includeStore`` -- which they need, because **a catalog hit is not evidence the catalog has the
+    game they mean**. The catalog is a partial mirror of the Store, so a search can return real titles and
     still miss the one in the caller's hands; only the caller can say "not these".
+
+    A term whose every catalog match was dropped as already-owned counts as answered, even though the
+    remaining list is empty. Escalating there would spend a PSN search to propose a game the caller
+    already holds, and :func:`add_manual_game` answers 409 for exactly that.
 
     A Store search spends the caller's PSN credentials, so it is never implicit on a term the catalog
     already answered, and its absence is reported rather than raised: an unlinked account is a state of
     this answer, not a failure of the request.
 
     :param q: The name to look for.
-    :param include_store: Ask for the Store even when the catalog returned candidates.
+    :param include_store: Ask for the Store even when the catalog answered.
     :param limit: Maximum candidates per source.
     """
     catalog_repository: CatalogRepository = request.app.state.catalog_repository
     page = await catalog_repository.list_games(search=q, exclude_owned_by=claims.sub, limit=limit)
     catalog = [_to_game_summary(game) for game in page.games]
 
-    if catalog and not include_store:
+    catalog_answered = bool(catalog) or page.excluded_owned > 0
+    if catalog_answered and not include_store:
         return ManualCandidatesResponse(catalog=catalog, already_owned=page.excluded_owned)
 
     try:
         hits = await _search_the_store(request, claims.sub, q, domain=FULL_GAMES_DOMAIN, limit=limit)
     except HTTPException as exc:
-        unavailable = "no_psn_link" if exc.status_code == 404 else "psn_auth_failed"
+        unavailable: StoreUnavailableReason = "no_psn_link" if exc.status_code == 404 else "psn_auth_failed"
         return ManualCandidatesResponse(
             catalog=catalog, already_owned=page.excluded_owned, store_unavailable=unavailable
         )
@@ -317,9 +329,7 @@ async def search_store_for_manual_add(
     results = await _search_the_store(request, claims.sub, q, domain=domain, limit=limit)
     game_ids = await catalog_repository.game_ids_for_store_ids([result.id for result in results if result.id])
 
-    return StoreSearchResponse(
-        domain=domain, results=[_to_store_result(result, game_ids) for result in results]
-    )
+    return StoreSearchResponse(domain=domain, results=[_to_store_result(result, game_ids) for result in results])
 
 
 def _to_store_result(result: GameSearchResult, game_ids: dict[str, str]) -> StoreSearchResultResponse:

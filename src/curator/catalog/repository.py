@@ -101,10 +101,7 @@ class CatalogRepository:
             owned_params.append(f"%{search}%")
         if exclude_owned_by is not None:
             ownership = (
-                "EXISTS ("
-                "SELECT 1 FROM library_entries le "
-                "WHERE le.game_id = g.game_id AND le.identity_sub = %s"
-                ")"
+                "EXISTS (SELECT 1 FROM library_entries le WHERE le.game_id = g.game_id AND le.identity_sub = %s)"
             )
             conditions.append(f"NOT {ownership}")
             params.append(exclude_owned_by)
