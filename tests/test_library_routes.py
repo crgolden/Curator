@@ -129,10 +129,12 @@ class FakeLibraryRepository:
     ``tests/test_library_repository.py`` (ILIKE, ``gen.name = %s``, and the NULLS LAST ordering
     on both sortable enrichment columns)."""
 
-    def __init__(self, games_by_sub=None, manual_upsert_writes=True):
+    def __init__(self, games_by_sub=None, manual_upsert_writes=True, manual_rows=(), psn_rows=()):
         self._games_by_sub = games_by_sub or {}
         self.manual_entries: list[tuple[str, str, tuple[str, ...], str | None]] = []
         self.manual_upsert_writes = manual_upsert_writes
+        self.manual_rows = {tuple(row) for row in manual_rows}
+        self.psn_rows = {tuple(row) for row in psn_rows}
 
     async def list_entries_with_enrichment(
         self, identity_sub, *, search=None, genre=None, sort="title", sort_dir="asc", limit=20, offset=0
@@ -162,6 +164,16 @@ class FakeLibraryRepository:
     async def upsert_manual_entry(self, identity_sub, game_id, *, platforms, owned_edition):
         self.manual_entries.append((identity_sub, game_id, tuple(platforms), owned_edition))
         return self.manual_upsert_writes
+
+    async def delete_manual_entry(self, identity_sub, game_id):
+        """Mirrors the production predicate's reach: the row goes only when it is the caller's own AND
+        carries ``source = 'manual'``. A PSN-sourced row and an absent one are indistinguishable to the
+        caller, which is why both leave ``psn_rows`` untouched and report the same ``False``."""
+        row = (identity_sub, game_id)
+        if row not in self.manual_rows:
+            return False
+        self.manual_rows.remove(row)
+        return True
 
 
 class FakeCatalogRepository:
@@ -311,6 +323,45 @@ def test_add_manual_game_404s_for_a_game_the_catalog_has_never_seen():
 
     assert response.status_code == 404
     assert library.manual_entries == []
+
+
+def _build_removable(manual_rows=(), psn_rows=()):
+    library = FakeLibraryRepository(manual_rows=manual_rows, psn_rows=psn_rows)
+    client, validator, _publisher = _build(library_repository=library)
+    validator.register("token-a", _claims(sub="sub-a"))
+    return client, library
+
+
+def test_removing_a_manually_added_game_deletes_it():
+    client, library = _build_removable(manual_rows=[("sub-a", "game-1")])
+
+    response = client.delete("/library/manual/game-1", headers=_bearer("token-a"))
+
+    assert response.status_code == 204
+    assert library.manual_rows == set()
+
+
+def test_removing_a_psn_sourced_game_is_refused_rather_than_deleting_it():
+    """A PSN entitlement is re-ingested by the next library refresh, so honouring the delete would remove
+    the row until the refresh silently put it back. Only a manually-added row is the caller's to remove --
+    the guard is the ``source = 'manual'`` predicate, and this is the only test that exercises it through
+    the route rather than by reading the query text."""
+    client, library = _build_removable(psn_rows=[("sub-a", "game-1")])
+
+    response = client.delete("/library/manual/game-1", headers=_bearer("token-a"))
+
+    assert response.status_code == 404
+    assert library.psn_rows == {("sub-a", "game-1")}
+
+
+def test_removing_another_callers_manual_game_leaves_it_alone():
+    """The route keys off the token's own sub, so naming someone else's game reads as absent."""
+    client, library = _build_removable(manual_rows=[("sub-b", "game-1")])
+
+    response = client.delete("/library/manual/game-1", headers=_bearer("token-a"))
+
+    assert response.status_code == 404
+    assert library.manual_rows == {("sub-b", "game-1")}
 
 
 def test_an_unknown_game_reports_404_even_when_the_platform_is_also_wrong():
