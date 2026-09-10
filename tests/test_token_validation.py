@@ -226,9 +226,7 @@ class KeysetFailsAfterTheFirstFetcher(FakeFetcher):
         return super().__call__(url)
 
 
-def _validate_any_token(fetch_json) -> None:
-    """Drive a validation far enough to force a keyset fetch. Which token is irrelevant -- every case here
-    fails before a token is ever examined, which is the property under test."""
+def _validate_a_token_that_would_otherwise_be_valid(fetch_json) -> None:
     key = _generate_key("key-1")
     JwtValidator(AUTHORITY, fetch_json=fetch_json).validate(_sign(key, "key-1"))
 
@@ -247,34 +245,26 @@ def _validate_any_token(fetch_json) -> None:
 )
 def test_a_failed_discovery_fetch_is_an_authority_outage_not_a_bad_token(shape, failure):
     with pytest.raises(AuthorityUnavailableError):
-        _validate_any_token(FailingFetcher(failure))
+        _validate_a_token_that_would_otherwise_be_valid(FailingFetcher(failure))
 
 
 def test_a_discovery_document_carrying_no_jwks_uri_is_an_authority_outage():
-    """A 200 whose body is JSON but is not a discovery document. Reads as ``KeyError`` at the subscript,
-    which says nothing about the caller's token either."""
-
     def serve_a_body_that_is_not_a_discovery_document(url: str) -> dict:
         return {}
 
     with pytest.raises(AuthorityUnavailableError):
-        _validate_any_token(serve_a_body_that_is_not_a_discovery_document)
+        _validate_a_token_that_would_otherwise_be_valid(serve_a_body_that_is_not_a_discovery_document)
 
 
-def test_a_jwks_joserfc_cannot_import_is_an_authority_outage():
-    """The one failure raised *outside* the two fetches but still inside ``_ensure_keyset``. Wrapping only
-    the fetches would leave this escaping as a bare 500, which is the hole this whole change closes."""
+def test_a_jwks_joserfc_cannot_import_is_an_authority_outage_though_no_fetch_failed():
     unimportable_jwks = {"keys": [{"kty": "not-a-real-key-type"}]}
     fetcher = FakeFetcher(unimportable_jwks)
 
     with pytest.raises(AuthorityUnavailableError):
-        _validate_any_token(fetcher)
+        _validate_a_token_that_would_otherwise_be_valid(fetcher)
 
 
-def test_identity_going_down_between_the_cached_keyset_and_the_kid_refetch_is_an_authority_outage():
-    """``_decode`` catches ``JoseError`` around both ``jwt.decode`` calls and performs the ``force=True``
-    refetch between them. An outage during that refetch must travel straight through, not be re-read as an
-    unverifiable token."""
+def test_an_outage_during_the_kid_refetch_is_an_authority_outage_not_an_unverifiable_token():
     original_key = _generate_key("key-1")
     fetcher = KeysetFailsAfterTheFirstFetcher({"keys": [original_key.as_dict(private=False)]})
     validator = JwtValidator(AUTHORITY, fetch_json=fetcher)
@@ -290,10 +280,6 @@ def test_identity_going_down_between_the_cached_keyset_and_the_kid_refetch_is_an
 
 
 def test_an_authority_outage_is_not_a_token_error_and_not_a_jose_error():
-    """The class relationships are the whole mechanism. ``curator.deps.require_bearer`` tells the two
-    apart by type to answer 503 rather than 401, and ``_decode``'s ``except JoseError`` would swallow the
-    outage back into a 401 if it ever became one -- so pin both, because a later refactor that changes
-    either base class would silently undo this with every test above still green."""
     assert not issubclass(AuthorityUnavailableError, TokenError)
     assert not issubclass(AuthorityUnavailableError, JoseError)
     assert not issubclass(TokenError, AuthorityUnavailableError)

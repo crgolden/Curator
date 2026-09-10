@@ -173,13 +173,6 @@ class UnreachableAuthorityValidator:
 
 @pytest.mark.parametrize(("method", "path", "kwargs"), _BEARER_REQUIRED_ROUTES)
 def test_bearer_required_routes_answer_503_when_identity_cannot_be_reached(method, path, kwargs):
-    """With Identity unreachable, Curator's JWKS fetch used to raise uncaught and every authenticated
-    route returned an opaque plain-text 500 -- an identity-provider outage presenting as this API being
-    broken.
-
-    503 rather than 401 because Curator judged nothing. A 401 carries ``WWW-Authenticate``, which is
-    exactly what Librarian's BFF keys its token-refresh retry on, aimed at the service that is down -- so
-    the absent header is asserted, not incidental."""
     client, *_ = _build(token_validator=UnreachableAuthorityValidator())
 
     response = getattr(client, method)(path, headers=_bearer("a-token-nobody-got-to-look-at"), **kwargs)

@@ -8,14 +8,6 @@ require the ``curator`` scope. No route may accept a caller-supplied user identi
 ``sub``) -- that would let one user act on another's data. Every route keys exclusively off the validated
 token's own ``sub``.
 
-**A token Curator could not judge is a 503, never a 401.** When Identity is unreachable,
-:class:`~curator.token_validation.JwtValidator` raises
-:class:`~curator.token_validation.AuthorityUnavailableError` rather than a ``TokenError``, and
-:func:`require_bearer` answers 503 with **no** ``WWW-Authenticate`` header. A 401 there would tell the
-caller their credential is bad -- and Librarian's BFF keys its refresh-and-retry-once branch on precisely
-a 401 carrying that header (``Librarian/src/bff/proxy.ts``), so it would send a token refresh to the
-service that is down. See that exception's docstring for the production incident this came from.
-
 :func:`require_verified_caller` layers one more requirement on top for routes that compare the caller's
 Identity email against a PSN account's email (link/unlink, ``/me``'s re-verify): a verified Identity email
 is mandatory for those, so a token missing the ``email`` claim is rejected outright rather than treated as
@@ -68,9 +60,9 @@ async def require_bearer(request: Request) -> TokenClaims:
     :param request: The incoming request (its ``Authorization`` header carries the token).
     :returns: The validated :class:`~curator.token_validation.TokenClaims`.
     :raises fastapi.HTTPException: 401 (with a ``WWW-Authenticate: Bearer`` header), if the header is
-        missing/malformed or the token fails validation; 503, if Identity could not be reached to obtain
-        the signing keys, so the token was never judged; 403, if the token is valid but lacks the
-        ``curator`` scope.
+        missing/malformed or the token fails validation; 503 (with no such header), if the authority could
+        not supply the signing keys, so the token was never judged; 403, if the token is valid but lacks
+        the ``curator`` scope.
     """
     token = _extract_bearer_token(request)
     if token is None:
