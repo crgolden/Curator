@@ -12,6 +12,11 @@ network access at all; the default implementation is a small ``urllib``-based HT
 is cached on the instance and only refetched when a token's ``kid`` isn't found in it -- covering
 Identity's normal key-rotation story (a new signing key appears in the JWKS; a token signed with it
 shouldn't be rejected just because Curator's cache predates the rotation).
+
+Two failures live here and they are not the same failure. A token that fails validation raises
+:class:`TokenError` and is a 401. Identity being unreachable raises :class:`AuthorityUnavailableError` and
+is a 503 -- Curator reached no verdict on the token at all, and saying "your credential is bad" when the
+credential was never examined sends the caller back to the service that is down.
 """
 
 from __future__ import annotations
@@ -32,11 +37,34 @@ _ALGORITHMS = ["RS256"]
 
 _DISCOVERY_FETCH_TIMEOUT_SECONDS = 10.0
 
+AUTHORITY_UNAVAILABLE_DETAIL = "Identity is unavailable, so the bearer token could not be verified."
+"""The 503 detail :class:`AuthorityUnavailableError` carries. Names the dependency without echoing the
+configured authority URL back to a caller; the ``raise ... from`` chain keeps the real cause for the span.
+"""
+
 
 class TokenError(Exception):
     """Raised when a bearer token fails validation for any reason: bad signature, wrong issuer, expired/
     not-yet-valid, malformed, or missing its ``sub`` claim. The message is always safe to surface as an
     HTTP 401 detail -- it never includes the raw token.
+    """
+
+
+class AuthorityUnavailableError(Exception):
+    """Raised when Identity could not be reached for its signing keys, so no verdict on the token was ever
+    reached.
+
+    Deliberately **not** a :class:`TokenError`, and deliberately not a subclass of anything
+    :meth:`JwtValidator._decode` catches. A ``TokenError`` becomes a 401 carrying
+    ``WWW-Authenticate: Bearer``, which tells the caller their credential is bad -- and Librarian's BFF
+    treats exactly that pair as "refresh the token and retry once"
+    (``Librarian/src/bff/proxy.ts``'s 401 branch), sending a refresh to the very service that is down.
+    The honest answer is a 503 naming the dependency; see :func:`curator.deps.require_bearer`.
+
+    Before this existed, a discovery/JWKS failure escaped :meth:`JwtValidator.validate` uncaught and
+    reached ``create_app``'s catch-all handler as a bare ``text/plain`` 500 on every authenticated route
+    at once -- an outage of the identity provider presenting as Curator being broken, with nothing in the
+    response naming the real dependency.
     """
 
 
@@ -117,6 +145,9 @@ class JwtValidator:
         :raises TokenError: If the token is malformed; its signature doesn't verify against any known key
             (even after one refetch of the JWKS for an unrecognized ``kid``); its ``iss`` doesn't match
             ``authority``; it is expired or not yet valid; or it carries no ``sub``/``iat`` claim.
+        :raises AuthorityUnavailableError: If Identity could not supply the signing keys at all, so the
+            token was never judged either way. A different outcome from every :class:`TokenError` above,
+            and it must stay a different HTTP status.
         """
         claims = self._decode(token)
 
@@ -160,11 +191,25 @@ class JwtValidator:
             raise TokenError(f"Malformed or unverifiable token: {exc}") from exc
 
     def _ensure_keyset(self, *, force: bool = False) -> KeySet:
-        """Return the cached :class:`~joserfc.jwk.KeySet`, fetching (or refetching) it when needed."""
+        """Return the cached :class:`~joserfc.jwk.KeySet`, fetching (or refetching) it when needed.
+
+        :param force: Refetch even when a keyset is already cached -- how :meth:`_decode` handles a
+            ``kid`` the cache predates.
+        :returns: The signing keys Identity publishes.
+        :raises AuthorityUnavailableError: If Identity could not be reached (``OSError``, covering
+            ``urllib.error.HTTPError``/``URLError`` and the timeout), answered with something that is not
+            JSON (``ValueError``), answered with JSON that is not a discovery document (``KeyError`` on
+            ``jwks_uri``), or published a JWKS ``joserfc`` cannot import (:class:`~joserfc.errors.JoseError`).
+            All four say the same thing about the caller's token, which is nothing.
+        """
         if self._keyset is None or force:
-            discovery = self._fetch_json(f"{self._authority}/.well-known/openid-configuration")
-            jwks = cast(KeySetSerialization, self._fetch_json(discovery["jwks_uri"]))
-            self._keyset = KeySet.import_key_set(jwks)
+            try:
+                discovery = self._fetch_json(f"{self._authority}/.well-known/openid-configuration")
+                jwks = cast(KeySetSerialization, self._fetch_json(discovery["jwks_uri"]))
+                keyset = KeySet.import_key_set(jwks)
+            except (OSError, ValueError, KeyError, JoseError) as exc:
+                raise AuthorityUnavailableError(AUTHORITY_UNAVAILABLE_DETAIL) from exc
+            self._keyset = keyset
         return self._keyset
 
 

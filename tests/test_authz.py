@@ -19,6 +19,7 @@ from fastapi.testclient import TestClient
 from curator.app import create_app
 from curator.persistence.crypto import TokenCrypto
 from curator.persistence.repository import LinkRecord
+from curator.token_validation import AUTHORITY_UNAVAILABLE_DETAIL, AuthorityUnavailableError, TokenClaims
 from test_routes import (
     FakeAgentFactory,
     FakeLibraryRepository,
@@ -160,6 +161,32 @@ def test_bearer_required_routes_reject_garbage_token(method, path, kwargs):
     client, *_ = _build()
     response = getattr(client, method)(path, headers=_bearer("garbage-not-a-real-token"), **kwargs)
     assert response.status_code == 401
+    assert response.headers.get("WWW-Authenticate") == "Bearer"
+
+
+class UnreachableAuthorityValidator:
+    """Stands in for ``JwtValidator`` while Identity is down: reaches no verdict on any token at all."""
+
+    def validate(self, token: str) -> TokenClaims:
+        raise AuthorityUnavailableError(AUTHORITY_UNAVAILABLE_DETAIL)
+
+
+@pytest.mark.parametrize(("method", "path", "kwargs"), _BEARER_REQUIRED_ROUTES)
+def test_bearer_required_routes_answer_503_when_identity_cannot_be_reached(method, path, kwargs):
+    """With Identity unreachable, Curator's JWKS fetch used to raise uncaught and every authenticated
+    route returned an opaque plain-text 500 -- an identity-provider outage presenting as this API being
+    broken.
+
+    503 rather than 401 because Curator judged nothing. A 401 carries ``WWW-Authenticate``, which is
+    exactly what Librarian's BFF keys its token-refresh retry on, aimed at the service that is down -- so
+    the absent header is asserted, not incidental."""
+    client, *_ = _build(token_validator=UnreachableAuthorityValidator())
+
+    response = getattr(client, method)(path, headers=_bearer("a-token-nobody-got-to-look-at"), **kwargs)
+
+    assert response.status_code == 503
+    assert "WWW-Authenticate" not in response.headers
+    assert response.json()["detail"] == AUTHORITY_UNAVAILABLE_DETAIL
 
 
 def test_cross_user_isolation_between_two_established_callers():

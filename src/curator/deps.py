@@ -8,6 +8,14 @@ require the ``curator`` scope. No route may accept a caller-supplied user identi
 ``sub``) -- that would let one user act on another's data. Every route keys exclusively off the validated
 token's own ``sub``.
 
+**A token Curator could not judge is a 503, never a 401.** When Identity is unreachable,
+:class:`~curator.token_validation.JwtValidator` raises
+:class:`~curator.token_validation.AuthorityUnavailableError` rather than a ``TokenError``, and
+:func:`require_bearer` answers 503 with **no** ``WWW-Authenticate`` header. A 401 there would tell the
+caller their credential is bad -- and Librarian's BFF keys its refresh-and-retry-once branch on precisely
+a 401 carrying that header (``Librarian/src/bff/proxy.ts``), so it would send a token refresh to the
+service that is down. See that exception's docstring for the production incident this came from.
+
 :func:`require_verified_caller` layers one more requirement on top for routes that compare the caller's
 Identity email against a PSN account's email (link/unlink, ``/me``'s re-verify): a verified Identity email
 is mandatory for those, so a token missing the ``email`` claim is rejected outright rather than treated as
@@ -37,7 +45,7 @@ from typing import Annotated
 from fastapi import Depends, HTTPException, Request
 
 from curator.persistence.repository import LinkRecord, Repository
-from curator.token_validation import TokenClaims, TokenError, TokenValidatorLike
+from curator.token_validation import AuthorityUnavailableError, TokenClaims, TokenError, TokenValidatorLike
 
 _CURATOR_SCOPE = "curator"
 
@@ -60,7 +68,8 @@ async def require_bearer(request: Request) -> TokenClaims:
     :param request: The incoming request (its ``Authorization`` header carries the token).
     :returns: The validated :class:`~curator.token_validation.TokenClaims`.
     :raises fastapi.HTTPException: 401 (with a ``WWW-Authenticate: Bearer`` header), if the header is
-        missing/malformed or the token fails validation; 403, if the token is valid but lacks the
+        missing/malformed or the token fails validation; 503, if Identity could not be reached to obtain
+        the signing keys, so the token was never judged; 403, if the token is valid but lacks the
         ``curator`` scope.
     """
     token = _extract_bearer_token(request)
@@ -74,6 +83,8 @@ async def require_bearer(request: Request) -> TokenClaims:
     validator: TokenValidatorLike = request.app.state.token_validator
     try:
         claims: TokenClaims = validator.validate(token)
+    except AuthorityUnavailableError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
     except TokenError as exc:
         raise HTTPException(
             status_code=401,
@@ -96,9 +107,9 @@ async def optional_bearer(request: Request) -> TokenClaims | None:
 
     :param request: The incoming request.
     :returns: The validated claims, or ``None`` when the request carries no ``Authorization`` header.
-    :raises fastapi.HTTPException: 401/403 on the same terms as :func:`require_bearer`, when a token is
-        present but invalid or out of scope. A supplied token that cannot be honoured is an error, not a
-        reason to silently serve the anonymous response.
+    :raises fastapi.HTTPException: 401/403/503 on the same terms as :func:`require_bearer`, when a token
+        is present but invalid, out of scope, or unjudgeable because Identity is down. A supplied token
+        that cannot be honoured is an error, not a reason to silently serve the anonymous response.
     """
     if _extract_bearer_token(request) is None:
         return None
