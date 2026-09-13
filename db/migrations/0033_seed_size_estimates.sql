@@ -32,9 +32,6 @@ VALUES (NULL, 'AAA', 'open world', 'PS5', 81),
        (NULL, 'Indie', NULL, 'PS5', 16),
        (NULL, 'Indie', NULL, 'PS4', 16);
 
--- Per-title overrides, from get_install_size()'s KNOWN_SIZES. That dict carries one size per title with
--- no platform axis, so each entry seeds both platforms with the same value -- the cross join states that
--- rather than duplicating every literal.
 INSERT INTO size_estimates (title_pattern, aaa_tier, genre_class, platform, size_gb)
 SELECT known.pattern, NULL, NULL, platforms.platform, known.size_gb
 FROM (VALUES ('call of duty: modern warfare ii', 150),

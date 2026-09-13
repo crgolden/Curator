@@ -151,7 +151,8 @@ existed; there is no separate "revoked" state to fall out of sync with `visibili
 Scoped to the entities a user or a collaborating repo actually interacts with. Not shown: pure lookup and
 provider/contributor-cache tables (`genres`, `publisher_tiers`, `franchise_rules`, `edition_ranks`,
 `size_estimates`, `rawg_cache`, `opencritic_cache`, `psn_catalog_cache`,
-`exclusion_rules`, `global_exclusions`, `data_quality_flags`,
+`global_exclusions`, `game_download_sizes`, `ps_plus_catalog_categories`, `ps_plus_catalog_walks`,
+`ps_plus_catalog_memberships`,
 `game_name_overrides`, `curation_rule_pass_state`, `game_measured_sizes` — WP13's global, upserted,
 any-authenticated-user-may-contribute install-size cache, `game_enrichment`'s own shape rather than the
 per-user history table it replaced) and audit/history tables (`account_action_log`, `entitlement_pulls`,

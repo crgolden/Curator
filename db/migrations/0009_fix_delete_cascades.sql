@@ -66,15 +66,11 @@ ALTER TABLE collection_runs
     ADD CONSTRAINT collection_runs_identity_sub_fkey
         FOREIGN KEY (identity_sub) REFERENCES app_users (identity_sub) ON DELETE CASCADE;
 
--- job_runs.identity_sub is nullable (NULL for a global, admin-scoped 'enrichment' run). Cascade still
--- applies to the rows that do carry a sub; the NULL rows are unaffected by a user delete.
 ALTER TABLE job_runs
     DROP CONSTRAINT job_runs_identity_sub_fkey;
 ALTER TABLE job_runs
     ADD CONSTRAINT job_runs_identity_sub_fkey
         FOREIGN KEY (identity_sub) REFERENCES app_users (identity_sub) ON DELETE CASCADE;
-
--- Child chains hanging off those per-user parents.
 
 ALTER TABLE entitlement_snapshots
     DROP CONSTRAINT entitlement_snapshots_pull_id_fkey;

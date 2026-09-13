@@ -23,12 +23,13 @@ from pydantic import BaseModel, Field, model_validator
 
 from curator.audit.repository import ACTION_LIBRARY_REFRESH_REQUESTED, AccountActionLogRepository
 from curator.catalog.repository import CatalogRepository, GameSummary
-from curator.catalog_routes import GameSummaryResponse
+from curator.catalog_routes import GameSummaryResponse, to_game_summary_response
 from curator.deps import require_bearer
 from curator.jobs.queue_publisher import QueuePublisher
 from curator.jobs.repository import JobRunsRepository
 from curator.jobs.staleness import abandoned_run_reason
-from curator.library.repository import LibraryRepository, LibrarySortField
+from curator.library.repository import HiddenFilter, LibraryRepository, LibrarySortField, TrophyMatch
+from curator.persistence.repository import Repository
 from curator.psn.errors import PsnAuthError
 from curator.psn.models import GameSearchResult
 from curator.psn.social_client import (
@@ -67,12 +68,18 @@ to find would be addable-looking and unaddable.
 """
 
 
+TrophyProgressState = Literal["off", "pending", "on"]
+TrophyProgressReason = Literal["no_link", "harvest_off", "never_refreshed"]
+
+
 class LibraryGameResponse(BaseModel):
     """One entry in the ``GET /library`` response.
 
     :param platforms: Every PlayStation platform this owner holds the game on, newest first. Empty when
         no platform could be established -- a manually-added entry whose caller named none and whose
         catalog row carries no npTitleId to derive one from.
+    :param trophy_match: ``matched`` when the entry resolved to a PSN trophy title, ``unmatched`` when a
+        refresh tried and found no confident match, ``not_attempted`` when no refresh has tried.
     """
 
     game_id: str
@@ -90,14 +97,33 @@ class LibraryGameResponse(BaseModel):
     source: str = "psn"
     cover_image_url: str | None
     platforms: list[str] = []
+    trophy_match: TrophyMatch = "not_attempted"
+
+
+class TrophyProgressResponse(BaseModel):
+    """Why the ``percent_completed`` column can be blank for the caller.
+
+    :param state: ``off`` when nothing will ever fill it (no PSN link, or ``harvest_trophies`` off),
+        ``pending`` when the preference is on but no refresh has fetched progress yet, ``on`` otherwise.
+    :param reason: The specific cause behind ``off`` or ``pending``; ``None`` when ``on``.
+    """
+
+    state: TrophyProgressState
+    reason: TrophyProgressReason | None
 
 
 class LibraryPageResponse(BaseModel):
     """The ``GET /library`` response body: one page of the caller's library plus the total count of
-    every row matching the current search/filter, independent of ``limit``/``offset``."""
+    every row matching the current search/filter, independent of ``limit``/``offset``.
+
+    :param hidden_count: How many of the caller's games are hidden, whichever ``hidden`` view was asked
+        for, so the page can offer the hidden view without a second request.
+    """
 
     games: list[LibraryGameResponse]
     total: int
+    trophy_progress: TrophyProgressResponse
+    hidden_count: int = 0
 
 
 class LibraryGenresResponse(BaseModel):
@@ -351,18 +377,7 @@ def _to_store_result(result: GameSearchResult, game_ids: dict[str, str]) -> Stor
 
 def _to_game_summary(game: GameSummary) -> GameSummaryResponse:
     """Project one catalogued game into the same shape ``GET /catalog/games`` returns."""
-    return GameSummaryResponse(
-        game_id=game.game_id,
-        canonical_title=game.canonical_title,
-        franchise=game.franchise,
-        genre=game.genre,
-        aaa_tier=game.aaa_tier,
-        cover_image_url=game.cover_image_url,
-        store_product_id=game.store_product_id,
-        critical_score=game.critical_score,
-        oc_score=game.oc_score,
-        psn_rating=game.psn_rating,
-    )
+    return to_game_summary_response(game)
 
 
 async def _search_the_store(
@@ -445,6 +460,11 @@ async def _admit_store_hit(
     add-ons domain answers with downloadable content, so the domain restriction is what keeps a cash-card
     SKU from becoming a catalog game -- it needs no separate rejection branch.
 
+    A hit that already resolves to a catalog game through any of the three store id spaces takes that
+    game and gains the ``game_concepts`` link, rather than being admitted again by name: a hit resolved
+    only through a product id or a walked ``store_product_id`` can carry a store name that normalizes
+    differently from the stored title, and admitting by name would fork the catalog.
+
     PSN's platform strings are filtered against
     :data:`~curator.psn.title_platform.CONSOLE_PLATFORM_IDS` rather than trusted wholesale: an
     unrecognised one is dropped, because a platform PSN has started publishing and the ``platforms``
@@ -462,12 +482,24 @@ async def _admit_store_hit(
     if hit is None or not hit.name or not hit.name.strip():
         raise HTTPException(status_code=404, detail=_NOT_IN_THE_STORE_DETAIL)
 
-    game_id, _created = await catalog_repository.admit_store_game(
-        concept_id=store_hit.id,
-        name=hit.name,
-        product_id=hit.default_product_id,
-        cover_image_url=hit.cover_image_url,
-    )
+    store_ids = [store_hit.id] + ([hit.default_product_id] if hit.default_product_id else [])
+    resolved = await catalog_repository.game_ids_for_store_ids(store_ids)
+    already_held = next((resolved[store_id] for store_id in store_ids if store_id in resolved), None)
+    if already_held is not None:
+        await catalog_repository.link_store_concept(
+            already_held,
+            concept_id=store_hit.id,
+            product_id=hit.default_product_id,
+            cover_image_url=hit.cover_image_url,
+        )
+        game_id = already_held
+    else:
+        game_id, _created = await catalog_repository.admit_store_game(
+            concept_id=store_hit.id,
+            name=hit.name,
+            product_id=hit.default_product_id,
+            cover_image_url=hit.cover_image_url,
+        )
 
     platforms: list[ConsolePlatform] = []
     for value in hit.platforms:
@@ -515,13 +547,15 @@ async def get_library(
     sort_dir: Literal["asc", "desc"] = Query(default="asc", alias="sortDir"),
     limit: int = Query(default=20, ge=1, le=100),
     offset: int = Query(default=0, ge=0),
+    hidden: HiddenFilter = Query(default="exclude"),
 ) -> LibraryPageResponse:
     """Return one page of the caller's own library, with per-provider (RAWG/OpenCritic) ratings,
     the resolved genre, and PSN's own catalog rating/product id per game.
 
     Every entry is included, even ones no provider has enriched yet (all rating fields ``None``) --
     this is the finished-library view Librarian's ``/library`` page renders, distinct from
-    ``GET /library/refresh/{run_id}``'s job-status polling.
+    ``GET /library/refresh/{run_id}``'s job-status polling. Hidden games are left out unless
+    ``hidden=only`` asks for exactly them.
 
     :param q: Optional case-insensitive title substring filter.
     :param genre: Optional exact-match genre-name filter.
@@ -529,10 +563,11 @@ async def get_library(
     :param sort_dir: Sort direction; unresolved (``None``) values always sort last regardless.
     :param limit: Page size.
     :param offset: Number of matching rows to skip.
+    :param hidden: ``exclude`` (the default) or ``only``.
     """
     library_repository: LibraryRepository = request.app.state.library_repository
     games, total = await library_repository.list_entries_with_enrichment(
-        claims.sub, search=q, genre=genre, sort=sort, sort_dir=sort_dir, limit=limit, offset=offset
+        claims.sub, search=q, genre=genre, sort=sort, sort_dir=sort_dir, limit=limit, offset=offset, hidden=hidden
     )
     return LibraryPageResponse(
         games=[
@@ -552,11 +587,55 @@ async def get_library(
                 source=game.source,
                 cover_image_url=game.cover_image_url,
                 platforms=list(game.platforms),
+                trophy_match=game.trophy_match,
             )
             for game in games
         ],
         total=total,
+        trophy_progress=await _trophy_progress(request, claims.sub),
+        hidden_count=await library_repository.count_hidden(claims.sub),
     )
+
+
+async def _trophy_progress(request: Request, sub: str) -> TrophyProgressResponse:
+    repository: Repository = request.app.state.repository
+    library_repository: LibraryRepository = request.app.state.library_repository
+    link = await repository.get_link(sub)
+    if link is None:
+        return TrophyProgressResponse(state="off", reason="no_link")
+    if link.harvest_trophies is not True:
+        return TrophyProgressResponse(state="off", reason="harvest_off")
+    if not await library_repository.has_trophy_progress(sub):
+        return TrophyProgressResponse(state="pending", reason="never_refreshed")
+    return TrophyProgressResponse(state="on", reason=None)
+
+
+@router.put("/{game_id}/hidden", status_code=204)
+async def hide_game(
+    request: Request, game_id: str, claims: Annotated[TokenClaims, Depends(require_bearer)]
+) -> Response:
+    """Hide one of the caller's games from their library and from collection candidacy.
+
+    The counterpart to ``DELETE /library/manual/{game_id}`` refusing a PSN-sourced row: a hide survives
+    every refresh because it is keyed independently of the entry, and it is undone by
+    ``DELETE /library/{game_id}/hidden``. Idempotent.
+
+    :raises fastapi.HTTPException: 404, if the caller holds no entry for that game.
+    """
+    library_repository: LibraryRepository = request.app.state.library_repository
+    if not await library_repository.hide_entry(claims.sub, game_id):
+        raise HTTPException(status_code=404, detail="That game is not in your library.")
+    return Response(status_code=204)
+
+
+@router.delete("/{game_id}/hidden", status_code=204)
+async def unhide_game(
+    request: Request, game_id: str, claims: Annotated[TokenClaims, Depends(require_bearer)]
+) -> Response:
+    """Unhide a game. Idempotent: always 204, even when it was not hidden."""
+    library_repository: LibraryRepository = request.app.state.library_repository
+    await library_repository.unhide_entry(claims.sub, game_id)
+    return Response(status_code=204)
 
 
 @router.post("/refresh", status_code=202)

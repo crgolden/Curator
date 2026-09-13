@@ -10,6 +10,7 @@ import json
 import logging
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
+from decimal import Decimal, InvalidOperation
 from typing import Any
 
 import httpx
@@ -54,6 +55,45 @@ class StoreFilterIgnoredError(StoreCatalogError):
 
 FULL_GAME_CLASSIFICATION = "Full Game"
 
+_CENTS_PER_UNIT = Decimal(100)
+
+
+def parse_price_cents(display_price: Any) -> int | None:
+    """Parse a storefront display price (``"$19.99"``, ``"$1,299.99"``) into whole cents.
+
+    :param display_price: The ``basePrice``/``discountedPrice`` string as the gateway sent it.
+    :returns: The amount in cents, or ``None`` for anything that is not a currency amount: ``"Free"``,
+        ``"Included"``, an absent value, or a string that does not parse as a decimal number.
+    """
+    if not isinstance(display_price, str):
+        return None
+    digits = display_price.strip().lstrip("$").replace(",", "")
+    if not digits or not digits[0].isdigit():
+        return None
+    try:
+        amount = Decimal(digits)
+    except InvalidOperation:
+        return None
+    return int((amount * _CENTS_PER_UNIT).to_integral_value())
+
+
+@dataclass(frozen=True, slots=True)
+class StorePrice:
+    """The ``price`` node of one product, parsed at walk time.
+
+    :param is_free: The gateway's ``isFree`` flag; ``None`` when the node omitted it.
+    :param tied_to_subscription: The gateway's ``isTiedToSubscription`` flag; ``None`` when omitted.
+    :param base_cents: ``basePrice`` in cents, or ``None`` when it is not a currency amount.
+    :param discounted_cents: ``discountedPrice`` in cents, or ``None`` when it is not a currency amount.
+    :param discount_text: The gateway's ``discountText`` (``"-65%"``), or ``None``.
+    """
+
+    is_free: bool | None
+    tied_to_subscription: bool | None
+    base_cents: int | None
+    discounted_cents: int | None
+    discount_text: str | None
+
 
 @dataclass(frozen=True, slots=True)
 class StoreProduct:
@@ -77,6 +117,7 @@ class StoreProduct:
     cover_image_url: str | None
     classification: str | None
     raw: Mapping[str, Any] = field(default_factory=dict)
+    price: StorePrice | None = None
 
     @property
     def is_full_game(self) -> bool:
@@ -86,12 +127,17 @@ class StoreProduct:
 
 @dataclass(frozen=True, slots=True)
 class StoreCategoryPage:
-    """One page of a category walk. Terminate on :attr:`is_last`, not on :attr:`total_count`."""
+    """One page of a category walk. Terminate on :attr:`is_last`, not on :attr:`total_count`.
+
+    :param reporting_name: The gateway's own ``reportingName`` for the category, or ``None`` when the
+        response carried none.
+    """
 
     products: tuple[StoreProduct, ...]
     total_count: int
     offset: int
     is_last: bool
+    reporting_name: str | None = None
 
 
 class StoreCatalogClient:
@@ -130,11 +176,13 @@ class StoreCatalogClient:
         page_info = grid.get("pageInfo") or {}
         total_count = int(page_info.get("totalCount") or 0)
         _raise_for_ignored_filters(grid, tuple(filter_by), total_count, category_id)
+        reporting_name = grid.get("reportingName")
         return StoreCategoryPage(
             products=tuple(_to_product(raw) for raw in (grid.get("products") or []) if raw.get("id")),
             total_count=total_count,
             offset=int(page_info.get("offset", offset)),
             is_last=bool(page_info.get("isLast")),
+            reporting_name=reporting_name if isinstance(reporting_name, str) else None,
         )
 
     async def facet_census(self, category_id: str, facet_name: str) -> dict[str, int] | None:
@@ -268,6 +316,21 @@ def _product_name(raw: dict[str, Any]) -> str | None:
     return name.strip() or None
 
 
+def _to_price(node: Any) -> StorePrice | None:
+    if not isinstance(node, dict):
+        return None
+    is_free = node.get("isFree")
+    tied_to_subscription = node.get("isTiedToSubscription")
+    discount_text = node.get("discountText")
+    return StorePrice(
+        is_free=is_free if isinstance(is_free, bool) else None,
+        tied_to_subscription=tied_to_subscription if isinstance(tied_to_subscription, bool) else None,
+        base_cents=parse_price_cents(node.get("basePrice")),
+        discounted_cents=parse_price_cents(node.get("discountedPrice")),
+        discount_text=discount_text if isinstance(discount_text, str) and discount_text.strip() else None,
+    )
+
+
 def _to_product(raw: dict[str, Any]) -> StoreProduct:
     return StoreProduct(
         product_id=str(raw["id"]),
@@ -279,4 +342,5 @@ def _to_product(raw: dict[str, Any]) -> StoreProduct:
         if raw.get("localizedStoreDisplayClassification")
         else None,
         raw=raw,
+        price=_to_price(raw.get("price")),
     )

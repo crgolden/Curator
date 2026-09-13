@@ -14,7 +14,9 @@ from curator.psn.store_client import (
     StoreCatalogError,
     StoreFilterIgnoredError,
     StoreQueryRotatedError,
+    parse_price_cents,
 )
+from test_values import new_price_cents, new_reporting_name
 
 
 def _grid(products, total, *, offset=0, is_last=False, facets=None):
@@ -567,3 +569,66 @@ async def test_offset_falls_back_to_the_request_when_the_gateway_omits_it():
     page = await _client(handler).category_page("cat-1", offset=250)
 
     assert page.offset == 250
+
+
+async def test_the_gateways_reporting_name_rides_on_the_page():
+    reporting_name = new_reporting_name("SPAR_GMA_PSGC")
+
+    def handler(request):
+        body = _grid([_product()], 1)
+        body["data"]["categoryGridRetrieve"]["reportingName"] = reporting_name
+        return httpx.Response(200, json=body)
+
+    page = await _client(handler).category_page("cat-1")
+
+    assert page.reporting_name == reporting_name
+
+
+async def test_a_page_without_a_reporting_name_carries_none_rather_than_a_blank():
+    def handler(request):
+        return httpx.Response(200, json=_grid([_product()], 1))
+
+    page = await _client(handler).category_page("cat-1")
+
+    assert page.reporting_name is None
+
+
+async def test_the_price_node_is_parsed_into_cents():
+    base_cents, discounted_cents = new_price_cents(), new_price_cents()
+    node = _product()
+    node["price"] = {
+        "basePrice": f"${base_cents // 100}.{base_cents % 100:02d}",
+        "discountedPrice": f"${discounted_cents // 100}.{discounted_cents % 100:02d}",
+        "discountText": "-65%",
+        "isFree": False,
+        "isTiedToSubscription": True,
+    }
+
+    def handler(request):
+        return httpx.Response(200, json=_grid([node], 1))
+
+    page = await _client(handler).category_page("cat-1")
+
+    price = page.products[0].price
+    assert price is not None
+    assert price.base_cents == base_cents
+    assert price.discounted_cents == discounted_cents
+    assert price.discount_text == "-65%"
+    assert price.is_free is False
+    assert price.tied_to_subscription is True
+
+
+@pytest.mark.parametrize(
+    ("display_price", "expected_cents"), [("$1,299.99", 129999), ("Free", None), ("Included", None), (None, None)]
+)
+def test_display_prices_that_are_not_amounts_parse_to_none(display_price, expected_cents):
+    assert parse_price_cents(display_price) == expected_cents
+
+
+async def test_a_product_without_a_price_node_has_no_price():
+    def handler(request):
+        return httpx.Response(200, json=_grid([_product()], 1))
+
+    page = await _client(handler).category_page("cat-1")
+
+    assert page.products[0].price is None

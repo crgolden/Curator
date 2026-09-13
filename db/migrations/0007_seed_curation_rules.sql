@@ -97,9 +97,6 @@ VALUES ('assassin.s creed', 'Assassin''s Creed', 0),
        ('warhammer', 'Warhammer', 84),
        ('\bys [ivx]', 'Ys', 85);
 
--- publisher_tiers: ported from Tools/PlayStation/ps_enrich.py's AAA_PUBLISHERS/AA_PUBLISHERS sets.
--- match_kind='substring' reproduces classify_tier()'s `pattern in lower` check, matching the legacy
--- sets' `any(p in pub_lower for p in ...)` behavior exactly.
 INSERT INTO publisher_tiers (pattern, tier, match_kind)
 VALUES ('sony interactive entertainment', 'AAA', 'substring'),
        ('playstation studios', 'AAA', 'substring'),
@@ -181,9 +178,6 @@ VALUES ('sony interactive entertainment', 'AAA', 'substring'),
        ('curve games', 'AA', 'substring'),
        ('curve digital', 'AA', 'substring');
 
--- genres: ported from Tools/PlayStation/ps_genre.py's GENRE_PRIORITY list. priority is the list's
--- original ascending index -- pick_genre_subgenre() ranks lower priority as more specific/preferred,
--- matching the legacy list's existing "most specific/descriptive first" order.
 INSERT INTO genres (name, priority, active)
 VALUES ('Shooter', 0, true),
        ('Fighting', 1, true),

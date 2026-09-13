@@ -1,25 +1,64 @@
 """Repository for the catalog aggregate: shared games/game_concepts/game_name_overrides, the per-user
 ingestion layer (entitlement_pulls/entitlement_snapshots), and the canonicalization-rule tables
-(exclusion_rules/franchise_rules/edition_ranks).
+(franchise_rules/edition_ranks).
 """
 
 from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Any
+from datetime import datetime
+from typing import Any, Literal
 
 from psycopg.types.json import Jsonb
 from psycopg_pool import AsyncConnectionPool
 
+from curator.catalog.content_kind import BROWSABLE_KIND_SQL, CONTENT_KINDS, EVERY_KIND, GAME_KIND, ContentKind
 from curator.catalog.cover_art import SQUARE_COVER_ART_SQL
 from curator.psn.store_client import StoreProduct
 from curator.scoring.size_estimation_service import SizeEstimate
 
+CatalogSortField = Literal["title", "price"]
+
+_CATALOG_SORT_COLUMNS: dict[str, str] = {
+    "title": "g.canonical_title",
+    "price": "price.price_discounted_cents",
+}
+
+_PRICE_JOIN_SQL = """
+            LEFT JOIN LATERAL (
+                SELECT pcc.price_is_free, pcc.price_tied_to_subscription, pcc.price_base_cents,
+                       pcc.price_discounted_cents, pcc.price_discount_text, pcc.price_fetched_at
+                FROM psn_catalog_cache pcc
+                WHERE pcc.game_id = g.game_id AND pcc.price_fetched_at IS NOT NULL
+                ORDER BY pcc.price_fetched_at DESC LIMIT 1
+            ) price ON true
+"""
+"""The most recently walked price for an aliased ``games g``; every column NULL when no walk carried one."""
+
+_PRICE_SELECT_SQL = """price.price_is_free, price.price_tied_to_subscription, price.price_base_cents,
+                       price.price_discounted_cents, price.price_discount_text, price.price_fetched_at"""
+
+
+@dataclass(frozen=True, slots=True)
+class CatalogPrice:
+    """The storefront price the most recent walk recorded for a game (``0062``)."""
+
+    is_free: bool | None
+    tied_to_subscription: bool | None
+    base_cents: int | None
+    discounted_cents: int | None
+    discount_text: str | None
+    fetched_at: datetime
+
 
 @dataclass(frozen=True, slots=True)
 class GameSummary:
-    """One row of ``GET /catalog/games``'s browsing result."""
+    """One row of ``GET /catalog/games``'s browsing result.
+
+    :param content_kind: ``None`` when the game has never been classified, which browses as a game.
+    :param price: ``None`` when no walk has carried a price node for the game.
+    """
 
     game_id: str
     canonical_title: str
@@ -32,6 +71,70 @@ class GameSummary:
     oc_score: float | None = None
     psn_rating: float | None = None
     percent_completed: int | None = None
+    content_kind: ContentKind | None = None
+    price: CatalogPrice | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class PublicCollectionSummary:
+    """One public collection containing a game, as ``GET /catalog/games/{gameId}/collections`` lists it."""
+
+    definition_id: str
+    name: str
+    share_slug: str
+    item_count: int
+    updated_at: datetime
+
+
+PUBLIC_COLLECTIONS_CONTAINING_SQL = """
+SELECT cd.definition_id, cd.name, cd.share_slug,
+       (SELECT count(*) FROM collection_definition_items items WHERE items.definition_id = cd.definition_id),
+       cd.updated_at
+FROM collection_definitions cd
+JOIN collection_definition_items cdi ON cdi.definition_id = cd.definition_id
+WHERE cdi.game_id = %s AND cd.visibility = 'public' AND cd.share_slug IS NOT NULL
+ORDER BY cd.updated_at DESC, cd.definition_id
+LIMIT %s
+"""
+"""Parameters: ``(game_id, limit)``. ``visibility = 'public'`` and never ``!= 'private'``: an unlisted
+collection is reachable by its link and deliberately not listed, and this lands on an indexed page."""
+
+PUBLIC_COLLECTIONS_CONTAINING_COUNT_SQL = """
+SELECT count(*)
+FROM collection_definitions cd
+JOIN collection_definition_items cdi ON cdi.definition_id = cd.definition_id
+WHERE cdi.game_id = %s AND cd.visibility = 'public' AND cd.share_slug IS NOT NULL
+"""
+"""Parameters: ``(game_id,)``."""
+
+
+def _kind_predicate(kind: str | None) -> tuple[str, list[Any]]:
+    """The browsing predicate for a ``kind`` request over an aliased ``games g``.
+
+    :returns: ``(sql, params)``. ``None`` and ``game`` browse unclassified rows as games; ``all`` lifts
+        the exclusion; any other kind selects exactly that kind.
+    """
+    if kind is None or kind == GAME_KIND:
+        return BROWSABLE_KIND_SQL, []
+    if kind == EVERY_KIND:
+        return "", []
+    if kind not in CONTENT_KINDS:
+        raise ValueError(f"Unknown content kind {kind!r}.")
+    return "g.content_kind = %s", [kind]
+
+
+def _to_price(row: Sequence[Any], start: int) -> CatalogPrice | None:
+    fetched_at = row[start + 5]
+    if fetched_at is None:
+        return None
+    return CatalogPrice(
+        is_free=row[start],
+        tied_to_subscription=row[start + 1],
+        base_cents=row[start + 2],
+        discounted_cents=row[start + 3],
+        discount_text=row[start + 4],
+        fetched_at=fetched_at,
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -54,6 +157,37 @@ GAME_UPSERT_ADVISORY_LOCK_CLASS = 1
 and two-int ``pg_advisory_xact_lock`` forms in separate lock spaces, so both the form and this classid have
 to match for the two repos to contend for the same lock."""
 
+RESOLVE_STORE_IDS_SQL = """
+SELECT candidate.store_id,
+       COALESCE(
+           (SELECT gc.game_id FROM game_concepts gc WHERE gc.concept_id = candidate.store_id),
+           (
+               SELECT gc.game_id FROM game_concepts gc
+               WHERE gc.product_id = candidate.store_id
+               ORDER BY gc.concept_id LIMIT 1
+           ),
+           (
+               SELECT pcc.game_id FROM psn_catalog_cache pcc
+               WHERE pcc.store_product_id = candidate.store_id AND pcc.game_id IS NOT NULL
+               ORDER BY pcc.title_id LIMIT 1
+           )
+       ) AS game_id
+FROM unnest(%s::text[]) AS candidate(store_id)
+"""
+"""The three id spaces a store hit is resolved through, in order. Parameters: ``(store_ids,)``."""
+
+LINK_STORE_CONCEPT_SQL = """
+INSERT INTO game_concepts (concept_id, game_id, product_id)
+VALUES (%s, %s, %s)
+ON CONFLICT (concept_id) DO NOTHING
+"""
+"""Parameters: ``(concept_id, game_id, product_id)``."""
+
+FILL_STORE_COVER_SQL = (
+    "UPDATE games SET store_cover_image_url = %s WHERE game_id = %s AND store_cover_image_url IS NULL"
+)
+"""Parameters: ``(cover_image_url, game_id)``."""
+
 
 class CatalogRepository:
     """DAO over the catalog aggregate's tables.
@@ -72,6 +206,9 @@ class CatalogRepository:
         genre: str | None = None,
         aaa_tier: str | None = None,
         exclude_owned_by: str | None = None,
+        kind: str | None = None,
+        sort: CatalogSortField = "title",
+        sort_dir: str = "asc",
         limit: int = 50,
         offset: int = 0,
     ) -> CatalogPage:
@@ -81,6 +218,13 @@ class CatalogRepository:
         :param franchise: Restrict to this exact franchise, if given.
         :param genre: Restrict to this exact genre name, if given.
         :param aaa_tier: Restrict to this publisher tier, if given.
+        :param kind: Which content kinds to browse. ``None`` and ``"game"`` exclude only proven non-games
+            (an unclassified row browses as a game); ``"all"`` lifts the exclusion; any other kind selects
+            exactly that kind. Applied to the count and the owned count alike, so ``total`` and paging
+            describe the same set.
+        :param sort: ``"title"`` or ``"price"``, looked up through a closed allowlist. A price sort puts
+            games with no recorded price last in either direction.
+        :param sort_dir: ``"asc"`` or ``"desc"``; anything else is treated as ``"asc"``.
         :param exclude_owned_by: Drop games this ``identity_sub`` already holds a library entry for,
             whatever its source. The predicate joins the WHERE clause rather than filtering the returned
             page, so ``total`` and every subsequent page describe the same reduced set -- a caller paging
@@ -94,6 +238,12 @@ class CatalogRepository:
         params: list[Any] = []
         owned_conditions: list[str] = []
         owned_params: list[Any] = []
+        kind_sql, kind_params = _kind_predicate(kind)
+        if kind_sql:
+            conditions.append(kind_sql)
+            params.extend(kind_params)
+            owned_conditions.append(kind_sql)
+            owned_params.extend(kind_params)
         if search:
             conditions.append("g.canonical_title ILIKE %s")
             params.append(f"%{search}%")
@@ -123,6 +273,8 @@ class CatalogRepository:
             owned_conditions.append("ge.aaa_tier = %s")
             owned_params.append(aaa_tier)
         where_clause = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+        sort_column = _CATALOG_SORT_COLUMNS[sort]
+        direction = "DESC" if sort_dir == "desc" else "ASC"
 
         base_query = f"""
             FROM games g
@@ -145,9 +297,14 @@ class CatalogRepository:
                            SELECT pcc.store_product_id FROM psn_catalog_cache pcc
                            WHERE pcc.game_id = g.game_id AND pcc.store_product_id IS NOT NULL LIMIT 1
                        ) AS store_product_id,
-                       ge.critical_score, ge.oc_score, ge.psn_rating
-                {base_query}
-                ORDER BY g.canonical_title, g.game_id
+                       ge.critical_score, ge.oc_score, ge.psn_rating, g.content_kind,
+                       {_PRICE_SELECT_SQL}
+                FROM games g
+                LEFT JOIN game_enrichment ge ON ge.game_id = g.game_id
+                LEFT JOIN genres gen ON gen.genre_id = ge.genre_id
+                {_PRICE_JOIN_SQL}
+                {where_clause}
+                ORDER BY {sort_column} {direction} NULLS LAST, g.canonical_title ASC, g.game_id
                 LIMIT %s OFFSET %s
                 """,
                 (*params, limit, offset),
@@ -184,6 +341,8 @@ class CatalogRepository:
                     critical_score=row[7],
                     oc_score=row[8],
                     psn_rating=row[9],
+                    content_kind=row[10],
+                    price=_to_price(row, 11),
                 )
                 for row in rows
             ],
@@ -211,10 +370,13 @@ class CatalogRepository:
                        (
                            SELECT le.trophy_percent_completed FROM library_entries le
                            WHERE le.game_id = g.game_id AND le.identity_sub = %s
-                       ) AS percent_completed
+                       ) AS percent_completed,
+                       g.content_kind,
+                       {_PRICE_SELECT_SQL}
                 FROM games g
                 LEFT JOIN game_enrichment ge ON ge.game_id = g.game_id
                 LEFT JOIN genres gen ON gen.genre_id = ge.genre_id
+                {_PRICE_JOIN_SQL}
                 WHERE g.game_id = %s
                 """,
                 (identity_sub, game_id),
@@ -235,7 +397,37 @@ class CatalogRepository:
             oc_score=row[8],
             psn_rating=row[9],
             percent_completed=row[10],
+            content_kind=row[11],
+            price=_to_price(row, 12),
         )
+
+    async def list_public_collections_containing(
+        self, game_id: str, *, limit: int = 20
+    ) -> tuple[list[PublicCollectionSummary], int]:
+        """Return the public collections that contain a game, newest first, and how many there are.
+
+        Only ``visibility = 'public'`` rows: an unlisted collection is reachable by its share link and
+        deliberately not listed, and this answer lands on a page the sitemap hands to search engines.
+
+        :param game_id: The game's id.
+        :param limit: The most collections to list; the count is over every match.
+        """
+        async with self._pool.connection() as conn, conn.cursor() as cur:
+            await cur.execute(PUBLIC_COLLECTIONS_CONTAINING_SQL, (game_id, limit))
+            rows = await cur.fetchall()
+            await cur.execute(PUBLIC_COLLECTIONS_CONTAINING_COUNT_SQL, (game_id,))
+            count_row = await cur.fetchone()
+        total = int(count_row[0]) if count_row is not None else 0
+        return [
+            PublicCollectionSummary(
+                definition_id=str(row[0]),
+                name=row[1],
+                share_slug=str(row[2]),
+                item_count=int(row[3]),
+                updated_at=row[4],
+            )
+            for row in rows
+        ], total
 
     async def list_genres(self) -> list[str]:
         """Return every active genre that is assigned to at least one game, most-preferred first.
@@ -297,17 +489,32 @@ class CatalogRepository:
                 game_id = str(row[0])
 
                 if product.np_title_id:
+                    price = product.price
                     await cur.execute(
                         """
                         INSERT INTO psn_catalog_cache
-                            (title_id, game_id, store_product_id, cover_image_url, raw, fetched_at)
-                        VALUES (%s, %s, %s, %s, %s, now())
+                            (title_id, game_id, store_product_id, cover_image_url, raw, fetched_at,
+                             price_is_free, price_tied_to_subscription, price_base_cents,
+                             price_discounted_cents, price_discount_text, price_fetched_at)
+                        VALUES (%s, %s, %s, %s, %s, now(), %s, %s, %s, %s, %s,
+                                CASE WHEN %s THEN now() END)
                         ON CONFLICT (title_id) DO UPDATE SET
                             game_id = EXCLUDED.game_id,
                             store_product_id = EXCLUDED.store_product_id,
                             cover_image_url = COALESCE(EXCLUDED.cover_image_url, psn_catalog_cache.cover_image_url),
                             raw = CASE WHEN EXCLUDED.raw = '{}'::jsonb THEN psn_catalog_cache.raw ELSE EXCLUDED.raw END,
-                            fetched_at = now()
+                            fetched_at = now(),
+                            price_is_free = COALESCE(EXCLUDED.price_is_free, psn_catalog_cache.price_is_free),
+                            price_tied_to_subscription = COALESCE(
+                                EXCLUDED.price_tied_to_subscription, psn_catalog_cache.price_tied_to_subscription
+                            ),
+                            price_base_cents = CASE WHEN EXCLUDED.price_fetched_at IS NOT NULL
+                                THEN EXCLUDED.price_base_cents ELSE psn_catalog_cache.price_base_cents END,
+                            price_discounted_cents = CASE WHEN EXCLUDED.price_fetched_at IS NOT NULL
+                                THEN EXCLUDED.price_discounted_cents ELSE psn_catalog_cache.price_discounted_cents END,
+                            price_discount_text = CASE WHEN EXCLUDED.price_fetched_at IS NOT NULL
+                                THEN EXCLUDED.price_discount_text ELSE psn_catalog_cache.price_discount_text END,
+                            price_fetched_at = COALESCE(EXCLUDED.price_fetched_at, psn_catalog_cache.price_fetched_at)
                         """,
                         (
                             product.np_title_id,
@@ -315,6 +522,12 @@ class CatalogRepository:
                             product.product_id,
                             product.cover_image_url,
                             Jsonb(dict(product.raw)),
+                            price.is_free if price else None,
+                            price.tied_to_subscription if price else None,
+                            price.base_cents if price else None,
+                            price.discounted_cents if price else None,
+                            price.discount_text if price else None,
+                            price is not None,
                         ),
                     )
                     if product.cover_image_url:
@@ -349,28 +562,30 @@ class CatalogRepository:
             return {}
 
         async with self._pool.connection() as conn, conn.cursor() as cur:
-            await cur.execute(
-                """
-                SELECT candidate.store_id,
-                       COALESCE(
-                           (SELECT gc.game_id FROM game_concepts gc WHERE gc.concept_id = candidate.store_id),
-                           (
-                               SELECT gc.game_id FROM game_concepts gc
-                               WHERE gc.product_id = candidate.store_id
-                               ORDER BY gc.concept_id LIMIT 1
-                           ),
-                           (
-                               SELECT pcc.game_id FROM psn_catalog_cache pcc
-                               WHERE pcc.store_product_id = candidate.store_id AND pcc.game_id IS NOT NULL
-                               ORDER BY pcc.title_id LIMIT 1
-                           )
-                       ) AS game_id
-                FROM unnest(%s::text[]) AS candidate(store_id)
-                """,
-                (list(store_ids),),
-            )
+            await cur.execute(RESOLVE_STORE_IDS_SQL, (list(store_ids),))
             rows = await cur.fetchall()
         return {str(row[0]): str(row[1]) for row in rows if row[1] is not None}
+
+    async def link_store_concept(
+        self, game_id: str, *, concept_id: str, product_id: str | None, cover_image_url: str | None
+    ) -> None:
+        """Record that a store concept resolves to a game the catalog already holds.
+
+        Used when a search hit resolved through ``product_id`` or ``store_product_id`` only: without the
+        ``game_concepts`` link, the next admission of the same concept would fall back to
+        ``normalized_title`` and could create a second ``games`` row for a title whose store name
+        normalizes differently from the stored ``canonical_title``. The cover fills a hole and never
+        overwrites.
+
+        :param game_id: The catalog game the hit resolved to.
+        :param concept_id: The hit's PSN concept id.
+        :param product_id: The concept's current ``defaultProduct`` id, when it published one.
+        :param cover_image_url: The hit's own cover, kept as the fallback artwork.
+        """
+        async with self._pool.connection() as conn, conn.cursor() as cur:
+            await cur.execute(LINK_STORE_CONCEPT_SQL, (concept_id, game_id, product_id))
+            if cover_image_url is not None:
+                await cur.execute(FILL_STORE_COVER_SQL, (cover_image_url, game_id))
 
     async def admit_store_game(
         self,
@@ -444,19 +659,9 @@ class CatalogRepository:
             game_id = str(row[0])
 
             if cover_image_url is not None:
-                await cur.execute(
-                    "UPDATE games SET store_cover_image_url = %s WHERE game_id = %s AND store_cover_image_url IS NULL",
-                    (cover_image_url, game_id),
-                )
+                await cur.execute(FILL_STORE_COVER_SQL, (cover_image_url, game_id))
 
-            await cur.execute(
-                """
-                INSERT INTO game_concepts (concept_id, game_id, product_id)
-                VALUES (%s, %s, %s)
-                ON CONFLICT (concept_id) DO NOTHING
-                """,
-                (concept_id, game_id, product_id),
-            )
+            await cur.execute(LINK_STORE_CONCEPT_SQL, (concept_id, game_id, product_id))
             await cur.execute(
                 "INSERT INTO game_enrichment (game_id) VALUES (%s) ON CONFLICT (game_id) DO NOTHING",
                 (game_id,),

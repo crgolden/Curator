@@ -29,6 +29,15 @@ DEFAULT_PAGE_DELAY_SECONDS = 0.5
 _CATEGORY_INDEPENDENT_STOPS = frozenset({"query_rotated", "filter_not_applied"})
 
 
+def next_page_offset(page: StoreCategoryPage, requested_offset: int) -> int:
+    """Return the offset that follows ``page``, advanced by the number of products actually returned.
+
+    :param page: The page just read.
+    :param requested_offset: The offset the page was asked for; wins when the gateway reports a smaller one.
+    """
+    return (page.offset if page.offset >= requested_offset else requested_offset) + max(len(page.products), 1)
+
+
 class CatalogBackfillWriter(Protocol):
     """The slice of :class:`~curator.catalog.repository.CatalogRepository` this service needs."""
 
@@ -247,8 +256,7 @@ class StoreBackfillService:
 
     @staticmethod
     def _next_offset(page: StoreCategoryPage, requested_offset: int) -> int:
-        """Advance past the page just read, by the count actually returned."""
-        return (page.offset if page.offset >= requested_offset else requested_offset) + max(len(page.products), 1)
+        return next_page_offset(page, requested_offset)
 
     @staticmethod
     def _progress(

@@ -32,8 +32,23 @@ import psycopg
 import pytest
 from psycopg import errors as psycopg_errors
 
+from curator.catalog.content_kind import CONTENT_KINDS
+from curator.catalog.ps_plus_repository import (
+    CATEGORY_WALK_STATE_SQL,
+    LAPSED_SQL,
+    LEAVING_SQL,
+    PS_PLUS_REWARD_MEMBERSHIP_TYPE,
+    UNCLAIMED_SQL,
+)
+from curator.catalog.repository import (
+    LINK_STORE_CONCEPT_SQL,
+    PUBLIC_COLLECTIONS_CONTAINING_COUNT_SQL,
+    PUBLIC_COLLECTIONS_CONTAINING_SQL,
+    RESOLVE_STORE_IDS_SQL,
+)
 from curator.collections.repository import _ITEM_BASE_FROM, _ITEM_SELECT_COLUMNS, CollectionsRepository
 from curator.psn.title_platform import CONSOLE_PLATFORM_IDS
+from test_values import new_ps4_title_id, new_store_product_id
 
 DATABASE_URL = os.environ.get("CURATOR_TEST_DATABASE_URL")
 
@@ -66,9 +81,6 @@ EXPECTED_TABLES = {
     "rawg_cache",
     "opencritic_cache",
     "psn_catalog_cache",
-    "data_quality_flags",
-    "data_quality_flag_games",
-    "exclusion_rules",
     "global_exclusions",
     "franchise_rules",
     "edition_ranks",
@@ -89,6 +101,10 @@ EXPECTED_TABLES = {
     "account_action_log",
     "user_profiles",
     "follows",
+    "ps_plus_catalog_categories",
+    "ps_plus_catalog_walks",
+    "ps_plus_catalog_memberships",
+    "game_download_sizes",
 }
 
 
@@ -189,19 +205,317 @@ def test_the_two_never_populated_catalog_columns_no_longer_exist(db_connection):
     assert surviving == []
 
 
-def test_collection_items_rejects_invalid_collection_status(db_connection, seeded_user_and_game):
-    user_sub, game_id = seeded_user_and_game
+def test_the_retired_rule_and_data_quality_tables_no_longer_exist(db_connection):
+    with db_connection.cursor() as cur:
+        cur.execute(
+            "SELECT table_name FROM information_schema.tables WHERE table_schema = 'public' "
+            "AND table_name IN (%s, %s, %s)",
+            ("exclusion_rules", "data_quality_flags", "data_quality_flag_games"),
+        )
+        surviving = cur.fetchall()
+    assert surviving == []
+
+
+def test_the_dead_columns_the_debt_inventory_named_no_longer_exist(db_connection):
+    with db_connection.cursor() as cur:
+        cur.execute(
+            "SELECT table_name, column_name FROM information_schema.columns WHERE table_schema = 'public' "
+            "AND ((table_name = 'collection_items' AND column_name IN ('collection_status', 'rotation_tier')) "
+            "OR (table_name = 'game_enrichment' AND column_name IN ('manual_score_override', 'is_free_to_play')))"
+        )
+        surviving = cur.fetchall()
+    assert surviving == []
+
+
+def test_games_content_kind_rejects_a_value_outside_the_closed_vocabulary(db_connection):
+    with pytest.raises(psycopg_errors.CheckViolation), db_connection.cursor() as cur:
+        cur.execute(
+            "INSERT INTO games (canonical_title, normalized_title, content_kind) VALUES (%s, %s, %s)",
+            ("Some App", "some app", "widget"),
+        )
+
+
+def test_games_content_kind_accepts_every_documented_kind_and_null(db_connection):
+    with db_connection.cursor() as cur:
+        for kind in (*CONTENT_KINDS, None):
+            cur.execute(
+                "INSERT INTO games (canonical_title, normalized_title, content_kind) VALUES (%s, %s, %s)",
+                (f"Kind {kind}", f"kind {kind}", kind),
+            )
+        cur.execute("SELECT count(*) FROM games WHERE normalized_title LIKE 'kind %'")
+        (count,) = cur.fetchone()
+    assert count == len(CONTENT_KINDS) + 1
+
+
+def test_psn_catalog_cache_carries_the_price_and_concept_type_columns(db_connection):
+    with db_connection.cursor() as cur:
+        cur.execute(
+            "SELECT column_name FROM information_schema.columns WHERE table_name = 'psn_catalog_cache' "
+            "AND column_name IN ('price_is_free', 'price_tied_to_subscription', 'price_base_cents', "
+            "'price_discounted_cents', 'price_discount_text', 'price_fetched_at', 'concept_type')"
+        )
+        columns = {row[0] for row in cur.fetchall()}
+    assert columns == {
+        "price_is_free",
+        "price_tied_to_subscription",
+        "price_base_cents",
+        "price_discounted_cents",
+        "price_discount_text",
+        "price_fetched_at",
+        "concept_type",
+    }
+
+
+def test_the_media_ceilings_are_seeded_for_the_three_disc_and_card_platforms_only(db_connection):
+    with db_connection.cursor() as cur:
+        cur.execute("SELECT platform_id, media_ceiling_gb FROM platforms WHERE media_ceiling_gb IS NOT NULL ORDER BY 1")
+        rows = cur.fetchall()
+    assert [(platform, float(ceiling)) for platform, ceiling in rows] == [("PS3", 50.0), ("PSP", 1.8), ("PSVITA", 4.0)]
+
+
+def test_game_download_sizes_rejects_a_non_positive_size(db_connection, seeded_user_and_game):
+    _user_sub, game_id = seeded_user_and_game
+    with pytest.raises(psycopg_errors.CheckViolation), db_connection.cursor() as cur:
+        cur.execute(
+            "INSERT INTO game_download_sizes (game_id, platform, bytes, fetched_at) VALUES (%s, %s, %s, now())",
+            (game_id, "PS3", 0),
+        )
+
+
+def test_job_runs_accepts_the_psn_credential_rejected_error_code(db_connection):
     run_id = str(uuid.uuid4())
     with db_connection.cursor() as cur:
         cur.execute(
-            "INSERT INTO collection_runs (run_id, identity_sub, spec_snapshot) VALUES (%s, %s, %s)",
-            (run_id, user_sub, "{}"),
+            "INSERT INTO job_runs (run_id, kind, status, error_code) VALUES (%s, %s, %s, %s)",
+            (run_id, "enrichment", "failed", "psn_credential_rejected"),
         )
-    with pytest.raises(psycopg_errors.CheckViolation), db_connection.cursor() as cur:
+        cur.execute("SELECT error_code FROM job_runs WHERE run_id = %s", (run_id,))
+        (stored,) = cur.fetchone()
+    assert stored == "psn_credential_rejected"
+
+
+def test_edition_ranks_are_seeded_with_the_base_edition_ranking_first(db_connection):
+    with db_connection.cursor() as cur:
+        cur.execute("SELECT keyword, rank FROM edition_ranks ORDER BY rank, keyword")
+        rows = cur.fetchall()
+    assert rows[0] == ("standard edition", 0)
+    assert all(rank > 0 for keyword, rank in rows[1:])
+
+
+def test_public_collections_containing_a_game_list_exactly_the_public_one(db_connection, seeded_user_and_game):
+    """A behavioural assertion is the whole test: a SQL-text assertion cannot discriminate an added
+    ``OR 'unlisted'``."""
+    user_sub, game_id = seeded_user_and_game
+    definition_ids = {visibility: str(uuid.uuid4()) for visibility in ("public", "unlisted", "private")}
+    with db_connection.cursor() as cur:
+        for visibility, definition_id in definition_ids.items():
+            cur.execute(
+                "INSERT INTO collection_definitions (definition_id, identity_sub, name, kind, visibility, share_slug) "
+                "VALUES (%s, %s, %s, %s, %s, %s)",
+                (definition_id, user_sub, f"{visibility} list", "filter_list", visibility, uuid.uuid4().hex),
+            )
+            cur.execute(
+                "INSERT INTO collection_definition_items (definition_id, game_id, rank) VALUES (%s, %s, %s)",
+                (definition_id, game_id, 1),
+            )
+        cur.execute(PUBLIC_COLLECTIONS_CONTAINING_SQL, (game_id, 20))
+        listed = [str(row[0]) for row in cur.fetchall()]
+        cur.execute(PUBLIC_COLLECTIONS_CONTAINING_COUNT_SQL, (game_id,))
+        (total,) = cur.fetchone()
+    assert listed == [definition_ids["public"]]
+    assert total == 1
+
+
+def test_a_store_hit_reachable_only_through_a_walked_product_id_links_without_a_second_games_row(db_connection):
+    """The store name normalizes differently from the stored canonical title, which is exactly the case
+    that used to fork the catalog through admit_store_game's title fallback."""
+    game_id = str(uuid.uuid4())
+    title_id = new_ps4_title_id()
+    store_product_id = new_store_product_id(title_id)
+    concept_id = str(uuid.uuid4().int)[:8]
+    with db_connection.cursor() as cur:
         cur.execute(
-            "INSERT INTO collection_items (run_id, game_id, included, collection_status) VALUES (%s, %s, %s, %s)",
-            (run_id, game_id, True, "Wrong"),
+            "INSERT INTO games (game_id, canonical_title, normalized_title) VALUES (%s, %s, %s)",
+            (game_id, "Stored Title", "stored title"),
         )
+        cur.execute(
+            "INSERT INTO psn_catalog_cache (title_id, game_id, store_product_id) VALUES (%s, %s, %s)",
+            (title_id, game_id, store_product_id),
+        )
+        cur.execute("SELECT count(*) FROM games")
+        (games_before,) = cur.fetchone()
+
+        cur.execute(RESOLVE_STORE_IDS_SQL, ([concept_id, store_product_id],))
+        resolved = {row[0]: row[1] for row in cur.fetchall() if row[1] is not None}
+        assert resolved == {store_product_id: uuid.UUID(game_id)}
+
+        cur.execute(LINK_STORE_CONCEPT_SQL, (concept_id, game_id, store_product_id))
+
+        cur.execute("SELECT count(*) FROM games")
+        (games_after,) = cur.fetchone()
+        cur.execute("SELECT game_id FROM game_concepts WHERE concept_id = %s", (concept_id,))
+        (linked_game_id,) = cur.fetchone()
+    assert games_after == games_before
+    assert linked_game_id == uuid.UUID(game_id)
+
+
+def test_the_two_ps_plus_categories_are_seeded_with_their_reporting_name_prefixes(db_connection):
+    with db_connection.cursor() as cur:
+        cur.execute("SELECT tier, reporting_name_prefix FROM ps_plus_catalog_categories ORDER BY tier")
+        rows = cur.fetchall()
+    assert rows == [("extra", "SPAR_GMA_PSGC"), ("premium", "SPAR_GMA_PSPLUS_CC")]
+
+
+def test_reward_membership_type_is_derived_from_the_stored_entitlement_payload(db_connection, seeded_user_and_game):
+    user_sub, _game_id = seeded_user_and_game
+    pull_id = str(uuid.uuid4())
+    with db_connection.cursor() as cur:
+        cur.execute(
+            "INSERT INTO entitlement_pulls (pull_id, identity_sub, source, entry_count) VALUES (%s, %s, %s, %s)",
+            (pull_id, user_sub, "curator-live", 2),
+        )
+        cur.execute(
+            "INSERT INTO entitlement_snapshots "
+            "(identity_sub, pull_id, entitlement_id, raw, first_seen_at, last_seen_at) "
+            "VALUES (%s, %s, %s, %s, now(), now()), (%s, %s, %s, %s, now(), now())",
+            (
+                user_sub,
+                pull_id,
+                "plus-ent",
+                json.dumps({"rewardMeta": {"rewardMembershipType": PS_PLUS_REWARD_MEMBERSHIP_TYPE}}),
+                user_sub,
+                pull_id,
+                "bought-ent",
+                json.dumps({}),
+            ),
+        )
+        cur.execute(
+            "SELECT entitlement_id, reward_membership_type FROM entitlement_snapshots WHERE identity_sub = %s "
+            "ORDER BY entitlement_id",
+            (user_sub,),
+        )
+        rows = cur.fetchall()
+    assert rows == [("bought-ent", None), ("plus-ent", PS_PLUS_REWARD_MEMBERSHIP_TYPE)]
+
+
+def _plant_ps_plus_walk(cur, category_id, *, started_at, completed_at):
+    walk_id = str(uuid.uuid4())
+    cur.execute(
+        "INSERT INTO ps_plus_catalog_walks (walk_id, category_id, started_at, completed_at, reported_total) "
+        "VALUES (%s, %s, %s, %s, %s)",
+        (walk_id, category_id, started_at, completed_at, 1),
+    )
+    return walk_id
+
+
+def _plant_ps_plus_membership(cur, category_id, walk_id, *, title_id, first_seen_at, left_at=None):
+    cur.execute(
+        "INSERT INTO ps_plus_catalog_memberships (title_id, category_id, store_product_id, first_seen_walk_id, "
+        "last_seen_walk_id, first_seen_at, last_seen_at, left_at, raw) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)",
+        (
+            title_id,
+            category_id,
+            new_store_product_id(title_id),
+            walk_id,
+            walk_id,
+            first_seen_at,
+            first_seen_at,
+            left_at,
+            "{}",
+        ),
+    )
+
+
+def _extra_category_id(cur):
+    cur.execute("SELECT category_id FROM ps_plus_catalog_categories WHERE tier = 'extra'")
+    return cur.fetchone()[0]
+
+
+def test_ps_plus_unclaimed_excludes_a_title_the_caller_actively_holds(db_connection, seeded_user_and_game):
+    user_sub, game_id = seeded_user_and_game
+    held_title_id, unclaimed_title_id = new_ps4_title_id(), new_ps4_title_id()
+    with db_connection.cursor() as cur:
+        category_id = _extra_category_id(cur)
+        walk_id = _plant_ps_plus_walk(cur, category_id, started_at="2026-09-01", completed_at="2026-09-01")
+        _plant_ps_plus_membership(cur, category_id, walk_id, title_id=held_title_id, first_seen_at="2026-09-01")
+        _plant_ps_plus_membership(cur, category_id, walk_id, title_id=unclaimed_title_id, first_seen_at="2026-09-01")
+        cur.execute(
+            "INSERT INTO library_entries (identity_sub, game_id, winning_entitlement_id, title_id) "
+            "VALUES (%s, %s, %s, %s)",
+            (user_sub, game_id, "ent-held", held_title_id),
+        )
+        cur.execute(UNCLAIMED_SQL, (user_sub,))
+        rows = cur.fetchall()
+    assert [row[0] for row in rows] == [unclaimed_title_id]
+
+
+def test_ps_plus_leaving_reports_a_departed_title_only_when_the_caller_got_it_through_ps_plus(
+    db_connection, seeded_user_and_game
+):
+    user_sub, _game_id = seeded_user_and_game
+    plus_title_id, bought_title_id = new_ps4_title_id(), new_ps4_title_id()
+    pull_id = str(uuid.uuid4())
+    with db_connection.cursor() as cur:
+        category_id = _extra_category_id(cur)
+        first_walk = _plant_ps_plus_walk(cur, category_id, started_at="2026-09-01", completed_at="2026-09-01")
+        _plant_ps_plus_walk(cur, category_id, started_at="2026-09-08", completed_at="2026-09-08")
+        for title_id in (plus_title_id, bought_title_id):
+            _plant_ps_plus_membership(
+                cur, category_id, first_walk, title_id=title_id, first_seen_at="2026-09-01", left_at="2026-09-08"
+            )
+        cur.execute(
+            "INSERT INTO entitlement_pulls (pull_id, identity_sub, source, entry_count) VALUES (%s, %s, %s, %s)",
+            (pull_id, user_sub, "curator-live", 2),
+        )
+        cur.execute(
+            "INSERT INTO entitlement_snapshots (identity_sub, pull_id, entitlement_id, title_id, raw, first_seen_at, "
+            "last_seen_at) VALUES (%s, %s, %s, %s, %s, now(), now()), (%s, %s, %s, %s, %s, now(), now())",
+            (
+                user_sub,
+                pull_id,
+                "plus-ent",
+                plus_title_id,
+                json.dumps({"rewardMeta": {"rewardMembershipType": PS_PLUS_REWARD_MEMBERSHIP_TYPE}}),
+                user_sub,
+                pull_id,
+                "bought-ent",
+                bought_title_id,
+                json.dumps({}),
+            ),
+        )
+        cur.execute(CATEGORY_WALK_STATE_SQL)
+        states = cur.fetchall()
+        since = next(row[4] for row in states if row[0] == category_id)
+        cur.execute(LEAVING_SQL, (since, user_sub, PS_PLUS_REWARD_MEMBERSHIP_TYPE))
+        rows = cur.fetchall()
+    assert since is not None, "the second completed walk is what makes a diff possible"
+    assert [row[0] for row in rows] == [plus_title_id]
+
+
+def test_ps_plus_lapsed_reports_an_inactive_ps_plus_entitlement_once_per_title(db_connection, seeded_user_and_game):
+    user_sub, _game_id = seeded_user_and_game
+    lapsed_title_id = new_ps4_title_id()
+    pull_id = str(uuid.uuid4())
+    with db_connection.cursor() as cur:
+        cur.execute(
+            "INSERT INTO entitlement_pulls (pull_id, identity_sub, source, entry_count) VALUES (%s, %s, %s, %s)",
+            (pull_id, user_sub, "curator-live", 2),
+        )
+        for entitlement_id in ("base", "edition"):
+            cur.execute(
+                "INSERT INTO entitlement_snapshots (identity_sub, pull_id, entitlement_id, title_id, active, raw, "
+                "first_seen_at, last_seen_at) VALUES (%s, %s, %s, %s, false, %s, now(), now())",
+                (
+                    user_sub,
+                    pull_id,
+                    entitlement_id,
+                    lapsed_title_id,
+                    json.dumps({"rewardMeta": {"rewardMembershipType": PS_PLUS_REWARD_MEMBERSHIP_TYPE}}),
+                ),
+            )
+        cur.execute(LAPSED_SQL, (user_sub, PS_PLUS_REWARD_MEMBERSHIP_TYPE))
+        rows = cur.fetchall()
+    assert [row[0] for row in rows] == [lapsed_title_id]
 
 
 def test_game_enrichment_genre_id_rejects_orphan_fk(db_connection, seeded_user_and_game):
@@ -219,14 +533,6 @@ def test_user_consoles_rejects_a_platform_outside_the_platforms_table(db_connect
         cur.execute(
             "INSERT INTO user_consoles (identity_sub, name, platform, raw_capacity_gb) VALUES (%s, %s, %s, %s)",
             (user_sub, "Living Room", "NOT-A-PLATFORM", 825),
-        )
-
-
-def test_exclusion_rules_rejects_invalid_rule_type(db_connection):
-    with pytest.raises(psycopg_errors.CheckViolation), db_connection.cursor() as cur:
-        cur.execute(
-            "INSERT INTO exclusion_rules (rule_type, pattern) VALUES (%s, %s)",
-            ("bogus", "some-pattern"),
         )
 
 
@@ -818,6 +1124,20 @@ def test_account_action_log_accepts_enrichment_key_rejected_action(db_connection
         cur.execute("SELECT count(*) FROM account_action_log WHERE identity_sub = %s", (user_sub,))
         (count,) = cur.fetchone()
     assert count == 1
+
+
+def test_account_action_log_accepts_the_friend_request_sent_and_chat_group_renamed_actions(
+    db_connection, seeded_user_and_game
+):
+    user_sub, _game_id = seeded_user_and_game
+    with db_connection.cursor() as cur:
+        cur.execute(
+            "INSERT INTO account_action_log (identity_sub, action, detail) VALUES (%s, %s, %s), (%s, %s, %s)",
+            (user_sub, "friend_request_sent", "someone", user_sub, "chat_group_renamed", "group"),
+        )
+        cur.execute("SELECT count(*) FROM account_action_log WHERE identity_sub = %s", (user_sub,))
+        (count,) = cur.fetchone()
+    assert count == 2
 
 
 def test_user_enrichment_keys_rejected_at_columns_round_trip(db_connection, seeded_user_and_game):

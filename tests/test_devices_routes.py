@@ -7,8 +7,8 @@ from __future__ import annotations
 from fastapi.testclient import TestClient
 
 from curator.app import create_app
-from curator.devices_routes import _collapse_by_device_id
 from curator.persistence.crypto import TokenCrypto
+from curator.psn.device_registrations import collapse_by_device_id as _collapse_by_device_id
 from curator.psn.errors import PsnAuthError
 from curator.psn.models import AccountDevice
 from test_routes import EMAIL, SUB, FakeRepository, FakeTokenValidator, _bearer, _claims, _make_settings, _seed_link

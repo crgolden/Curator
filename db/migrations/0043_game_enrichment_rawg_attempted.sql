@@ -30,12 +30,6 @@
 ALTER TABLE game_enrichment
     ADD COLUMN rawg_attempted_at TIMESTAMPTZ;
 
--- The one backfill that IS truthful, and it is load-bearing. rawg_enriched = true can only have been
--- written by a pass where RAWG answered and had the title, so stamping those rows asserts nothing that
--- did not happen. It also keeps the handful of genuinely-good rows out of the retry set: without it every
--- row in the table is "never asked", so the four titles that do carry a RAWG-sourced developer and
--- critical_score would be re-enriched, and a pass running while RAWG is down would overwrite them with
--- the NULLs it got. enriched_at is the closest honest timestamp -- it is when that answer was recorded.
 UPDATE game_enrichment
 SET rawg_attempted_at = enriched_at
 WHERE rawg_enriched = true;

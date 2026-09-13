@@ -5,18 +5,40 @@ only applies to attached swappable storage; see ``curator.storage_devices_routes
 
 from __future__ import annotations
 
-from typing import Annotated
+from typing import Annotated, Literal
 
+import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 
 from curator.collections.console_model_defaults import default_capacity_gb
 from curator.collections.repository import CollectionsRepository, UserConsole
 from curator.deps import require_bearer
+from curator.persistence.repository import Repository
+from curator.psn.device_registrations import collapse_by_device_id
+from curator.psn.errors import PsnAuthError
+from curator.psn.social_client import SocialClientFactory
 from curator.psn.title_platform import ConsolePlatform, console_platform, platform_vocabulary_message
 from curator.token_validation import TokenClaims
 
 router = APIRouter(prefix="/consoles", tags=["consoles"])
+
+ConsoleDeviceLinkState = Literal["linked", "device_deactivated", "device_missing", "not_checked"]
+"""What PSN says about a console's linked device. ``not_checked`` is the explicit state when
+``harvest_devices`` is off or PSN could not be asked; it is never an omitted field."""
+
+
+class ConsoleDeviceLinkResponse(BaseModel):
+    """A console's link to a PSN-registered device, and what PSN currently says about that device.
+
+    :param state: ``linked`` when PSN still lists the device with no deactivation date;
+        ``device_deactivated`` when it lists it with one; ``device_missing`` when it no longer lists it at
+        all; ``not_checked`` when the ``harvest_devices`` preference is off or PSN could not be reached.
+        The mapping row itself is never deleted by the server.
+    """
+
+    device_id: str
+    state: ConsoleDeviceLinkState
 
 
 class ConsoleRequest(BaseModel):
@@ -57,6 +79,8 @@ class ConsoleResponse(BaseModel):
         console's real recorded capacity, defaulted or not, with no distinction left to flag). A client
         uses this one-time signal to show "we guessed this, please correct it if wrong" rather than
         presenting a guess as a confirmed fact.
+    :param device_link: The console's PSN device link and its live state, populated by ``GET /consoles``
+        only; ``None`` when the console is linked to no device, and on every other route.
     """
 
     console_id: str
@@ -69,6 +93,7 @@ class ConsoleResponse(BaseModel):
     routing_genres: list[str]
     fill_order: int
     capacity_is_default: bool = False
+    device_link: ConsoleDeviceLinkResponse | None = None
 
 
 class ConsoleInstallRequest(BaseModel):
@@ -100,7 +125,12 @@ def _console_platform(value: str) -> ConsolePlatform:
         raise HTTPException(status_code=400, detail=platform_vocabulary_message()) from exc
 
 
-def _to_response(console: UserConsole, *, capacity_is_default: bool = False) -> ConsoleResponse:
+def _to_response(
+    console: UserConsole,
+    *,
+    capacity_is_default: bool = False,
+    device_link: ConsoleDeviceLinkResponse | None = None,
+) -> ConsoleResponse:
     return ConsoleResponse(
         console_id=console.console_id,
         name=console.name,
@@ -112,7 +142,52 @@ def _to_response(console: UserConsole, *, capacity_is_default: bool = False) -> 
         routing_genres=list(console.routing_genres),
         fill_order=console.fill_order,
         capacity_is_default=capacity_is_default,
+        device_link=device_link,
     )
+
+
+async def _device_link_states(
+    request: Request, sub: str, device_id_by_console: dict[str, str]
+) -> dict[str, ConsoleDeviceLinkResponse]:
+    """Resolve each linked console's device state, asking PSN only when the caller allows it.
+
+    Zero PSN calls when nothing is linked or ``harvest_devices`` is off; a PSN failure of any kind
+    reports ``not_checked`` rather than failing the console list.
+    """
+    if not device_id_by_console:
+        return {}
+
+    def unchecked() -> dict[str, ConsoleDeviceLinkResponse]:
+        return {
+            console_id: ConsoleDeviceLinkResponse(device_id=device_id, state="not_checked")
+            for console_id, device_id in device_id_by_console.items()
+        }
+
+    repository: Repository = request.app.state.repository
+    link = await repository.get_link(sub)
+    if link is None or link.harvest_devices is not True:
+        return unchecked()
+
+    social_client_factory: SocialClientFactory = request.app.state.social_client_factory
+    try:
+        client = await social_client_factory(sub)
+        devices = collapse_by_device_id(await client.devices())
+    except (RuntimeError, PsnAuthError, httpx.HTTPError):
+        return unchecked()
+
+    listed = {device.device_id: device for device in devices if device.device_id}
+    states: dict[str, ConsoleDeviceLinkResponse] = {}
+    for console_id, device_id in device_id_by_console.items():
+        device = listed.get(device_id)
+        state: ConsoleDeviceLinkState
+        if device is None:
+            state = "device_missing"
+        elif device.deactivation_date:
+            state = "device_deactivated"
+        else:
+            state = "linked"
+        states[console_id] = ConsoleDeviceLinkResponse(device_id=device_id, state=state)
+    return states
 
 
 @router.post("", status_code=201)
@@ -156,10 +231,17 @@ async def create_console(
 async def list_consoles(
     request: Request, claims: Annotated[TokenClaims, Depends(require_bearer)]
 ) -> list[ConsoleResponse]:
-    """List every console the caller owns, ordered by ``fill_order``."""
+    """List every console the caller owns, ordered by ``fill_order``, each with its device link's state.
+
+    PSN is asked about the linked devices only when at least one console is linked and the caller's
+    ``harvest_devices`` preference is on; otherwise every link reports ``not_checked``.
+    """
     repository: CollectionsRepository = request.app.state.collections_repository
     consoles = await repository.list_user_consoles(claims.sub)
-    return [_to_response(console) for console in consoles]
+    console_id_by_device = await repository.list_console_device_links(claims.sub)
+    device_id_by_console = {console_id: device_id for device_id, console_id in console_id_by_device.items()}
+    states = await _device_link_states(request, claims.sub, device_id_by_console)
+    return [_to_response(console, device_link=states.get(console.console_id)) for console in consoles]
 
 
 @router.get("/{console_id}")

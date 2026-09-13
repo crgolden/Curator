@@ -7,7 +7,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from pydantic import BaseModel
 
 from curator.catalog.repository import CatalogRepository
-from curator.collections.collection_orchestrator import CollectionOrchestrator
+from curator.collections.collection_orchestrator import CollectionOrchestrator, CollectionResult
 from curator.collections.collection_spec import CollectionSpec
 from curator.collections.filter_predicate import FilterPredicate, parse_predicate, predicate_to_dict
 from curator.collections.game_candidate import GameCandidate
@@ -73,8 +73,24 @@ class CollectionGameResponse(BaseModel):
     percent_completed: int | None
 
 
+class IgnoredFilterResponse(BaseModel):
+    """A spec filter the run could not apply.
+
+    :param filter: The spec field, e.g. ``min_percent_completed``.
+    :param reason: Why, e.g. ``no_trophy_data`` when the caller has no stored trophy percentage anywhere.
+    """
+
+    filter: str
+    reason: str
+
+
 class CollectionPreviewResponse(BaseModel):
     """The ``POST /collections/preview`` response body.
+
+    ``ignored_filters`` names a filter the run let everything through, and
+    ``excluded_for_missing_trophy_data`` counts the games a completion floor dropped for carrying no
+    percentage of their own; both are the two shapes a blank trophy column can take, and a client that
+    shows a floor as applied when it was not misleads its owner.
 
     ``included``/``excluded`` are one capped page each; ``included_total``/``excluded_total`` count the
     whole generated result so a caller can size its pager. Both lists are paged by the *same*
@@ -94,6 +110,8 @@ class CollectionPreviewResponse(BaseModel):
     excluded_total: int
     included_game_ids: list[str]
     used_gb: float | None
+    ignored_filters: list[IgnoredFilterResponse] = []
+    excluded_for_missing_trophy_data: int = 0
 
 
 @router.post("/preview")
@@ -154,7 +172,13 @@ async def preview_collection(
         excluded_total=len(result.excluded),
         included_game_ids=[candidate.game_id for candidate in result.included],
         used_gb=result.used_gb,
+        ignored_filters=_ignored_filters(result),
+        excluded_for_missing_trophy_data=result.excluded_for_missing_trophy_data,
     )
+
+
+def _ignored_filters(result: CollectionResult) -> list[IgnoredFilterResponse]:
+    return [IgnoredFilterResponse(filter=item.filter, reason=item.reason) for item in result.ignored_filters]
 
 
 def _to_response(candidate: GameCandidate) -> CollectionGameResponse:
@@ -296,6 +320,8 @@ class CollectionRunResponse(BaseModel):
     excluded_total: int
     included_game_ids: list[str]
     used_gb: float | None
+    ignored_filters: list[IgnoredFilterResponse] = []
+    excluded_for_missing_trophy_data: int = 0
 
 
 @router.post("", status_code=201)
@@ -700,6 +726,8 @@ async def run_definition(
         excluded_total=len(result.excluded),
         included_game_ids=[candidate.game_id for candidate in result.included],
         used_gb=result.used_gb,
+        ignored_filters=_ignored_filters(result),
+        excluded_for_missing_trophy_data=result.excluded_for_missing_trophy_data,
     )
 
 

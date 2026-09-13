@@ -212,7 +212,13 @@ class CollectionItem:
 
 @dataclass(frozen=True, slots=True)
 class RawCandidateRow:
-    """One raw joined row from ``library_entries``/``games``/``game_enrichment``, before scoring."""
+    """One raw joined row from ``library_entries``/``games``/``game_enrichment``, before scoring.
+
+    :param is_free_to_play: Whether the storefront's most recent walk priced the game as free
+        (``psn_catalog_cache.price_is_free``); ``False`` when no walk carried a price.
+    :param download_size_bytes: The package size Sony's web-store entitlements reported for this game on
+        the platform being filled (``game_download_sizes``), or ``None``.
+    """
 
     game_id: str
     title: str
@@ -226,6 +232,17 @@ class RawCandidateRow:
     measured_size_gb: float | None
     np_communication_id: str | None = None
     percent_completed: int | None = None
+    download_size_bytes: int | None = None
+
+
+IS_FREE_TO_PLAY_SQL = """(
+                           SELECT COALESCE(bool_or(pcc.price_is_free), false) FROM psn_catalog_cache pcc
+                           WHERE pcc.game_id = g.game_id AND pcc.price_fetched_at IS NOT NULL
+                       )"""
+"""Correlated scalar over an aliased ``games g``: free when any walked price for the game said so."""
+
+BROWSABLE_CANDIDATE_SQL = "AND (g.content_kind IS NULL OR g.content_kind = 'game')"
+"""The candidate-pool predicate a ``filter_list`` applies; ``capacity_fill`` counts every kind."""
 
 
 class CollectionsRepository:
@@ -617,6 +634,109 @@ class CollectionsRepository:
             game_id=game_id, platform=platform, size_gb=size_gb, recorded_by=recorded_by, recorded_at=row[0]
         )
 
+    async def list_platform_media_ceilings(self) -> dict[str, float]:
+        """Return ``{platform_id: media_ceiling_gb}`` for every platform that has one (``0063``)."""
+        async with self._pool.connection() as conn, conn.cursor() as cur:
+            await cur.execute("SELECT platform_id, media_ceiling_gb FROM platforms WHERE media_ceiling_gb IS NOT NULL")
+            rows = await cur.fetchall()
+        return {str(row[0]): float(row[1]) for row in rows}
+
+    async def user_has_trophy_data(self, identity_sub: str) -> bool:
+        """Whether any of the user's library entries carries a stored trophy percentage.
+
+        This is the per-user escape :meth:`list_candidates`' completion floor takes: a user with no
+        percentage anywhere is never filtered by the floor at all.
+        """
+        async with self._pool.connection() as conn, conn.cursor() as cur:
+            await cur.execute(
+                "SELECT EXISTS (SELECT 1 FROM library_entries WHERE identity_sub = %s "
+                "AND trophy_percent_completed IS NOT NULL)",
+                (identity_sub,),
+            )
+            row = await cur.fetchone()
+        return bool(row[0]) if row is not None else False
+
+    async def count_candidates_missing_trophy_data(
+        self,
+        identity_sub: str,
+        *,
+        platform: ConsolePlatform | None = None,
+        include_inactive: bool = False,
+        exclude_installed_on: Sequence[str] | None = None,
+        include_non_games: bool = False,
+    ) -> int:
+        """Count the candidates a completion floor drops because their percentage is NULL.
+
+        Same pool as :meth:`list_candidates` minus the floor itself: a partially harvested user's unmatched
+        games fail ``>= floor`` silently, and this is the count that says so.
+        """
+        clauses, params = self._candidate_filters(
+            identity_sub,
+            platform=platform,
+            include_inactive=include_inactive,
+            exclude_installed_on=exclude_installed_on,
+            include_non_games=include_non_games,
+        )
+        async with self._pool.connection() as conn, conn.cursor() as cur:
+            await cur.execute(
+                f"""
+                SELECT count(*)
+                FROM library_entries le
+                JOIN games g ON g.game_id = le.game_id
+                WHERE le.identity_sub = %s {clauses}
+                  AND le.trophy_percent_completed IS NULL
+                  AND NOT EXISTS (
+                      SELECT 1 FROM library_exclusions lx
+                      WHERE lx.identity_sub = le.identity_sub AND lx.game_id = g.game_id
+                  )
+                """,
+                tuple(params),
+            )
+            row = await cur.fetchone()
+        return int(row[0]) if row is not None else 0
+
+    @staticmethod
+    def _candidate_filters(
+        identity_sub: str,
+        *,
+        platform: ConsolePlatform | None,
+        include_inactive: bool,
+        exclude_installed_on: Sequence[str] | None,
+        include_non_games: bool,
+    ) -> tuple[str, list[Any]]:
+        """The shared platform, activity, installed-elsewhere and content-kind clauses over ``le``/``g``.
+
+        :returns: ``(sql, params)`` where ``params`` begins with ``identity_sub`` for the caller's own
+            ``WHERE le.identity_sub = %s``.
+        """
+        params: list[Any] = [identity_sub]
+        clauses = ""
+        if platform is not None:
+            clauses += """
+                AND EXISTS (
+                    SELECT 1 FROM library_entry_platforms lep
+                    WHERE lep.identity_sub = le.identity_sub AND lep.game_id = le.game_id
+                      AND lep.platform = %s
+                )
+            """
+            params.append(platform)
+        if not include_inactive:
+            clauses += " AND le.is_active = true"
+        if exclude_installed_on:
+            clauses += """
+                AND NOT EXISTS (
+                    SELECT 1 FROM console_installs ci
+                    JOIN user_consoles uc ON uc.console_id = ci.console_id
+                    WHERE ci.game_id = g.game_id AND ci.installed = true
+                      AND uc.identity_sub = %s AND ci.console_id = ANY(%s)
+                )
+            """
+            params.append(identity_sub)
+            params.append(list(exclude_installed_on))
+        if not include_non_games:
+            clauses += f" {BROWSABLE_CANDIDATE_SQL}"
+        return clauses, params
+
     async def list_candidates(
         self,
         identity_sub: str,
@@ -625,6 +745,7 @@ class CollectionsRepository:
         include_inactive: bool = False,
         min_percent_completed: int | None = None,
         exclude_installed_on: Sequence[str] | None = None,
+        include_non_games: bool = False,
     ) -> list[RawCandidateRow]:
         """Return a user's library, joined with enrichment and the latest measured size (if any).
 
@@ -633,6 +754,10 @@ class CollectionsRepository:
         -- when asked -- games below a trophy-completion floor are filtered out here, so every collection
         strategy inherits all four without having to re-apply them. This is the single chokepoint every
         candidate pool flows through.
+
+        :param include_non_games: Keep entries whose ``games.content_kind`` says they are not games. A
+            ``capacity_fill`` asks for them because a media app occupies real console storage; a
+            ``filter_list`` leaves them out.
 
         Row order is deterministic (``ORDER BY g.canonical_title, g.game_id``) so that a caller sorting
         this list by a tied score (``curator.collections.sort_order``'s ``"composite_desc"``, matching
@@ -657,36 +782,20 @@ class CollectionsRepository:
             this caller's own is silently ignored rather than trusted, since ``console_installs`` itself
             carries no ``identity_sub`` to check against directly.
         """
-        active_clause = "" if include_inactive else "AND le.is_active = true"
-
+        size_platform_sql = "CASE WHEN le.native_ps5 THEN 'PS5' ELSE 'PS4' END"
         params: list[Any] = []
-        measured_size_platform_sql = "CASE WHEN le.native_ps5 THEN 'PS5' ELSE 'PS4' END"
-        platform_clause = ""
         if platform is not None:
-            measured_size_platform_sql = "%s"
+            size_platform_sql = "%s"
             params.append(platform)
-        params.append(identity_sub)
-        if platform is not None:
-            platform_clause = """
-                AND EXISTS (
-                    SELECT 1 FROM library_entry_platforms lep
-                    WHERE lep.identity_sub = le.identity_sub AND lep.game_id = le.game_id
-                      AND lep.platform = %s
-                )
-            """
             params.append(platform)
-        installed_elsewhere_clause = ""
-        if exclude_installed_on:
-            installed_elsewhere_clause = """
-                AND NOT EXISTS (
-                    SELECT 1 FROM console_installs ci
-                    JOIN user_consoles uc ON uc.console_id = ci.console_id
-                    WHERE ci.game_id = g.game_id AND ci.installed = true
-                      AND uc.identity_sub = %s AND ci.console_id = ANY(%s)
-                )
-            """
-            params.append(identity_sub)
-            params.append(list(exclude_installed_on))
+        filter_clauses, filter_params = self._candidate_filters(
+            identity_sub,
+            platform=platform,
+            include_inactive=include_inactive,
+            exclude_installed_on=exclude_installed_on,
+            include_non_games=include_non_games,
+        )
+        params.extend(filter_params)
 
         completion_clause = ""
         if min_percent_completed is not None:
@@ -706,19 +815,23 @@ class CollectionsRepository:
             await cur.execute(
                 f"""
                 SELECT g.game_id, g.canonical_title, gen.name, ge.aaa_tier, g.franchise,
-                       ge.critical_score, ge.oc_score, ge.psn_rating, ge.is_free_to_play,
+                       ge.critical_score, ge.oc_score, ge.psn_rating, {IS_FREE_TO_PLAY_SQL},
                        (
                            SELECT gms.size_gb FROM game_measured_sizes gms
                            WHERE gms.game_id = g.game_id
-                             AND gms.platform = ({measured_size_platform_sql})
+                             AND gms.platform = ({size_platform_sql})
                        ) AS measured_size_gb,
-                       le.np_communication_id, le.trophy_percent_completed
+                       le.np_communication_id, le.trophy_percent_completed,
+                       (
+                           SELECT gds.bytes FROM game_download_sizes gds
+                           WHERE gds.game_id = g.game_id
+                             AND gds.platform = ({size_platform_sql})
+                       ) AS download_size_bytes
                 FROM library_entries le
                 JOIN games g ON g.game_id = le.game_id
                 LEFT JOIN game_enrichment ge ON ge.game_id = g.game_id
                 LEFT JOIN genres gen ON gen.genre_id = ge.genre_id
-                WHERE le.identity_sub = %s {platform_clause} {active_clause}
-                  {installed_elsewhere_clause} {completion_clause}
+                WHERE le.identity_sub = %s {filter_clauses} {completion_clause}
                   AND NOT EXISTS (
                       SELECT 1 FROM library_exclusions lx
                       WHERE lx.identity_sub = le.identity_sub AND lx.game_id = g.game_id
@@ -742,6 +855,7 @@ class CollectionsRepository:
                 measured_size_gb=row[9],
                 np_communication_id=row[10],
                 percent_completed=row[11],
+                download_size_bytes=row[12] if len(row) > 12 else None,
             )
             for row in rows
         ]

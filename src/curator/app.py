@@ -32,6 +32,8 @@ from psycopg_pool import AsyncConnectionPool
 from redis.asyncio import Redis
 
 from curator.audit.repository import AccountActionLogRepository
+from curator.catalog.ps_plus_repository import PsPlusRepository
+from curator.catalog.ps_plus_walk_service import PsPlusWalkService
 from curator.catalog.repository import CatalogRepository
 from curator.catalog.store_backfill_service import StoreBackfillService
 from curator.catalog_routes import router as catalog_router
@@ -50,6 +52,7 @@ from curator.jobs import (
     LIBRARY_REFRESH_QUEUE,
     SCHEDULED_REFRESH_QUEUE,
 )
+from curator.jobs.ps_plus_walk_scheduler import PsPlusWalkScheduler
 from curator.jobs.queue_depth_monitor import QueueDepthMonitor
 from curator.jobs.queue_publisher import QueuePublisher
 from curator.jobs.repository import JobRunsRepository
@@ -69,6 +72,7 @@ from curator.persistence.repository import Repository
 from curator.preferences_routes import router as preferences_router
 from curator.presence_routes import router as presence_router
 from curator.profile_routes import router as profile_router
+from curator.ps_plus_routes import router as ps_plus_router
 from curator.psn.account_client import AccountClient, AccountClientFactory
 from curator.psn.mutation_service import MutationService, MutationServiceFactory
 from curator.psn.presence_client import PresenceClient, PresenceClientFactory
@@ -112,6 +116,7 @@ def create_app(
     profile_link_repository: ProfileLinkRepository | None = None,
     follow_repository: FollowRepository | None = None,
     refresh_schedules_repository: RefreshSchedulesRepository | None = None,
+    ps_plus_repository: PsPlusRepository | None = None,
     redis_client: Redis | None = None,
     trophy_client_factory: TrophyClientFactory | None = None,
     identity_client_factory: AccountClientFactory | None = None,
@@ -161,6 +166,9 @@ def create_app(
         :class:`~curator.persistence.profile_link_repository.ProfileLinkRepository` over ``pool``.
     :param follow_repository: The follow-graph repository; defaults to a real
         :class:`~curator.persistence.follow_repository.FollowRepository` over ``pool``.
+    :param ps_plus_repository: The PS Plus catalog repository; defaults to a real
+        :class:`~curator.catalog.ps_plus_repository.PsPlusRepository` over ``pool``. Also backs the walk
+        service and the scheduler, which is constructed but never started here.
     :param redis_client: The shared Redis client backing the distributed PSN rate limiter
         (:class:`~curator.psn.rate_limiter.RedisRateLimiter`) and trophy-read caching
         (:class:`~curator.psn.trophy_cache.CachedTrophyClient`); defaults to
@@ -223,6 +231,9 @@ def create_app(
         query_hashes=(*settings.store_query_hashes, *CATEGORY_GRID_RETRIEVE_HASHES),
     )
     store_backfill_service = StoreBackfillService(store_catalog_client, catalog_repository)
+    ps_plus_repository = ps_plus_repository or PsPlusRepository(shared_pool)
+    ps_plus_walk_service = PsPlusWalkService(store_catalog_client, ps_plus_repository)
+    ps_plus_walk_scheduler = PsPlusWalkScheduler(ps_plus_walk_service, ps_plus_repository)
     job_runs_repository = job_runs_repository or JobRunsRepository(shared_pool)
     audit_repository = audit_repository or AccountActionLogRepository(shared_pool)
     enrichment_keys_repository = enrichment_keys_repository or EnrichmentKeysRepository(shared_pool)
@@ -311,6 +322,9 @@ def create_app(
     app.state.catalog_repository = catalog_repository
     app.state.store_backfill_service = store_backfill_service
     app.state.store_catalog_client = store_catalog_client
+    app.state.ps_plus_repository = ps_plus_repository
+    app.state.ps_plus_walk_service = ps_plus_walk_service
+    app.state.ps_plus_walk_scheduler = ps_plus_walk_scheduler
     app.state.library_repository = library_repository
     app.state.collections_repository = collections_repository
     app.state.collection_orchestrator = collection_orchestrator
@@ -342,6 +356,7 @@ def create_app(
     app.include_router(enrichment_keys_router)
     app.include_router(profile_router)
     app.include_router(refresh_schedules_router)
+    app.include_router(ps_plus_router)
     app.include_router(social_router)
     app.include_router(public_collections_router)
 

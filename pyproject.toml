@@ -127,6 +127,9 @@ module = [
     "test_presence_routes",
     "test_profile_persistence",
     "test_profile_routes",
+    "test_ps_plus_routes",
+    "test_ps_plus_walk_scheduler",
+    "test_ps_plus_walk_service",
     "test_public_collections_routes",
     "test_psn_account_client",
     "test_psn_identifiers",
@@ -157,6 +160,7 @@ module = [
     "test_settings",
     "test_telemetry",
     "test_token_validation",
+    "test_values",
 ]
 disallow_untyped_defs = false
 disallow_incomplete_defs = false

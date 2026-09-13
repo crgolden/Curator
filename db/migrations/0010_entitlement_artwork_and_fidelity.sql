@@ -29,14 +29,3 @@ ALTER TABLE entitlement_snapshots
     ADD COLUMN concept_icon_url TEXT,
     ADD COLUMN is_game          BOOLEAN,
     ADD COLUMN platform_ids     TEXT[] NOT NULL DEFAULT '{}';
-
--- opencritic_cache.raw has the same defect entitlement_snapshots.raw had: the column was declared in
--- 0001_initial.sql but omitted from the INSERT's column list in curator.enrichment.repository, so it was
--- NULL for every row. That INSERT now writes it, matching the correct pattern rawg_cache already used.
--- No schema change is needed for that -- this comment records it so the next reader isn't misled.
-
--- Two further tables are worth flagging while in this area: psn_game_search_cache and
--- psn_player_search_cache have no INSERT anywhere in curator/src. Their only would-be writers
--- (CatalogClient.search_games / SocialClient.search_players) have no route and no internal caller, so
--- both tables are currently unpopulated by design-drift rather than intent. Left in place deliberately;
--- do not assume they contain data.

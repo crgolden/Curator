@@ -11,7 +11,17 @@ from fastapi.testclient import TestClient
 from curator.app import create_app
 from curator.collections.repository import UserConsole
 from curator.persistence.crypto import TokenCrypto
-from test_routes import FakeAgentFactory, FakeRepository, FakeTokenValidator, _bearer, _claims, _make_settings
+from curator.psn.models import AccountDevice
+from test_routes import (
+    FakeAgentFactory,
+    FakeRepository,
+    FakeTokenValidator,
+    _bearer,
+    _claims,
+    _make_settings,
+    _seed_link,
+)
+from test_values import new_device_id, new_game_title
 
 
 class FakeCollectionsRepository:
@@ -25,12 +35,18 @@ class FakeCollectionsRepository:
         self._owners: dict[str, str] = dict(owners or {c.console_id: "sub-a" for c in (consoles or [])})
         self._installs: dict[str, dict[str, bool]] = {}
         self.set_install_calls = []
+        self.device_links: dict[str, str] = {}
         self._next_id = 1
 
     async def get_console(self, identity_sub, console_id):
         if self._owners.get(console_id) != identity_sub:
             return None
         return self._consoles.get(console_id)
+
+    async def list_user_consoles(self, identity_sub):
+        return [
+            console for console_id, console in self._consoles.items() if self._owners.get(console_id) == identity_sub
+        ]
 
     async def create_console(
         self,
@@ -100,6 +116,57 @@ class FakeCollectionsRepository:
 
     async def list_installed_game_ids(self, console_id):
         return {game_id for game_id, installed in self._installs.get(console_id, {}).items() if installed}
+
+    async def list_console_device_links(self, identity_sub):
+        return dict(self.device_links)
+
+
+class FakeDevicesClient:
+    def __init__(self, devices):
+        self._devices = list(devices)
+        self.calls = 0
+
+    async def devices(self):
+        self.calls += 1
+        return list(self._devices)
+
+
+class FakeDevicesClientFactory:
+    def __init__(self, client):
+        self._client = client
+
+    async def __call__(self, sub):
+        return self._client
+
+
+def _device(device_id, *, deactivation_date=None):
+    return AccountDevice(
+        device_id=device_id,
+        device_type="PS5",
+        device_name=new_game_title(),
+        activation_type="PRIMARY",
+        activation_date="2026-01-01T00:00:00Z",
+        deactivation_date=deactivation_date,
+    )
+
+
+def _build_with_devices(repo, devices, *, harvest_devices):
+    repository = FakeRepository()
+    token_crypto = TokenCrypto(TokenCrypto.generate_key())
+    _seed_link(repository, token_crypto, "sub-a", harvest_devices=harvest_devices)
+    validator = FakeTokenValidator()
+    devices_client = FakeDevicesClient(devices)
+    app = create_app(
+        _make_settings(),
+        repository=repository,
+        token_crypto=token_crypto,
+        agent_factory=FakeAgentFactory(repository, token_crypto),
+        token_validator=validator,
+        collections_repository=repo,
+        social_client_factory=FakeDevicesClientFactory(devices_client),
+    )
+    validator.register("token-a", _claims(sub="sub-a"))
+    return TestClient(app), devices_client
 
 
 def _console(console_id="c1"):
@@ -197,6 +264,64 @@ def test_creates_a_console_with_explicit_capacity_is_never_flagged_as_default():
     body = response.json()
     assert body["raw_capacity_gb"] == 700.0
     assert body["capacity_is_default"] is False
+
+
+def test_a_linked_device_psn_lists_as_deactivated_reports_device_deactivated():
+    device_id = new_device_id()
+    repo = FakeCollectionsRepository(consoles=[_console("c1")], owners={"c1": "sub-a"})
+    repo.device_links = {device_id: "c1"}
+    client, _devices = _build_with_devices(
+        repo, [_device(device_id, deactivation_date="2026-06-01T00:00:00Z")], harvest_devices=True
+    )
+
+    body = client.get("/consoles", headers=_bearer("token-a")).json()
+
+    assert body[0]["device_link"] == {"device_id": device_id, "state": "device_deactivated"}
+
+
+def test_a_linked_device_psn_no_longer_lists_reports_device_missing_and_keeps_the_link():
+    device_id = new_device_id()
+    repo = FakeCollectionsRepository(consoles=[_console("c1")], owners={"c1": "sub-a"})
+    repo.device_links = {device_id: "c1"}
+    client, _devices = _build_with_devices(repo, [_device(new_device_id())], harvest_devices=True)
+
+    body = client.get("/consoles", headers=_bearer("token-a")).json()
+
+    assert body[0]["device_link"] == {"device_id": device_id, "state": "device_missing"}
+    assert repo.device_links == {device_id: "c1"}, "the server never deletes the mapping"
+
+
+def test_a_linked_device_psn_still_lists_reports_linked():
+    device_id = new_device_id()
+    repo = FakeCollectionsRepository(consoles=[_console("c1")], owners={"c1": "sub-a"})
+    repo.device_links = {device_id: "c1"}
+    client, _devices = _build_with_devices(repo, [_device(device_id)], harvest_devices=True)
+
+    body = client.get("/consoles", headers=_bearer("token-a")).json()
+
+    assert body[0]["device_link"] == {"device_id": device_id, "state": "linked"}
+
+
+def test_harvest_devices_off_reports_not_checked_and_makes_no_psn_call():
+    device_id = new_device_id()
+    repo = FakeCollectionsRepository(consoles=[_console("c1")], owners={"c1": "sub-a"})
+    repo.device_links = {device_id: "c1"}
+    client, devices = _build_with_devices(repo, [_device(device_id)], harvest_devices=False)
+
+    body = client.get("/consoles", headers=_bearer("token-a")).json()
+
+    assert body[0]["device_link"] == {"device_id": device_id, "state": "not_checked"}
+    assert devices.calls == 0
+
+
+def test_an_unlinked_console_carries_no_device_link_and_costs_no_psn_call():
+    repo = FakeCollectionsRepository(consoles=[_console("c1")], owners={"c1": "sub-a"})
+    client, devices = _build_with_devices(repo, [_device(new_device_id())], harvest_devices=True)
+
+    body = client.get("/consoles", headers=_bearer("token-a")).json()
+
+    assert body[0]["device_link"] is None
+    assert devices.calls == 0
 
 
 def test_get_console_never_reports_capacity_as_default_even_if_it_was_originally():

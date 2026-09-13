@@ -22,5 +22,4 @@ CREATE TABLE user_refresh_schedules
     updated_at           TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
--- The worker claims due schedules by time, not by user.
 CREATE INDEX idx_user_refresh_schedules_next_run_at ON user_refresh_schedules (next_run_at);

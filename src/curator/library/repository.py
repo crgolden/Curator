@@ -18,6 +18,21 @@ from curator.psn.title_platform import ConsolePlatform
 
 LibrarySortField = Literal["title", "genre", "rawg_rating", "opencritic_rating", "psn_rating", "percent_completed"]
 
+HiddenFilter = Literal["exclude", "only"]
+"""Whether a library page leaves out the caller's hidden games (the default) or lists only them."""
+
+TrophyMatch = Literal["matched", "unmatched", "not_attempted"]
+"""Whether a library entry has been resolved to a PSN trophy title: matched to one, tried and not
+matched, or never tried."""
+
+HIDDEN_REASON = "hidden"
+"""The ``library_exclusions.reason`` a user-initiated hide writes."""
+
+_HIDDEN_EXISTS_SQL = """EXISTS (
+                SELECT 1 FROM library_exclusions lx
+                WHERE lx.identity_sub = le.identity_sub AND lx.game_id = le.game_id
+            )"""
+
 _SORT_COLUMNS: dict[str, str] = {
     "title": "g.canonical_title",
     "genre": "gen.name",
@@ -58,6 +73,7 @@ _LIBRARY_VIEW_COLUMNS: tuple[tuple[str, str], ...] = (
     ("source", "le.source"),
     ("cover_image_url", SQUARE_COVER_ART_SQL),
     ("platforms", _OWNED_PLATFORMS_SQL),
+    ("trophy_match_attempted_at", "le.trophy_match_attempted_at"),
 )
 
 _LIBRARY_VIEW_SELECT_LIST = ", ".join(f"{expression} AS {name}" for name, expression in _LIBRARY_VIEW_COLUMNS)
@@ -68,7 +84,11 @@ _LIBRARY_VIEW_COLUMN_INDEX: dict[str, int] = {name: index for index, (name, _) i
 @dataclass(frozen=True, slots=True)
 class LibraryGameView:
     """One row of a user's library, joined with its enrichment status -- backs ``GET /library``'s
-    rating/genre columns."""
+    rating/genre columns.
+
+    :param trophy_match: Whether the entry resolved to a PSN trophy title, derived from
+        ``np_communication_id`` and ``trophy_match_attempted_at``.
+    """
 
     game_id: str
     title: str
@@ -86,6 +106,14 @@ class LibraryGameView:
     source: str = "psn"
     cover_image_url: str | None = None
     platforms: tuple[str, ...] = ()
+    trophy_match: TrophyMatch = "not_attempted"
+
+
+def trophy_match_state(np_communication_id: str | None, attempted_at: object | None) -> TrophyMatch:
+    """Derive an entry's trophy-match state from the two persisted columns."""
+    if np_communication_id:
+        return "matched"
+    return "unmatched" if attempted_at is not None else "not_attempted"
 
 
 class LibraryRepository:
@@ -208,6 +236,66 @@ class LibraryRepository:
             )
             return cur.rowcount
 
+    async def has_trophy_progress(self, identity_sub: str) -> bool:
+        """Whether any of the user's entries has ever had its trophy progress fetched.
+
+        Distinguishes "never refreshed since enabling the preference" from "refreshed, nothing matched".
+        """
+        async with self._pool.connection() as conn, conn.cursor() as cur:
+            await cur.execute(
+                "SELECT EXISTS (SELECT 1 FROM library_entries WHERE identity_sub = %s "
+                "AND trophy_progress_fetched_at IS NOT NULL)",
+                (identity_sub,),
+            )
+            row = await cur.fetchone()
+        return bool(row[0]) if row is not None else False
+
+    async def hide_entry(self, identity_sub: str, game_id: str) -> bool:
+        """Hide one of the user's library entries from their library and from collection candidacy.
+
+        Keyed on ``library_exclusions (identity_sub, game_id)`` rather than on the entry itself, so a
+        PSN-sourced entry rebuilt by the next refresh stays hidden. Idempotent.
+
+        :returns: ``True`` when the caller holds the game; ``False`` when they have no entry for it, in
+            which case nothing is written.
+        """
+        async with self._pool.connection() as conn, conn.cursor() as cur:
+            await cur.execute(
+                "SELECT 1 FROM library_entries WHERE identity_sub = %s AND game_id = %s", (identity_sub, game_id)
+            )
+            if await cur.fetchone() is None:
+                return False
+            await cur.execute(
+                """
+                INSERT INTO library_exclusions (identity_sub, game_id, reason, excluded_by)
+                VALUES (%s, %s, %s, %s)
+                ON CONFLICT (identity_sub, game_id) DO NOTHING
+                """,
+                (identity_sub, game_id, HIDDEN_REASON, identity_sub),
+            )
+            return True
+
+    async def unhide_entry(self, identity_sub: str, game_id: str) -> None:
+        """Remove the user's hide for a game. A no-op when it was not hidden."""
+        async with self._pool.connection() as conn, conn.cursor() as cur:
+            await cur.execute(
+                "DELETE FROM library_exclusions WHERE identity_sub = %s AND game_id = %s", (identity_sub, game_id)
+            )
+
+    async def count_hidden(self, identity_sub: str) -> int:
+        """How many of the user's library entries are hidden."""
+        async with self._pool.connection() as conn, conn.cursor() as cur:
+            await cur.execute(
+                """
+                SELECT count(*) FROM library_exclusions lx
+                JOIN library_entries le ON le.identity_sub = lx.identity_sub AND le.game_id = lx.game_id
+                WHERE lx.identity_sub = %s
+                """,
+                (identity_sub,),
+            )
+            row = await cur.fetchone()
+        return int(row[0]) if row is not None else 0
+
     async def count_entries(self, identity_sub: str) -> int:
         """Return how many library entries ``identity_sub`` has, for the profile overview's tile.
 
@@ -234,6 +322,7 @@ class LibraryRepository:
         sort_dir: str = "asc",
         limit: int = 20,
         offset: int = 0,
+        hidden: HiddenFilter = "exclude",
     ) -> tuple[list[LibraryGameView], int]:
         """Return one page of a user's library, joined with its genre/ratings/enrichment status,
         for ``GET /library``'s (and ``GET /users/{sub}/library``'s) table -- plus the total count of
@@ -258,8 +347,10 @@ class LibraryRepository:
         :param sort_dir: ``"asc"`` or ``"desc"``; anything else is treated as ``"asc"``.
         :param limit: Page size.
         :param offset: Number of matching rows to skip.
+        :param hidden: ``"exclude"`` leaves out the games the owner hid (``library_exclusions``);
+            ``"only"`` lists nothing else, for unhiding. A hide is orthogonal to ``is_active``.
         """
-        conditions: list[str] = ["le.identity_sub = %s"]
+        conditions: list[str] = ["le.identity_sub = %s", f"{'' if hidden == 'only' else 'NOT '}{_HIDDEN_EXISTS_SQL}"]
         params: list[Any] = [identity_sub]
         if search:
             conditions.append("g.canonical_title ILIKE %s")
@@ -316,6 +407,7 @@ class LibraryRepository:
                 source=row[at["source"]],
                 cover_image_url=row[at["cover_image_url"]],
                 platforms=tuple(row[at["platforms"]] or ()),
+                trophy_match=trophy_match_state(row[at["np_communication_id"]], row[at["trophy_match_attempted_at"]]),
             )
             for row in rows
         ]

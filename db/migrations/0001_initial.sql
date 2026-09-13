@@ -1,5 +1,5 @@
 -- Curator schema — migration 0001 (initial)
--- Target: PostgreSQL 17. Applied manually via psql (see TESTING.md) — there is no migration runner.
+-- Target: PostgreSQL 17. Applied by db/run_migrations.py in filename order.
 --
 -- Design
 -- ------
@@ -66,12 +66,6 @@
 
 CREATE EXTENSION IF NOT EXISTS pgcrypto;
 
--- ============================================================================================
--- Account layer
--- ============================================================================================
-
--- One row per authenticated Curator user. identity_sub is Identity's `sub` claim — a UUID minted by
--- IdentityServer, not generated here, so it is the primary key rather than a separate surrogate key.
 CREATE TABLE app_users
 (
     identity_sub  UUID PRIMARY KEY,
@@ -80,14 +74,6 @@ CREATE TABLE app_users
     last_login_at TIMESTAMPTZ NULL
 );
 
--- Each user's link to their PSN account. token_response_enc holds the folded-in psnpy token dict (access
--- + refresh tokens and their expiries), AES-256-GCM-encrypted before it ever reaches SQL — see
--- curator.persistence.crypto.TokenCrypto and curator.persistence.db_token_store.DbTokenStore.
--- No npsso column: the npsso cookie is a one-time bootstrap credential, never persisted. No email
--- column: same hard privacy tenet as app_users.
--- last_verified_at tracks when the identity_sub/PSN email match was last re-checked against a bearer
--- token (see curator.reverify.reverify_link) -- NULL until the first (re-)verification. A token issued
--- after this timestamp triggers a fresh PSN check; an older/same-vintage token does not.
 CREATE TABLE psn_links
 (
     identity_sub             UUID PRIMARY KEY REFERENCES app_users (identity_sub) ON DELETE CASCADE,
@@ -100,10 +86,6 @@ CREATE TABLE psn_links
     last_verified_at         TIMESTAMPTZ
 );
 
--- Replaces the folded-in psnpy's file-based TestAccountStore. The mutation-safety wall (psn/safety.py)
--- pins one real PSN test account per user before any mutating social/chat operation (send message,
--- create/rename group, invite/kick, friend accept/remove) is allowed to run against it — DB-backed so the
--- pin is visible across every Curator App Service instance, not just the one that set it.
 CREATE TABLE psn_test_accounts
 (
     identity_sub   UUID PRIMARY KEY REFERENCES app_users (identity_sub) ON DELETE CASCADE,
@@ -111,12 +93,6 @@ CREATE TABLE psn_test_accounts
     pinned_at      TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
--- ============================================================================================
--- Ingestion layer (per-user, append-only)
--- ============================================================================================
-
--- One row per call to the folded-in psnpy's entitlements endpoint (or a manual JSON import). Append-only:
--- a pull is never updated or deleted, only superseded by a later pull.
 CREATE TABLE entitlement_pulls
 (
     pull_id      UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -128,8 +104,6 @@ CREATE TABLE entitlement_pulls
 
 CREATE INDEX idx_entitlement_pulls_identity_sub ON entitlement_pulls (identity_sub);
 
--- One row per entitlement returned by a single pull — the raw, unprocessed shape of each entry, kept
--- alongside the full original JSON (raw) so a downstream bug in extraction never loses information.
 CREATE TABLE entitlement_snapshots
 (
     pull_id           UUID NOT NULL REFERENCES entitlement_pulls (pull_id),
@@ -141,8 +115,6 @@ CREATE TABLE entitlement_snapshots
     game_meta_name    TEXT,
     concept_meta_name TEXT,
     title_meta_name   TEXT,
-    -- Populate from gameMeta.packageType (values 'PSGD' / 'PS4GD'). The old ingestion read the wrong
-    -- key, gameMeta.type — keep reading packageType here.
     package_type      TEXT,
     active            BOOLEAN,
     active_date       TIMESTAMPTZ,
@@ -153,16 +125,10 @@ CREATE TABLE entitlement_snapshots
 CREATE INDEX idx_entitlement_snapshots_concept_id ON entitlement_snapshots (concept_id);
 CREATE INDEX idx_entitlement_snapshots_product_id ON entitlement_snapshots (product_id);
 
--- ============================================================================================
--- Shared catalog layer (global — deliberately NO identity_sub)
--- ============================================================================================
-
--- The canonical, de-duplicated game catalog shared across every user.
 CREATE TABLE games
 (
     game_id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     canonical_title  TEXT NOT NULL,
-    -- The matching key used when merging entitlements/concepts onto a game.
     normalized_title TEXT NOT NULL,
     franchise        TEXT,
     search_names     TEXT[] NOT NULL DEFAULT '{}',
@@ -172,10 +138,6 @@ CREATE TABLE games
 
 CREATE INDEX idx_games_normalized_title ON games (normalized_title);
 
--- Maps a PSN concept id (TEXT, as PSN issues it — not a UUID) to the game it belongs to. Merging two
--- concepts onto the same game by product_id alone is unsafe — Sony reuses product ids across genuinely
--- different games — so a product-id merge additionally requires an identical name (dual-signal merge;
--- enforced at the application layer, not by a constraint here).
 CREATE TABLE game_concepts
 (
     concept_id TEXT PRIMARY KEY,
@@ -185,7 +147,6 @@ CREATE TABLE game_concepts
 
 CREATE INDEX idx_game_concepts_game_id ON game_concepts (game_id);
 
--- A manual correction of a concept's display name (e.g. PSN's own metadata is wrong or misleading).
 CREATE TABLE game_name_overrides
 (
     concept_id    TEXT PRIMARY KEY REFERENCES game_concepts (concept_id),
@@ -194,10 +155,6 @@ CREATE TABLE game_name_overrides
     created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
--- Genre -> priority weighting used by rotation/assignment scoring, AND the canonical genre reference —
--- game_enrichment.genre_id/subgenre_id are FKs into this table rather than free TEXT columns, so a
--- stored genre value can never diverge from the ranking table (a real gap in an earlier draft of this
--- schema, closed here from the start).
 CREATE TABLE genres
 (
     genre_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -206,7 +163,6 @@ CREATE TABLE genres
     active   BOOLEAN NOT NULL DEFAULT true
 );
 
--- One row per game holding every enrichment signal used by curation/rotation scoring.
 CREATE TABLE game_enrichment
 (
     game_id                UUID PRIMARY KEY REFERENCES games (game_id),
@@ -217,10 +173,7 @@ CREATE TABLE game_enrichment
     publisher              TEXT,
     esrb                   TEXT,
     multiplayer            BOOLEAN,
-    -- Distinct from `multiplayer` — F2P-ness was previously inferred by keyword-matching the
-    -- Multiplayer free-text column, a smell fixed by giving it its own column from day one.
     is_free_to_play        BOOLEAN,
-    -- RAWG's Metacritic-sourced score.
     critical_score         NUMERIC(5, 2),
     oc_score               NUMERIC(5, 2),
     oc_tier                TEXT,
@@ -238,9 +191,6 @@ CREATE TABLE game_enrichment
 CREATE INDEX idx_game_enrichment_genre_id ON game_enrichment (genre_id);
 CREATE INDEX idx_game_enrichment_subgenre_id ON game_enrichment (subgenre_id);
 
--- RAWG lookup cache, keyed by the same normalized_title used to match games. raw = NULL means a
--- confirmed no-match (distinct from "not yet looked up", which is simply an absent row) — so a
--- re-enrichment pass never re-queries RAWG for a title already known to have no RAWG entry.
 CREATE TABLE rawg_cache
 (
     normalized_title TEXT PRIMARY KEY,
@@ -249,7 +199,6 @@ CREATE TABLE rawg_cache
     fetched_at       TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
--- OpenCritic lookup cache, keyed by OpenCritic's own game id.
 CREATE TABLE opencritic_cache
 (
     oc_game_id          INT PRIMARY KEY,
@@ -261,11 +210,6 @@ CREATE TABLE opencritic_cache
     fetched_at          TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
--- Official PSN Store catalog lookup cache (psn/catalog_client.py's title_concept() call), keyed by PSN
--- product id. Replaces an earlier public-store-SSR-HTML-scrape cache with structured first-party data —
--- genres/star_rating/publisher/release_date/cover_image_url — which is far more reliable than scraping
--- (the public PS Store SSR page is documented as subject to IP-based 403 blocks after ~200 requests;
--- the official authenticated catalog endpoint has no such issue).
 CREATE TABLE psn_catalog_cache
 (
     product_id      TEXT PRIMARY KEY,
@@ -278,10 +222,6 @@ CREATE TABLE psn_catalog_cache
     fetched_at      TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
--- PSN GraphQL game/player search caches, keyed by normalized query text — avoids re-querying PSN's
--- search endpoints for a repeated query. Same shape as rawg_cache/opencritic_cache (raw JSONB + fetch
--- timestamp), deliberately not moved to Redis since these are durable positive/negative caches, not
--- time-decaying current-state data.
 CREATE TABLE psn_game_search_cache
 (
     normalized_query TEXT PRIMARY KEY,
@@ -296,8 +236,6 @@ CREATE TABLE psn_player_search_cache
     fetched_at       TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
--- A detected data-quality issue in the shared catalog (e.g. two concepts that look like the same game
--- under different product ids, or the reverse).
 CREATE TABLE data_quality_flags
 (
     flag_id     UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -311,7 +249,6 @@ CREATE TABLE data_quality_flags
     resolution  TEXT CHECK (resolution IN ('confirmed_distinct', 'manually_merged', 'ignored'))
 );
 
--- The games implicated in a data-quality flag (usually two, for a suspected duplicate/split pair).
 CREATE TABLE data_quality_flag_games
 (
     flag_id UUID NOT NULL REFERENCES data_quality_flags (flag_id),
@@ -321,12 +258,6 @@ CREATE TABLE data_quality_flag_games
 
 CREATE INDEX idx_data_quality_flag_games_game_id ON data_quality_flag_games (game_id);
 
--- ============================================================================================
--- Curation-rule layer (global config-as-data)
--- ============================================================================================
-
--- Titles/patterns to drop entirely from curation (media apps mistakenly counted as games, F2P titles
--- not worth ranking, ad-hoc name patterns, or an explicit whitelist override keeping a title in).
 CREATE TABLE exclusion_rules
 (
     rule_id    UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -336,9 +267,6 @@ CREATE TABLE exclusion_rules
     created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
--- Canonicalization-level, GLOBAL, permanent exclusion memory — distinct from library_exclusions below
--- (per-user). Once a concept is excluded here it never silently regenerates on a later ingestion run,
--- for any user, even if the raw PSN entitlement data would otherwise re-include it.
 CREATE TABLE global_exclusions
 (
     concept_id  TEXT PRIMARY KEY REFERENCES game_concepts (concept_id),
@@ -346,7 +274,6 @@ CREATE TABLE global_exclusions
     excluded_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
--- Regex patterns mapping a title to a franchise grouping, used for franchise-aware curation.
 CREATE TABLE franchise_rules
 (
     rule_id   UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -355,17 +282,12 @@ CREATE TABLE franchise_rules
     priority  INT NOT NULL DEFAULT 0
 );
 
--- Keyword -> rank used to pick the "best" owned edition of a game (e.g. "Game of the Year" outranks
--- "Standard").
 CREATE TABLE edition_ranks
 (
     keyword TEXT PRIMARY KEY,
     rank    INT NOT NULL
 );
 
--- Publisher name/pattern -> AAA/AA/Indie tier classification. Config-as-data replacing three
--- independently-drifted hardcoded Python publisher lists in the legacy pipeline with one canonical
--- reference table.
 CREATE TABLE publisher_tiers
 (
     tier_id    UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -374,8 +296,6 @@ CREATE TABLE publisher_tiers
     match_kind TEXT NOT NULL CHECK (match_kind IN ('exact', 'substring'))
 );
 
--- Install-size estimates used when a game has no measured_sizes row yet. A per-title substring override
--- (title_pattern) wins over the generic aaa_tier/genre_class row when both could apply.
 CREATE TABLE size_estimates
 (
     estimate_id   UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -387,12 +307,6 @@ CREATE TABLE size_estimates
     CHECK (title_pattern IS NOT NULL OR aaa_tier IS NOT NULL)
 );
 
--- ============================================================================================
--- Per-user library layer
--- ============================================================================================
-
--- A user's derived library: one row per game they own, with the winning entitlement/edition already
--- resolved.
 CREATE TABLE library_entries
 (
     identity_sub           UUID NOT NULL REFERENCES app_users (identity_sub),
@@ -410,9 +324,6 @@ CREATE TABLE library_entries
 CREATE INDEX idx_library_entries_identity_sub ON library_entries (identity_sub);
 CREATE INDEX idx_library_entries_game_id ON library_entries (game_id);
 
--- Games a user has explicitly chosen to exclude from curation (overrides the global exclusion_rules
--- for that one user). Distinct from global_exclusions above, which is cross-user and canonicalization-
--- level.
 CREATE TABLE library_exclusions
 (
     identity_sub UUID NOT NULL REFERENCES app_users (identity_sub),
@@ -426,10 +337,6 @@ CREATE TABLE library_exclusions
 CREATE INDEX idx_library_exclusions_identity_sub ON library_exclusions (identity_sub);
 CREATE INDEX idx_library_exclusions_game_id ON library_exclusions (game_id);
 
--- A user's physical consoles, used as rotation/assignment targets. raw_capacity_gb/update_buffer_gb are
--- the single source of truth for a console's effective capacity — every consumer (the capacity_fill
--- collection strategy, any future dashboard) computes effective capacity from these two columns and
--- nothing else; no parallel hardcoded "display" capacity number is allowed to exist anywhere in code.
 CREATE TABLE user_consoles
 (
     console_id       UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -447,9 +354,6 @@ CREATE TABLE user_consoles
 
 CREATE INDEX idx_user_consoles_identity_sub ON user_consoles (identity_sub);
 
--- History-retaining, per-platform install-size measurements. Per-platform (not just per-game) so a PS4
--- measurement never clobbers a PS5 one for the same game; history-retaining (measured_at is part of the
--- key) so a later re-measurement doesn't destroy the prior data point.
 CREATE TABLE measured_sizes
 (
     identity_sub UUID NOT NULL REFERENCES app_users (identity_sub),
@@ -463,12 +367,6 @@ CREATE TABLE measured_sizes
 CREATE INDEX idx_measured_sizes_identity_sub ON measured_sizes (identity_sub);
 CREATE INDEX idx_measured_sizes_game_id ON measured_sizes (game_id);
 
--- A saved or ad-hoc named collection specification for a user — generalizes what used to be two
--- hardcoded scripts (ps_assign_ps5.py / ps_assign_ps4.py) into one reusable concept. 'capacity_fill'
--- bin-packs against a specific console's effective capacity (user_consoles.raw_capacity_gb -
--- update_buffer_gb); 'filter_list' is an unconstrained genre/score/tier filter with no capacity limit.
--- A saved definition is optional — POST /collections/preview generates a result set from an inline spec
--- without ever writing a row here.
 CREATE TABLE collection_definitions
 (
     definition_id   UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -487,8 +385,6 @@ CREATE TABLE collection_definitions
 
 CREATE INDEX idx_collection_definitions_identity_sub ON collection_definitions (identity_sub);
 
--- One row per run of the collection-generation algorithm (whether against a saved definition or an
--- inline spec), capturing the spec used so a run is always explainable/reproducible after the fact.
 CREATE TABLE collection_runs
 (
     run_id        UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -500,8 +396,6 @@ CREATE TABLE collection_runs
 
 CREATE INDEX idx_collection_runs_identity_sub ON collection_runs (identity_sub);
 
--- Per-game outcome of one collection run: whether it was included, its rank/scores, and (for
--- capacity_fill runs) the collection/rotation status that drove the bin-pack decision.
 CREATE TABLE collection_items
 (
     run_id             UUID    NOT NULL REFERENCES collection_runs (run_id),
@@ -518,10 +412,6 @@ CREATE TABLE collection_items
 
 CREATE INDEX idx_collection_items_game_id ON collection_items (game_id);
 
--- Current install state of a game on a specific console (the live, mutable counterpart to the
--- historical collection_items record). The one and only place install-checked-state changes — never a
--- side effect of a collection run, so "physically installed here" and "currently recommended here" stay
--- two distinct facts (checked state deliberately never auto-transfers on console reassignment).
 CREATE TABLE console_installs
 (
     console_id UUID NOT NULL REFERENCES user_consoles (console_id),
@@ -533,14 +423,6 @@ CREATE TABLE console_installs
 
 CREATE INDEX idx_console_installs_game_id ON console_installs (game_id);
 
--- ============================================================================================
--- Background jobs (curator-library-refresh / curator-enrichment queue-backed workflows)
--- ============================================================================================
-
--- One row per POST /library/refresh or POST /enrichment/runs job, so GET /library/refresh/{run_id} has
--- something to poll. The run id is generated client-side by curator.jobs.queue_publisher.QueuePublisher
--- and threaded through the queue message body, so this row is created before the message is even sent.
--- identity_sub is NULL for a 'enrichment' run (a global, admin-scoped re-scrape, not per-user).
 CREATE TABLE job_runs
 (
     run_id       UUID PRIMARY KEY,

@@ -31,10 +31,4 @@ CREATE TABLE collection_definition_items
     PRIMARY KEY (definition_id, game_id)
 );
 
--- The definition_id FK cascades so this table joins the chain 0009_fix_delete_cascades.sql established:
--- deleting an app_users row cascades to collection_definitions, which now cascades to here. A new child
--- table without that cascade would silently reintroduce the DELETE /me foreign-key violation 0009 fixed.
---
--- game_id deliberately does NOT cascade. games is the shared, cross-user catalog; nothing deletes from it
--- today, and if something ever does, a collection quietly losing members is the wrong outcome.
 CREATE INDEX idx_collection_definition_items_game_id ON collection_definition_items (game_id);

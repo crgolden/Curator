@@ -11,10 +11,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Final, Literal
 
-SizeSource = Literal["measured", "estimated", "default"]
+SizeSource = Literal["measured", "download", "estimated", "capped_default", "default"]
 
 MEASURED_SIZE: Final[SizeSource] = "measured"
+DOWNLOAD_SIZE: Final[SizeSource] = "download"
 ESTIMATED_SIZE: Final[SizeSource] = "estimated"
+CAPPED_DEFAULT_SIZE: Final[SizeSource] = "capped_default"
 DEFAULT_SIZE: Final[SizeSource] = "default"
 
 
@@ -22,12 +24,11 @@ DEFAULT_SIZE: Final[SizeSource] = "default"
 class GameCandidate:
     """One of a user's owned games, already scored and sized, ready for a collection strategy.
 
-    :param size_source: Which rung of the resolution ladder produced :attr:`size_gb` -- a contributed
-        ``game_measured_sizes`` row, a ``size_estimates`` band, or the flat fallback that applies when
-        neither exists. Without it the three are indistinguishable in the response, and ``"default"`` is
-        exactly the case that should prompt its owner for a real on-disk figure: a PS3, Vita, PSP, PS2 or
-        PS1 title has no seeded band at all (``0033_seed_size_estimates`` seeds PS5 and PS4 only), so every
-        one of them packs at the flat size until somebody measures one.
+    :param size_source: Which rung of the resolution ladder produced :attr:`size_gb`: a contributed
+        ``game_measured_sizes`` row, the package size Sony's web-store entitlements reported
+        (``game_download_sizes``), a ``size_estimates`` band, the platform's physical media ceiling when
+        that is below the flat fallback, or the flat fallback itself. ``"default"`` is the case that should
+        prompt its owner for a real on-disk figure.
     """
 
     game_id: str
