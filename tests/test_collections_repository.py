@@ -12,7 +12,7 @@ from curator.catalog.cover_art import SQUARE_COVER_ART_SQL
 from curator.collections.collection_spec import CollectionSpec
 from curator.collections.filter_predicate import GenreIn
 from curator.collections.game_candidate import GameCandidate
-from curator.collections.repository import CollectionsRepository
+from curator.collections.repository import BROWSABLE_CANDIDATE_SQL, IS_FREE_TO_PLAY_SQL, CollectionsRepository
 
 
 class FakeCursor:
@@ -178,7 +178,7 @@ async def test_list_candidates_filters_every_platform_through_library_entry_plat
     assert "FROM library_entry_platforms lep" in sql
     assert "le.native_ps5" not in sql, "the boolean pair must not decide platform membership any more"
     assert "le.ps4_eligible" not in sql
-    assert params == (platform, "sub-1", platform)
+    assert params == (platform, platform, "sub-1", platform)
 
 
 async def test_list_candidates_reads_the_measured_size_for_the_platform_being_filled():
@@ -191,9 +191,92 @@ async def test_list_candidates_reads_the_measured_size_for_the_platform_being_fi
 
     sql, params = pool.connections[0].executed[0]
     assert "CASE WHEN le.native_ps5" not in sql
-    assert params == ("PS4", "sub-1", "PS4"), (
-        "the measured-size subquery is in the SELECT list, so its parameter binds before the WHERE clause's"
+    assert params == ("PS4", "PS4", "sub-1", "PS4"), (
+        "the measured-size and download-size subqueries are in the SELECT list, so their parameters bind "
+        "before the WHERE clause's"
     )
+
+
+async def test_list_candidates_reads_the_download_size_for_the_platform_being_filled():
+    pool = FakePool(fetchall_results=[[]])
+    repo = CollectionsRepository(pool)
+
+    await repo.list_candidates("sub-1", platform="PSVITA")
+
+    sql, _params = pool.connections[0].executed[0]
+    assert "FROM game_download_sizes gds" in sql
+    assert "gds.platform = (%s)" in sql
+
+
+async def test_list_candidates_reads_free_to_play_from_the_walked_store_price():
+    """game_enrichment.is_free_to_play was NULL on every row and written by nothing, so the free-to-play
+    adjustment never fired; the storefront's own price node is the source."""
+    pool = FakePool(fetchall_results=[[]])
+    repo = CollectionsRepository(pool)
+
+    await repo.list_candidates("sub-1")
+
+    sql, _params = pool.connections[0].executed[0]
+    assert IS_FREE_TO_PLAY_SQL in sql
+    assert "ge.is_free_to_play" not in sql
+
+
+async def test_list_candidates_leaves_proven_non_games_out_by_default():
+    pool = FakePool(fetchall_results=[[]])
+    repo = CollectionsRepository(pool)
+
+    await repo.list_candidates("sub-1")
+
+    sql, _params = pool.connections[0].executed[0]
+    assert BROWSABLE_CANDIDATE_SQL in sql
+
+
+async def test_list_candidates_keeps_non_games_when_a_capacity_fill_asks():
+    pool = FakePool(fetchall_results=[[]])
+    repo = CollectionsRepository(pool)
+
+    await repo.list_candidates("sub-1", include_non_games=True)
+
+    sql, _params = pool.connections[0].executed[0]
+    assert "content_kind" not in sql
+
+
+async def test_user_has_trophy_data_probes_for_any_stored_percentage():
+    identity_sub = str(uuid4())
+    pool = FakePool(fetchone_results=[(True,)])
+    repo = CollectionsRepository(pool)
+
+    assert await repo.user_has_trophy_data(identity_sub) is True
+    sql, params = pool.connections[0].executed[0]
+    assert "trophy_percent_completed IS NOT NULL" in sql
+    assert params == (identity_sub,)
+
+
+async def test_counting_candidates_missing_trophy_data_uses_the_candidate_predicates_without_the_floor():
+    identity_sub = str(uuid4())
+    pool = FakePool(fetchone_results=[(randint(1, 50),)])
+    repo = CollectionsRepository(pool)
+
+    await repo.count_candidates_missing_trophy_data(identity_sub, platform="PS5", exclude_installed_on=("c1",))
+
+    sql, params = pool.connections[0].executed[0]
+    assert "le.trophy_percent_completed IS NULL" in sql
+    assert "le.trophy_percent_completed >= %s" not in sql
+    assert "FROM library_entry_platforms lep" in sql
+    assert "console_installs" in sql
+    assert "library_exclusions" in sql
+    assert params == (identity_sub, "PS5", identity_sub, ["c1"])
+
+
+async def test_platform_media_ceilings_map_only_platforms_that_carry_one():
+    pool = FakePool(fetchall_results=[[("PSP", 1.8), ("PSVITA", 4.0)]])
+    repo = CollectionsRepository(pool)
+
+    ceilings = await repo.list_platform_media_ceilings()
+
+    assert ceilings == {"PSP": 1.8, "PSVITA": 4.0}
+    sql, _params = pool.connections[0].executed[0]
+    assert "media_ceiling_gb IS NOT NULL" in sql
 
 
 async def test_list_candidates_excludes_inactive_entitlements_by_default():

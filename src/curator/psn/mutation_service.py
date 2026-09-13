@@ -1,7 +1,7 @@
 """Mutating PSN social/chat operations, gated by the mutation-safety wall (:mod:`curator.psn.safety`).
 
 ``send_message`` and ``kick_from_group`` are implemented and tested but deliberately unrouted -- see
-``AGENTS/PARKING-LOT.md`` §7 item 7.
+``AGENTS/REPOS/Curator.md``.
 """
 
 from __future__ import annotations
@@ -12,12 +12,17 @@ from typing import Any
 
 from curator.psn import _identity
 from curator.psn.account_client import AccountClient
+from curator.psn.errors import NoPendingFriendRequestError
 from curator.psn.models import SentMessage
 from curator.psn.safety import CHAT_WRITES, FRIEND_WRITES, MutationGuard
 from curator.psn.session import PsnSession
+from curator.psn.social_client import SocialClient
 
 _GAMING_LOUNGE_URI = "https://m.np.playstation.com/api/gamingLoungeGroups/v1"
 _PROFILE_URI = "https://m.np.playstation.com/api/userProfile/v1/internal/users"
+
+NO_FRIEND_RELATION = "no-friend"
+"""PSN's ``friendRelation`` for two accounts with neither a friendship nor a pending request between them."""
 
 
 def _epoch_millis_iso(value: Any) -> str | None:
@@ -45,6 +50,7 @@ class MutationService:
         self._session = session
         self._guard = guard
         self._account_client = AccountClient(session)
+        self._social_client = SocialClient(session)
 
     async def _require(self, capability: str) -> None:
         live_account = await self._account_client.whoami()
@@ -109,19 +115,28 @@ class MutationService:
         group_id: str,
         online_ids: list[str] | None = None,
         account_ids: list[str] | None = None,
-    ) -> None:
+    ) -> str | None:
         """Invite one or more users to a chat group.
+
+        PSN answers with the group the membership landed in, which is not always ``group_id``: inviting
+        into a two-person DM allocates a new group holding all three members and leaves the DM as it was
+        (verified live; the recording is in ``Tools/OpenAPI/PlayStation Catalog``).
 
         :param group_id: The group's id.
         :param online_ids: Invitee online ids.
         :param account_ids: Invitee account ids.
+        :returns: The id of the group that now holds the invitees.
         """
         await self._require(CHAT_WRITES)
         members = await self._resolve_account_ids(online_ids, account_ids)
-        await self._session.post(
-            f"{_GAMING_LOUNGE_URI}/groups/{group_id}/invitees",
-            json={"invitees": [{"accountId": account_id} for account_id in members]},
-        )
+        response = (
+            await self._session.post(
+                f"{_GAMING_LOUNGE_URI}/groups/{group_id}/invitees",
+                json={"invitees": [{"accountId": account_id} for account_id in members]},
+            )
+        ).json()
+        resulting_group_id = response.get("groupId")
+        return str(resulting_group_id) if resulting_group_id is not None else None
 
     async def kick_from_group(
         self,
@@ -139,13 +154,18 @@ class MutationService:
         target_account_id = await _identity.account_id_for(self._session, online_id, account_id)
         await self._session.delete(f"{_GAMING_LOUNGE_URI}/groups/{group_id}/members/{target_account_id}")
 
-    async def leave_group(self, group_id: str) -> None:
-        """Leave a chat group. Destructive.
+    async def leave_group(self, group_id: str) -> bool:
+        """Leave a chat group. Destructive, so the membership is read first.
 
         :param group_id: The group's id.
+        :returns: ``True`` when PSN was told to remove the caller; ``False`` when the caller is not a member
+            of that group, in which case nothing is sent.
         """
         await self._require(CHAT_WRITES)
+        if group_id not in await self._social_client.chat_group_ids():
+            return False
         await self._session.delete(f"{_GAMING_LOUNGE_URI}/groups/{group_id}/members/me")
+        return True
 
     async def accept_friend(self, online_id: str | None = None, account_id: str | None = None) -> None:
         """Accept a friend request from (or send one to) a user.
@@ -159,15 +179,45 @@ class MutationService:
         target_account_id = await _identity.account_id_for(self._session, online_id, account_id)
         await self._session.put(f"{_PROFILE_URI}/me/friends/{target_account_id}")
 
-    async def remove_friend(self, online_id: str | None = None, account_id: str | None = None) -> None:
-        """Remove a friend, or decline a pending friend request. Destructive.
+    async def send_friend_request(self, online_id: str) -> None:
+        """Send a friend request to ``online_id``.
+
+        :param online_id: The other user's online id.
+        """
+        await self.accept_friend(online_id=online_id)
+
+    async def accept_friend_request(self, online_id: str) -> None:
+        """Accept the friend request ``online_id`` has sent the caller.
+
+        :param online_id: The requester's online id, matched case-insensitively against the received
+            requests.
+        :raises NoPendingFriendRequestError: If that user has sent no request, so nothing is sent to PSN.
+        """
+        await self._require(FRIEND_WRITES)
+        pending = await self._social_client.friend_requests()
+        requester = next(
+            (user for user in pending if user.online_id is not None and user.online_id.lower() == online_id.lower()),
+            None,
+        )
+        if requester is None:
+            raise NoPendingFriendRequestError(f"{online_id} has not sent a friend request.")
+        await self._session.put(f"{_PROFILE_URI}/me/friends/{requester.account_id}")
+
+    async def remove_friend(self, online_id: str | None = None, account_id: str | None = None) -> bool:
+        """Remove a friend, or decline a pending friend request. Destructive, so the standing is read first.
 
         :param online_id: The other user's online id.
         :param account_id: The other user's account id.
+        :returns: ``True`` when PSN was told to remove the relationship; ``False`` when there was nothing
+            between the two accounts, in which case nothing is sent.
         """
         await self._require(FRIEND_WRITES)
         target_account_id = await _identity.account_id_for(self._session, online_id, account_id)
+        standing = await self._social_client.friendship(account_id=target_account_id)
+        if standing.relation == NO_FRIEND_RELATION:
+            return False
         await self._session.delete(f"{_PROFILE_URI}/me/friends/{target_account_id}")
+        return True
 
 
 MutationServiceFactory = Callable[[str], Coroutine[Any, Any, "MutationService"]]

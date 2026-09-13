@@ -15,6 +15,7 @@ from curator.psn.social_client import (
     ADD_ONS_DOMAIN,
     FULL_GAMES_DOMAIN,
     GAME_SEARCH_CONTEXT,
+    MAX_CHAT_GROUPS,
     MAX_GAME_SEARCH_PAGES,
     SOCIAL_SEARCH_CONTEXT,
     SocialClient,
@@ -95,6 +96,18 @@ async def test_friend_requests_resolves_online_ids():
     result = await client.friend_requests()
 
     assert result == [SocialUser(account_id="7", online_id="Dana")]
+
+
+async def test_chat_group_ids_reads_the_callers_group_memberships():
+    body = {"groups": [{"groupId": "abc-1", "groupType": 1}, {"groupId": "def-2"}, {"groupType": 1}]}
+    session = FakeSession(responses={"members/me/groups": body})
+
+    group_ids = await SocialClient(session).chat_group_ids()
+
+    assert group_ids == ["abc-1", "def-2"]
+    url, params = session.get_calls[-1]
+    assert url.endswith("/gamingLoungeGroups/v1/members/me/groups")
+    assert params["limit"] == MAX_CHAT_GROUPS
 
 
 async def test_friendship_maps_fields():

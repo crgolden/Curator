@@ -38,9 +38,6 @@ ALTER TABLE user_consoles DROP CONSTRAINT user_consoles_platform_check;
 ALTER TABLE user_consoles
     ADD CONSTRAINT user_consoles_platform_fkey FOREIGN KEY (platform) REFERENCES platforms (platform_id);
 
--- opencritic_pagination_cursor.platform is deliberately left alone: its values are OpenCritic's own
--- platform slugs, not a console a user owns, and it keys an external API's pagination.
-
 CREATE TABLE library_entry_platforms
 (
     identity_sub UUID NOT NULL,

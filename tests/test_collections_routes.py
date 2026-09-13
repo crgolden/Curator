@@ -8,7 +8,7 @@ import psycopg
 from fastapi.testclient import TestClient
 
 from curator.app import create_app
-from curator.collections.collection_orchestrator import CollectionResult
+from curator.collections.collection_orchestrator import CollectionResult, IgnoredFilter
 from curator.collections.filter_predicate import And, GenreIn, Or, ScoreAtLeast, TierIn
 from curator.collections.game_candidate import DEFAULT_SIZE, MEASURED_SIZE, GameCandidate
 from curator.collections.repository import CollectionDefinition, CollectionItem, UserConsole
@@ -299,6 +299,27 @@ def _candidate(game_id: str, *, aaa_tier: str | None = "AAA") -> GameCandidate:
         rank_score=3,
         size_gb=50.0,
     )
+
+
+def test_preview_reports_an_ignored_completion_floor_and_the_silently_dropped_count():
+    result = CollectionResult(
+        included=(),
+        excluded=(),
+        used_gb=None,
+        ignored_filters=(IgnoredFilter("min_percent_completed", "no_trophy_data"),),
+        excluded_for_missing_trophy_data=3,
+    )
+    client, validator = _build(orchestrator=FakeOrchestrator(result))
+    validator.register("token-a", _claims(sub="sub-a"))
+
+    body = client.post(
+        "/collections/preview",
+        json={"kind": "filter_list", "min_percent_completed": 50},
+        headers=_bearer("token-a"),
+    ).json()
+
+    assert body["ignored_filters"] == [{"filter": "min_percent_completed", "reason": "no_trophy_data"}]
+    assert body["excluded_for_missing_trophy_data"] == 3
 
 
 def test_preview_caps_both_lists_and_reports_their_real_totals():

@@ -166,9 +166,11 @@ dev database or at production: **this module commits.** The fixture applies migr
 pristine. That is deliberate — `Functions.Tests.Integration` shares `curator_test` and requires the
 schema present — and it is why the older "create a throwaway database, then drop it" recipe is gone.
 
-What it checks: every table the migration is expected to create exists; representative CHECK constraints
-reject an out-of-enum value (`game_assignments.collection_status`, `user_consoles.platform`,
-`exclusion_rules.rule_type`); `game_measured_sizes` upserts per (game_id, platform) rather than
+What it checks: every table the migration is expected to create exists and every dropped one is gone
+(`exclusion_rules`, the two `data_quality_flags` tables, the vestigial `collection_items` columns);
+representative CHECK constraints reject an out-of-enum value (`user_consoles.platform`,
+`games.content_kind`, `job_runs.error_code`); the PS Plus rotation, store-hit linking and public-collection
+SQL constants run against planted rows; `game_measured_sizes` upserts per (game_id, platform) rather than
 accumulating history (a second `PUT` for the same pair overwrites, it doesn't add a row), and its
 `recorded_by` survives its contributor's account deletion as `NULL` rather than cascading away (migration
 0025); and no column named anything like `%email%` or `%npsso%` exists anywhere in the schema (the hard

@@ -14,7 +14,9 @@ from curator.collections.capacity_fill_strategy import StorageBin, fill_capacity
 from curator.collections.collection_spec import CollectionSpec
 from curator.collections.filter_list_strategy import apply_filter_list, filter_candidates
 from curator.collections.game_candidate import (
+    CAPPED_DEFAULT_SIZE,
     DEFAULT_SIZE,
+    DOWNLOAD_SIZE,
     ESTIMATED_SIZE,
     MEASURED_SIZE,
     GameCandidate,
@@ -26,6 +28,12 @@ from curator.scoring.scoring_service import composite_score, rank_score
 from curator.scoring.size_estimation_service import SizeEstimate, estimate_install_size_gb
 
 _DEFAULT_SIZE_GB = 20.0
+
+BYTES_PER_GB = 1_000_000_000
+"""Decimal gigabytes, the unit the console's own storage screen and ``size_estimates`` report in."""
+
+IGNORED_FILTER_MIN_PERCENT_COMPLETED = "min_percent_completed"
+IGNORED_FILTER_REASON_NO_TROPHY_DATA = "no_trophy_data"
 
 _NO_CONSOLE_ESTIMATE_PLATFORM: ConsolePlatform = "PS4"
 """Which platform's size band a collection with **no console attached** estimates against.
@@ -44,9 +52,23 @@ real bands for those platforms needs published figures nobody has measured.
 
 
 @dataclass(frozen=True, slots=True)
+class IgnoredFilter:
+    """A spec filter the run could not apply, and why."""
+
+    filter: str
+    reason: str
+
+
+@dataclass(frozen=True, slots=True)
 class CollectionResult:
     """One collection-generation run's outcome.
 
+    :param ignored_filters: Filters the spec asked for that this run did not apply. Today the one case:
+        ``min_percent_completed`` for a user with no stored trophy percentage anywhere, where the SQL
+        floor's per-user escape lets everything through rather than emptying the collection.
+    :param excluded_for_missing_trophy_data: How many otherwise-eligible candidates the completion floor
+        dropped because their own percentage is NULL, for a user who has percentages elsewhere. Zero when
+        no floor was asked for or the floor was ignored.
     :param unmatched: ``capacity_fill`` only -- candidates that didn't satisfy the spec's own
         genre/score/tier/predicate filter at all, as distinct from :attr:`excluded` (candidates that
         *did* match but didn't fit the capacity budget). Always empty for ``filter_list``, where
@@ -62,6 +84,8 @@ class CollectionResult:
     excluded: tuple[GameCandidate, ...]
     used_gb: float | None
     unmatched: tuple[GameCandidate, ...] = ()
+    ignored_filters: tuple[IgnoredFilter, ...] = ()
+    excluded_for_missing_trophy_data: int = 0
 
 
 class CollectionOrchestrator:
@@ -152,12 +176,32 @@ class CollectionOrchestrator:
                 for device in attached_devices
             )
 
+        include_non_games = spec.kind == "capacity_fill"
         raw_rows = await self._repository.list_candidates(
             identity_sub,
             platform=platform,
             include_inactive=spec.include_inactive,
             min_percent_completed=spec.min_percent_completed,
             exclude_installed_on=spec.exclude_installed_on,
+            include_non_games=include_non_games,
+        )
+        ignored_filters: tuple[IgnoredFilter, ...] = ()
+        excluded_for_missing_trophy_data = 0
+        if spec.min_percent_completed is not None:
+            if await self._repository.user_has_trophy_data(identity_sub):
+                excluded_for_missing_trophy_data = await self._repository.count_candidates_missing_trophy_data(
+                    identity_sub,
+                    platform=platform,
+                    include_inactive=spec.include_inactive,
+                    exclude_installed_on=spec.exclude_installed_on,
+                    include_non_games=include_non_games,
+                )
+            else:
+                ignored_filters = (
+                    IgnoredFilter(IGNORED_FILTER_MIN_PERCENT_COMPLETED, IGNORED_FILTER_REASON_NO_TROPHY_DATA),
+                )
+        media_ceiling_gb = (
+            (await self._repository.list_platform_media_ceilings()).get(platform) if platform is not None else None
         )
         completion_map = completion_map or {}
         candidates = [
@@ -165,6 +209,7 @@ class CollectionOrchestrator:
                 row,
                 size_estimates,
                 platform=platform,
+                media_ceiling_gb=media_ceiling_gb,
                 percent_completed=completion_map.get(row.game_id, row.percent_completed),
             )
             for row in raw_rows
@@ -197,13 +242,24 @@ class CollectionOrchestrator:
             )
             used_gb = sum(fill_result.used_gb_by_bin.values())
             return CollectionResult(
-                included=included, excluded=fill_result.overflow, used_gb=used_gb, unmatched=unmatched
+                included=included,
+                excluded=fill_result.overflow,
+                used_gb=used_gb,
+                unmatched=unmatched,
+                ignored_filters=ignored_filters,
+                excluded_for_missing_trophy_data=excluded_for_missing_trophy_data,
             )
 
         filtered = apply_filter_list(candidates, spec, completion_available=completion_available)
         included_ids = {candidate.game_id for candidate in filtered}
         excluded = tuple(candidate for candidate in candidates if candidate.game_id not in included_ids)
-        return CollectionResult(included=tuple(filtered), excluded=excluded, used_gb=None)
+        return CollectionResult(
+            included=tuple(filtered),
+            excluded=excluded,
+            used_gb=None,
+            ignored_filters=ignored_filters,
+            excluded_for_missing_trophy_data=excluded_for_missing_trophy_data,
+        )
 
     @staticmethod
     def _score(
@@ -211,12 +267,15 @@ class CollectionOrchestrator:
         size_estimates: list[SizeEstimate],
         *,
         platform: ConsolePlatform | None,
+        media_ceiling_gb: float | None = None,
         percent_completed: int | None = None,
     ) -> GameCandidate:
         comp = composite_score(row.critical_score, row.oc_score, row.psn_rating)
         multiplayer_text = "free to play" if row.is_free_to_play else ""
         points = rank_score(comp, multiplayer_text, row.franchise)
-        size_gb, size_source = CollectionOrchestrator._resolve_size(row, size_estimates, platform=platform)
+        size_gb, size_source = CollectionOrchestrator._resolve_size(
+            row, size_estimates, platform=platform, media_ceiling_gb=media_ceiling_gb
+        )
         return GameCandidate(
             game_id=row.game_id,
             title=row.title,
@@ -232,17 +291,28 @@ class CollectionOrchestrator:
 
     @staticmethod
     def _resolve_size(
-        row: RawCandidateRow, size_estimates: list[SizeEstimate], *, platform: ConsolePlatform | None
+        row: RawCandidateRow,
+        size_estimates: list[SizeEstimate],
+        *,
+        platform: ConsolePlatform | None,
+        media_ceiling_gb: float | None = None,
     ) -> tuple[float, SizeSource]:
         """The install-size ladder, and which rung answered.
 
-        Contributed measurement, then a ``size_estimates`` band, then :data:`_DEFAULT_SIZE_GB`. The rung
-        travels with the size because a bare number cannot tell a caller whether 20 GB is a fact somebody
-        measured or the flat fallback standing in for one -- the distinction ``GET``/``PUT
-        /games/{game_id}/measured-sizes`` exists to let a user close.
+        Contributed measurement, then the download size Sony's entitlements reported, then a
+        ``size_estimates`` band, then the platform's media ceiling when it is below the flat fallback, then
+        :data:`_DEFAULT_SIZE_GB`. The rung travels with the size because a bare number cannot tell a caller
+        whether 20 GB is a fact somebody measured or the flat fallback standing in for one -- the
+        distinction ``GET``/``PUT /games/{game_id}/measured-sizes`` exists to let a user close.
+
+        :param media_ceiling_gb: The platform's physical media ceiling, or ``None`` for a platform without
+            one and for a run with no console, where the PS4 substitution stands and no ceiling applies.
         """
         if row.measured_size_gb is not None:
             return float(row.measured_size_gb), MEASURED_SIZE
+
+        if row.download_size_bytes is not None:
+            return row.download_size_bytes / BYTES_PER_GB, DOWNLOAD_SIZE
 
         estimated_gb = estimate_install_size_gb(
             row.title,
@@ -253,5 +323,8 @@ class CollectionOrchestrator:
         )
         if estimated_gb is not None:
             return float(estimated_gb), ESTIMATED_SIZE
+
+        if platform is not None and media_ceiling_gb is not None and media_ceiling_gb < _DEFAULT_SIZE_GB:
+            return media_ceiling_gb, CAPPED_DEFAULT_SIZE
 
         return _DEFAULT_SIZE_GB, DEFAULT_SIZE

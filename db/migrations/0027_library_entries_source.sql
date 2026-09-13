@@ -9,9 +9,6 @@ ALTER TABLE library_entries
     ADD COLUMN source TEXT NOT NULL DEFAULT 'psn'
         CHECK (source IN ('psn', 'manual'));
 
--- The entitlement columns are nullable because manual rows have no entitlement -- but a *PSN* row without
--- the entitlement that won its edition tiebreak is a lost ingestion result, not a valid row. Enforced here
--- rather than by convention in the ingestion service.
 ALTER TABLE library_entries
     ADD CONSTRAINT library_entries_psn_rows_have_entitlement
         CHECK (source <> 'psn' OR winning_entitlement_id IS NOT NULL);

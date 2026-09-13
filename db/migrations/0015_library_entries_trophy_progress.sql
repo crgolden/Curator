@@ -40,9 +40,6 @@ ALTER TABLE library_entries
     ADD COLUMN trophy_percent_completed  SMALLINT CHECK (trophy_percent_completed BETWEEN 0 AND 100),
     ADD COLUMN trophy_progress_fetched_at TIMESTAMPTZ;
 
--- Supports the min_percent_completed predicate now that it can be applied in the candidate query rather
--- than after the fact. Partial: rows with no progress can never satisfy a minimum, so they are dead weight
--- in the index.
 CREATE INDEX idx_library_entries_trophy_progress
     ON library_entries (identity_sub, trophy_percent_completed)
     WHERE trophy_percent_completed IS NOT NULL;

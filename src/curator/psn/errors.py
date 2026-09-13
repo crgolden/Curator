@@ -10,3 +10,7 @@ class PsnAuthError(Exception):
 class MutationNotAllowedError(Exception):
     """Raised when a mutating PSN operation (send message, create/rename group, friend request, ...) is
     attempted against an account that is not the pinned test account (see :mod:`curator.psn.safety`)."""
+
+
+class NoPendingFriendRequestError(Exception):
+    """Raised when an accept is attempted for a user who has not sent the caller a friend request."""

@@ -10,9 +10,12 @@ from __future__ import annotations
 
 import uuid
 
+import pytest
+
+from curator.catalog.content_kind import BROWSABLE_KIND_SQL, EVERY_KIND
 from curator.catalog.cover_art import SQUARE_COVER_ART_SQL
 from curator.catalog.repository import GAME_UPSERT_ADVISORY_LOCK_CLASS, CatalogRepository
-from curator.psn.store_client import StoreProduct
+from curator.psn.store_client import StorePrice, StoreProduct
 
 
 class FakeCursor:
@@ -127,6 +130,127 @@ async def test_listing_games_without_an_owner_leaves_the_catalog_unfiltered():
     assert "library_entries" not in count_sql
     assert len(pool.connections[0].executed) == 2, "an unfiltered browse pays for no ownership count"
     assert page.excluded_owned == 0
+
+
+async def test_browsing_excludes_proven_non_games_from_the_count_the_page_and_the_owned_count():
+    pool = FakePool(fetchone_results=[(0,), (0,)], fetchall_results=[[]])
+    repo = CatalogRepository(pool)
+
+    await repo.list_games(exclude_owned_by=str(uuid.uuid4()))
+
+    for sql, _params in pool.connections[0].executed:
+        assert BROWSABLE_KIND_SQL in sql
+
+
+async def test_browsing_every_kind_lifts_the_content_kind_predicate():
+    pool = FakePool(fetchone_results=[(0,)], fetchall_results=[[]])
+    repo = CatalogRepository(pool)
+
+    await repo.list_games(kind=EVERY_KIND)
+
+    for sql, _params in pool.connections[0].executed:
+        assert "content_kind" not in sql.split("SELECT g.game_id")[0]
+
+
+async def test_browsing_one_kind_selects_exactly_that_kind():
+    pool = FakePool(fetchone_results=[(0,)], fetchall_results=[[]])
+    repo = CatalogRepository(pool)
+
+    await repo.list_games(kind="media_app")
+
+    count_sql, count_params = pool.connections[0].executed[0]
+    assert "g.content_kind = %s" in count_sql
+    assert count_params == ("media_app",)
+
+
+async def test_browsing_by_price_puts_unpriced_games_last_in_either_direction():
+    pool = FakePool(fetchone_results=[(0,)], fetchall_results=[[]])
+    repo = CatalogRepository(pool)
+
+    await repo.list_games(sort="price", sort_dir="desc")
+
+    select_sql, _params = pool.connections[0].executed[1]
+    assert "ORDER BY price.price_discounted_cents DESC NULLS LAST" in select_sql
+
+
+async def test_browsing_sorts_through_a_closed_allowlist():
+    pool = FakePool(fetchone_results=[(0,)], fetchall_results=[[]])
+    repo = CatalogRepository(pool)
+
+    with pytest.raises(KeyError):
+        await repo.list_games(sort="rank")
+
+
+async def test_browsing_joins_the_most_recently_walked_price():
+    pool = FakePool(fetchone_results=[(0,)], fetchall_results=[[]])
+    repo = CatalogRepository(pool)
+
+    await repo.list_games()
+
+    select_sql, _params = pool.connections[0].executed[1]
+    assert "pcc.price_fetched_at IS NOT NULL" in select_sql
+    assert "ORDER BY pcc.price_fetched_at DESC LIMIT 1" in select_sql
+
+
+async def test_backfill_writes_the_parsed_price_and_stamps_when_it_was_fetched():
+    base_cents, discounted_cents = uuid.uuid4().int % 9999 + 1, uuid.uuid4().int % 9999 + 1
+    product = StoreProduct(
+        product_id="P1",
+        name="Bloodborne",
+        platforms=("PS4",),
+        np_title_id="CUSA00207_00",
+        cover_image_url=None,
+        classification="Full Game",
+        price=StorePrice(
+            is_free=False,
+            tied_to_subscription=True,
+            base_cents=base_cents,
+            discounted_cents=discounted_cents,
+            discount_text="-50%",
+        ),
+    )
+    pool = FakePool(fetchone_results=[("game-1",)])
+    repo = CatalogRepository(pool)
+
+    await repo.backfill_store_products([product])
+
+    cache_sql, cache_params = pool.connections[0].executed[1]
+    assert "price_fetched_at" in cache_sql
+    assert cache_params is not None
+    assert cache_params[5:] == (False, True, base_cents, discounted_cents, "-50%", True)
+
+
+async def test_backfill_without_a_price_node_leaves_a_stored_price_alone():
+    product = StoreProduct(
+        product_id="P1",
+        name="Bloodborne",
+        platforms=("PS4",),
+        np_title_id="CUSA00207_00",
+        cover_image_url=None,
+        classification="Full Game",
+    )
+    pool = FakePool(fetchone_results=[("game-1",)])
+    repo = CatalogRepository(pool)
+
+    await repo.backfill_store_products([product])
+
+    cache_sql, cache_params = pool.connections[0].executed[1]
+    assert cache_params is not None
+    assert cache_params[-1] is False, "no price node means price_fetched_at stays what it was"
+    assert "COALESCE(EXCLUDED.price_fetched_at, psn_catalog_cache.price_fetched_at)" in cache_sql
+
+
+async def test_public_collections_containing_a_game_read_only_public_rows():
+    game_id = str(uuid.uuid4())
+    pool = FakePool(fetchone_results=[(0,)], fetchall_results=[[]])
+    repo = CatalogRepository(pool)
+
+    await repo.list_public_collections_containing(game_id)
+
+    list_sql, list_params = pool.connections[0].executed[0]
+    assert "cd.visibility = 'public'" in list_sql
+    assert "!= 'private'" not in list_sql
+    assert list_params == (game_id, 20)
 
 
 async def test_backfill_keeps_the_whole_product_node_the_walk_already_paid_for():
@@ -280,6 +404,35 @@ async def test_store_id_lookup_prefers_the_concept_id_over_either_product_id():
     product_match = sql.index("gc.product_id = candidate.store_id")
     cache_match = sql.index("pcc.store_product_id = candidate.store_id")
     assert concept_match < product_match < cache_match
+
+
+async def test_linking_a_store_concept_writes_the_concept_row_and_fills_only_an_empty_cover():
+    game_id = str(uuid.uuid4())
+    concept_id = str(uuid.uuid4().int)[:6]
+    product_id = f"UP1004-PPSA{uuid.uuid4().int % 100000:05d}_00-STANDARDEDITION0"
+    cover = f"https://image.api.playstation.com/{uuid.uuid4().hex}.png"
+    pool = FakePool()
+    repo = CatalogRepository(pool)
+
+    await repo.link_store_concept(game_id, concept_id=concept_id, product_id=product_id, cover_image_url=cover)
+
+    executed = pool.connections[0].executed
+    assert "INSERT INTO game_concepts" in executed[0][0]
+    assert "ON CONFLICT (concept_id) DO NOTHING" in executed[0][0]
+    assert executed[0][1] == (concept_id, game_id, product_id)
+    assert "store_cover_image_url IS NULL" in executed[1][0]
+    assert executed[1][1] == (cover, game_id)
+
+
+async def test_linking_a_store_concept_without_a_cover_touches_only_game_concepts():
+    pool = FakePool()
+    repo = CatalogRepository(pool)
+
+    await repo.link_store_concept(
+        str(uuid.uuid4()), concept_id=str(uuid.uuid4().int)[:6], product_id=None, cover_image_url=None
+    )
+
+    assert len(pool.connections[0].executed) == 1
 
 
 async def test_admitting_a_store_title_creates_the_game_its_concept_and_an_enrichment_row():

@@ -29,17 +29,5 @@ ALTER TABLE library_entries
 
 CREATE INDEX idx_library_entries_is_active ON library_entries (identity_sub, is_active);
 
--- The matching authoring choice on a collection: by default a collection is built from what the owner
--- can actually play, and include_inactive opts into the full historical library instead. Stored
--- alongside the other filter columns as provenance -- it describes how the collection was assembled,
--- and is re-applied when the owner asks for a fresh proposal via POST /collections/{id}/runs.
 ALTER TABLE collection_definitions
     ADD COLUMN include_inactive BOOLEAN NOT NULL DEFAULT false;
-
--- NOT addressed here, deliberately: an entitlement that vanishes from PSN's response entirely (rather
--- than being reported with activeFlag = false) still leaves a stale library_entries row. Fixing that
--- means deactivating every entry absent from the latest pull, and entitlements() stops paging on a short
--- page -- so a truncated PSN response is indistinguishable from a genuinely small library, and a sweep
--- would silently deactivate a user's whole library with no way back short of a re-pull. PS Plus lapses
--- produce case 1 (an explicit false), which is what this migration handles. The sweep needs its own
--- guard (compare against the previous entry count) and its own decision.

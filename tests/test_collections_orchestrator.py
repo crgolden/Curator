@@ -6,9 +6,21 @@ import random
 
 import pytest
 
-from curator.collections.collection_orchestrator import _DEFAULT_SIZE_GB, CollectionOrchestrator
+from curator.collections.collection_orchestrator import (
+    _DEFAULT_SIZE_GB,
+    BYTES_PER_GB,
+    IGNORED_FILTER_MIN_PERCENT_COMPLETED,
+    IGNORED_FILTER_REASON_NO_TROPHY_DATA,
+    CollectionOrchestrator,
+)
 from curator.collections.collection_spec import CollectionSpec
-from curator.collections.game_candidate import DEFAULT_SIZE, ESTIMATED_SIZE, MEASURED_SIZE
+from curator.collections.game_candidate import (
+    CAPPED_DEFAULT_SIZE,
+    DEFAULT_SIZE,
+    DOWNLOAD_SIZE,
+    ESTIMATED_SIZE,
+    MEASURED_SIZE,
+)
 from curator.collections.repository import RawCandidateRow, StorageDevice, UserConsole
 from curator.scoring.size_estimation_service import SizeEstimate
 
@@ -19,14 +31,28 @@ _SIZE_ESTIMATES = [
 
 
 class FakeCollectionsRepository:
-    def __init__(self, consoles=None, candidates=None, devices=None):
+    def __init__(
+        self,
+        consoles=None,
+        candidates=None,
+        devices=None,
+        *,
+        has_trophy_data=False,
+        missing_trophy_data=0,
+        media_ceilings=None,
+    ):
         self._consoles = consoles or []
         self._candidates = candidates or []
         self._devices = devices or []
+        self._has_trophy_data = has_trophy_data
+        self._missing_trophy_data = missing_trophy_data
+        self._media_ceilings = dict(media_ceilings or {})
         self.list_candidates_calls: list[str | None] = []
         self.include_inactive_calls: list[bool] = []
         self.min_percent_completed_calls: list[int | None] = []
         self.exclude_installed_on_calls: list[tuple[str, ...] | None] = []
+        self.include_non_games_calls: list[bool] = []
+        self.missing_trophy_data_calls: list[str] = []
         self.list_user_consoles_call_count = 0
 
     async def list_user_consoles(self, identity_sub):
@@ -44,12 +70,26 @@ class FakeCollectionsRepository:
         include_inactive=False,
         min_percent_completed=None,
         exclude_installed_on=None,
+        include_non_games=False,
     ):
         self.list_candidates_calls.append(platform)
         self.include_inactive_calls.append(include_inactive)
         self.min_percent_completed_calls.append(min_percent_completed)
         self.exclude_installed_on_calls.append(exclude_installed_on)
+        self.include_non_games_calls.append(include_non_games)
         return self._candidates
+
+    async def user_has_trophy_data(self, identity_sub):
+        return self._has_trophy_data
+
+    async def count_candidates_missing_trophy_data(
+        self, identity_sub, *, platform=None, include_inactive=False, exclude_installed_on=None, include_non_games=False
+    ):
+        self.missing_trophy_data_calls.append(identity_sub)
+        return self._missing_trophy_data
+
+    async def list_platform_media_ceilings(self):
+        return dict(self._media_ceilings)
 
 
 def _row(
@@ -63,6 +103,7 @@ def _row(
     is_free_to_play=False,
     measured_size_gb=None,
     title=None,
+    download_size_bytes=None,
 ):
     return RawCandidateRow(
         game_id=game_id,
@@ -75,7 +116,103 @@ def _row(
         psn_rating=psn_rating,
         is_free_to_play=is_free_to_play,
         measured_size_gb=measured_size_gb,
+        download_size_bytes=download_size_bytes,
     )
+
+
+async def test_a_download_size_beats_an_estimate_and_a_measurement_beats_a_download():
+    measured_gb = float(random.randint(1, 60))
+    download_bytes = random.randint(1, 10) * BYTES_PER_GB
+    repository = FakeCollectionsRepository(
+        consoles=[_console(platform="PS5")],
+        candidates=[
+            _row("measured", measured_size_gb=measured_gb, download_size_bytes=download_bytes),
+            _row("downloaded", download_size_bytes=download_bytes),
+        ],
+    )
+    orchestrator = CollectionOrchestrator(repository)
+
+    result = await orchestrator.generate(
+        "sub-1", CollectionSpec(kind="capacity_fill", console_id="c1"), size_estimates=_SIZE_ESTIMATES
+    )
+
+    by_id = {c.game_id: c for c in (*result.included, *result.excluded)}
+    assert (by_id["measured"].size_gb, by_id["measured"].size_source) == (measured_gb, MEASURED_SIZE)
+    assert (by_id["downloaded"].size_gb, by_id["downloaded"].size_source) == (
+        download_bytes / BYTES_PER_GB,
+        DOWNLOAD_SIZE,
+    )
+
+
+async def test_a_psp_candidate_with_no_size_data_resolves_to_the_media_ceiling():
+    repository = FakeCollectionsRepository(
+        consoles=[_console(platform="PSP")], candidates=[_row("umd")], media_ceilings={"PSP": 1.8}
+    )
+    orchestrator = CollectionOrchestrator(repository)
+
+    result = await orchestrator.generate(
+        "sub-1", CollectionSpec(kind="capacity_fill", console_id="c1"), size_estimates=_SIZE_ESTIMATES
+    )
+
+    candidate = (*result.included, *result.excluded)[0]
+    assert (candidate.size_gb, candidate.size_source) == (1.8, CAPPED_DEFAULT_SIZE)
+
+
+async def test_a_run_with_no_console_never_applies_a_media_ceiling():
+    repository = FakeCollectionsRepository(candidates=[_row("g1")], media_ceilings={"PS4": 1.0})
+    orchestrator = CollectionOrchestrator(repository)
+
+    result = await orchestrator.generate("sub-1", CollectionSpec(kind="filter_list"), size_estimates=[])
+
+    assert (result.included[0].size_gb, result.included[0].size_source) == (_DEFAULT_SIZE_GB, DEFAULT_SIZE)
+
+
+async def test_a_completion_floor_for_a_user_with_no_trophy_data_is_reported_as_ignored():
+    repository = FakeCollectionsRepository(candidates=[_row("g1")], has_trophy_data=False)
+    orchestrator = CollectionOrchestrator(repository)
+
+    result = await orchestrator.generate(
+        "sub-1", CollectionSpec(kind="filter_list", min_percent_completed=50), size_estimates=[]
+    )
+
+    assert [(item.filter, item.reason) for item in result.ignored_filters] == [
+        (IGNORED_FILTER_MIN_PERCENT_COMPLETED, IGNORED_FILTER_REASON_NO_TROPHY_DATA)
+    ]
+    assert result.excluded_for_missing_trophy_data == 0
+    assert repository.missing_trophy_data_calls == []
+
+
+async def test_a_completion_floor_for_a_partially_harvested_user_reports_the_silently_dropped_count():
+    dropped = random.randint(1, 20)
+    repository = FakeCollectionsRepository(candidates=[_row("g1")], has_trophy_data=True, missing_trophy_data=dropped)
+    orchestrator = CollectionOrchestrator(repository)
+
+    result = await orchestrator.generate(
+        "sub-1", CollectionSpec(kind="filter_list", min_percent_completed=50), size_estimates=[]
+    )
+
+    assert result.ignored_filters == ()
+    assert result.excluded_for_missing_trophy_data == dropped
+
+
+async def test_no_completion_floor_asks_nothing_about_trophy_data():
+    repository = FakeCollectionsRepository(candidates=[_row("g1")], has_trophy_data=True, missing_trophy_data=3)
+    orchestrator = CollectionOrchestrator(repository)
+
+    result = await orchestrator.generate("sub-1", CollectionSpec(kind="filter_list"), size_estimates=[])
+
+    assert result.excluded_for_missing_trophy_data == 0
+    assert repository.missing_trophy_data_calls == []
+
+
+async def test_a_capacity_fill_counts_every_content_kind_and_a_filter_list_does_not():
+    repository = FakeCollectionsRepository(consoles=[_console(platform="PS5")], candidates=[_row("g1")])
+    orchestrator = CollectionOrchestrator(repository)
+
+    await orchestrator.generate("sub-1", CollectionSpec(kind="capacity_fill", console_id="c1"), size_estimates=[])
+    await orchestrator.generate("sub-1", CollectionSpec(kind="filter_list"), size_estimates=[])
+
+    assert repository.include_non_games_calls == [True, False]
 
 
 async def test_capacity_fill_requires_console_id():

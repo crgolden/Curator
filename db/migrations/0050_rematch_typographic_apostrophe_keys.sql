@@ -72,21 +72,6 @@ SELECT lower(btrim(regexp_replace(
     '\s+', ' ', 'g')))
 $$;
 
--- Copy each stale row to the key the current normalizer produces for it. DISTINCT ON is what keeps this
--- from aborting the deploy: the old rule preserved each typographic form as its own key, so one title can
--- sit in this table under both U+2019 and U+2018 and both now fold to the same fresh key. Two bare UPDATEs
--- would each see the other's key as free and collide on the primary key (0001_initial.sql:246), failing the
--- whole file -- and because a failed file is never recorded in schema_migrations, every later deploy would
--- retry and fail identically with no way to self-heal. Electing one winner per fresh key removes that
--- possibility rather than betting the table never contains such a pair.
---
--- The winner is the one carrying a real payload, then the most recently fetched, then the key itself so the
--- result never depends on scan order. The same preference decides a collision with a row already sitting on
--- the fresh key: ON CONFLICT overwrites only a cached miss, and only with a real payload. RAWG is searched
--- with the raw title (EnrichmentOrchestrationService.cs:213), so a miss recorded for the ASCII spelling was
--- never evidence about the typographic one -- yet after the fix the typographic title normalizes onto that
--- key and would be served that miss at :203-208. A real payload therefore outranks a cached nothing, and
--- two rows that agree leave the incumbent alone.
 INSERT INTO rawg_cache (normalized_title, rawg_game_id, raw, fetched_at)
 SELECT DISTINCT ON (rawg_normalized_key(normalized_title)) rawg_normalized_key(normalized_title),
                                                            rawg_game_id,
@@ -101,15 +86,10 @@ ON CONFLICT (normalized_title) DO UPDATE SET rawg_game_id = EXCLUDED.rawg_game_i
 WHERE rawg_cache.raw IS NULL
   AND EXCLUDED.raw IS NOT NULL;
 
--- The originals have been copied to their fresh key, and any row still not a fixed point lost the election
--- above. Either way it is unreachable under the current normalizer, so leaving it is leaving a row nothing
--- can ever read. A loser that was a cached miss is the right thing to lose: RAWG is simply asked again.
 DELETE
 FROM rawg_cache stale
 WHERE stale.normalized_title <> rawg_normalized_key(stale.normalized_title);
 
--- Re-enrol the games the old rule mismatched. Scoped to a provider that actually missed, so a title that
--- both providers already matched is not re-queried for nothing.
 UPDATE game_enrichment
 SET rawg_attempted_at = NULL
 WHERE rawg_attempted_at IS NOT NULL

@@ -93,6 +93,7 @@ class FakeLibraryGameView:
         source="psn",
         cover_image_url=None,
         platforms=(),
+        trophy_match="not_attempted",
     ):
         self.game_id = game_id
         self.title = title
@@ -110,6 +111,7 @@ class FakeLibraryGameView:
         self.source = source
         self.cover_image_url = cover_image_url
         self.platforms = platforms
+        self.trophy_match = trophy_match
 
 
 _SORT_ATTRS = {
@@ -129,17 +131,56 @@ class FakeLibraryRepository:
     ``tests/test_library_repository.py`` (ILIKE, ``gen.name = %s``, and the NULLS LAST ordering
     on both sortable enrichment columns)."""
 
-    def __init__(self, games_by_sub=None, manual_upsert_writes=True, manual_rows=(), psn_rows=()):
+    def __init__(
+        self,
+        games_by_sub=None,
+        manual_upsert_writes=True,
+        manual_rows=(),
+        psn_rows=(),
+        *,
+        has_trophy_progress=False,
+        hidden_game_ids=(),
+    ):
         self._games_by_sub = games_by_sub or {}
         self.manual_entries: list[tuple[str, str, tuple[str, ...], str | None]] = []
         self.manual_upsert_writes = manual_upsert_writes
         self.manual_rows = {tuple(row) for row in manual_rows}
         self.psn_rows = {tuple(row) for row in psn_rows}
+        self._has_trophy_progress = has_trophy_progress
+        self.hidden: set[tuple[str, str]] = set(hidden_game_ids)
+        self.hidden_filters: list[str] = []
+
+    async def has_trophy_progress(self, identity_sub):
+        return self._has_trophy_progress
+
+    async def hide_entry(self, identity_sub, game_id):
+        held = any(g.game_id == game_id for g in self._games_by_sub.get(identity_sub, []))
+        if held:
+            self.hidden.add((identity_sub, game_id))
+        return held
+
+    async def unhide_entry(self, identity_sub, game_id):
+        self.hidden.discard((identity_sub, game_id))
+
+    async def count_hidden(self, identity_sub):
+        return sum(1 for sub, _game in self.hidden if sub == identity_sub)
 
     async def list_entries_with_enrichment(
-        self, identity_sub, *, search=None, genre=None, sort="title", sort_dir="asc", limit=20, offset=0
+        self,
+        identity_sub,
+        *,
+        search=None,
+        genre=None,
+        sort="title",
+        sort_dir="asc",
+        limit=20,
+        offset=0,
+        hidden="exclude",
     ):
+        self.hidden_filters.append(hidden)
         games = list(self._games_by_sub.get(identity_sub, []))
+        hidden_ids = {game for sub, game in self.hidden if sub == identity_sub}
+        games = [g for g in games if (g.game_id in hidden_ids) == (hidden == "only")]
         if search:
             games = [g for g in games if search.lower() in g.title.lower()]
         if genre:
@@ -599,6 +640,106 @@ def test_get_status_enrichment_run_returns_404():
     assert response.status_code == 404
 
 
+def test_get_library_reports_trophy_progress_off_for_an_unlinked_caller():
+    client, validator, _publisher = _build(library_repository=FakeLibraryRepository({"sub-a": []}))
+    validator.register("token-a", _claims(sub="sub-a"))
+
+    body = client.get("/library", headers=_bearer("token-a")).json()
+
+    assert body["trophy_progress"] == {"state": "off", "reason": "no_link"}
+
+
+def test_get_library_reports_trophy_progress_off_when_harvesting_is_disabled():
+    repository = FakeRepository()
+    _seed_link(repository, TokenCrypto(TokenCrypto.generate_key()), "sub-a", harvest_trophies=False)
+    client, validator, _publisher = _build(
+        library_repository=FakeLibraryRepository({"sub-a": []}), repository=repository
+    )
+    validator.register("token-a", _claims(sub="sub-a"))
+
+    body = client.get("/library", headers=_bearer("token-a")).json()
+
+    assert body["trophy_progress"] == {"state": "off", "reason": "harvest_off"}
+
+
+def test_get_library_reports_trophy_progress_pending_until_a_refresh_has_fetched_any():
+    repository = FakeRepository()
+    _seed_link(repository, TokenCrypto(TokenCrypto.generate_key()), "sub-a", harvest_trophies=True)
+    client, validator, _publisher = _build(
+        library_repository=FakeLibraryRepository({"sub-a": []}, has_trophy_progress=False), repository=repository
+    )
+    validator.register("token-a", _claims(sub="sub-a"))
+
+    body = client.get("/library", headers=_bearer("token-a")).json()
+
+    assert body["trophy_progress"] == {"state": "pending", "reason": "never_refreshed"}
+
+
+def test_get_library_reports_trophy_progress_on_once_a_refresh_has_fetched_progress():
+    repository = FakeRepository()
+    _seed_link(repository, TokenCrypto(TokenCrypto.generate_key()), "sub-a", harvest_trophies=True)
+    client, validator, _publisher = _build(
+        library_repository=FakeLibraryRepository({"sub-a": []}, has_trophy_progress=True), repository=repository
+    )
+    validator.register("token-a", _claims(sub="sub-a"))
+
+    body = client.get("/library", headers=_bearer("token-a")).json()
+
+    assert body["trophy_progress"] == {"state": "on", "reason": None}
+
+
+def test_get_library_carries_each_rows_trophy_match_state():
+    games = [
+        FakeLibraryGameView("g1", "Matched", trophy_match="matched"),
+        FakeLibraryGameView("g2", "Unmatched", trophy_match="unmatched"),
+    ]
+    client, validator, _publisher = _build(library_repository=FakeLibraryRepository({"sub-a": games}))
+    validator.register("token-a", _claims(sub="sub-a"))
+
+    body = client.get("/library", headers=_bearer("token-a")).json()
+
+    assert [row["trophy_match"] for row in body["games"]] == ["matched", "unmatched"]
+
+
+def test_hiding_a_held_game_removes_it_from_the_library_and_counts_it():
+    games = [FakeLibraryGameView("g1", "Keep"), FakeLibraryGameView("g2", "Hide me")]
+    library = FakeLibraryRepository({"sub-a": games})
+    client, validator, _publisher = _build(library_repository=library)
+    validator.register("token-a", _claims(sub="sub-a"))
+
+    hide = client.put("/library/g2/hidden", headers=_bearer("token-a"))
+    body = client.get("/library", headers=_bearer("token-a")).json()
+
+    assert hide.status_code == 204
+    assert [row["game_id"] for row in body["games"]] == ["g1"]
+    assert body["hidden_count"] == 1
+    assert library.hidden_filters[-1] == "exclude"
+
+
+def test_hiding_a_game_the_caller_does_not_hold_is_404():
+    client, validator, _publisher = _build(library_repository=FakeLibraryRepository({"sub-a": []}))
+    validator.register("token-a", _claims(sub="sub-a"))
+
+    assert client.put("/library/g9/hidden", headers=_bearer("token-a")).status_code == 404
+
+
+def test_the_hidden_view_lists_only_hidden_games_and_unhiding_is_idempotent():
+    games = [FakeLibraryGameView("g1", "Above"), FakeLibraryGameView("g2", "Below")]
+    library = FakeLibraryRepository({"sub-a": games}, hidden_game_ids=[("sub-a", "g2")])
+    client, validator, _publisher = _build(library_repository=library)
+    validator.register("token-a", _claims(sub="sub-a"))
+
+    body = client.get("/library?hidden=only", headers=_bearer("token-a")).json()
+    first = client.delete("/library/g2/hidden", headers=_bearer("token-a"))
+    second = client.delete("/library/g2/hidden", headers=_bearer("token-a"))
+    after = client.get("/library", headers=_bearer("token-a")).json()
+
+    assert [row["game_id"] for row in body["games"]] == ["g2"]
+    assert (first.status_code, second.status_code) == (204, 204)
+    assert [row["game_id"] for row in after["games"]] == ["g1", "g2"]
+    assert after["hidden_count"] == 0
+
+
 def test_get_library_requires_bearer_token():
     client, _validator, _publisher = _build()
 
@@ -653,6 +794,7 @@ def test_get_library_returns_callers_own_games_with_ratings_and_genre():
                 "source": "psn",
                 "cover_image_url": "https://cdn.example/elden-ring.jpg",
                 "platforms": ["PS5", "PS4"],
+                "trophy_match": "not_attempted",
             },
             {
                 "game_id": "game-2",
@@ -670,9 +812,12 @@ def test_get_library_returns_callers_own_games_with_ratings_and_genre():
                 "source": "psn",
                 "cover_image_url": None,
                 "platforms": [],
+                "trophy_match": "not_attempted",
             },
         ],
         "total": 2,
+        "trophy_progress": {"state": "off", "reason": "no_link"},
+        "hidden_count": 0,
     }
 
 
@@ -712,7 +857,12 @@ def test_get_library_returns_empty_page_for_a_user_with_no_entries():
     response = client.get("/library", headers=_bearer("token-a"))
 
     assert response.status_code == 200
-    assert response.json() == {"games": [], "total": 0}
+    assert response.json() == {
+        "games": [],
+        "total": 0,
+        "trophy_progress": {"state": "off", "reason": "no_link"},
+        "hidden_count": 0,
+    }
 
 
 def test_get_library_scoped_to_caller_only():

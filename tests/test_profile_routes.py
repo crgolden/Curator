@@ -159,7 +159,16 @@ class FakeLibraryRepository:
         return len(self._games_by_sub.get(identity_sub, []))
 
     async def list_entries_with_enrichment(
-        self, identity_sub: str, *, search=None, genre=None, sort="title", sort_dir="asc", limit=20, offset=0
+        self,
+        identity_sub: str,
+        *,
+        search=None,
+        genre=None,
+        sort="title",
+        sort_dir="asc",
+        limit=20,
+        offset=0,
+        hidden="exclude",
     ):
         games = self._games_by_sub.get(identity_sub, [])
         return games[offset : offset + limit], len(games)

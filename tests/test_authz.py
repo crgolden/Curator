@@ -82,6 +82,19 @@ _BEARER_REQUIRED_ROUTES = [
     ("get", "/users/sub-x/library", {}),
     ("get", "/users/sub-x/collections", {}),
     ("post", "/enrichment/runs/run-x/cancel", {}),
+    ("get", "/me/ps-plus-rotation", {}),
+    ("get", "/me/ps-plus-rotation/summary", {}),
+    ("post", "/catalog/ps-plus/walk", {"json": {}}),
+    ("put", "/library/game-x/hidden", {}),
+    ("delete", "/library/game-x/hidden", {}),
+    ("get", "/me/friend-requests", {}),
+    ("post", "/me/friend-requests/someone", {}),
+    ("put", "/me/friends/someone", {}),
+    ("delete", "/me/friends/someone", {}),
+    ("post", "/me/chat/groups", {"json": {}}),
+    ("patch", "/me/chat/groups/ba08b67ca0b044b7688a29abdc884f37b5dd47cd-215", {"json": {"name": "x"}}),
+    ("post", "/me/chat/groups/ba08b67ca0b044b7688a29abdc884f37b5dd47cd-215/invitees", {"json": {}}),
+    ("delete", "/me/chat/groups/ba08b67ca0b044b7688a29abdc884f37b5dd47cd-215/members/me", {}),
 ]
 
 
@@ -238,7 +251,7 @@ def test_cross_user_isolation_between_two_established_callers():
     assert subs_touched_by_a == {"sub-a"}
 
 
-_ALLOWED_PATH_PARAMETERS = {"console_id", "game_id", "np_communication_id", "sub"}
+_ALLOWED_PATH_PARAMETERS = {"console_id", "game_id", "np_communication_id", "sub", "online_id", "group_id"}
 
 
 def test_no_route_exposes_a_caller_suppliable_user_identifier_path_parameter():

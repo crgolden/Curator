@@ -31,7 +31,11 @@ from curator.psn.models import (
 from curator.psn.session import PsnSession
 
 _PROFILE_URI = "https://m.np.playstation.com/api/userProfile/v1/internal/users"
+_GAMING_LOUNGE_URI = "https://m.np.playstation.com/api/gamingLoungeGroups/v1"
 _LEGACY_PROFILE_URI = "https://us-prof.np.community.playstation.net/userProfile/v1/users"
+
+MAX_CHAT_GROUPS: Final = 200
+"""The most chat groups one membership read returns; the bound is quota, not recursion."""
 _MY_ACCOUNT_URL = "https://dms.api.playstation.com/api/v1/devices/accounts/me"
 _CPSS_URI = "https://m.np.playstation.com/api/cpss"
 
@@ -267,6 +271,22 @@ class SocialClient:
             friends_count=data.get("friendsCount"),
             mutual_friends_count=data.get("mutualFriendsCount"),
         )
+
+    async def chat_group_ids(self) -> list[str]:
+        """List the ids of the chat groups the authenticated user is a member of.
+
+        :returns: Up to :data:`MAX_CHAT_GROUPS` group ids, in the order PSN lists them.
+        """
+        return await self._session.run_with_reauth(self._chat_group_ids)
+
+    async def _chat_group_ids(self) -> list[str]:
+        response = (
+            await self._session.get(
+                f"{_GAMING_LOUNGE_URI}/members/me/groups",
+                params={"includeFields": "members", "limit": MAX_CHAT_GROUPS, "offset": 0},
+            )
+        ).json()
+        return [str(group["groupId"]) for group in (response.get("groups") or []) if group.get("groupId")]
 
     async def profile(self, online_id: str | None = None, account_id: str | None = None) -> Profile:
         """Get a user's legacy public profile: about-me text, avatar URLs, languages, verification status.

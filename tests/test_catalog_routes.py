@@ -10,12 +10,30 @@ import httpx
 from fastapi.testclient import TestClient
 
 from curator.app import create_app
-from curator.catalog.repository import CatalogPage, CatalogRepository, GameSummary
+from curator.catalog.content_kind import EVERY_KIND
+from curator.catalog.ps_plus_walk_service import PsPlusWalkProgress
+from curator.catalog.repository import (
+    CatalogPage,
+    CatalogPrice,
+    CatalogRepository,
+    GameSummary,
+    PublicCollectionSummary,
+)
 from curator.catalog.store_backfill_service import BackfillProgress, BackfillSummary
 from curator.persistence.crypto import TokenCrypto
 from curator.psn.store_client import StoreCatalogClient
 from test_catalog_repository import FakePool
 from test_routes import FakeAgentFactory, FakeRepository, FakeTokenValidator, _bearer, _claims, _make_settings
+from test_values import (
+    new_category_id,
+    new_definition_id,
+    new_game_id,
+    new_game_title,
+    new_price_cents,
+    new_share_slug,
+    new_utc_instant,
+    new_walk_id,
+)
 
 MIGRATION_0036_SEEDED_PRODUCT_GENRE_FACET_KEYS = (
     "SHOOTER",
@@ -73,15 +91,36 @@ class FakeCatalogRepository:
         self._excluded_owned = excluded_owned
         self.list_games_calls = []
         self.get_game_calls = []
+        self.kind_calls: list[str | None] = []
+        self.sort_calls: list[tuple[str, str]] = []
+        self.public_collections: list[PublicCollectionSummary] = []
+        self.collections_calls: list[tuple[str, int]] = []
 
     async def list_genre_vocabulary(self):
         return list(self._genre_vocabulary)
 
     async def list_games(
-        self, *, search=None, franchise=None, genre=None, aaa_tier=None, exclude_owned_by=None, limit=50, offset=0
+        self,
+        *,
+        search=None,
+        franchise=None,
+        genre=None,
+        aaa_tier=None,
+        exclude_owned_by=None,
+        kind=None,
+        sort="title",
+        sort_dir="asc",
+        limit=50,
+        offset=0,
     ):
         self.list_games_calls.append((search, franchise, genre, aaa_tier, exclude_owned_by, limit, offset))
+        self.kind_calls.append(kind)
+        self.sort_calls.append((sort, sort_dir))
         return CatalogPage(games=self._games, total=len(self._games), excluded_owned=self._excluded_owned)
+
+    async def list_public_collections_containing(self, game_id, *, limit=20):
+        self.collections_calls.append((game_id, limit))
+        return list(self.public_collections[:limit]), len(self.public_collections)
 
     async def get_game(self, game_id, identity_sub=None):
         self.get_game_calls.append((game_id, identity_sub))
@@ -579,6 +618,8 @@ def test_returns_games_from_repository():
             "oc_score": None,
             "psn_rating": None,
             "percent_completed": None,
+            "content_kind": None,
+            "price": None,
         }
     ]
     assert body["total"] == 1
@@ -615,3 +656,163 @@ def test_default_pagination():
     client.get("/catalog/games", headers=_bearer("token-a"))
 
     assert catalog_repository.list_games_calls == [(None, None, None, None, None, 50, 0)]
+
+
+def _game(**overrides):
+    fields = {
+        "game_id": new_game_id(),
+        "canonical_title": new_game_title(),
+        "franchise": None,
+        "genre": None,
+        "aaa_tier": None,
+    }
+    fields.update(overrides)
+    return GameSummary(**fields)
+
+
+def test_browsing_leaves_proven_non_games_out_by_default_and_all_lifts_it():
+    catalog_repository = FakeCatalogRepository()
+    client, _validator = _build(catalog_repository)
+
+    client.get("/catalog/games")
+    client.get("/catalog/games?kind=all")
+    client.get("/catalog/games?kind=media_app")
+
+    assert catalog_repository.kind_calls == ["game", EVERY_KIND, "media_app"]
+
+
+def test_browsing_rejects_a_kind_outside_the_vocabulary():
+    client, _validator = _build()
+
+    assert client.get("/catalog/games?kind=bogus").status_code == 422
+
+
+def test_browsing_passes_the_price_sort_through():
+    catalog_repository = FakeCatalogRepository()
+    client, _validator = _build(catalog_repository)
+
+    client.get("/catalog/games?sort=price&sortDir=desc")
+
+    assert catalog_repository.sort_calls == [("price", "desc")]
+
+
+def test_browsing_rejects_a_sort_outside_the_allowlist():
+    client, _validator = _build()
+
+    assert client.get("/catalog/games?sort=rank").status_code == 422
+
+
+def test_a_catalog_row_carries_its_content_kind_and_walked_price():
+    fetched_at = new_utc_instant()
+    base_cents, discounted_cents = new_price_cents(), new_price_cents()
+    priced = _game(
+        content_kind="media_app",
+        price=CatalogPrice(
+            is_free=False,
+            tied_to_subscription=False,
+            base_cents=base_cents,
+            discounted_cents=discounted_cents,
+            discount_text="-10%",
+            fetched_at=fetched_at,
+        ),
+    )
+    client, _validator = _build(FakeCatalogRepository([priced, _game()]))
+
+    body = client.get("/catalog/games?kind=all").json()
+
+    assert body["games"][0]["content_kind"] == "media_app"
+    assert body["games"][0]["price"]["base_cents"] == base_cents
+    assert body["games"][0]["price"]["discounted_cents"] == discounted_cents
+    assert body["games"][1]["content_kind"] is None
+    assert body["games"][1]["price"] is None
+
+
+def test_the_public_collections_of_a_game_need_no_token_and_list_what_the_repository_reports():
+    catalog_repository = FakeCatalogRepository()
+    listed = PublicCollectionSummary(
+        definition_id=new_definition_id(),
+        name=new_game_title(),
+        share_slug=new_share_slug(),
+        item_count=3,
+        updated_at=new_utc_instant(),
+    )
+    catalog_repository.public_collections = [listed]
+    client, _validator = _build(catalog_repository)
+    game_id = new_game_id()
+
+    response = client.get(f"/catalog/games/{game_id}/collections")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["total"] == 1
+    assert body["collections"][0]["share_slug"] == listed.share_slug
+    assert body["collections"][0]["item_count"] == 3
+    assert catalog_repository.collections_calls == [(game_id, 20)]
+
+
+class FakePsPlusWalkService:
+    def __init__(self, results):
+        self._results = list(results)
+        self.calls: list[int | None] = []
+
+    async def walk_all(self, *, max_pages_per_category=None):
+        self.calls.append(max_pages_per_category)
+        return self._results
+
+
+def _ps_plus_progress(**overrides):
+    fields = {
+        "category_id": new_category_id(),
+        "tier": "extra",
+        "walk_id": new_walk_id(),
+        "pages_read": 5,
+        "distinct_products": 489,
+        "reported_total": 489,
+        "stopped_reason": None,
+        "completed": True,
+    }
+    fields.update(overrides)
+    return PsPlusWalkProgress(**fields)
+
+
+def test_the_ps_plus_walk_requires_admin_not_merely_a_bearer_token():
+    client, validator = _build()
+    validator.register("token-a", _claims())
+
+    response = client.post("/catalog/ps-plus/walk", json={}, headers=_bearer("token-a"))
+
+    assert response.status_code == 403
+
+
+def test_the_ps_plus_walk_reports_the_coverage_shortfall_that_decides_departures():
+    service = FakePsPlusWalkService(
+        [
+            _ps_plus_progress(),
+            _ps_plus_progress(tier="premium", distinct_products=170, reported_total=174, completed=True),
+        ]
+    )
+    client, validator = _build()
+    client.app.state.ps_plus_walk_service = service
+    validator.register("admin-token", _claims(is_admin=True))
+
+    response = client.post("/catalog/ps-plus/walk", json={"max_pages_per_category": 3}, headers=_bearer("admin-token"))
+
+    assert response.status_code == 200
+    body = response.json()
+    assert [row["coverage_shortfall"] for row in body["categories"]] == [0, 4]
+    assert body["categories"][1]["tier"] == "premium"
+    assert service.calls == [3]
+
+
+def test_the_ps_plus_walk_reports_a_renamed_category_as_stopped():
+    service = FakePsPlusWalkService(
+        [_ps_plus_progress(stopped_reason="category_renamed", completed=False, distinct_products=0)]
+    )
+    client, validator = _build()
+    client.app.state.ps_plus_walk_service = service
+    validator.register("admin-token", _claims(is_admin=True))
+
+    body = client.post("/catalog/ps-plus/walk", json={}, headers=_bearer("admin-token")).json()
+
+    assert body["categories"][0]["stopped_reason"] == "category_renamed"
+    assert body["categories"][0]["completed"] is False

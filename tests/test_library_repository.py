@@ -5,7 +5,7 @@ from __future__ import annotations
 from uuid import uuid4
 
 from curator.catalog.cover_art import SQUARE_COVER_ART_SQL
-from curator.library.repository import _OWNED_PLATFORMS_SQL, LibraryRepository
+from curator.library.repository import _OWNED_PLATFORMS_SQL, HIDDEN_REASON, LibraryRepository
 
 
 class FakeCursor:
@@ -99,6 +99,7 @@ async def test_list_entries_with_enrichment_maps_rows_and_total():
                     "psn",
                     "https://cdn.example/elden-ring.jpg",
                     ["PS5", "PS4"],
+                    "2026-09-01T00:00:00Z",
                 ),
                 (
                     "game-2",
@@ -117,6 +118,7 @@ async def test_list_entries_with_enrichment_maps_rows_and_total():
                     "manual",
                     None,
                     [],
+                    None,
                 ),
             ]
         ],
@@ -128,6 +130,8 @@ async def test_list_entries_with_enrichment_maps_rows_and_total():
     assert total == 2
     assert len(games) == 2
     assert games[0].game_id == "game-1"
+    assert games[0].trophy_match == "matched"
+    assert games[1].trophy_match == "not_attempted"
     assert games[0].genre == "Action RPG"
     assert games[0].rawg_rating == 96.0
     assert games[0].opencritic_rating == 94.0
@@ -181,6 +185,7 @@ async def test_list_entries_with_enrichment_reports_psn_enriched_from_the_column
         "psn",
         None,
         None,
+        "2026-09-01T00:00:00Z",
     )
     pool = FakePool(fetchone_results=[(1,)], fetchall_results=[[concept_without_a_star_rating]])
     repo = LibraryRepository(pool)
@@ -191,6 +196,74 @@ async def test_list_entries_with_enrichment_reports_psn_enriched_from_the_column
     assert "COALESCE(ge.psn_enriched, false)" in select_sql
     assert games[0].psn_rating is None
     assert games[0].psn_enriched is True
+    assert games[0].trophy_match == "unmatched", "a refresh tried and matched nothing"
+
+
+async def test_list_entries_leaves_hidden_games_out_by_default():
+    pool = FakePool(fetchone_results=[(0,)], fetchall_results=[[]])
+    repo = LibraryRepository(pool)
+
+    await repo.list_entries_with_enrichment(str(uuid4()))
+
+    count_sql, _ = pool.connections[0].executed[0]
+    select_sql, _ = pool.connections[0].executed[1]
+    for sql in (count_sql, select_sql):
+        assert "NOT EXISTS (" in sql
+        assert "FROM library_exclusions lx" in sql
+
+
+async def test_list_entries_hidden_only_lists_nothing_but_hidden_games():
+    pool = FakePool(fetchone_results=[(0,)], fetchall_results=[[]])
+    repo = LibraryRepository(pool)
+
+    await repo.list_entries_with_enrichment(str(uuid4()), hidden="only")
+
+    select_sql, _ = pool.connections[0].executed[1]
+    assert "FROM library_exclusions lx" in select_sql
+    assert "NOT EXISTS (\n                SELECT 1 FROM library_exclusions" not in select_sql
+
+
+async def test_hiding_a_game_the_caller_holds_writes_a_keyed_exclusion():
+    identity_sub, game_id = str(uuid4()), str(uuid4())
+    pool = FakePool(fetchone_results=[(1,)])
+    repo = LibraryRepository(pool)
+
+    assert await repo.hide_entry(identity_sub, game_id) is True
+    insert_sql, params = pool.connections[0].executed[1]
+    assert "INSERT INTO library_exclusions" in insert_sql
+    assert "ON CONFLICT (identity_sub, game_id) DO NOTHING" in insert_sql
+    assert params == (identity_sub, game_id, HIDDEN_REASON, identity_sub)
+
+
+async def test_hiding_a_game_the_caller_does_not_hold_writes_nothing():
+    pool = FakePool(fetchone_results=[None])
+    repo = LibraryRepository(pool)
+
+    assert await repo.hide_entry(str(uuid4()), str(uuid4())) is False
+    assert len(pool.connections[0].executed) == 1
+
+
+async def test_unhiding_deletes_the_exclusion():
+    identity_sub, game_id = str(uuid4()), str(uuid4())
+    pool = FakePool()
+    repo = LibraryRepository(pool)
+
+    await repo.unhide_entry(identity_sub, game_id)
+
+    sql, params = pool.connections[0].executed[0]
+    assert sql.startswith("DELETE FROM library_exclusions")
+    assert params == (identity_sub, game_id)
+
+
+async def test_has_trophy_progress_probes_the_fetched_at_column():
+    identity_sub = str(uuid4())
+    pool = FakePool(fetchone_results=[(False,)])
+    repo = LibraryRepository(pool)
+
+    assert await repo.has_trophy_progress(identity_sub) is False
+    sql, params = pool.connections[0].executed[0]
+    assert "trophy_progress_fetched_at IS NOT NULL" in sql
+    assert params == (identity_sub,)
 
 
 async def test_list_entries_with_enrichment_builds_search_and_genre_conditions():
@@ -259,7 +332,25 @@ async def test_list_entries_with_enrichment_reads_platforms_as_a_scalar_subquery
 
 async def test_list_entries_with_enrichment_defaults_absent_platforms_to_empty():
     """``array_agg`` yields NULL over no rows; the caller must see an empty tuple, not ``None``."""
-    row = ("game-1", "Solo", None, None, None, None, None, False, False, False, True, None, None, "manual", None, None)
+    row = (
+        "game-1",
+        "Solo",
+        None,
+        None,
+        None,
+        None,
+        None,
+        False,
+        False,
+        False,
+        True,
+        None,
+        None,
+        "manual",
+        None,
+        None,
+        None,
+    )
     pool = FakePool(fetchone_results=[(1,)], fetchall_results=[[row]])
     repo = LibraryRepository(pool)
 

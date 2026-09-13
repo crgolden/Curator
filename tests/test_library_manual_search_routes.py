@@ -58,6 +58,7 @@ class FakeCatalogRepository:
         self._catalog_games = list(catalog_games)
         self._excluded_owned = excluded_owned
         self.admitted: list[tuple[str, str, str | None, str | None]] = []
+        self.linked: list[tuple[str, str, str | None, str | None]] = []
         self.looked_up: list[list[str]] = []
         self.searched: list[tuple[str | None, str | None, int]] = []
 
@@ -90,6 +91,9 @@ class FakeCatalogRepository:
     async def admit_store_game(self, *, concept_id, name, product_id=None, cover_image_url=None):
         self.admitted.append((concept_id, name, product_id, cover_image_url))
         return self._admitted_game_id, True
+
+    async def link_store_concept(self, game_id, *, concept_id, product_id, cover_image_url):
+        self.linked.append((game_id, concept_id, product_id, cover_image_url))
 
     async def game_exists(self, game_id):
         return game_id in self._game_ids_by_store_id.values()
@@ -495,6 +499,32 @@ def test_accepting_a_store_hit_admits_it_and_adds_the_library_entry():
     assert [row[:3] for row in catalog.admitted] == [(expected_concept_id, expected_title, expected_product_id)]
     assert library.manual_entries == [(SUB, expected_game_id, ("PS4", "PS5"), None)]
     assert search.calls == [(search_term, FULL_GAMES_DOMAIN, MAX_STORE_SEARCH_LIMIT)]
+
+
+def test_a_store_hit_the_catalog_already_resolves_takes_that_game_and_links_the_concept():
+    """A hit resolved through a product id or a walked store_product_id would otherwise be admitted by
+    name, and a store name that normalizes differently from the stored title forks the catalog."""
+    concept_id = uuid.uuid4().hex
+    product_id = f"UP1004-PPSA{uuid.uuid4().int % 100000:05d}_00-STANDARDEDITION0"
+    held_game_id = str(uuid.uuid4())
+    catalog = FakeCatalogRepository(game_ids_by_store_id={product_id: held_game_id})
+    library = FakeLibraryRepository()
+    hit = _hit(f"Ghost of {uuid.uuid4().hex}", concept_id, default_product_id=product_id)
+    client, validator, _search = _build(
+        FakeSearchClient(results=[hit]), catalog_repository=catalog, library_repository=library
+    )
+
+    response = client.post(
+        "/library/manual",
+        json={"store_hit": {"query": uuid.uuid4().hex, "id": concept_id}},
+        headers=_authorized(validator),
+    )
+
+    assert response.status_code == 204
+    assert catalog.admitted == [], "the catalog already holds this game; admitting again would fork it"
+    assert catalog.linked == [(held_game_id, concept_id, product_id, hit.cover_image_url)]
+    assert catalog.looked_up == [[concept_id, product_id]]
+    assert library.manual_entries == [(SUB, held_game_id, ("PS5",), None)]
 
 
 def test_accepting_a_store_hit_never_trusts_the_clients_own_copy_of_the_title():
