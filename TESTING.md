@@ -87,13 +87,18 @@ python -m pytest tests -q
 so without it every `pytest` invocation fails with `error: unrecognized arguments: -n --dist`. The suite
 runs in parallel by default because its cost is diffuse per-test overhead rather than any one slow test.
 
-To run serially — debugging a single test, or reading output in source order — pass `-n 0`:
+To run serially, reading output in source order, pass `-n 0` to the whole suite:
 
 ```powershell
-python -m pytest tests/test_routes.py -q -n 0
+python -m pytest -q -n 0
 ```
 
 `-p no:xdist` does **not** work for this: disabling the plugin leaves the `addopts` flags unrecognized.
+
+**Always run the whole suite, never one file or one `-k` expression.** A narrowed run is not a gate. The
+workspace's PreToolUse hook (`Tools/Claude/invoke_gate_cadence_gate.py`) denies an agent's `pytest` typed on
+its own, since every step belongs in one gate script, and denies a gate script whose `pytest` names a `.py`
+file or passes `-k`.
 
 `tests/test_telemetry.py` covers `curator.telemetry`: both legs (OTLP traces/metrics, Elasticsearch
 logging) stay no-op when their settings are absent; the module-level registration guards make repeated
@@ -189,8 +194,11 @@ happy to store, and without this test nothing goes red.
 $line = Select-String -Path .env -Pattern '^CURATOR_TEST_DATABASE_URL=' -Raw
 $env:CURATOR_TEST_DATABASE_URL = ($line -split '=', 2)[1].Trim()
 
-python -m pytest tests/test_schema.py -q -n0
+python -m pytest -q -rs
 ```
+
+With the variable set, the whole suite runs this module too, exactly as CI does. Any `skipped` count means
+it did not run; `-rs` prints the reason.
 
 **Never put the connection string on a command line.** It carries the password, and any tool that fails
 to connect prints the whole conninfo — which is how a credential reached a session transcript on
