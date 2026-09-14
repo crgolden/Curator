@@ -286,9 +286,11 @@ def create_app(
             await pool.open()
         if queue_depth_monitor is not None:
             queue_depth_monitor.start()
+        ps_plus_walk_scheduler.start()
         try:
             yield
         finally:
+            await ps_plus_walk_scheduler.stop()
             if queue_depth_monitor is not None:
                 await queue_depth_monitor.stop()
             if service_bus_client is not None:

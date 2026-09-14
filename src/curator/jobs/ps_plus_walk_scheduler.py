@@ -2,8 +2,7 @@
 
 The walk is bounded (a handful of pages per category) so it runs here rather than as a queued job; the
 per-category advisory lock is what keeps two API workers from walking one category at once. The scheduler
-is constructed by ``create_app`` and published on ``app.state``; whether the lifespan starts it is the
-deployment decision recorded in ``AGENTS/REPOS/Curator.md``.
+is constructed by ``create_app``, published on ``app.state`` and started by the app's lifespan.
 """
 
 from __future__ import annotations

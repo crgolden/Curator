@@ -362,7 +362,9 @@ class PsPlusRepository:
         """
         categories = await self.category_states()
         catalog_walked_at = _latest(state.walked_at for state in categories)
-        since = _earliest(state.previous_completed_at for state in categories)
+        since = _earliest_only_when_no_value_is_missing(
+            state.previous_completed_at for state in categories
+        )
         async with self._pool.connection() as conn, conn.cursor() as cur:
             await cur.execute(UNCLAIMED_SQL, (identity_sub,))
             unclaimed = [_to_title(row) for row in await cur.fetchall()]
@@ -398,9 +400,11 @@ def _latest(values: Any) -> datetime | None:
     return max(present) if present else None
 
 
-def _earliest(values: Any) -> datetime | None:
-    present = [value for value in values if value is not None]
-    return min(present) if present else None
+def _earliest_only_when_no_value_is_missing(values: Any) -> datetime | None:
+    collected = list(values)
+    if not collected or any(value is None for value in collected):
+        return None
+    return min(collected)
 
 
 def _to_title(row: Sequence[Any]) -> PsPlusTitle:

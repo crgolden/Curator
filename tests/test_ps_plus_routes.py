@@ -44,9 +44,10 @@ def _title(**overrides):
 
 
 class FakePsPlusRepository:
-    def __init__(self, report=None, summary=None):
+    def __init__(self, report=None, summary=None, latest_walk_started_at=None):
         self._report = report
         self._summary = summary
+        self._latest_walk_started_at = latest_walk_started_at or datetime.now(timezone.utc)
         self.report_calls: list[str] = []
         self.summary_calls: list[str] = []
 
@@ -57,6 +58,9 @@ class FakePsPlusRepository:
     async def rotation_summary(self, identity_sub):
         self.summary_calls.append(identity_sub)
         return self._summary
+
+    async def latest_walk_started_at(self):
+        return self._latest_walk_started_at
 
 
 def _build(ps_plus_repository, *, linked_sub=None):
@@ -141,10 +145,25 @@ def test_the_summary_needs_a_psn_link():
     assert client.get("/me/ps-plus-rotation/summary", headers=_bearer("token")).status_code == 404
 
 
-def test_the_scheduler_is_constructed_but_not_started():
+def test_the_scheduler_is_constructed():
     client, _validator = _build(FakePsPlusRepository())
 
     scheduler = client.app.state.ps_plus_walk_scheduler
 
     assert scheduler is not None
-    assert scheduler._task is None
+
+
+def test_the_lifespan_starts_the_scheduler_and_stops_it_on_shutdown():
+    client, _validator = _build(FakePsPlusRepository())
+    scheduler = client.app.state.ps_plus_walk_scheduler
+
+    assert scheduler._task is None, "nothing may start before the lifespan runs"
+
+    with client:
+        started = scheduler._task
+
+    assert started is not None, (
+        "the weekly walk only happens if the lifespan starts the scheduler; "
+        "constructing it and publishing it on app.state does nothing on its own"
+    )
+    assert scheduler._task is None, "shutdown must cancel the task rather than leave it running"
