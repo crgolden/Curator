@@ -4,6 +4,7 @@ Azure connection)."""
 from __future__ import annotations
 
 import asyncio
+import threading
 
 import pytest
 
@@ -24,9 +25,11 @@ class FakeAdminClient:
         self._properties_by_queue = properties_by_queue or {}
         self._raises_for = set(raises_for)
         self.calls: list[str] = []
+        self.polled = threading.Event()
 
     def get_queue_runtime_properties(self, queue_name, **kwargs):
         self.calls.append(queue_name)
+        self.polled.set()
         if queue_name in self._raises_for:
             raise RuntimeError(f"admin API unavailable for {queue_name}")
         return self._properties_by_queue[queue_name]
@@ -43,7 +46,6 @@ def _clear_queue_depth_gauges():
 
 
 _POLL_INTERVAL_SECONDS = 0.01
-_LONG_ENOUGH_FOR_ONE_POLL_CYCLE = _POLL_INTERVAL_SECONDS * 5
 
 
 async def test_poll_once_records_active_and_dead_letter_counts_per_queue():
@@ -93,7 +95,7 @@ async def test_start_and_stop_manage_the_background_task():
 
     monitor.start()
     assert monitor._task is not None
-    await asyncio.sleep(_LONG_ENOUGH_FOR_ONE_POLL_CYCLE)
+    await asyncio.to_thread(admin_client.polled.wait)
 
     await monitor.stop()
     assert monitor._task is None

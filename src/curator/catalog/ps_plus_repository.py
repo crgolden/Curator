@@ -5,7 +5,7 @@ walk, and the per-title memberships with their lifecycle, plus the read side of 
 from __future__ import annotations
 
 import uuid
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncIterator, Iterable, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import datetime
@@ -362,9 +362,7 @@ class PsPlusRepository:
         """
         categories = await self.category_states()
         catalog_walked_at = _latest(state.walked_at for state in categories)
-        since = _earliest_only_when_no_value_is_missing(
-            state.previous_completed_at for state in categories
-        )
+        since = _earliest_only_when_no_value_is_missing(state.previous_completed_at for state in categories)
         async with self._pool.connection() as conn, conn.cursor() as cur:
             await cur.execute(UNCLAIMED_SQL, (identity_sub,))
             unclaimed = [_to_title(row) for row in await cur.fetchall()]
@@ -400,11 +398,12 @@ def _latest(values: Any) -> datetime | None:
     return max(present) if present else None
 
 
-def _earliest_only_when_no_value_is_missing(values: Any) -> datetime | None:
+def _earliest_only_when_no_value_is_missing(values: Iterable[datetime | None]) -> datetime | None:
     collected = list(values)
-    if not collected or any(value is None for value in collected):
+    present = [value for value in collected if value is not None]
+    if not present or len(present) != len(collected):
         return None
-    return min(collected)
+    return min(present)
 
 
 def _to_title(row: Sequence[Any]) -> PsPlusTitle:
