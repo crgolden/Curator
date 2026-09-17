@@ -9,7 +9,7 @@ import asyncio
 import logging
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import Protocol
+from typing import Literal, Protocol
 
 from curator.psn.store_client import (
     FULL_GAME_FILTER,
@@ -26,7 +26,11 @@ PAGE_SIZE = 100
 
 DEFAULT_PAGE_DELAY_SECONDS = 0.5
 
-_CATEGORY_INDEPENDENT_STOPS = frozenset({"query_rotated", "filter_not_applied"})
+BackfillStoppedReason = Literal["query_rotated", "filter_not_applied", "no_products", "page_budget_exhausted"]
+"""Why a category's walk stopped short; ``None`` means it reached the last page. Narrower than PS Plus's
+:data:`~curator.catalog.ps_plus_repository.WalkStoppedReason`, which adds ``category_renamed``."""
+
+_CATEGORY_INDEPENDENT_STOPS: frozenset[BackfillStoppedReason] = frozenset({"query_rotated", "filter_not_applied"})
 
 
 def next_page_offset(page: StoreCategoryPage, requested_offset: int) -> int:
@@ -55,7 +59,7 @@ class BackfillProgress:
     products_seen: int = 0
     games_created: int = 0
     covers_cached: int = 0
-    stopped_reason: str | None = None
+    stopped_reason: BackfillStoppedReason | None = None
     distinct_products: int = 0
     reported_total: int | None = None
     start_offset: int = 0
@@ -141,31 +145,31 @@ class StoreBackfillService:
                 logger.exception("Store backfill halted: every persisted-query hash rejected")
                 return self._progress(
                     category_id,
-                    offset,
-                    False,
-                    pages_read,
-                    products_seen,
-                    games_created,
-                    covers_cached,
-                    "query_rotated",
-                    seen_product_ids,
-                    reported_total,
-                    start_offset,
+                    next_offset=offset,
+                    completed=False,
+                    pages_read=pages_read,
+                    products_seen=products_seen,
+                    games_created=games_created,
+                    covers_cached=covers_cached,
+                    stopped_reason="query_rotated",
+                    seen_product_ids=seen_product_ids,
+                    reported_total=reported_total,
+                    start_offset=start_offset,
                 )
             except StoreFilterIgnoredError:
                 logger.exception("Store backfill halted: the full-game filter was not honoured")
                 return self._progress(
                     category_id,
-                    offset,
-                    False,
-                    pages_read,
-                    products_seen,
-                    games_created,
-                    covers_cached,
-                    "filter_not_applied",
-                    seen_product_ids,
-                    reported_total,
-                    start_offset,
+                    next_offset=offset,
+                    completed=False,
+                    pages_read=pages_read,
+                    products_seen=products_seen,
+                    games_created=games_created,
+                    covers_cached=covers_cached,
+                    stopped_reason="filter_not_applied",
+                    seen_product_ids=seen_product_ids,
+                    reported_total=reported_total,
+                    start_offset=start_offset,
                 )
 
             pages_read += 1
@@ -184,16 +188,16 @@ class StoreBackfillService:
                 walked_the_whole_category_and_found_nothing = products_seen == 0 and start_offset == 0
                 progress = self._progress(
                     category_id,
-                    offset,
-                    not walked_the_whole_category_and_found_nothing,
-                    pages_read,
-                    products_seen,
-                    games_created,
-                    covers_cached,
-                    "no_products" if walked_the_whole_category_and_found_nothing else None,
-                    seen_product_ids,
-                    reported_total,
-                    start_offset,
+                    next_offset=offset,
+                    completed=not walked_the_whole_category_and_found_nothing,
+                    pages_read=pages_read,
+                    products_seen=products_seen,
+                    games_created=games_created,
+                    covers_cached=covers_cached,
+                    stopped_reason="no_products" if walked_the_whole_category_and_found_nothing else None,
+                    seen_product_ids=seen_product_ids,
+                    reported_total=reported_total,
+                    start_offset=start_offset,
                 )
                 if walked_the_whole_category_and_found_nothing:
                     logger.warning(
@@ -218,16 +222,16 @@ class StoreBackfillService:
 
         return self._progress(
             category_id,
-            offset,
-            False,
-            pages_read,
-            products_seen,
-            games_created,
-            covers_cached,
-            "page_budget_exhausted",
-            seen_product_ids,
-            reported_total,
-            start_offset,
+            next_offset=offset,
+            completed=False,
+            pages_read=pages_read,
+            products_seen=products_seen,
+            games_created=games_created,
+            covers_cached=covers_cached,
+            stopped_reason="page_budget_exhausted",
+            seen_product_ids=seen_product_ids,
+            reported_total=reported_total,
+            start_offset=start_offset,
         )
 
     async def backfill(
@@ -261,13 +265,14 @@ class StoreBackfillService:
     @staticmethod
     def _progress(
         category_id: str,
+        *,
         next_offset: int,
         completed: bool,
         pages_read: int,
         products_seen: int,
         games_created: int,
         covers_cached: int,
-        stopped_reason: str | None,
+        stopped_reason: BackfillStoppedReason | None,
         seen_product_ids: set[str],
         reported_total: int | None,
         start_offset: int,

@@ -16,7 +16,7 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 
-from curator.catalog.ps_plus_repository import PsPlusRepository, PsPlusTitle
+from curator.catalog.ps_plus_repository import PsPlusRepository, PsPlusTier, PsPlusTitle
 from curator.deps import require_bearer
 from curator.persistence.repository import Repository
 from curator.token_validation import TokenClaims
@@ -37,7 +37,7 @@ class PsPlusTitleResponse(BaseModel):
     title_id: str
     game_id: str | None
     title: str | None
-    tier: str | None
+    tier: PsPlusTier | None
     platforms: list[str]
     cover_image_url: str | None
     store_product_id: str | None
@@ -47,7 +47,7 @@ class PsPlusTitleResponse(BaseModel):
 class PsPlusCategoryResponse(BaseModel):
     """One walked category and its most recent completed walk."""
 
-    tier: str
+    tier: PsPlusTier
     walked_at: datetime | None
     total: int
 

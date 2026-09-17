@@ -15,8 +15,10 @@ from datetime import datetime, timezone
 
 import pytest
 from fastapi.testclient import TestClient
+from starlette.routing import Match
 
 from curator.app import create_app
+from curator.deps import require_bearer
 from curator.persistence.crypto import TokenCrypto
 from curator.persistence.repository import LinkRecord
 from curator.token_validation import AUTHORITY_UNAVAILABLE_DETAIL, AuthorityUnavailableError, TokenClaims
@@ -95,7 +97,112 @@ _BEARER_REQUIRED_ROUTES = [
     ("patch", "/me/chat/groups/ba08b67ca0b044b7688a29abdc884f37b5dd47cd-215", {"json": {"name": "x"}}),
     ("post", "/me/chat/groups/ba08b67ca0b044b7688a29abdc884f37b5dd47cd-215/invitees", {"json": {}}),
     ("delete", "/me/chat/groups/ba08b67ca0b044b7688a29abdc884f37b5dd47cd-215/members/me", {}),
+    ("put", "/consoles/console-x/device-link", {"json": {"device_id": "device-x"}}),
+    ("delete", "/consoles/console-x/device-link", {}),
+    ("delete", "/me", {}),
+    ("get", "/me/actions", {}),
+    ("get", "/me/enrichment-keys", {}),
+    ("put", "/me/enrichment-keys/rawg", {"json": {"api_key": "key-x"}}),
+    ("delete", "/me/enrichment-keys/rawg", {}),
+    ("get", "/me/refresh-schedule", {}),
+    ("put", "/me/refresh-schedule", {"json": {"cadence": "weekly"}}),
+    ("delete", "/me/refresh-schedule", {}),
+    ("get", "/users/sub-x/library/genres", {}),
+    ("get", "/library", {}),
+    ("get", "/library/genres", {}),
+    ("get", "/library/manual/candidates", {"params": {"q": "a-title"}}),
+    ("get", "/library/manual/search", {"params": {"q": "a-title"}}),
+    ("post", "/library/manual", {"json": {"game_id": "game-x"}}),
+    ("delete", "/library/manual/game-x", {}),
+    ("post", "/library/refresh", {}),
+    ("get", "/library/refresh/run-x", {}),
+    ("post", "/collections/preview", {"json": {"kind": "filter_list"}}),
+    ("post", "/collections", {"json": {"name": "a-collection"}}),
+    ("get", "/collections", {}),
+    ("get", "/collections/followed", {}),
+    ("get", "/collections/definition-x", {}),
+    ("patch", "/collections/definition-x", {"json": {}}),
+    ("delete", "/collections/definition-x", {}),
+    ("get", "/collections/definition-x/items", {}),
+    ("delete", "/collections/definition-x/items/game-x", {}),
+    ("put", "/collections/definition-x/visibility", {"json": {"visibility": "public"}}),
+    ("post", "/collections/definition-x/follow", {}),
+    ("delete", "/collections/definition-x/follow", {}),
+    ("post", "/collections/definition-x/runs", {}),
+    ("post", "/consoles", {"json": {"name": "a-console", "platform": "PS5"}}),
+    ("get", "/consoles", {}),
+    ("get", "/consoles/console-x", {}),
+    ("patch", "/consoles/console-x", {"json": {}}),
+    ("delete", "/consoles/console-x", {}),
+    ("get", "/consoles/console-x/installs", {}),
+    ("put", "/consoles/console-x/installs/game-x", {"json": {"installed": True}}),
+    ("post", "/storage-devices", {"json": {"name": "a-drive", "kind": "usb", "capacity_gb": 1000.0}}),
+    ("get", "/storage-devices", {}),
+    ("get", "/storage-devices/device-x", {}),
+    ("patch", "/storage-devices/device-x", {"json": {}}),
+    ("delete", "/storage-devices/device-x", {}),
+    ("put", "/storage-devices/device-x/attach/console-x", {}),
+    ("delete", "/storage-devices/device-x/attach", {}),
+    ("get", "/storage-devices/device-x/installs", {}),
+    ("put", "/storage-devices/device-x/installs/game-x", {"json": {"installed": True}}),
+    ("get", "/games/game-x/measured-sizes", {}),
+    ("put", "/games/game-x/measured-sizes/PS5", {"json": {"size_gb": 42.0}}),
+    ("get", "/catalog/genres/drift", {}),
+    ("post", "/catalog/backfill", {"json": {"category_ids": ["category-x"]}}),
+    ("post", "/enrichment/runs", {}),
+    ("get", "/enrichment/runs/latest", {}),
+    ("get", "/enrichment/runs/run-x", {}),
 ]
+
+
+def _dependency_calls(dependant):
+    """Every callable in one route's dependency tree, the endpoint itself included."""
+    yield dependant.call
+    for sub_dependant in dependant.dependencies:
+        yield from _dependency_calls(sub_dependant)
+
+
+def _route_dispatched_to(routes, method: str, path: str):
+    """The route ``method path`` would actually reach: the first full match, exactly as the router picks it."""
+    scope = {"type": "http", "method": method, "path": path, "root_path": "", "headers": []}
+    for route in routes:
+        match, _ = route.matches(scope)
+        if match is Match.FULL:
+            return route
+    return None
+
+
+def _reaches_require_bearer(route) -> bool:
+    dependant = getattr(route, "dependant", None)
+    return dependant is not None and any(call is require_bearer for call in _dependency_calls(dependant))
+
+
+def test_every_route_behind_require_bearer_is_listed_in_bearer_required_routes():
+    """``_BEARER_REQUIRED_ROUTES`` is hand-maintained and feeds three ``parametrize`` decorators, so a
+    protected route missing from it is never asserted at all and the suite still passes. This is the check
+    that discriminates: it asks the app which routes actually reach
+    :func:`~curator.deps.require_bearer` -- directly or through ``require_verified_caller``/
+    ``require_admin`` -- and fails naming any the list does not cover.
+
+    ``optional_bearer`` routes are excluded for free rather than by an exception list: it calls
+    ``require_bearer`` from its own body, so it never appears in the dependency graph, which is the same
+    reason those routes answer anonymously.
+
+    Coverage is judged by which route each listed path is *dispatched to*, not by which patterns it
+    happens to match. A listed ``/collections/followed`` matches ``/collections/{definition_id}`` as well,
+    so a match-based test would credit the second route to the first entry and leave it unasserted.
+    """
+    client, *_ = _build()
+    routes = client.app.routes
+    dispatched_to = [_route_dispatched_to(routes, method.upper(), path) for method, path, _ in _BEARER_REQUIRED_ROUTES]
+
+    unlisted = [
+        f"{'/'.join(sorted(route.methods))} {route.path}"
+        for route in routes
+        if _reaches_require_bearer(route) and not any(reached is route for reached in dispatched_to)
+    ]
+
+    assert unlisted == []
 
 
 class RecordingRepository(FakeRepository):

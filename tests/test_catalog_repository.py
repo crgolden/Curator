@@ -564,6 +564,54 @@ async def test_admitting_a_title_the_catalog_already_holds_by_name_reuses_that_g
     assert any("INSERT INTO game_concepts" in sql for sql in statements)
 
 
+async def test_admitting_a_store_title_keys_it_the_way_a_library_refresh_would():
+    title = f"Ghost of {uuid.uuid4().hex}"
+    expected_game_id = str(uuid.uuid4())
+    pool = FakePool(fetchone_results=[None, None, (expected_game_id,)])
+    repo = CatalogRepository(pool)
+
+    await repo.admit_store_game(concept_id=str(uuid.uuid4().int)[:6], name=f"  {title}™ ")
+
+    executed = pool.connections[0].executed
+    lock_sql, lock_params = executed[0]
+    assert "pg_advisory_xact_lock" in lock_sql
+    assert lock_params == (GAME_UPSERT_ADVISORY_LOCK_CLASS, title.lower())
+    _lookup_sql, lookup_params = executed[2]
+    assert lookup_params == (title.lower(),)
+    _insert_sql, insert_params = executed[3]
+    assert insert_params == (title, title.lower(), None)
+
+
+async def test_admitting_a_store_title_with_no_name_left_after_normalization_is_refused():
+    repo = CatalogRepository(FakePool())
+
+    with pytest.raises(ValueError):
+        await repo.admit_store_game(concept_id=str(uuid.uuid4().int)[:6], name="™")
+
+
+async def test_backfill_keys_a_store_product_the_way_a_library_refresh_would():
+    title = f"Ghost of {uuid.uuid4().hex}"
+    product = StoreProduct(
+        product_id="P1",
+        name=f"{title}™",
+        platforms=("PS4",),
+        np_title_id="CUSA00207_00",
+        cover_image_url=None,
+        classification="Full Game",
+    )
+    pool = FakePool(fetchone_results=[None, ("game-1",)])
+    repo = CatalogRepository(pool)
+
+    await repo.backfill_store_products([product])
+
+    executed = pool.connections[0].executed
+    _lookup_sql, lookup_params = executed[0]
+    assert lookup_params == (title.lower(),)
+    insert_sql, insert_params = executed[1]
+    assert "INSERT INTO games" in insert_sql
+    assert insert_params == (title, title.lower())
+
+
 async def test_admitting_a_store_title_leaves_rawg_attempted_at_unset():
     """``rawg_attempted_at IS NULL`` is what ``EnrichmentRunProcessor`` unions into its candidate set via
     ``GetGameIdsNeverAskedOfRawgAsync``; stamping it here would strand the game unenriched forever."""

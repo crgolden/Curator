@@ -749,38 +749,19 @@ class CollectionsRepository:
     ) -> list[RawCandidateRow]:
         """Return a user's library, joined with enrichment and the latest measured size (if any).
 
-        Games the user has explicitly excluded (``library_exclusions``), games they can no longer play
-        (``is_active = false``), games already installed on another of their consoles (when asked), and
-        -- when asked -- games below a trophy-completion floor are filtered out here, so every collection
-        strategy inherits all four without having to re-apply them. This is the single chokepoint every
-        candidate pool flows through.
-
-        :param include_non_games: Keep entries whose ``games.content_kind`` says they are not games. A
-            ``capacity_fill`` asks for them because a media app occupies real console storage; a
-            ``filter_list`` leaves them out.
-
-        Row order is deterministic (``ORDER BY g.canonical_title, g.game_id``) so that a caller sorting
-        this list by a tied score (``curator.collections.sort_order``'s ``"composite_desc"``, matching
-        the legacy PS4 Criterion/Blockbuster rule's stable-order tie-break) gets the same result every run
-        -- Python's ``sorted()`` is stable, but only as good as the order it starts from, and without this
-        an unordered ``SELECT`` leaves ties at the mercy of Postgres's arbitrary row order.
+        Rows hidden in ``library_exclusions`` are never returned. Row order is
+        ``canonical_title`` then ``game_id``, which callers sorting by a tied score depend on
+        (``AGENTS/REPOS/Curator.md`` § Collections).
 
         :param platform: If given, only games the user owns on that platform, read from
-            ``library_entry_platforms`` (``0032_platforms.sql``) rather than from ``library_entries``'
-            ``native_ps5``/``ps4_eligible`` pair -- two booleans cannot express the seven platforms
-            ``platforms`` carries, and a PS3/Vita/PSP console filtering on the pair matched everything.
-            The measured-size lookup narrows to the same platform for the same reason: a game owned on
-            both PS4 and PS5 has two ``game_measured_sizes`` rows, and the pair-derived ``CASE`` always
-            picked the PS5 one.
-        :param include_inactive: Draw on lapsed entitlements too. Off by default, so a collection is
-            built from what its owner can actually launch unless they ask otherwise.
+            ``library_entry_platforms``. The measured-size lookup narrows to the same platform, so a game
+            owned on both PS4 and PS5 reports the size for the platform asked about.
+        :param include_inactive: Include entries whose entitlement has lapsed. Off by default.
         :param min_percent_completed: Minimum stored trophy completion to include, or ``None`` for no
-            floor. Expressible as SQL only because ``0015_library_entries_trophy_progress.sql`` persists
-            the percentage, so a narrow collection spec does not cost a full-library PSN resolution.
-        :param exclude_installed_on: Console ids whose currently-installed games should be excluded.
-            Scoped to ``identity_sub``'s own consoles regardless of what's passed in -- an id that isn't
-            this caller's own is silently ignored rather than trusted, since ``console_installs`` itself
-            carries no ``identity_sub`` to check against directly.
+            floor. Read from the stored percentage; no PSN call.
+        :param exclude_installed_on: Console ids whose currently-installed games should be excluded. An
+            id that is not one of ``identity_sub``'s own consoles is ignored rather than honoured.
+        :param include_non_games: Keep entries whose ``games.content_kind`` says they are not games.
         """
         size_platform_sql = "CASE WHEN le.native_ps5 THEN 'PS5' ELSE 'PS4' END"
         params: list[Any] = []
@@ -855,7 +836,7 @@ class CollectionsRepository:
                 measured_size_gb=row[9],
                 np_communication_id=row[10],
                 percent_completed=row[11],
-                download_size_bytes=row[12] if len(row) > 12 else None,
+                download_size_bytes=row[12],
             )
             for row in rows
         ]

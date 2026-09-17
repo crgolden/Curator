@@ -9,7 +9,7 @@ from collections.abc import AsyncIterator, Iterable, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 
 from psycopg import AsyncCursor
 from psycopg.types.json import Jsonb
@@ -24,13 +24,18 @@ both runtimes; only this runtime takes the lock."""
 
 PS_PLUS_REWARD_MEMBERSHIP_TYPE = "PS_PLUS"
 
-WALK_STOPPED_REASONS = (
+PsPlusTier = Literal["extra", "premium"]
+"""``ps_plus_catalog_categories.tier``'s CHECK constraint (``0058``) as a type."""
+
+WalkStoppedReason = Literal[
     "query_rotated",
     "filter_not_applied",
     "no_products",
     "page_budget_exhausted",
     "category_renamed",
-)
+]
+"""``ps_plus_catalog_walks.stopped_reason``'s CHECK constraint (``0058``) as a type; ``None`` means the
+walk did not stop early."""
 
 _MEMBERSHIP_COLUMNS = """
        m.title_id, c.tier, m.store_product_id, m.raw, {since_column} AS since_at,
@@ -136,7 +141,7 @@ class PsPlusCategory:
     """One walked storefront category."""
 
     category_id: str
-    tier: str
+    tier: PsPlusTier
     locale: str
     reporting_name_prefix: str
 
@@ -149,7 +154,7 @@ class PsPlusCategoryState:
     """
 
     category_id: str
-    tier: str
+    tier: PsPlusTier
     walked_at: datetime | None
     total: int
     previous_completed_at: datetime | None
@@ -169,7 +174,7 @@ class PsPlusTitle:
     title_id: str
     game_id: str | None
     title: str | None
-    tier: str | None
+    tier: PsPlusTier | None
     platforms: tuple[str, ...]
     cover_image_url: str | None
     store_product_id: str | None
@@ -288,7 +293,9 @@ class PsPlusWalkWriter:
         )
         return self._cursor.rowcount
 
-    async def stop(self, walk_id: str, reason: str, reported_total: int | None, distinct_products: int) -> None:
+    async def stop(
+        self, walk_id: str, reason: WalkStoppedReason, reported_total: int | None, distinct_products: int
+    ) -> None:
         """Record why the walk stopped short. ``completed_at`` stays NULL, so no departure is ever derived."""
         await self._cursor.execute(
             """

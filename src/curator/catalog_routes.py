@@ -7,9 +7,10 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel
 
 from curator.catalog.content_kind import EVERY_KIND, ContentKind
+from curator.catalog.ps_plus_repository import PsPlusTier, WalkStoppedReason
 from curator.catalog.ps_plus_walk_service import PsPlusWalkService
 from curator.catalog.repository import CatalogPrice, CatalogRepository, CatalogSortField, GameSummary
-from curator.catalog.store_backfill_service import StoreBackfillService
+from curator.catalog.store_backfill_service import BackfillStoppedReason, StoreBackfillService
 from curator.deps import optional_bearer, require_admin
 from curator.psn.store_client import PRODUCT_GENRES_FACET, PS4_GAMES_CATEGORY_ID, StoreCatalogClient
 from curator.token_validation import TokenClaims
@@ -151,7 +152,7 @@ class CategoryBackfillResult(BaseModel):
     products_seen: int
     games_created: int
     covers_cached: int
-    stopped_reason: str | None
+    stopped_reason: BackfillStoppedReason | None
 
 
 class CatalogBackfillResponse(BaseModel):
@@ -189,13 +190,13 @@ class PsPlusCategoryWalkResult(BaseModel):
     """
 
     category_id: str
-    tier: str
+    tier: PsPlusTier
     walk_id: str
     pages_read: int
     distinct_products: int
     reported_total: int | None
     coverage_shortfall: int
-    stopped_reason: str | None
+    stopped_reason: WalkStoppedReason | None
     completed: bool
 
 
@@ -384,7 +385,7 @@ async def backfill_catalog(
         being told only that the whole request failed. 503, if ``app.state.store_backfill_service`` is
         absent -- ``create_app`` always constructs one, so no deployment reaches that arm.
     """
-    backfill_service: StoreBackfillService | None = request.app.state.store_backfill_service
+    backfill_service: StoreBackfillService | None = getattr(request.app.state, "store_backfill_service", None)
     if backfill_service is None:
         raise HTTPException(status_code=503, detail="PlayStation Store backfill service is not configured.")
 

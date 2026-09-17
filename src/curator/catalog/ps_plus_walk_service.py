@@ -14,15 +14,15 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Protocol
 
-from curator.catalog.ps_plus_repository import PsPlusCategory, PsPlusWalkWriter
+from curator.catalog.ps_plus_repository import PsPlusCategory, PsPlusTier, PsPlusWalkWriter, WalkStoppedReason
 from curator.catalog.store_backfill_service import DEFAULT_PAGE_DELAY_SECONDS, PAGE_SIZE, next_page_offset
 from curator.psn.store_client import StoreCatalogClient, StoreFilterIgnoredError, StoreQueryRotatedError
 
-CATEGORY_RENAMED = "category_renamed"
-QUERY_ROTATED = "query_rotated"
-FILTER_NOT_APPLIED = "filter_not_applied"
-NO_PRODUCTS = "no_products"
-PAGE_BUDGET_EXHAUSTED = "page_budget_exhausted"
+CATEGORY_RENAMED: WalkStoppedReason = "category_renamed"
+QUERY_ROTATED: WalkStoppedReason = "query_rotated"
+FILTER_NOT_APPLIED: WalkStoppedReason = "filter_not_applied"
+NO_PRODUCTS: WalkStoppedReason = "no_products"
+PAGE_BUDGET_EXHAUSTED: WalkStoppedReason = "page_budget_exhausted"
 
 
 class PsPlusWalkStore(Protocol):
@@ -42,12 +42,12 @@ class PsPlusWalkProgress:
     """
 
     category_id: str
-    tier: str
+    tier: PsPlusTier
     walk_id: str
     pages_read: int
     distinct_products: int
     reported_total: int | None
-    stopped_reason: str | None
+    stopped_reason: WalkStoppedReason | None
     completed: bool
 
     @property
@@ -120,16 +120,35 @@ class PsPlusWalkService:
                 page = await self._client.category_page(category.category_id, offset=offset, size=PAGE_SIZE)
             except StoreQueryRotatedError:
                 await writer.stop(walk_id, QUERY_ROTATED, reported_total, len(seen_product_ids))
-                return self._progress(category, walk_id, pages_read, seen_product_ids, reported_total, QUERY_ROTATED)
+                return self._progress(
+                    category,
+                    walk_id,
+                    pages_read=pages_read,
+                    seen_product_ids=seen_product_ids,
+                    reported_total=reported_total,
+                    stopped_reason=QUERY_ROTATED,
+                )
             except StoreFilterIgnoredError:
                 await writer.stop(walk_id, FILTER_NOT_APPLIED, reported_total, len(seen_product_ids))
                 return self._progress(
-                    category, walk_id, pages_read, seen_product_ids, reported_total, FILTER_NOT_APPLIED
+                    category,
+                    walk_id,
+                    pages_read=pages_read,
+                    seen_product_ids=seen_product_ids,
+                    reported_total=reported_total,
+                    stopped_reason=FILTER_NOT_APPLIED,
                 )
 
             if pages_read == 0 and not _reporting_name_matches(page.reporting_name, category.reporting_name_prefix):
                 await writer.stop(walk_id, CATEGORY_RENAMED, page.total_count, 0)
-                return self._progress(category, walk_id, 1, set(), page.total_count, CATEGORY_RENAMED)
+                return self._progress(
+                    category,
+                    walk_id,
+                    pages_read=pages_read + 1,
+                    seen_product_ids=set(),
+                    reported_total=page.total_count,
+                    stopped_reason=CATEGORY_RENAMED,
+                )
 
             pages_read += 1
             reported_total = page.total_count
@@ -141,11 +160,24 @@ class PsPlusWalkService:
             if page.is_last or not page.products:
                 if not seen_product_ids:
                     await writer.stop(walk_id, NO_PRODUCTS, reported_total, 0)
-                    return self._progress(category, walk_id, pages_read, seen_product_ids, reported_total, NO_PRODUCTS)
+                    return self._progress(
+                        category,
+                        walk_id,
+                        pages_read=pages_read,
+                        seen_product_ids=seen_product_ids,
+                        reported_total=reported_total,
+                        stopped_reason=NO_PRODUCTS,
+                    )
                 completed_at = self._clock()
                 await writer.complete(walk_id, completed_at, reported_total, len(seen_product_ids))
                 progress = self._progress(
-                    category, walk_id, pages_read, seen_product_ids, reported_total, None, completed=True
+                    category,
+                    walk_id,
+                    pages_read=pages_read,
+                    seen_product_ids=seen_product_ids,
+                    reported_total=reported_total,
+                    stopped_reason=None,
+                    completed=True,
                 )
                 if progress.coverage_shortfall == 0:
                     await writer.mark_departures(walk_id, completed_at)
@@ -155,17 +187,24 @@ class PsPlusWalkService:
                 await asyncio.sleep(self._page_delay_seconds)
 
         await writer.stop(walk_id, PAGE_BUDGET_EXHAUSTED, reported_total, len(seen_product_ids))
-        return self._progress(category, walk_id, pages_read, seen_product_ids, reported_total, PAGE_BUDGET_EXHAUSTED)
+        return self._progress(
+            category,
+            walk_id,
+            pages_read=pages_read,
+            seen_product_ids=seen_product_ids,
+            reported_total=reported_total,
+            stopped_reason=PAGE_BUDGET_EXHAUSTED,
+        )
 
     @staticmethod
     def _progress(
         category: PsPlusCategory,
         walk_id: str,
+        *,
         pages_read: int,
         seen_product_ids: set[str],
         reported_total: int | None,
-        stopped_reason: str | None,
-        *,
+        stopped_reason: WalkStoppedReason | None,
         completed: bool = False,
     ) -> PsPlusWalkProgress:
         return PsPlusWalkProgress(

@@ -409,6 +409,14 @@ def test_genre_drift_returns_503_when_the_store_client_is_not_configured():
     assert client.get("/catalog/genres/drift", headers=_bearer("admin-token")).status_code == 503
 
 
+def test_genre_drift_returns_503_when_the_store_client_was_never_set():
+    client, validator = _build()
+    del client.app.state.store_catalog_client
+    validator.register("admin-token", _claims(is_admin=True))
+
+    assert client.get("/catalog/genres/drift", headers=_bearer("admin-token")).status_code == 503
+
+
 def test_backfill_still_requires_admin_now_that_browsing_is_anonymous():
     client, _validator = _build()
 
@@ -586,6 +594,16 @@ def test_backfill_starts_from_zero_when_no_offset_is_given():
 
 def test_backfill_returns_503_when_the_store_client_is_not_configured():
     client, validator = _build(backfill_service=None, omit_backfill_service=True)
+    validator.register("admin-token", _claims(is_admin=True))
+
+    response = client.post("/catalog/backfill", json={"category_ids": ["cat-1"]}, headers=_bearer("admin-token"))
+
+    assert response.status_code == 503
+
+
+def test_backfill_returns_503_when_the_service_was_never_set():
+    client, validator = _build()
+    del client.app.state.store_backfill_service
     validator.register("admin-token", _claims(is_admin=True))
 
     response = client.post("/catalog/backfill", json={"category_ids": ["cat-1"]}, headers=_bearer("admin-token"))
@@ -802,6 +820,26 @@ def test_the_ps_plus_walk_reports_the_coverage_shortfall_that_decides_departures
     assert [row["coverage_shortfall"] for row in body["categories"]] == [0, 4]
     assert body["categories"][1]["tier"] == "premium"
     assert service.calls == [3]
+
+
+def test_the_ps_plus_walk_returns_503_when_the_walk_service_is_not_configured():
+    client, validator = _build()
+    client.app.state.ps_plus_walk_service = None
+    validator.register("admin-token", _claims(is_admin=True))
+
+    response = client.post("/catalog/ps-plus/walk", json={}, headers=_bearer("admin-token"))
+
+    assert response.status_code == 503
+
+
+def test_the_ps_plus_walk_returns_503_when_the_walk_service_was_never_set():
+    client, validator = _build()
+    del client.app.state.ps_plus_walk_service
+    validator.register("admin-token", _claims(is_admin=True))
+
+    response = client.post("/catalog/ps-plus/walk", json={}, headers=_bearer("admin-token"))
+
+    assert response.status_code == 503
 
 
 def test_the_ps_plus_walk_reports_a_renamed_category_as_stopped():

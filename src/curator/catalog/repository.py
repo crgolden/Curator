@@ -15,6 +15,7 @@ from psycopg_pool import AsyncConnectionPool
 
 from curator.catalog.content_kind import BROWSABLE_KIND_SQL, CONTENT_KINDS, EVERY_KIND, GAME_KIND, ContentKind
 from curator.catalog.cover_art import SQUARE_COVER_ART_SQL
+from curator.catalog.title_normalization import normalize_name, normalized_title
 from curator.psn.store_client import StoreProduct
 from curator.scoring.size_estimation_service import SizeEstimate
 
@@ -472,16 +473,17 @@ class CatalogRepository:
         covers_cached = 0
         async with self._pool.connection() as conn, conn.cursor() as cur:
             for product in products:
-                if product.name is None:
+                canonical_title = normalize_name(product.name)
+                if canonical_title is None:
                     continue
 
-                normalized_title = product.name.lower()
-                await cur.execute("SELECT game_id FROM games WHERE normalized_title = %s", (normalized_title,))
+                key = normalized_title(canonical_title)
+                await cur.execute("SELECT game_id FROM games WHERE normalized_title = %s", (key,))
                 row = await cur.fetchone()
                 if row is None:
                     await cur.execute(
                         "INSERT INTO games (canonical_title, normalized_title) VALUES (%s, %s) RETURNING game_id",
-                        (product.name, normalized_title),
+                        (canonical_title, key),
                     )
                     row = await cur.fetchone()
                     assert row is not None
@@ -630,11 +632,14 @@ class CatalogRepository:
         :returns: ``(game_id, created)`` -- ``created`` distinguishes a newly admitted game from one the
             catalog already held.
         """
-        normalized_title = name.strip().lower()
+        canonical_title = normalize_name(name)
+        if canonical_title is None:
+            raise ValueError("A store title must carry a name.")
+        key = normalized_title(canonical_title)
         async with self._pool.connection() as conn, conn.transaction(), conn.cursor() as cur:
             await cur.execute(
                 "SELECT pg_advisory_xact_lock(%s, hashtext(%s))",
-                (GAME_UPSERT_ADVISORY_LOCK_CLASS, normalized_title),
+                (GAME_UPSERT_ADVISORY_LOCK_CLASS, key),
             )
 
             await cur.execute("SELECT game_id FROM game_concepts WHERE concept_id = %s", (concept_id,))
@@ -642,7 +647,7 @@ class CatalogRepository:
             if row is not None:
                 return str(row[0]), False
 
-            await cur.execute("SELECT game_id FROM games WHERE normalized_title = %s", (normalized_title,))
+            await cur.execute("SELECT game_id FROM games WHERE normalized_title = %s", (key,))
             row = await cur.fetchone()
             created = row is None
             if row is None:
@@ -652,7 +657,7 @@ class CatalogRepository:
                     VALUES (%s, %s, %s)
                     RETURNING game_id
                     """,
-                    (name.strip(), normalized_title, cover_image_url),
+                    (canonical_title, key, cover_image_url),
                 )
                 row = await cur.fetchone()
                 assert row is not None
