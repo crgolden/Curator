@@ -1017,7 +1017,11 @@ def test_get_library_genres_empty_for_user_with_no_enriched_genres():
 
 def test_get_library_percent_completed_comes_from_the_stored_column():
     games = [FakeLibraryGameView("game-1", "Game A", percent_completed=50)]
-    client, validator, _publisher = _build(library_repository=FakeLibraryRepository({"sub-a": games}))
+    repository = FakeRepository()
+    _seed_link(repository, TokenCrypto(TokenCrypto.generate_key()), "sub-a", harvest_trophies=True)
+    client, validator, _publisher = _build(
+        library_repository=FakeLibraryRepository({"sub-a": games}, has_trophy_progress=True), repository=repository
+    )
     validator.register("token-a", _claims(sub="sub-a"))
 
     response = client.get("/library", headers=_bearer("token-a"))
@@ -1068,7 +1072,7 @@ def test_get_library_never_calls_psn_to_resolve_completion():
     factory = FakeTrophyClientFactory()
     factory.linked["sub-a"] = FakeTrophyClient()
     client, validator, _publisher = _build(
-        library_repository=FakeLibraryRepository({"sub-a": games}),
+        library_repository=FakeLibraryRepository({"sub-a": games}, has_trophy_progress=True),
         repository=repository,
         trophy_client_factory=factory,
     )

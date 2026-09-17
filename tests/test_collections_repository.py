@@ -106,6 +106,7 @@ async def test_list_candidates_no_platform_filter():
                     None,
                     "NPWR12345_00",
                     63,
+                    None,
                 )
             ]
         ]
@@ -119,6 +120,7 @@ async def test_list_candidates_no_platform_filter():
     assert candidates[0].critical_score == 90.0
     assert candidates[0].np_communication_id == "NPWR12345_00"
     assert candidates[0].percent_completed == 63
+    assert candidates[0].download_size_bytes is None
     conn = pool.connections[0]
     sql, params = conn.executed[0]
     assert "library_entry_platforms" not in sql
