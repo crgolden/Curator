@@ -107,3 +107,7 @@ def new_price_cents() -> int:
 
 def new_positive_count(ceiling: int = 500) -> int:
     return random.randint(1, ceiling)
+
+
+def new_percent_completed() -> int:
+    return random.randint(1, 99)

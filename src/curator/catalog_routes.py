@@ -12,6 +12,7 @@ from curator.catalog.ps_plus_walk_service import PsPlusWalkService
 from curator.catalog.repository import CatalogPrice, CatalogRepository, CatalogSortField, GameSummary
 from curator.catalog.store_backfill_service import BackfillStoppedReason, StoreBackfillService
 from curator.deps import optional_bearer, require_admin
+from curator.persistence.repository import Repository
 from curator.psn.store_client import PRODUCT_GENRES_FACET, PS4_GAMES_CATEGORY_ID, StoreCatalogClient
 from curator.token_validation import TokenClaims
 
@@ -267,16 +268,25 @@ async def list_games(
 async def get_game(
     request: Request, game_id: str, claims: Annotated[TokenClaims | None, Depends(optional_bearer)]
 ) -> GameSummaryResponse:
-    """Read one catalogued game, including the caller's own trophy progress when they are signed in.
+    """Read one catalogued game, including the caller's own trophy progress when they are signed in and
+    harvesting trophies.
 
     :raises fastapi.HTTPException: 404, if no game has that id.
     """
     repository: CatalogRepository = request.app.state.catalog_repository
-    game = await repository.get_game(game_id, claims.sub if claims else None)
+    game = await repository.get_game(game_id, await _trophy_harvesting_sub(request, claims))
     if game is None:
         raise HTTPException(status_code=404, detail="No such game.")
 
     return to_game_summary_response(game)
+
+
+async def _trophy_harvesting_sub(request: Request, claims: TokenClaims | None) -> str | None:
+    if claims is None:
+        return None
+    repository: Repository = request.app.state.repository
+    link = await repository.get_link(claims.sub)
+    return claims.sub if link is not None and link.harvest_trophies else None
 
 
 @router.get("/games/{game_id}/collections")

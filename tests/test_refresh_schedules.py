@@ -210,6 +210,42 @@ def test_put_schedule_replaces_an_existing_one_and_publishes_again():
     assert len(publisher.scheduled_calls) == 2
 
 
+def test_put_schedule_with_the_same_cadence_keeps_the_next_run_and_publishes_nothing_new():
+    client, schedules, publisher = _build(linked=True)
+    client.put("/me/refresh-schedule", json={"cadence": "weekly"}, headers=_bearer("valid-token"))
+    first_next_run_at = schedules.schedules[SUB].next_run_at
+
+    response = client.put(
+        "/me/refresh-schedule", json={"cadence": "weekly", "ps_plus_watch": True}, headers=_bearer("valid-token")
+    )
+
+    assert response.status_code == 200
+    assert schedules.schedules[SUB].ps_plus_watch is True
+    assert schedules.schedules[SUB].next_run_at == first_next_run_at
+    assert len(publisher.scheduled_calls) == 1
+
+
+def test_put_schedule_on_a_paused_chain_restarts_it_from_now_even_with_the_same_cadence():
+    schedules = FakeRefreshSchedulesRepository()
+    stale_next_run_at = _NOW - timedelta(days=3)
+    schedules.schedules[SUB] = RefreshSchedule(
+        identity_sub=SUB,
+        cadence="weekly",
+        ps_plus_watch=False,
+        next_run_at=stale_next_run_at,
+        last_run_at=None,
+        consecutive_failures=3,
+        paused_reason="too_many_failures",
+    )
+    client, schedules, publisher = _build(linked=True, schedules=schedules)
+
+    response = client.put("/me/refresh-schedule", json={"cadence": "weekly"}, headers=_bearer("valid-token"))
+
+    assert response.status_code == 200
+    assert schedules.schedules[SUB].next_run_at > datetime.now(timezone.utc)
+    assert len(publisher.scheduled_calls) == 1
+
+
 def test_delete_schedule_removes_it():
     client, schedules, _ = _build(linked=True)
     client.put("/me/refresh-schedule", json={"cadence": "weekly"}, headers=_bearer("valid-token"))

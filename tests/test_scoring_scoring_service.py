@@ -36,41 +36,37 @@ def test_psn_normalization_bounds():
 
 
 def test_composite_85_plus_gives_three_pts():
-    assert rank_score(85, None, None) == 3
-    assert rank_score(100, None, None) == 3
+    assert rank_score(85, None, is_free_to_play=False) == 3
+    assert rank_score(100, None, is_free_to_play=False) == 3
 
 
 def test_composite_75_to_84_gives_one_pt():
-    assert rank_score(75, None, None) == 1
-    assert rank_score(84, None, None) == 1
+    assert rank_score(75, None, is_free_to_play=False) == 1
+    assert rank_score(84, None, is_free_to_play=False) == 1
 
 
 def test_composite_below_75_gives_zero_pts():
-    assert rank_score(74, None, None) == 0
-    assert rank_score(0, None, None) == 0
+    assert rank_score(74, None, is_free_to_play=False) == 0
+    assert rank_score(0, None, is_free_to_play=False) == 0
 
 
 def test_no_composite_gives_zero_pts():
-    assert rank_score(None, None, None) == 0
+    assert rank_score(None, None, is_free_to_play=False) == 0
 
 
 def test_franchise_adds_one_pt():
-    assert rank_score(80, None, "God of War") == 2
+    assert rank_score(80, "God of War", is_free_to_play=False) == 2
 
 
-def test_f2p_subtracts_three_pts():
-    penalized = HIGH_COMPOSITE_POINTS - F2P_PENALTY_POINTS
-    assert rank_score(85, "free to play", None) == penalized
-    assert rank_score(85, "live-service", None) == penalized
-    assert rank_score(85, "free-to-play", None) == penalized
+def test_a_free_game_loses_the_penalty_points():
+    assert rank_score(85, None, is_free_to_play=True) == HIGH_COMPOSITE_POINTS - F2P_PENALTY_POINTS
 
 
-def test_f2p_with_high_score_and_franchise():
-    assert rank_score(85, "free to play", "Overwatch") == (
+def test_a_free_game_with_high_score_and_franchise():
+    assert rank_score(85, "Overwatch", is_free_to_play=True) == (
         HIGH_COMPOSITE_POINTS + FRANCHISE_POINTS - F2P_PENALTY_POINTS
     )
 
 
-def test_no_multiplayer_not_penalized():
-    assert rank_score(85, "", None) == 3
-    assert rank_score(85, None, None) == 3
+def test_a_paid_game_is_not_penalized_whatever_its_monetisation():
+    assert rank_score(85, None, is_free_to_play=False) == HIGH_COMPOSITE_POINTS

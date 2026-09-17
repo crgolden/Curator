@@ -176,6 +176,18 @@ def seeded_user_and_game(db_connection):
     return user_sub, game_id
 
 
+def test_two_games_cannot_share_a_normalized_title(db_connection, seeded_user_and_game):
+    _user_sub, game_id = seeded_user_and_game
+    with db_connection.cursor() as cur:
+        cur.execute("SELECT normalized_title FROM games WHERE game_id = %s", (game_id,))
+        (taken_key,) = cur.fetchone()
+    with pytest.raises(psycopg_errors.UniqueViolation), db_connection.cursor() as cur:
+        cur.execute(
+            "INSERT INTO games (game_id, canonical_title, normalized_title) VALUES (%s, %s, %s)",
+            (str(uuid.uuid4()), taken_key.upper(), taken_key),
+        )
+
+
 def test_migration_creates_all_expected_tables(db_connection):
     with db_connection.cursor() as cur:
         cur.execute("SELECT table_name FROM information_schema.tables WHERE table_schema = 'public'")

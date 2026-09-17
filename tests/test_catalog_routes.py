@@ -23,12 +23,21 @@ from curator.catalog.store_backfill_service import BackfillProgress, BackfillSum
 from curator.persistence.crypto import TokenCrypto
 from curator.psn.store_client import StoreCatalogClient
 from test_catalog_repository import FakePool
-from test_routes import FakeAgentFactory, FakeRepository, FakeTokenValidator, _bearer, _claims, _make_settings
+from test_routes import (
+    FakeAgentFactory,
+    FakeRepository,
+    FakeTokenValidator,
+    _bearer,
+    _claims,
+    _make_settings,
+    _seed_link,
+)
 from test_values import (
     new_category_id,
     new_definition_id,
     new_game_id,
     new_game_title,
+    new_percent_completed,
     new_price_cents,
     new_share_slug,
     new_utc_instant,
@@ -137,8 +146,9 @@ def _build(
     omit_backfill_service=False,
     store_client=None,
     omit_store_client=False,
+    repository=None,
 ):
-    repository = FakeRepository()
+    repository = repository if repository is not None else FakeRepository()
     token_crypto = TokenCrypto(TokenCrypto.generate_key())
     validator = FakeTokenValidator()
     app = create_app(
@@ -525,7 +535,8 @@ def test_an_anonymous_visitor_gets_no_trophy_progress_on_a_game_page():
     assert catalog_repository.get_game_calls == [("g1", None)]
 
 
-def test_a_signed_in_caller_gets_their_own_trophy_progress_on_a_game_page():
+def test_a_signed_in_caller_harvesting_trophies_gets_their_own_progress_on_a_game_page():
+    stored_percent = new_percent_completed()
     catalog_repository = FakeCatalogRepository(
         [
             GameSummary(
@@ -534,19 +545,46 @@ def test_a_signed_in_caller_gets_their_own_trophy_progress_on_a_game_page():
                 franchise=None,
                 genre="RPG",
                 aaa_tier="AAA",
-                percent_completed=64,
+                percent_completed=stored_percent,
             )
         ]
     )
-    client, validator = _build(catalog_repository)
+    repository = FakeRepository()
     claims = _claims()
+    _seed_link(repository, TokenCrypto(TokenCrypto.generate_key()), claims.sub, harvest_trophies=True)
+    client, validator = _build(catalog_repository, repository=repository)
     validator.register("token-a", claims)
 
     response = client.get("/catalog/games/g1", headers=_bearer("token-a"))
 
     assert response.status_code == 200
-    assert response.json()["percent_completed"] == 64
+    assert response.json()["percent_completed"] == stored_percent
     assert catalog_repository.get_game_calls == [("g1", claims.sub)]
+
+
+def test_a_signed_in_caller_with_trophy_harvesting_off_is_served_a_game_page_without_progress():
+    catalog_repository = FakeCatalogRepository(
+        [
+            GameSummary(
+                game_id="g1",
+                canonical_title="Bloodborne",
+                franchise=None,
+                genre="RPG",
+                aaa_tier="AAA",
+                percent_completed=new_percent_completed(),
+            )
+        ]
+    )
+    repository = FakeRepository()
+    claims = _claims()
+    _seed_link(repository, TokenCrypto(TokenCrypto.generate_key()), claims.sub, harvest_trophies=False)
+    client, validator = _build(catalog_repository, repository=repository)
+    validator.register("token-a", claims)
+
+    response = client.get("/catalog/games/g1", headers=_bearer("token-a"))
+
+    assert response.status_code == 200
+    assert catalog_repository.get_game_calls == [("g1", None)]
 
 
 def test_a_game_page_rejects_a_supplied_token_that_is_invalid_rather_than_serving_it_anonymously():

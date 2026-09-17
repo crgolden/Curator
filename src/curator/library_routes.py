@@ -569,6 +569,7 @@ async def get_library(
     games, total = await library_repository.list_entries_with_enrichment(
         claims.sub, search=q, genre=genre, sort=sort, sort_dir=sort_dir, limit=limit, offset=offset, hidden=hidden
     )
+    trophy_progress = await _trophy_progress(request, claims.sub)
     return LibraryPageResponse(
         games=[
             LibraryGameResponse(
@@ -583,7 +584,7 @@ async def get_library(
                 opencritic_enriched=game.opencritic_enriched,
                 psn_enriched=game.psn_enriched,
                 is_active=game.is_active,
-                percent_completed=game.percent_completed,
+                percent_completed=game.percent_completed if trophy_progress.state == "on" else None,
                 source=game.source,
                 cover_image_url=game.cover_image_url,
                 platforms=list(game.platforms),
@@ -592,7 +593,7 @@ async def get_library(
             for game in games
         ],
         total=total,
-        trophy_progress=await _trophy_progress(request, claims.sub),
+        trophy_progress=trophy_progress,
         hidden_count=await library_repository.count_hidden(claims.sub),
     )
 

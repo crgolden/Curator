@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import uuid
 from datetime import datetime, timedelta, timezone
 
 from fastapi.testclient import TestClient
@@ -660,6 +661,36 @@ def test_get_library_reports_trophy_progress_off_when_harvesting_is_disabled():
     body = client.get("/library", headers=_bearer("token-a")).json()
 
     assert body["trophy_progress"] == {"state": "off", "reason": "harvest_off"}
+
+
+def test_get_library_withholds_a_stored_percentage_while_harvesting_is_off():
+    repository = FakeRepository()
+    _seed_link(repository, TokenCrypto(TokenCrypto.generate_key()), "sub-a", harvest_trophies=False)
+    stored_percent = uuid.uuid4().int % 99 + 1
+    games = {"sub-a": [FakeLibraryGameView("g1", "Abzu", percent_completed=stored_percent)]}
+    client, validator, _publisher = _build(library_repository=FakeLibraryRepository(games), repository=repository)
+    validator.register("token-a", _claims(sub="sub-a"))
+
+    body = client.get("/library", headers=_bearer("token-a")).json()
+
+    assert body["trophy_progress"]["state"] == "off"
+    assert body["games"][0]["percent_completed"] is None
+
+
+def test_get_library_serves_a_stored_percentage_while_harvesting_is_on():
+    repository = FakeRepository()
+    _seed_link(repository, TokenCrypto(TokenCrypto.generate_key()), "sub-a", harvest_trophies=True)
+    stored_percent = uuid.uuid4().int % 99 + 1
+    games = {"sub-a": [FakeLibraryGameView("g1", "Abzu", percent_completed=stored_percent)]}
+    client, validator, _publisher = _build(
+        library_repository=FakeLibraryRepository(games, has_trophy_progress=True), repository=repository
+    )
+    validator.register("token-a", _claims(sub="sub-a"))
+
+    body = client.get("/library", headers=_bearer("token-a")).json()
+
+    assert body["trophy_progress"]["state"] == "on"
+    assert body["games"][0]["percent_completed"] == stored_percent
 
 
 def test_get_library_reports_trophy_progress_pending_until_a_refresh_has_fetched_any():

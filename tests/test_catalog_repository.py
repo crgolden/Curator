@@ -585,7 +585,7 @@ async def test_admitting_a_store_title_keys_it_the_way_a_library_refresh_would()
 async def test_admitting_a_store_title_with_no_name_left_after_normalization_is_refused():
     repo = CatalogRepository(FakePool())
 
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="must carry a name"):
         await repo.admit_store_game(concept_id=str(uuid.uuid4().int)[:6], name="™")
 
 

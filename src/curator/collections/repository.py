@@ -228,7 +228,7 @@ class RawCandidateRow:
     critical_score: float | None
     oc_score: float | None
     psn_rating: float | None
-    is_free_to_play: bool | None
+    is_free_to_play: bool
     measured_size_gb: float | None
     np_communication_id: str | None = None
     percent_completed: int | None = None

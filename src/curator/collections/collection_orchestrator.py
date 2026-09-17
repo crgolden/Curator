@@ -271,8 +271,7 @@ class CollectionOrchestrator:
         percent_completed: int | None = None,
     ) -> GameCandidate:
         comp = composite_score(row.critical_score, row.oc_score, row.psn_rating)
-        multiplayer_text = "free to play" if row.is_free_to_play else ""
-        points = rank_score(comp, multiplayer_text, row.franchise)
+        points = rank_score(comp, row.franchise, is_free_to_play=row.is_free_to_play)
         size_gb, size_source = CollectionOrchestrator._resolve_size(
             row, size_estimates, platform=platform, media_ceiling_gb=media_ceiling_gb
         )

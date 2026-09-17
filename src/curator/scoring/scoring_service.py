@@ -5,8 +5,6 @@ every platform.
 
 from __future__ import annotations
 
-F2P_KEYWORDS = frozenset({"free to play", "f2p", "live service", "live-service", "free-to-play"})
-
 HIGH_COMPOSITE_THRESHOLD = 85.0
 MID_COMPOSITE_THRESHOLD = 75.0
 HIGH_COMPOSITE_POINTS = 3
@@ -31,12 +29,13 @@ def composite_score(
     return sum(scores) / len(scores) if scores else None
 
 
-def rank_score(composite: float | None, multiplayer: str | None, franchise: str | None) -> int:
+def rank_score(composite: float | None, franchise: str | None, *, is_free_to_play: bool) -> int:
     """Score a game for rotation/assignment ranking.
 
     :param composite: The game's :func:`composite_score`.
-    :param multiplayer: The game's multiplayer/live-service descriptor text (checked for F2P keywords).
     :param franchise: The game's assigned franchise; any non-empty value counts.
+    :param is_free_to_play: Whether the storefront prices the game as free; a free game loses
+        ``F2P_PENALTY_POINTS``. A paid live-service game is not penalized.
     :returns: The point total, from the module's ``*_POINTS``/``*_THRESHOLD`` constants.
     """
     points = 0
@@ -50,8 +49,7 @@ def rank_score(composite: float | None, multiplayer: str | None, franchise: str 
     if franchise:
         points += FRANCHISE_POINTS
 
-    multiplayer_lower = (multiplayer or "").lower()
-    if any(keyword in multiplayer_lower for keyword in F2P_KEYWORDS):
+    if is_free_to_play:
         points -= F2P_PENALTY_POINTS
 
     return points

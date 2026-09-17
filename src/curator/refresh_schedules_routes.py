@@ -83,6 +83,9 @@ async def set_refresh_schedule(
 ) -> RefreshScheduleResponse:
     """Create or replace the caller's schedule and publish its first run.
 
+    A healthy schedule saved again with the same cadence keeps its ``next_run_at`` and the message already
+    scheduled for it; only a new cadence, a paused chain or a first opt-in starts the clock from now.
+
     :raises fastapi.HTTPException: 404, if the caller has no PSN link; 503, if no scheduled-refresh queue
         is configured, since a stored schedule nothing will ever act on is worse than a refused one.
     """
@@ -92,6 +95,13 @@ async def set_refresh_schedule(
         raise HTTPException(status_code=503, detail=_NO_QUEUE_DETAIL)
 
     repository: RefreshSchedulesRepository = request.app.state.refresh_schedules_repository
+    current = await repository.get(claims.sub)
+    if current is not None and current.paused_reason is None and current.cadence == body.cadence:
+        schedule = await repository.upsert(
+            claims.sub, cadence=body.cadence, ps_plus_watch=body.ps_plus_watch, next_run_at=current.next_run_at
+        )
+        return _response(schedule)
+
     next_run_at = next_run_after(body.cadence)
     schedule = await repository.upsert(
         claims.sub, cadence=body.cadence, ps_plus_watch=body.ps_plus_watch, next_run_at=next_run_at
