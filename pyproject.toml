@@ -160,6 +160,7 @@ module = [
     "test_schema",
     "test_settings",
     "test_telemetry",
+    "test_title_normalization",
     "test_token_validation",
     "test_values",
 ]
