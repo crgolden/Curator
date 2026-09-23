@@ -823,14 +823,14 @@ develop = ["aiohttp", "anyio", "furo", "httpx", "opentelemetry-api", "openteleme
 
 [[package]]
 name = "elasticsearch"
-version = "9.5.0"
+version = "9.5.1"
 description = "Python client for Elasticsearch"
 optional = false
 python-versions = ">=3.10"
 groups = ["main"]
 files = [
-    {file = "elasticsearch-9.5.0-py3-none-any.whl", hash = "sha256:010e04f44fd161428f0ab7f94b93a533d3dcc3285d02c9df509b4e0127916420"},
-    {file = "elasticsearch-9.5.0.tar.gz", hash = "sha256:c37576ba04d04200a05012db99bc99024000ae15b9ebdd683966aa8a0e6cd1c4"},
+    {file = "elasticsearch-9.5.1-py3-none-any.whl", hash = "sha256:a980d8888ae70c03f0a1db6b2c5e3e39bf4e235abea737f522d2fd1d2d20bb99"},
+    {file = "elasticsearch-9.5.1.tar.gz", hash = "sha256:98210cd96c256dd9936f58e1c762aba94da7db7d38d058bb0fbaf7e4b9567146"},
 ]
 
 [package.dependencies]
@@ -3087,4 +3087,4 @@ dev = ["httpx2", "mypy", "pytest", "pytest-asyncio", "pytest-cov", "pytest-xdist
 [metadata]
 lock-version = "2.1"
 python-versions = ">=3.10,<4.0"
-content-hash = "e7b7590ad87d0d0fa23a456f68938813d6f57849f3f9720b9f7e74a9040e01fa"
+content-hash = "f1fab81cc90d373300fa17298830f2661a3fd9b1ba093cfcd51543a4bc83a14c"
