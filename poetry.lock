@@ -2241,21 +2241,21 @@ files = [
 
 [[package]]
 name = "psycopg-pool"
-version = "3.3.1"
+version = "3.3.3"
 description = "Connection Pool for Psycopg"
 optional = false
 python-versions = ">=3.10"
 groups = ["main"]
 files = [
-    {file = "psycopg_pool-3.3.1-py3-none-any.whl", hash = "sha256:2af5b432941c4c9ad5c87b3fa410aec910ec8f7c122855897983a06c45f2e4b5"},
-    {file = "psycopg_pool-3.3.1.tar.gz", hash = "sha256:b10b10b7a175d5cc1592147dc5b7eec8a9e0834eb3ed2c4a92c858e2f51eb63c"},
+    {file = "psycopg_pool-3.3.3-py3-none-any.whl", hash = "sha256:9b9cd6a4fcec47a410f7e82d408540e7f77b478509e91b44c1a5457a13e5ff37"},
+    {file = "psycopg_pool-3.3.3.tar.gz", hash = "sha256:df87b5d9d0ad7db37f6cdad4fa8ce113d250f5997f6db38e9a99192fb67f9e1d"},
 ]
 
 [package.dependencies]
 typing-extensions = ">=4.6"
 
 [package.extras]
-test = ["anyio (>=4.0)", "mypy (>=1.14)", "pproxy (>=2.7)", "pytest (>=6.2.5)", "pytest-cov (>=3.0)", "pytest-randomly (>=3.5)"]
+test = ["anyio (>=4.0)", "mypy (>=2.1.0)", "pproxy (>=2.7)", "pytest (>=6.2.5)", "pytest-cov (>=3.0)", "pytest-randomly (>=3.5)"]
 
 [[package]]
 name = "pycountry"
@@ -3087,4 +3087,4 @@ dev = ["httpx2", "mypy", "pytest", "pytest-asyncio", "pytest-cov", "pytest-xdist
 [metadata]
 lock-version = "2.1"
 python-versions = ">=3.10,<4.0"
-content-hash = "f1fab81cc90d373300fa17298830f2661a3fd9b1ba093cfcd51543a4bc83a14c"
+content-hash = "9239cd10c0f88ae2991005cf7e9115b889777f6214173afdd1e0b93f1562112e"
