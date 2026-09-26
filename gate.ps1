@@ -11,7 +11,7 @@ $gateOutput = Join-Path ([IO.Path]::GetTempPath()) "crgolden-gates\$(Split-Path 
 New-Item -ItemType Directory -Force -Path $gateOutput | Out-Null
 
 Register-GateSteps @('Schema test database configuration', 'poetry check --lock', 'ruff check', 'ruff format --check', 'mypy',
-    'Bearer-list control', 'Run tests with coverage', 'SonarCloud analysis')
+    'Bearer-list control', 'Run tests with coverage', 'SonarCloud analysis', 'Verify deployment package boots')
 $repo = $PSScriptRoot
 $pytestLog = Join-Path $gateOutput 'pytest.txt'
 $sonarBranch = "branch-local-$($env:COMPUTERNAME.ToLowerInvariant())"
@@ -90,5 +90,34 @@ if (-not (Test-StepCarried $sonarStep)) {
     $null = Test-Exit $sonarStep
 }
 
-Write-Row 'Package / Migrate / Deploy' 'NOT RUN' 'delivery jobs, not checks'
+$bootStep = "Verify deployment package boots (the workflow step's exports, no .env)"
+if (-not (Test-StepCarried $bootStep)) {
+    $package = Join-Path $gateOutput 'publish'
+    if (Test-Path -LiteralPath $package) { Remove-Item -LiteralPath $package -Recurse -Force }
+    New-Item -ItemType Directory -Force -Path $package | Out-Null
+    foreach ($item in 'src', 'db', 'pyproject.toml', 'poetry.lock', 'app.py') {
+        Copy-Item -LiteralPath (Join-Path $repo $item) -Destination $package -Recurse
+    }
+    $workflow = [IO.File]::ReadAllText((Join-Path $repo '.github\workflows\main_crgolden-curator.yml'))
+    $exports = [regex]::Matches($workflow, "(?m)^[ \t]*export (\w+)='([^']*)'")
+    if ($exports.Count -eq 0) { Stop-Gate $bootStep 'no export lines found in the workflow boot-check step' }
+    $bootKey = python -c "from curator.persistence.crypto import TokenCrypto; print(TokenCrypto.generate_key().decode())"
+    $boot = [Diagnostics.ProcessStartInfo]::new((Get-Command python).Source)
+    $boot.ArgumentList.Add('-c')
+    $boot.ArgumentList.Add("import app; print('Package boots OK:', app.app)")
+    $boot.WorkingDirectory = $package
+    $boot.UseShellExecute = $false
+    $boot.Environment.Clear()
+    foreach ($name in 'SystemRoot', 'PATH', 'TEMP', 'TMP', 'USERPROFILE', 'LOCALAPPDATA', 'APPDATA') {
+        $boot.Environment[$name] = [Environment]::GetEnvironmentVariable($name)
+    }
+    foreach ($export in $exports) { $boot.Environment[$export.Groups[1].Value] = $export.Groups[2].Value }
+    $boot.Environment['CURATOR_TOKEN_KEY'] = $bootKey
+    $bootProcess = [Diagnostics.Process]::Start($boot)
+    $bootProcess.WaitForExit()
+    if ($bootProcess.ExitCode -ne 0) { Stop-Gate $bootStep "exit $($bootProcess.ExitCode) with $($exports.Count) exported settings" }
+    Write-Row $bootStep 'PASS' "booted with $($exports.Count) exported settings"
+}
+
+Write-Row 'Upload package / Migrate / Deploy' 'NOT RUN' 'delivery jobs, not checks'
 Complete-Gate
