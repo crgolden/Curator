@@ -33,8 +33,14 @@ from typing import Any, Protocol
 
 from curator.persistence.crypto import InvalidToken, TokenCrypto
 from curator.persistence.repository import Repository
+from curator.token_response import (
+    ACCESS_TOKEN_EXPIRES_AT_KEY,
+    ACCESS_TOKEN_KEY,
+    EXPIRES_IN_KEY,
+    REFRESH_TOKEN_EXPIRES_AT_KEY,
+)
 
-_EPHEMERAL_KEYS = frozenset({"access_token", "expires_in", "access_token_expires_at"})
+_EPHEMERAL_KEYS = frozenset({ACCESS_TOKEN_KEY, EXPIRES_IN_KEY, ACCESS_TOKEN_EXPIRES_AT_KEY})
 
 
 class RedisLike(Protocol):
@@ -117,13 +123,13 @@ class DbTokenStore:
             Its ``access_token_expires_at`` / ``refresh_token_expires_at`` keys, when present, hold
             precomputed absolute Unix epoch timestamps.
         """
-        if not isinstance(token_response, dict) or not token_response.get("access_token"):
+        if not isinstance(token_response, dict) or not token_response.get(ACCESS_TOKEN_KEY):
             return
 
         durable = {key: value for key, value in token_response.items() if key not in _EPHEMERAL_KEYS}
         encrypted = self._crypto.encrypt(json.dumps(durable).encode("utf-8"))
-        access_expires = _to_datetime(token_response.get("access_token_expires_at"))
-        refresh_expires = _to_datetime(token_response.get("refresh_token_expires_at"))
+        access_expires = _to_datetime(token_response.get(ACCESS_TOKEN_EXPIRES_AT_KEY))
+        refresh_expires = _to_datetime(token_response.get(REFRESH_TOKEN_EXPIRES_AT_KEY))
 
         await self._repository.upsert_link(
             self._sub,
@@ -145,7 +151,7 @@ class DbTokenStore:
         if self._redis is None:
             return
 
-        expires_at = token_response.get("access_token_expires_at")
+        expires_at = token_response.get(ACCESS_TOKEN_EXPIRES_AT_KEY)
         if expires_at is None:
             return
 

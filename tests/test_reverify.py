@@ -4,11 +4,19 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
+import pytest
+
+from audit_fakes import RecordingAuditRepository
+from curator.audit.repository import ACTION_LINK_REVERIFIED, OUTCOME_COMPLETED, OUTCOME_FAILED, OUTCOME_STARTED
+from curator.deps import CURATOR_SCOPE
 from curator.persistence.crypto import TokenCrypto
 from curator.persistence.repository import LinkRecord
 from curator.psn.errors import PsnAuthError
-from curator.reverify import reverify_link
+from curator.reverify import REVERIFY_AUTH_FAILED, REVERIFY_PSN_UNAVAILABLE, reverify_link
 from curator.token_validation import TokenClaims
+from test_values import new_email_address, new_identity_sub
+
+EMAIL = new_email_address()
 
 
 class FakeRepository:
@@ -84,15 +92,94 @@ async def test_reverify_clears_access_token_only_link_when_expired_access_token_
     crypto = _make_crypto()
     sub = "sub-1"
     _seed_access_token_only_link(repo, crypto, sub)
-    claims = TokenClaims(
-        sub=sub, email="user@example.com", iat=datetime(2026, 2, 1, tzinfo=timezone.utc), scopes=("curator",)
-    )
+    claims = TokenClaims(sub=sub, email=EMAIL, iat=datetime(2026, 2, 1, tzinfo=timezone.utc), scopes=(CURATOR_SCOPE,))
 
     async def agent_factory(sub_arg, npsso=None):
         return FakeAgent(sub_arg, npsso, raise_error=PsnAuthError("no refresh token available"))
 
-    await reverify_link(claims, repository=repo, token_crypto=crypto, agent_factory=agent_factory)
+    recorder = RecordingAuditRepository()
+    await reverify_link(claims, repository=repo, token_crypto=crypto, agent_factory=agent_factory, recorder=recorder)
 
     assert repo.delete_calls == [sub]
     assert sub not in repo.links
     assert repo.touch_verified_calls == []
+    assert [(row.action, row.detail, row.outcome) for row in recorder.rows] == [
+        (ACTION_LINK_REVERIFIED, REVERIFY_AUTH_FAILED, OUTCOME_FAILED)
+    ]
+
+
+def _stale_verification_claims(sub: str) -> TokenClaims:
+    return TokenClaims(sub=sub, email=EMAIL, iat=datetime(2026, 2, 1, tzinfo=timezone.utc), scopes=(CURATOR_SCOPE,))
+
+
+async def test_reverify_records_the_check_before_it_reaches_psn():
+    repo = FakeRepository()
+    crypto = _make_crypto()
+    sub = new_identity_sub()
+    _seed_access_token_only_link(repo, crypto, sub)
+    recorder = RecordingAuditRepository()
+    history_when_psn_was_asked: list[list[tuple[str, str]]] = []
+
+    async def agent_factory(sub_arg, npsso=None):
+        history_when_psn_was_asked.append(recorder.outcomes)
+        return FakeAgent(sub_arg, npsso, email_info=(EMAIL, True))
+
+    await reverify_link(
+        _stale_verification_claims(sub),
+        repository=repo,
+        token_crypto=crypto,
+        agent_factory=agent_factory,
+        recorder=recorder,
+    )
+
+    assert history_when_psn_was_asked == [[(ACTION_LINK_REVERIFIED, OUTCOME_STARTED)]]
+    assert recorder.outcomes == [(ACTION_LINK_REVERIFIED, OUTCOME_COMPLETED)]
+
+
+async def test_reverify_never_asks_psn_when_the_history_row_cannot_be_written():
+    repo = FakeRepository()
+    crypto = _make_crypto()
+    sub = new_identity_sub()
+    _seed_access_token_only_link(repo, crypto, sub)
+    recorder = RecordingAuditRepository()
+    recorder.begin_error = RuntimeError(sub)
+    asked: list[str] = []
+
+    async def agent_factory(sub_arg, npsso=None):
+        asked.append(sub_arg)
+        return FakeAgent(sub_arg, npsso, email_info=(EMAIL, True))
+
+    with pytest.raises(RuntimeError):
+        await reverify_link(
+            _stale_verification_claims(sub),
+            repository=repo,
+            token_crypto=crypto,
+            agent_factory=agent_factory,
+            recorder=recorder,
+        )
+
+    assert asked == []
+
+
+async def test_reverify_records_an_unreachable_psn_as_failed_and_keeps_the_link():
+    repo = FakeRepository()
+    crypto = _make_crypto()
+    sub = new_identity_sub()
+    _seed_access_token_only_link(repo, crypto, sub)
+    recorder = RecordingAuditRepository()
+
+    async def agent_factory(sub_arg, npsso=None):
+        return FakeAgent(sub_arg, npsso, raise_error=ConnectionError(sub_arg))
+
+    await reverify_link(
+        _stale_verification_claims(sub),
+        repository=repo,
+        token_crypto=crypto,
+        agent_factory=agent_factory,
+        recorder=recorder,
+    )
+
+    assert sub in repo.links
+    assert [(row.action, row.detail, row.outcome) for row in recorder.rows] == [
+        (ACTION_LINK_REVERIFIED, REVERIFY_PSN_UNAVAILABLE, OUTCOME_FAILED)
+    ]

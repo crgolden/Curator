@@ -15,11 +15,13 @@ from psycopg_pool import AsyncConnectionPool
 
 from curator.catalog.content_kind import BROWSABLE_KIND_SQL, CONTENT_KINDS, EVERY_KIND, GAME_KIND, ContentKind
 from curator.catalog.cover_art import SQUARE_COVER_ART_SQL
-from curator.catalog.title_normalization import normalize_name, normalized_title
+from curator.catalog.title_normalization import edition_family, normalize_name, normalized_title
 from curator.psn.store_client import StoreProduct
 from curator.scoring.size_estimation_service import SizeEstimate
 
 CatalogSortField = Literal["title", "price"]
+
+GENRE_VOCABULARY_SQL = "SELECT name FROM genres ORDER BY priority"
 
 _CATALOG_SORT_COLUMNS: dict[str, str] = {
     "title": "g.canonical_title",
@@ -161,7 +163,11 @@ to match for the two repos to contend for the same lock."""
 RESOLVE_STORE_IDS_SQL = """
 SELECT candidate.store_id,
        COALESCE(
-           (SELECT gc.game_id FROM game_concepts gc WHERE gc.concept_id = candidate.store_id),
+           (
+               SELECT min(gc.game_id::text)::uuid FROM game_concepts gc
+               WHERE gc.concept_id = candidate.store_id
+               HAVING count(*) = 1
+           ),
            (
                SELECT gc.game_id FROM game_concepts gc
                WHERE gc.product_id = candidate.store_id
@@ -175,14 +181,24 @@ SELECT candidate.store_id,
        ) AS game_id
 FROM unnest(%s::text[]) AS candidate(store_id)
 """
-"""The three id spaces a store hit is resolved through, in order. Parameters: ``(store_ids,)``."""
+"""The three id spaces a store hit is resolved through, in order. Parameters: ``(store_ids,)``. A concept
+that several products share resolves nothing by itself; the hit's product id has to say which one."""
 
 LINK_STORE_CONCEPT_SQL = """
 INSERT INTO game_concepts (concept_id, game_id, product_id)
 VALUES (%s, %s, %s)
-ON CONFLICT (concept_id) DO NOTHING
+ON CONFLICT DO NOTHING
 """
 """Parameters: ``(concept_id, game_id, product_id)``."""
+
+SIBLINGS_UNDER_CONCEPT_SQL = """
+SELECT gc.game_id, g.normalized_title FROM game_concepts gc
+JOIN games g ON g.game_id = gc.game_id
+WHERE gc.concept_id = %s
+"""
+"""Parameters: ``(concept_id,)``. Every product already linked under a concept, with its title key."""
+
+EDITION_KEYWORDS_SQL = "SELECT keyword FROM edition_ranks ORDER BY rank, keyword"
 
 FILL_STORE_COVER_SQL = (
     "UPDATE games SET store_cover_image_url = %s WHERE game_id = %s AND store_cover_image_url IS NULL"
@@ -459,7 +475,7 @@ class CatalogRepository:
         :returns: Every ``genres.name``, ordered by ``genres.priority`` ascending.
         """
         async with self._pool.connection() as conn, conn.cursor() as cur:
-            await cur.execute("SELECT name FROM genres ORDER BY priority")
+            await cur.execute(GENRE_VOCABULARY_SQL)
             rows = await cur.fetchall()
         return [row[0] for row in rows]
 
@@ -478,17 +494,33 @@ class CatalogRepository:
                     continue
 
                 key = normalized_title(canonical_title)
-                await cur.execute("SELECT game_id FROM games WHERE normalized_title = %s", (key,))
-                row = await cur.fetchone()
-                if row is None:
+                async with conn.transaction():
                     await cur.execute(
-                        "INSERT INTO games (canonical_title, normalized_title) VALUES (%s, %s) RETURNING game_id",
-                        (canonical_title, key),
+                        "SELECT pg_advisory_xact_lock(%s, hashtext(%s))",
+                        (GAME_UPSERT_ADVISORY_LOCK_CLASS, key),
                     )
+                    await cur.execute("SELECT game_id FROM games WHERE normalized_title = %s", (key,))
                     row = await cur.fetchone()
-                    assert row is not None
-                    games_created += 1
-                game_id = str(row[0])
+                    if row is None:
+                        await cur.execute(
+                            """
+                            INSERT INTO games (canonical_title, normalized_title, content_kind, store_cover_image_url)
+                            VALUES (%s, %s, %s, %s)
+                            RETURNING game_id
+                            """,
+                            (canonical_title, key, GAME_KIND, product.cover_image_url),
+                        )
+                        row = await cur.fetchone()
+                        assert row is not None
+                        games_created += 1
+                    game_id = str(row[0])
+
+                    if product.cover_image_url is not None:
+                        await cur.execute(FILL_STORE_COVER_SQL, (product.cover_image_url, game_id))
+                    await cur.execute(
+                        "INSERT INTO game_enrichment (game_id) VALUES (%s) ON CONFLICT (game_id) DO NOTHING",
+                        (game_id,),
+                    )
 
                 if product.np_title_id:
                     price = product.price
@@ -551,11 +583,13 @@ class CatalogRepository:
         is as likely to mean "no walk has covered this title" as "the catalog has never seen this game".
 
         Three id spaces are tried in a fixed order, and the order is the evidence. ``game_concepts
-        .concept_id`` is the primary key, is populated for every row, and is what a ``MobileGames`` hit's
-        own id is, so it goes first. ``game_concepts.product_id`` is neither unique nor a safe merge key --
-        ``0001_initial.sql`` records that Sony reuses one product id across genuinely different games --
-        so it is a fallback, ordered to make the pick deterministic rather than arbitrary.
-        ``psn_catalog_cache.store_product_id`` is last because it is the sparsest.
+        .concept_id`` is populated for every row and is what a ``MobileGames`` hit's own id is, so it goes
+        first, but only while the concept maps to exactly one game: a concept shared by several products
+        (a game and its soundtrack app, ``0072``) cannot say which of them the hit is, so it resolves
+        nothing and the product id decides. ``game_concepts.product_id`` is neither unique nor a safe
+        merge key -- ``0001_initial.sql`` records that Sony reuses one product id across genuinely
+        different games -- so it is a fallback, ordered to make the pick deterministic rather than
+        arbitrary. ``psn_catalog_cache.store_product_id`` is last because it is the sparsest.
 
         :param store_ids: Result ids as :class:`~curator.psn.models.GameSearchResult` reports them.
         :returns: ``{store_id: game_id}``, carrying only the ids that resolved.
@@ -599,13 +633,16 @@ class CatalogRepository:
     ) -> tuple[str, bool]:
         """Admit a PlayStation Store title to the shared catalog, and return the game it now maps to.
 
-        Idempotent by concept id first and normalized title second, so two users admitting the same title
-        -- or one user admitting a title a library refresh has already ingested -- converge on one game
-        rather than forking the catalog. The advisory lock covers the read-then-insert on ``games``, which
-        has an index on ``normalized_title`` but no unique constraint; it takes the exact classid+key pair
-        ``Functions``' ``UpsertGameAsync`` takes over the same key (see :data:`GAME_UPSERT_ADVISORY_LOCK_CLASS`
-        on why the classid has to match, not just the key), so the two writers cannot interleave into a
-        duplicate.
+        Idempotent by concept id plus normalized title first and normalized title alone second, so two
+        users admitting the same title -- or one user admitting a title a library refresh has already
+        ingested -- converge on one game rather than forking the catalog, while a differently named
+        product under a concept the catalog already holds (a soundtrack app beside its game) becomes its
+        own game, because a concept is not a product (``0072``). The advisory lock covers the
+        read-then-insert on ``games``, whose ``normalized_title`` index is unique since ``0071``, so an
+        interleaving would surface as a failed insert rather than a duplicate; it takes the exact
+        classid+key pair ``Functions``' ``UpsertGameAsync`` takes over the same key (see
+        :data:`GAME_UPSERT_ADVISORY_LOCK_CLASS` on why the classid has to match, not just the key), so the
+        two writers cannot interleave at all.
 
         ``game_enrichment`` gets a bare row, leaving ``rawg_attempted_at`` NULL. That is the "never
         reached, still eligible" state of the pair ``AGENTS/REPOS/Curator.md`` documents, and
@@ -642,10 +679,31 @@ class CatalogRepository:
                 (GAME_UPSERT_ADVISORY_LOCK_CLASS, key),
             )
 
-            await cur.execute("SELECT game_id FROM game_concepts WHERE concept_id = %s", (concept_id,))
+            await cur.execute(
+                """
+                SELECT gc.game_id FROM game_concepts gc
+                JOIN games g ON g.game_id = gc.game_id
+                WHERE gc.concept_id = %s AND g.normalized_title = %s
+                """,
+                (concept_id, key),
+            )
             row = await cur.fetchone()
             if row is not None:
                 return str(row[0]), False
+
+            await cur.execute(SIBLINGS_UNDER_CONCEPT_SQL, (concept_id,))
+            siblings = await cur.fetchall()
+            if siblings:
+                await cur.execute(EDITION_KEYWORDS_SQL)
+                keywords = [str(keyword_row[0]) for keyword_row in await cur.fetchall()]
+                family = edition_family(key, keywords)
+                same_family = [
+                    str(sibling_game_id)
+                    for sibling_game_id, sibling_title in siblings
+                    if edition_family(str(sibling_title), keywords) == family
+                ]
+                if len(same_family) == 1:
+                    return same_family[0], False
 
             await cur.execute("SELECT game_id FROM games WHERE normalized_title = %s", (key,))
             row = await cur.fetchone()

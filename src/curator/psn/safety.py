@@ -27,7 +27,9 @@ if TYPE_CHECKING:
     from curator.psn.account_client import Account
 
 DEFAULT_TEST_ONLINE_ID = "curator-test-account"
-_TEST_ONLINE_ID_ENV_NAMES: tuple[str, ...] = ("CURATOR_PSN_TEST_ONLINE_ID", "PSNPY_TEST_ONLINE_ID")
+TEST_ONLINE_ID_ENV_NAME = "CURATOR_PSN_TEST_ONLINE_ID"
+LEGACY_TEST_ONLINE_ID_ENV_NAME = "PSNPY_TEST_ONLINE_ID"
+_TEST_ONLINE_ID_ENV_NAMES: tuple[str, ...] = (TEST_ONLINE_ID_ENV_NAME, LEGACY_TEST_ONLINE_ID_ENV_NAME)
 
 FRIEND_WRITES = "allow_friend_writes"
 CHAT_WRITES = "allow_chat_writes"
@@ -137,7 +139,9 @@ class MutationGuard:
             :meth:`~curator.psn.account_client.AccountClient.whoami`).
         :param capability: :data:`FRIEND_WRITES` or :data:`CHAT_WRITES`.
         :raises MutationNotAllowedError: If the user has no link, the live account is not the linked one,
-            the capability is not enabled, or the daily mutation cap is already spent.
+            the capability is not enabled, or this attempt would exceed the daily mutation cap. The caller's
+            own attempt is already written to the history (:func:`curator.audit.recorded.recorded`) before
+            this runs, so it is one of the attempts counted.
         """
         assert capability in (FRIEND_WRITES, CHAT_WRITES), f"unknown capability: {capability!r}"
         if self._links is None:
@@ -162,8 +166,8 @@ class MutationGuard:
         from curator.audit.repository import PSN_MUTATION_ACTIONS
 
         since = datetime.now(timezone.utc) - timedelta(days=1)
-        spent = await self._mutations.count_since(self._identity_sub, PSN_MUTATION_ACTIONS, since)
-        if spent >= MUTATION_DAILY_CAP:
+        attempts_including_this_one = await self._mutations.count_since(self._identity_sub, PSN_MUTATION_ACTIONS, since)
+        if attempts_including_this_one > MUTATION_DAILY_CAP:
             raise MutationNotAllowedError(
                 f"Daily PSN change limit reached ({MUTATION_DAILY_CAP} in 24 hours). Try again later."
             )

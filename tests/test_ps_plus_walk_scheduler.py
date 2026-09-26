@@ -1,19 +1,24 @@
-"""Tests for the in-process weekly PS Plus walk scheduler, using fake walkers and histories."""
-
 from __future__ import annotations
 
+import random
 from datetime import datetime, timedelta, timezone
 
-from curator.jobs.ps_plus_walk_scheduler import DEFAULT_WALK_INTERVAL, PsPlusWalkScheduler
+from curator.jobs.ps_plus_walk_scheduler import (
+    DEFAULT_MAX_PAGES_PER_CATEGORY,
+    DEFAULT_WALK_INTERVAL,
+    PsPlusWalkScheduler,
+)
 
 
 class FakeWalker:
     def __init__(self, *, fails=False):
         self.calls = 0
+        self.page_budgets = []
         self._fails = fails
 
     async def walk_all(self, *, max_pages_per_category=None):
         self.calls += 1
+        self.page_budgets.append(max_pages_per_category)
         if self._fails:
             raise RuntimeError("gateway down")
         return []
@@ -30,8 +35,8 @@ class FakeHistory:
 _NOW = datetime(2026, 9, 10, 12, tzinfo=timezone.utc)
 
 
-def _scheduler(walker, latest):
-    return PsPlusWalkScheduler(walker, FakeHistory(latest), clock=lambda: _NOW)
+def _scheduler(walker, latest, **options):
+    return PsPlusWalkScheduler(walker, FakeHistory(latest), clock=lambda: _NOW, **options)
 
 
 async def test_walks_when_no_walk_has_ever_run():
@@ -59,6 +64,23 @@ async def test_walks_when_the_last_walk_is_at_least_the_interval_old():
 
     assert ran
     assert walker.calls == 1
+
+
+async def test_a_scheduled_walk_is_bounded_by_the_default_page_budget():
+    walker = FakeWalker()
+
+    await _scheduler(walker, None).check_once()
+
+    assert walker.page_budgets == [DEFAULT_MAX_PAGES_PER_CATEGORY]
+
+
+async def test_a_configured_page_budget_reaches_the_walk():
+    walker = FakeWalker()
+    page_budget = random.randint(1, 50)
+
+    await _scheduler(walker, None, max_pages_per_category=page_budget).check_once()
+
+    assert walker.page_budgets == [page_budget]
 
 
 async def test_a_failed_walk_does_not_escape_the_loop():

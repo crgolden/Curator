@@ -13,7 +13,15 @@ from typing import Any, Final
 
 from psycopg_pool import AsyncConnectionPool
 
-TERMINAL_STATUSES: Final[tuple[str, ...]] = ("succeeded", "failed", "cancelled")
+JOB_KIND_LIBRARY_REFRESH: Final = "library_refresh"
+JOB_KIND_ENRICHMENT: Final = "enrichment"
+
+JOB_STATUS_RUNNING: Final = "running"
+JOB_STATUS_SUCCEEDED: Final = "succeeded"
+JOB_STATUS_FAILED: Final = "failed"
+JOB_STATUS_CANCELLED: Final = "cancelled"
+
+TERMINAL_STATUSES: Final[tuple[str, ...]] = (JOB_STATUS_SUCCEEDED, JOB_STATUS_FAILED, JOB_STATUS_CANCELLED)
 """Every ``job_runs.status`` a run can never leave.
 
 Non-terminal is expressed as the complement of this set, never as its own list, so a status added to
@@ -22,7 +30,8 @@ worth designing out is a new terminal status that every "is this run still activ
 reporting as active.
 """
 
-_NOT_TERMINAL_SQL: Final = "status <> ALL(%s)"
+NOT_TERMINAL_SQL: Final = "status <> ALL(%s)"
+NEWEST_FIRST_SQL: Final = "ORDER BY created_at DESC LIMIT 1"
 
 
 @dataclass(frozen=True, slots=True)
@@ -65,7 +74,7 @@ class JobRunsRepository:
 
     async def mark_failed(self, run_id: str, error: str) -> None:
         """Transition a run to ``failed``, recording ``error``."""
-        await self._set_status(run_id, "failed", error=error)
+        await self._set_status(run_id, JOB_STATUS_FAILED, error=error)
 
     async def _set_status(self, run_id: str, status: str, *, error: str | None = None) -> None:
         async with self._pool.connection() as conn, conn.cursor() as cur:
@@ -103,7 +112,7 @@ class JobRunsRepository:
         async with self._pool.connection() as conn, conn.cursor() as cur:
             await cur.execute(
                 "UPDATE job_runs SET status = 'cancelled', error = %s, updated_at = now(), "
-                f"lease_expires_at = NULL WHERE run_id = %s AND {_NOT_TERMINAL_SQL}",
+                f"lease_expires_at = NULL WHERE run_id = %s AND {NOT_TERMINAL_SQL}",
                 (reason, run_id, list(TERMINAL_STATUSES)),
             )
             return bool(cur.rowcount)
@@ -119,8 +128,8 @@ class JobRunsRepository:
             await cur.execute(
                 "SELECT run_id, kind, identity_sub, status, error, result_summary, updated_at, lease_expires_at "
                 "FROM job_runs WHERE identity_sub = %s AND kind = %s "
-                f"AND {_NOT_TERMINAL_SQL} "
-                "ORDER BY created_at DESC LIMIT 1",
+                f"AND {NOT_TERMINAL_SQL} "
+                f"{NEWEST_FIRST_SQL}",
                 (identity_sub, kind, list(TERMINAL_STATUSES)),
             )
             row = await cur.fetchone()
@@ -137,8 +146,8 @@ class JobRunsRepository:
             await cur.execute(
                 "SELECT run_id, kind, identity_sub, status, error, result_summary, updated_at, lease_expires_at "
                 "FROM job_runs WHERE identity_sub IS NULL AND kind = %s "
-                f"AND {_NOT_TERMINAL_SQL} "
-                "ORDER BY created_at DESC LIMIT 1",
+                f"AND {NOT_TERMINAL_SQL} "
+                f"{NEWEST_FIRST_SQL}",
                 (kind, list(TERMINAL_STATUSES)),
             )
             row = await cur.fetchone()
@@ -152,7 +161,7 @@ class JobRunsRepository:
         async with self._pool.connection() as conn, conn.cursor() as cur:
             await cur.execute(
                 "SELECT run_id, kind, identity_sub, status, error, result_summary, updated_at, lease_expires_at "
-                "FROM job_runs WHERE kind = %s ORDER BY created_at DESC LIMIT 1",
+                f"FROM job_runs WHERE kind = %s {NEWEST_FIRST_SQL}",
                 (kind,),
             )
             row = await cur.fetchone()

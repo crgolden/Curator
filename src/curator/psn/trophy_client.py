@@ -9,10 +9,11 @@ from __future__ import annotations
 
 import re
 from collections.abc import Callable, Coroutine
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Final
 
 from curator.psn import _identity
 from curator.psn.models import (
+    ALL_TROPHY_GROUPS,
     TitleStat,
     TrophyDetail,
     TrophyGroup,
@@ -22,21 +23,95 @@ from curator.psn.models import (
     trophy_counts,
 )
 from curator.psn.session import PsnSession
+from curator.psn.title_platform import PS4, PS5
 
 if TYPE_CHECKING:
     from curator.psn.trophy_cache import CachedTrophyClient
 
-_TROPHIES_URI = "https://m.np.playstation.com/api/trophy/v1"
-_GAMES_LIST_URI = "https://m.np.playstation.com/api/gamelist/v2"
+TROPHIES_URI: Final = "https://m.np.playstation.com/api/trophy/v1"
+GAMES_LIST_URI: Final = "https://m.np.playstation.com/api/gamelist/v2"
 
-_PLATFORM_CATEGORY_NAMES = {"ps4_game": "PS4", "ps5_native_game": "PS5"}
+PS4_GAME_CATEGORY: Final = "ps4_game"
+PS5_NATIVE_GAME_CATEGORY: Final = "ps5_native_game"
+UNKNOWN_CATEGORY: Final = "UNKNOWN"
+
+_PLATFORM_CATEGORY_NAMES = {PS4_GAME_CATEGORY: PS4, PS5_NATIVE_GAME_CATEGORY: PS5}
+
+TROPHY_LEVEL_KEY: Final = "trophyLevel"
+PROGRESS_KEY: Final = "progress"
+TIER_KEY: Final = "tier"
+EARNED_TROPHIES_KEY: Final = "earnedTrophies"
+DEFINED_TROPHIES_KEY: Final = "definedTrophies"
+TROPHY_TITLES_KEY: Final = "trophyTitles"
+TROPHY_TITLE_NAME_KEY: Final = "trophyTitleName"
+NP_COMMUNICATION_ID_KEY: Final = "npCommunicationId"
+TROPHY_TITLE_PLATFORM_KEY: Final = "trophyTitlePlatform"
+LAST_UPDATED_KEY: Final = "lastUpdatedDateTime"
+NEXT_OFFSET_KEY: Final = "nextOffset"
+TITLES_KEY: Final = "titles"
+TROPHIES_KEY: Final = "trophies"
+TROPHY_ID_KEY: Final = "trophyId"
+TROPHY_NAME_KEY: Final = "trophyName"
+TROPHY_DETAIL_KEY: Final = "trophyDetail"
+TROPHY_TYPE_KEY: Final = "trophyType"
+TROPHY_HIDDEN_KEY: Final = "trophyHidden"
+TROPHY_ICON_URL_KEY: Final = "trophyIconUrl"
+EARNED_KEY: Final = "earned"
+EARNED_DATE_KEY: Final = "earnedDateTime"
+PROGRESS_RATE_KEY: Final = "progressRate"
+TROPHY_EARNED_RATE_KEY: Final = "trophyEarnedRate"
+TROPHY_GROUPS_KEY: Final = "trophyGroups"
+TROPHY_GROUP_ID_KEY: Final = "trophyGroupId"
+TROPHY_GROUP_NAME_KEY: Final = "trophyGroupName"
+TROPHY_GROUP_DETAIL_KEY: Final = "trophyGroupDetail"
+TROPHY_GROUP_ICON_URL_KEY: Final = "trophyGroupIconUrl"
+TITLE_ID_KEY: Final = "titleId"
+NAME_KEY: Final = "name"
+CATEGORY_KEY: Final = "category"
+PLAY_COUNT_KEY: Final = "playCount"
+FIRST_PLAYED_KEY: Final = "firstPlayedDateTime"
+LAST_PLAYED_KEY: Final = "lastPlayedDateTime"
+PLAY_DURATION_KEY: Final = "playDuration"
+IMAGE_URL_KEY: Final = "imageUrl"
 
 _PLAY_DURATION_RE = re.compile(r"PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?")
 
 
+def trophy_summary_url(path_id: str) -> str:
+    return f"{TROPHIES_URI}/users/{path_id}/trophySummary"
+
+
+def trophy_titles_url(path_id: str) -> str:
+    return f"{TROPHIES_URI}/users/{path_id}/{TROPHY_TITLES_KEY}"
+
+
+def title_trophy_titles_url(path_id: str) -> str:
+    return f"{TROPHIES_URI}/users/{path_id}/{TITLES_KEY}/{TROPHY_TITLES_KEY}"
+
+
+def trophy_groups_url(np_communication_id: str) -> str:
+    return f"{TROPHIES_URI}/npCommunicationIds/{np_communication_id}/{TROPHY_GROUPS_KEY}"
+
+
+def user_trophy_groups_url(path_id: str, np_communication_id: str) -> str:
+    return f"{TROPHIES_URI}/users/{path_id}/npCommunicationIds/{np_communication_id}/{TROPHY_GROUPS_KEY}"
+
+
+def group_trophies_url(np_communication_id: str, group: str) -> str:
+    return f"{trophy_groups_url(np_communication_id)}/{group}/{TROPHIES_KEY}"
+
+
+def user_group_trophies_url(path_id: str, np_communication_id: str, group: str) -> str:
+    return f"{user_trophy_groups_url(path_id, np_communication_id)}/{group}/{TROPHIES_KEY}"
+
+
+def title_stats_url(path_id: str) -> str:
+    return f"{GAMES_LIST_URI}/users/{path_id}/{TITLES_KEY}"
+
+
 def _trophy_service_name(platform: str) -> str:
     """Return PSN's trophy service name for a platform string: ``"trophy2"`` for PS5, else ``"trophy"``."""
-    return "trophy2" if platform.upper() == "PS5" else "trophy"
+    return "trophy2" if platform.upper() == PS5 else "trophy"
 
 
 def _to_float(value: Any) -> float | None:
@@ -60,16 +135,20 @@ def _play_duration_seconds(play_duration: str | None) -> int | None:
     return hours * 3600 + minutes * 60 + seconds
 
 
+def _platforms(value: Any) -> tuple[str, ...]:
+    return tuple(p for p in (value or "").split(",") if p)
+
+
 def _trophy_title(data: dict[str, Any]) -> TrophyTitle:
     """Map a raw ``trophyTitles``-endpoint entry to our :class:`~curator.psn.models.TrophyTitle`."""
     return TrophyTitle(
-        name=data.get("trophyTitleName"),
-        np_communication_id=data.get("npCommunicationId"),
-        platforms=tuple(p for p in (data.get("trophyTitlePlatform") or "").split(",") if p),
-        progress=data.get("progress"),
-        earned=trophy_counts(data.get("earnedTrophies")),
-        defined=trophy_counts(data.get("definedTrophies")),
-        last_updated=data.get("lastUpdatedDateTime"),
+        name=data.get(TROPHY_TITLE_NAME_KEY),
+        np_communication_id=data.get(NP_COMMUNICATION_ID_KEY),
+        platforms=_platforms(data.get(TROPHY_TITLE_PLATFORM_KEY)),
+        progress=data.get(PROGRESS_KEY),
+        earned=trophy_counts(data.get(EARNED_TROPHIES_KEY)),
+        defined=trophy_counts(data.get(DEFINED_TROPHIES_KEY)),
+        last_updated=data.get(LAST_UPDATED_KEY),
     )
 
 
@@ -93,17 +172,17 @@ class TrophyClient:
 
     async def _trophy_summary(self, online_id: str | None, account_id: str | None) -> TrophySummary:
         if online_id is None and account_id is None:
-            path_id = "me"
+            path_id = _identity.SELF_PATH_ID
             resolved_account_id = await _identity.own_account_id(self._session)
         else:
             resolved_account_id = await _identity.account_id_for(self._session, online_id, account_id)
             path_id = resolved_account_id
-        data = (await self._session.get(f"{_TROPHIES_URI}/users/{path_id}/trophySummary")).json()
+        data = (await self._session.get(trophy_summary_url(path_id))).json()
         return TrophySummary(
-            level=data.get("trophyLevel", -1),
-            progress=data.get("progress", -1),
-            tier=data.get("tier", -1),
-            earned=trophy_counts(data.get("earnedTrophies")),
+            level=data.get(TROPHY_LEVEL_KEY, -1),
+            progress=data.get(PROGRESS_KEY, -1),
+            tier=data.get(TIER_KEY, -1),
+            earned=trophy_counts(data.get(EARNED_TROPHIES_KEY)),
             account_id=resolved_account_id,
         )
 
@@ -130,17 +209,14 @@ class TrophyClient:
         while len(titles) < limit:
             page_limit = min(page_size, limit - len(titles))
             response = (
-                await self._session.get(
-                    f"{_TROPHIES_URI}/users/{path_id}/trophyTitles",
-                    params={"limit": page_limit, "offset": offset},
-                )
+                await self._session.get(trophy_titles_url(path_id), params={"limit": page_limit, "offset": offset})
             ).json()
-            entries = response.get("trophyTitles") or []
+            entries = response.get(TROPHY_TITLES_KEY) or []
             if not entries:
                 break
             titles.extend(_trophy_title(entry) for entry in entries)
             offset += len(entries)
-            if (response.get("nextOffset") or 0) <= 0:
+            if (response.get(NEXT_OFFSET_KEY) or 0) <= 0:
                 break
         return titles
 
@@ -169,14 +245,11 @@ class TrophyClient:
     ) -> list[TrophyTitle]:
         path_id = await _identity.path_account_id(self._session, online_id, account_id)
         response = (
-            await self._session.get(
-                f"{_TROPHIES_URI}/users/{path_id}/titles/trophyTitles",
-                params={"npTitleIds": ",".join(title_ids)},
-            )
+            await self._session.get(title_trophy_titles_url(path_id), params={"npTitleIds": ",".join(title_ids)})
         ).json()
         titles: list[TrophyTitle] = []
-        for title in response.get("titles") or []:
-            for entry in title.get("trophyTitles") or []:
+        for title in response.get(TITLES_KEY) or []:
+            for entry in title.get(TROPHY_TITLES_KEY) or []:
                 titles.append(_trophy_title(entry))
         return titles
 
@@ -186,7 +259,7 @@ class TrophyClient:
         platform: str,
         online_id: str | None = None,
         account_id: str | None = None,
-        group: str = "all",
+        group: str = ALL_TROPHY_GROUPS,
         limit: int | None = None,
     ) -> list[TrophyDetail]:
         """List every trophy in a title, each merged with the user's earned progress and rarity.
@@ -214,10 +287,8 @@ class TrophyClient:
     ) -> list[TrophyDetail]:
         path_id = await _identity.path_account_id(self._session, online_id, account_id)
         service_name = _trophy_service_name(platform)
-        meta_url = f"{_TROPHIES_URI}/npCommunicationIds/{np_communication_id}/trophyGroups/{group}/trophies"
-        progress_url = (
-            f"{_TROPHIES_URI}/users/{path_id}/npCommunicationIds/{np_communication_id}/trophyGroups/{group}/trophies"
-        )
+        meta_url = group_trophies_url(np_communication_id, group)
+        progress_url = user_group_trophies_url(path_id, np_communication_id, group)
         details: list[TrophyDetail] = []
         offset = 0
         page_size = 200
@@ -226,28 +297,28 @@ class TrophyClient:
             params = {"npServiceName": service_name, "limit": page_limit, "offset": offset}
             meta_response = (await self._session.get(meta_url, params=params)).json()
             progress_response = (await self._session.get(progress_url, params=params)).json()
-            trophies = meta_response.get("trophies") or []
-            progresses = progress_response.get("trophies") or []
+            trophies = meta_response.get(TROPHIES_KEY) or []
+            progresses = progress_response.get(TROPHIES_KEY) or []
             if not trophies:
                 break
             for trophy, progress in zip(trophies, progresses, strict=False):
                 merged = {**trophy, **progress}
                 details.append(
                     TrophyDetail(
-                        trophy_id=merged.get("trophyId"),
-                        name=merged.get("trophyName"),
-                        detail=merged.get("trophyDetail"),
-                        type=merged.get("trophyType"),
-                        hidden=merged.get("trophyHidden"),
-                        icon_url=merged.get("trophyIconUrl"),
-                        earned=merged.get("earned"),
-                        earned_date=merged.get("earnedDateTime"),
-                        progress_rate=merged.get("progressRate"),
-                        rarity=_to_float(merged.get("trophyEarnedRate")),
+                        trophy_id=merged.get(TROPHY_ID_KEY),
+                        name=merged.get(TROPHY_NAME_KEY),
+                        detail=merged.get(TROPHY_DETAIL_KEY),
+                        type=merged.get(TROPHY_TYPE_KEY),
+                        hidden=merged.get(TROPHY_HIDDEN_KEY),
+                        icon_url=merged.get(TROPHY_ICON_URL_KEY),
+                        earned=merged.get(EARNED_KEY),
+                        earned_date=merged.get(EARNED_DATE_KEY),
+                        progress_rate=merged.get(PROGRESS_RATE_KEY),
+                        rarity=_to_float(merged.get(TROPHY_EARNED_RATE_KEY)),
                     )
                 )
             offset += len(trophies)
-            if (meta_response.get("nextOffset") or 0) <= 0:
+            if (meta_response.get(NEXT_OFFSET_KEY) or 0) <= 0:
                 break
         return details
 
@@ -279,48 +350,38 @@ class TrophyClient:
     ) -> TrophyGroups:
         path_id = await _identity.path_account_id(self._session, online_id, account_id)
         params = {"npServiceName": _trophy_service_name(platform)}
-        meta = (
-            await self._session.get(
-                f"{_TROPHIES_URI}/npCommunicationIds/{np_communication_id}/trophyGroups",
-                params=params,
-            )
-        ).json()
-        progress = (
-            await self._session.get(
-                f"{_TROPHIES_URI}/users/{path_id}/npCommunicationIds/{np_communication_id}/trophyGroups",
-                params=params,
-            )
-        ).json()
+        meta = (await self._session.get(trophy_groups_url(np_communication_id), params=params)).json()
+        progress = (await self._session.get(user_trophy_groups_url(path_id, np_communication_id), params=params)).json()
         merged = {**meta, **progress}
         merged_groups = [
             {**meta_group, **progress_group}
             for meta_group, progress_group in zip(
-                meta.get("trophyGroups") or [],
-                progress.get("trophyGroups") or [],
+                meta.get(TROPHY_GROUPS_KEY) or [],
+                progress.get(TROPHY_GROUPS_KEY) or [],
                 strict=False,
             )
         ]
         groups = tuple(
             TrophyGroup(
-                group_id=group.get("trophyGroupId"),
-                name=group.get("trophyGroupName"),
-                detail=group.get("trophyGroupDetail"),
-                icon_url=group.get("trophyGroupIconUrl"),
-                progress=group.get("progress"),
-                defined=trophy_counts(group.get("definedTrophies")),
-                earned=trophy_counts(group.get("earnedTrophies")),
-                last_updated=group.get("lastUpdatedDateTime"),
+                group_id=group.get(TROPHY_GROUP_ID_KEY),
+                name=group.get(TROPHY_GROUP_NAME_KEY),
+                detail=group.get(TROPHY_GROUP_DETAIL_KEY),
+                icon_url=group.get(TROPHY_GROUP_ICON_URL_KEY),
+                progress=group.get(PROGRESS_KEY),
+                defined=trophy_counts(group.get(DEFINED_TROPHIES_KEY)),
+                earned=trophy_counts(group.get(EARNED_TROPHIES_KEY)),
+                last_updated=group.get(LAST_UPDATED_KEY),
             )
             for group in merged_groups
         )
         return TrophyGroups(
-            title_name=merged.get("trophyTitleName"),
-            platforms=tuple(sorted(p for p in (merged.get("trophyTitlePlatform") or "").split(",") if p)),
-            progress=merged.get("progress"),
-            defined=trophy_counts(merged.get("definedTrophies")),
-            earned=trophy_counts(merged.get("earnedTrophies")),
+            title_name=merged.get(TROPHY_TITLE_NAME_KEY),
+            platforms=tuple(sorted(_platforms(merged.get(TROPHY_TITLE_PLATFORM_KEY)))),
+            progress=merged.get(PROGRESS_KEY),
+            defined=trophy_counts(merged.get(DEFINED_TROPHIES_KEY)),
+            earned=trophy_counts(merged.get(EARNED_TROPHIES_KEY)),
             groups=groups,
-            last_updated=merged.get("lastUpdatedDateTime"),
+            last_updated=merged.get(LAST_UPDATED_KEY),
         )
 
     async def title_stats(
@@ -349,29 +410,26 @@ class TrophyClient:
         while len(stats) < limit:
             page_limit = min(page_size, limit - len(stats))
             response = (
-                await self._session.get(
-                    f"{_GAMES_LIST_URI}/users/{path_id}/titles",
-                    params={"limit": page_limit, "offset": offset},
-                )
+                await self._session.get(title_stats_url(path_id), params={"limit": page_limit, "offset": offset})
             ).json()
-            titles = response.get("titles") or []
+            titles = response.get(TITLES_KEY) or []
             if not titles:
                 break
             for title in titles:
                 stats.append(
                     TitleStat(
-                        title_id=title.get("titleId"),
-                        name=title.get("name"),
-                        category=_PLATFORM_CATEGORY_NAMES.get(title.get("category"), "UNKNOWN"),
-                        play_count=title.get("playCount"),
-                        first_played=title.get("firstPlayedDateTime"),
-                        last_played=title.get("lastPlayedDateTime"),
-                        play_duration_seconds=_play_duration_seconds(title.get("playDuration")),
-                        image_url=title.get("imageUrl"),
+                        title_id=title.get(TITLE_ID_KEY),
+                        name=title.get(NAME_KEY),
+                        category=_PLATFORM_CATEGORY_NAMES.get(title.get(CATEGORY_KEY), UNKNOWN_CATEGORY),
+                        play_count=title.get(PLAY_COUNT_KEY),
+                        first_played=title.get(FIRST_PLAYED_KEY),
+                        last_played=title.get(LAST_PLAYED_KEY),
+                        play_duration_seconds=_play_duration_seconds(title.get(PLAY_DURATION_KEY)),
+                        image_url=title.get(IMAGE_URL_KEY),
                     )
                 )
             offset += len(titles)
-            if (response.get("nextOffset") or 0) <= 0:
+            if (response.get(NEXT_OFFSET_KEY) or 0) <= 0:
                 break
         return stats
 

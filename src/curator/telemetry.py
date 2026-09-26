@@ -1,14 +1,13 @@
-"""Curator's optional OpenTelemetry (traces + metrics) and Elasticsearch structured-logging legs.
+"""Curator's OpenTelemetry (traces + metrics) and Elasticsearch structured-logging legs.
 
-Both legs are independently no-op when their configuration is absent -- local dev and CI set neither
-``AlloyEndpoint`` (see :class:`~curator.settings.Settings`) nor ``ElasticsearchNode`` /
-``ElasticsearchUsername`` / ``ElasticsearchPassword`` -- and telemetry must never prevent the app from
-starting: :func:`configure_telemetry` wraps each leg in its own broad ``except Exception`` so a bad
-endpoint, an unreachable collector, or any other telemetry-only failure is logged to stderr and swallowed
-rather than raised into ``create_app``. This mirrors the fleet convention (see the workspace root
-``AGENTS.md``): OTLP gRPC to Grafana Alloy for traces and metrics with ``service.name`` =
-``"crgolden-curator"``, ``/health`` excluded from tracing, and Elasticsearch-shipped logs carrying
-``service.name`` and a flat ``log.level`` field (mirroring what the Churches Node app ships).
+On App Service both legs are required: :meth:`~curator.settings.Settings.from_config` refuses to build
+settings without ``AlloyEndpoint`` and ``ElasticsearchNode`` / ``ElasticsearchUsername`` /
+``ElasticsearchPassword``, and :func:`configure_telemetry` lets a leg that fails to configure raise into
+``create_app``, so the app does not start without its telemetry. Local dev and CI set neither, and each
+leg is then skipped. This mirrors the fleet convention (see the workspace root ``AGENTS.md``): OTLP gRPC
+to Grafana Alloy for traces and metrics with ``service.name`` = ``"crgolden-curator"``, ``/health``
+excluded from tracing, and Elasticsearch-shipped logs carrying ``service.name`` and a flat ``log.level``
+field (mirroring what the Churches Node app ships).
 
 :func:`configure_telemetry` is called once per app from :func:`curator.app.create_app`. Because each
 gunicorn worker process calls the factory independently, per-worker OTel initialization comes for free --
@@ -33,6 +32,7 @@ from logging.handlers import QueueHandler, QueueListener
 from queue import SimpleQueue
 from typing import Any, cast
 
+import httpx
 from elasticsearch import Elasticsearch
 from fastapi import FastAPI
 from opentelemetry import metrics as metrics
@@ -50,6 +50,8 @@ from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import BatchSpanProcessor
 from opentelemetry.trace import Span
 
+from curator.enrichment.rawg_client import KEY_PARAM as RAWG_KEY_PARAM
+from curator.enrichment.rawg_client import RAWG_BASE_URL
 from curator.settings import Settings
 
 SERVICE_NAME_VALUE = "crgolden-curator"
@@ -63,8 +65,8 @@ _OTLP_EXPORTER_LOGGER = "opentelemetry.exporter.otlp.proto.grpc.exporter"
 _SEMCONV_STABILITY_OPT_IN_ENV = "OTEL_SEMCONV_STABILITY_OPT_IN"
 _SEMCONV_STABILITY_OPT_IN = "http,database"
 
-_REDACT_QUERY_PARAM_HOSTS = ("api.rawg.io",)
-_REDACT_QUERY_PARAM_NAME = "key"
+_REDACT_QUERY_PARAM_HOSTS = (httpx.URL(RAWG_BASE_URL).host,)
+_REDACT_QUERY_PARAM_NAME = RAWG_KEY_PARAM
 _URL_SPAN_ATTRIBUTE_KEYS = ("http.url", "url.full")
 
 
@@ -84,6 +86,19 @@ async def _redact_rawg_key_from_span(span: Span, request_info: RequestInfo) -> N
 
 
 _ES_DATA_STREAM = "logs-app-curator"
+_ES_CREATE_OP_TYPE = "create"
+
+ELASTIC_TRANSPORT_LOGGER = "elastic_transport"
+ELASTICSEARCH_LOGGER = "elasticsearch"
+
+TIMESTAMP_FIELD = "@timestamp"
+MESSAGE_FIELD = "message"
+LOG_LEVEL_FIELD = "log.level"
+SERVICE_NAME_FIELD = "service.name"
+LOGGER_NAME_FIELD = "logger.name"
+STACK_TRACE_FIELD = "error.stack_trace"
+
+ELASTICSEARCH_CREDENTIALS_MISSING = "An Elasticsearch node needs both a username and a password."
 
 _ES_FAILURE_REPORT_EVERY = 100
 
@@ -103,21 +118,14 @@ _es_logging_configured = False
 
 
 def configure_telemetry(app: FastAPI, settings: Settings) -> None:
-    """Wire up Curator's telemetry legs, never allowing a telemetry failure to prevent app startup.
+    """Wire up Curator's telemetry legs; a leg that fails to configure raises and stops startup.
 
     :param app: The just-constructed FastAPI app to instrument.
     :param settings: The resolved :class:`~curator.settings.Settings`; each leg reads only its own
-        fields and is skipped entirely when they are absent.
+        fields and is skipped when they are absent, which settings allow only off App Service.
     """
-    try:
-        _configure_tracing_and_metrics(app, settings)
-    except Exception as exc:
-        print(f"curator.telemetry: OTLP telemetry setup failed, continuing without it: {exc}", file=sys.stderr)
-
-    try:
-        _configure_elasticsearch_logging(settings)
-    except Exception as exc:
-        print(f"curator.telemetry: Elasticsearch logging setup failed, continuing without it: {exc}", file=sys.stderr)
+    _configure_tracing_and_metrics(app, settings)
+    _configure_elasticsearch_logging(settings)
 
 
 def _configure_tracing_and_metrics(app: FastAPI, settings: Settings) -> None:
@@ -230,17 +238,21 @@ def _instrument_app(app: FastAPI) -> None:
 
 
 def _configure_elasticsearch_logging(settings: Settings) -> None:
-    """Attach a root-logger handler shipping ECS-ish JSON docs to Elasticsearch, iff fully configured.
+    """Attach a root-logger handler shipping ECS-ish JSON docs to Elasticsearch, iff a node is configured.
 
-    The node URL and both basic-auth credentials must all be present -- a partially configured leg is
-    treated the same as an absent one (disabled), never a startup error. Guarded by
-    :data:`_es_logging_configured` so repeated calls never attach a second handler.
+    :meth:`~curator.settings.Settings.from_config` refuses a node without both basic-auth credentials, so
+    a node here with either one missing is a partially built :class:`~curator.settings.Settings` and
+    raises rather than silently disabling the leg. Guarded by :data:`_es_logging_configured` so repeated
+    calls never attach a second handler.
 
     :param settings: The resolved settings; ``elasticsearch_node``, ``elasticsearch_username``,
         ``elasticsearch_password``, and ``log_level`` are consulted.
+    :raises ValueError: If a node is set without both credentials.
     """
-    if not (settings.elasticsearch_node and settings.elasticsearch_username and settings.elasticsearch_password):
+    if not settings.elasticsearch_node:
         return
+    if not (settings.elasticsearch_username and settings.elasticsearch_password):
+        raise ValueError(ELASTICSEARCH_CREDENTIALS_MISSING)
 
     global _es_logging_configured
     with _es_logging_lock:
@@ -253,8 +265,8 @@ def _configure_elasticsearch_logging(settings: Settings) -> None:
         )
         handler = _ElasticsearchLogHandler(client)
 
-        logging.getLogger("elastic_transport").propagate = False
-        logging.getLogger("elasticsearch").propagate = False
+        logging.getLogger(ELASTIC_TRANSPORT_LOGGER).propagate = False
+        logging.getLogger(ELASTICSEARCH_LOGGER).propagate = False
 
         named_level = logging.getLevelName(settings.log_level)
         level = named_level if isinstance(named_level, int) else logging.WARNING
@@ -302,14 +314,14 @@ def format_log_record(record: logging.LogRecord) -> dict[str, Any]:
     :returns: A JSON-serializable document.
     """
     doc: dict[str, Any] = {
-        "@timestamp": datetime.fromtimestamp(record.created, tz=timezone.utc).isoformat(),
-        "message": record.getMessage(),
-        "log.level": _LEVEL_NAMES.get(record.levelname, record.levelname),
-        "service.name": SERVICE_NAME_VALUE,
-        "logger.name": record.name,
+        TIMESTAMP_FIELD: datetime.fromtimestamp(record.created, tz=timezone.utc).isoformat(),
+        MESSAGE_FIELD: record.getMessage(),
+        LOG_LEVEL_FIELD: _LEVEL_NAMES.get(record.levelname, record.levelname),
+        SERVICE_NAME_FIELD: SERVICE_NAME_VALUE,
+        LOGGER_NAME_FIELD: record.name,
     }
     if record.exc_info:
-        doc["error.stack_trace"] = logging.Formatter().formatException(record.exc_info)
+        doc[STACK_TRACE_FIELD] = logging.Formatter().formatException(record.exc_info)
     return doc
 
 
@@ -355,7 +367,7 @@ class _ElasticsearchLogHandler(logging.Handler):
             self._client.index(
                 index=_ES_DATA_STREAM,
                 document=format_log_record(record),
-                op_type="create",
+                op_type=_ES_CREATE_OP_TYPE,
                 require_data_stream=True,
             )
         except Exception as exc:

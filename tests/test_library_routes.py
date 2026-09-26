@@ -5,10 +5,48 @@ from __future__ import annotations
 import uuid
 from datetime import datetime, timedelta, timezone
 
+import pytest
 from fastapi.testclient import TestClient
 
+from audit_fakes import RecordingAuditRepository
+from curator import library_routes
 from curator.app import create_app
+from curator.audit.repository import ACTION_LIBRARY_REFRESH_REQUESTED
+from curator.jobs.repository import (
+    JOB_KIND_ENRICHMENT,
+    JOB_KIND_LIBRARY_REFRESH,
+    JOB_STATUS_FAILED,
+    JOB_STATUS_RUNNING,
+    JOB_STATUS_SUCCEEDED,
+    TERMINAL_STATUSES,
+)
+from curator.jobs.staleness import lease_lapsed_reason, no_progress_reason
+from curator.library.repository import (
+    HIDDEN_EXCLUDE,
+    HIDDEN_ONLY,
+    LIBRARY_SOURCE_PSN,
+    TROPHY_MATCHED,
+    TROPHY_NOT_ATTEMPTED,
+    TROPHY_UNMATCHED,
+)
+from curator.library_routes import (
+    LIBRARY_REFRESH_RUN_NOUN,
+    TROPHY_PROGRESS_HARVEST_OFF,
+    TROPHY_PROGRESS_NEVER_REFRESHED,
+    TROPHY_PROGRESS_NO_LINK,
+    TROPHY_PROGRESS_OFF,
+    TROPHY_PROGRESS_ON,
+    TROPHY_PROGRESS_PENDING,
+    LibraryGameResponse,
+    LibraryGenresResponse,
+    LibraryPageResponse,
+    LibraryRefreshResponse,
+    LibraryRefreshStatusResponse,
+    ManualGameRequest,
+    TrophyProgressResponse,
+)
 from curator.persistence.crypto import TokenCrypto
+from curator.psn.title_platform import PS3, PS4, PS5, PSVITA, platform_vocabulary_message
 from test_routes import (
     FakeAgentFactory,
     FakeRepository,
@@ -16,6 +54,7 @@ from test_routes import (
     _bearer,
     _claims,
     _make_settings,
+    _path,
     _seed_link,
 )
 from test_trophy_routes import FakeTrophyClient, FakeTrophyClientFactory
@@ -65,13 +104,13 @@ class FakeJobRunsRepository:
         candidates = [
             run
             for run in self.runs.values()
-            if run.identity_sub == identity_sub and run.kind == kind and run.status not in ("succeeded", "failed")
+            if run.identity_sub == identity_sub and run.kind == kind and run.status not in TERMINAL_STATUSES
         ]
         return max(candidates, key=lambda run: run.updated_at, default=None)
 
     async def mark_failed(self, run_id, error):
         self.failed_calls.append((run_id, error))
-        self.runs[run_id].status = "failed"
+        self.runs[run_id].status = JOB_STATUS_FAILED
         self.runs[run_id].error = error
 
 
@@ -91,10 +130,10 @@ class FakeLibraryGameView:
         is_active=True,
         np_communication_id=None,
         percent_completed=None,
-        source="psn",
+        source=LIBRARY_SOURCE_PSN,
         cover_image_url=None,
         platforms=(),
-        trophy_match="not_attempted",
+        trophy_match=TROPHY_NOT_ATTEMPTED,
     ):
         self.game_id = game_id
         self.title = title
@@ -113,16 +152,6 @@ class FakeLibraryGameView:
         self.cover_image_url = cover_image_url
         self.platforms = platforms
         self.trophy_match = trophy_match
-
-
-_SORT_ATTRS = {
-    "title": "title",
-    "genre": "genre",
-    "rawg_rating": "rawg_rating",
-    "opencritic_rating": "opencritic_rating",
-    "psn_rating": "psn_rating",
-    "percent_completed": "percent_completed",
-}
 
 
 class FakeLibraryRepository:
@@ -176,18 +205,18 @@ class FakeLibraryRepository:
         sort_dir="asc",
         limit=20,
         offset=0,
-        hidden="exclude",
+        hidden=HIDDEN_EXCLUDE,
     ):
         self.hidden_filters.append(hidden)
         games = list(self._games_by_sub.get(identity_sub, []))
         hidden_ids = {game for sub, game in self.hidden if sub == identity_sub}
-        games = [g for g in games if (g.game_id in hidden_ids) == (hidden == "only")]
+        games = [g for g in games if (g.game_id in hidden_ids) == (hidden == HIDDEN_ONLY)]
         if search:
             games = [g for g in games if search.lower() in g.title.lower()]
         if genre:
             games = [g for g in games if g.genre == genre]
 
-        attr = _SORT_ATTRS[sort]
+        attr = sort
         reverse = sort_dir == "desc"
         games.sort(key=lambda g: (getattr(g, attr) is None, getattr(g, attr), g.title), reverse=False)
         if reverse:
@@ -248,6 +277,7 @@ def _build(
         agent_factory=FakeAgentFactory(repository, token_crypto),
         token_validator=validator,
         trophy_client_factory=trophy_client_factory or FakeTrophyClientFactory(),
+        audit_repository=RecordingAuditRepository(),
     )
     app.state.queue_publisher = publisher
     app.state.job_runs_repository = job_runs_repository or FakeJobRunsRepository()
@@ -271,13 +301,13 @@ def test_add_manual_game_records_every_platform_the_caller_named():
     client, library = _build_manual()
 
     response = client.post(
-        "/library/manual",
-        json={"game_id": "game-1", "platforms": ["PS3", "PSVITA"]},
+        _path(client, library_routes.add_manual_game),
+        json=ManualGameRequest(game_id="game-1", platforms=[PS3, PSVITA]).model_dump(),
         headers=_bearer("token-a"),
     )
 
     assert response.status_code == 204
-    assert library.manual_entries == [("sub-a", "game-1", ("PS3", "PSVITA"), None)]
+    assert library.manual_entries == [("sub-a", "game-1", (PS3, PSVITA), None)]
 
 
 def test_add_manual_game_still_accepts_the_deprecated_boolean_pair():
@@ -285,43 +315,51 @@ def test_add_manual_game_still_accepts_the_deprecated_boolean_pair():
     client, library = _build_manual()
 
     response = client.post(
-        "/library/manual",
-        json={"game_id": "game-1", "native_ps5": True, "ps4_eligible": True},
+        _path(client, library_routes.add_manual_game),
+        json=ManualGameRequest(game_id="game-1", native_ps5=True, ps4_eligible=True).model_dump(),
         headers=_bearer("token-a"),
     )
 
     assert response.status_code == 204
-    assert library.manual_entries[0][2] == ("PS5", "PS4")
+    assert library.manual_entries[0][2] == (PS5, PS4)
 
 
 def test_add_manual_game_does_not_duplicate_a_platform_named_both_ways():
     client, library = _build_manual()
 
     client.post(
-        "/library/manual",
-        json={"game_id": "game-1", "platforms": ["PS5"], "native_ps5": True},
+        _path(client, library_routes.add_manual_game),
+        json=ManualGameRequest(game_id="game-1", platforms=[PS5], native_ps5=True).model_dump(),
         headers=_bearer("token-a"),
     )
 
-    assert library.manual_entries[0][2] == ("PS5",)
+    assert library.manual_entries[0][2] == (PS5,)
 
 
 def test_add_manual_game_derives_the_platform_from_the_catalogs_own_title_id():
     """A PS3 disc has no boolean to set and the client has no reason to know PSN's prefix table."""
     client, library = _build_manual(title_ids_by_game={"game-1": "BLUS30443_00"})
 
-    response = client.post("/library/manual", json={"game_id": "game-1"}, headers=_bearer("token-a"))
+    response = client.post(
+        _path(client, library_routes.add_manual_game),
+        json=ManualGameRequest(game_id="game-1").model_dump(),
+        headers=_bearer("token-a"),
+    )
 
     assert response.status_code == 204
-    assert library.manual_entries[0][2] == ("PS3",)
+    assert library.manual_entries[0][2] == (PS3,)
 
 
 def test_a_caller_supplied_platform_wins_over_the_derived_one():
     client, library = _build_manual(title_ids_by_game={"game-1": "BLUS30443_00"})
 
-    client.post("/library/manual", json={"game_id": "game-1", "platforms": ["PS5"]}, headers=_bearer("token-a"))
+    client.post(
+        _path(client, library_routes.add_manual_game),
+        json=ManualGameRequest(game_id="game-1", platforms=[PS5]).model_dump(),
+        headers=_bearer("token-a"),
+    )
 
-    assert library.manual_entries[0][2] == ("PS5",)
+    assert library.manual_entries[0][2] == (PS5,)
 
 
 def test_add_manual_game_records_no_platform_when_the_prefix_is_not_a_title():
@@ -329,7 +367,11 @@ def test_add_manual_game_records_no_platform_when_the_prefix_is_not_a_title():
     discount coupon's platform on a real game."""
     client, library = _build_manual(title_ids_by_game={"game-1": "NPIA90007_01"})
 
-    client.post("/library/manual", json={"game_id": "game-1"}, headers=_bearer("token-a"))
+    client.post(
+        _path(client, library_routes.add_manual_game),
+        json=ManualGameRequest(game_id="game-1").model_dump(),
+        headers=_bearer("token-a"),
+    )
 
     assert library.manual_entries[0][2] == ()
 
@@ -340,7 +382,11 @@ def test_adding_a_game_the_caller_already_holds_from_psn_says_so_instead_of_repo
     no art or scores, so the game reads as absent right until the add quietly does nothing."""
     client, _library = _build_manual(manual_upsert_writes=False)
 
-    response = client.post("/library/manual", json={"game_id": "game-1"}, headers=_bearer("token-a"))
+    response = client.post(
+        _path(client, library_routes.add_manual_game),
+        json=ManualGameRequest(game_id="game-1").model_dump(),
+        headers=_bearer("token-a"),
+    )
 
     assert response.status_code == 409
     assert "already in your library" in response.json()["detail"]
@@ -350,18 +396,24 @@ def test_add_manual_game_rejects_a_platform_outside_the_vocabulary():
     client, library = _build_manual()
 
     response = client.post(
-        "/library/manual", json={"game_id": "game-1", "platforms": ["Xbox"]}, headers=_bearer("token-a")
+        _path(client, library_routes.add_manual_game),
+        json=ManualGameRequest(game_id="game-1", platforms=[uuid.uuid4().hex]).model_dump(),
+        headers=_bearer("token-a"),
     )
 
     assert response.status_code == 400
-    assert "PSVITA" in response.json()["detail"]
+    assert response.json()["detail"] == platform_vocabulary_message()
     assert library.manual_entries == []
 
 
 def test_add_manual_game_404s_for_a_game_the_catalog_has_never_seen():
     client, library = _build_manual(known_games=())
 
-    response = client.post("/library/manual", json={"game_id": "game-1"}, headers=_bearer("token-a"))
+    response = client.post(
+        _path(client, library_routes.add_manual_game),
+        json=ManualGameRequest(game_id="game-1").model_dump(),
+        headers=_bearer("token-a"),
+    )
 
     assert response.status_code == 404
     assert library.manual_entries == []
@@ -377,7 +429,9 @@ def _build_removable(manual_rows=(), psn_rows=()):
 def test_removing_a_manually_added_game_deletes_it():
     client, library = _build_removable(manual_rows=[("sub-a", "game-1")])
 
-    response = client.delete("/library/manual/game-1", headers=_bearer("token-a"))
+    response = client.delete(
+        _path(client, library_routes.remove_manual_game, game_id="game-1"), headers=_bearer("token-a")
+    )
 
     assert response.status_code == 204
     assert library.manual_rows == set()
@@ -390,7 +444,9 @@ def test_removing_a_psn_sourced_game_is_refused_rather_than_deleting_it():
     the route rather than by reading the query text."""
     client, library = _build_removable(psn_rows=[("sub-a", "game-1")])
 
-    response = client.delete("/library/manual/game-1", headers=_bearer("token-a"))
+    response = client.delete(
+        _path(client, library_routes.remove_manual_game, game_id="game-1"), headers=_bearer("token-a")
+    )
 
     assert response.status_code == 404
     assert library.psn_rows == {("sub-a", "game-1")}
@@ -400,7 +456,9 @@ def test_removing_another_callers_manual_game_leaves_it_alone():
     """The route keys off the token's own sub, so naming someone else's game reads as absent."""
     client, library = _build_removable(manual_rows=[("sub-b", "game-1")])
 
-    response = client.delete("/library/manual/game-1", headers=_bearer("token-a"))
+    response = client.delete(
+        _path(client, library_routes.remove_manual_game, game_id="game-1"), headers=_bearer("token-a")
+    )
 
     assert response.status_code == 404
     assert library.manual_rows == {("sub-b", "game-1")}
@@ -411,7 +469,9 @@ def test_an_unknown_game_reports_404_even_when_the_platform_is_also_wrong():
     client, library = _build_manual(known_games=())
 
     response = client.post(
-        "/library/manual", json={"game_id": "game-1", "platforms": ["Xbox"]}, headers=_bearer("token-a")
+        _path(client, library_routes.add_manual_game),
+        json=ManualGameRequest(game_id="game-1", platforms=[uuid.uuid4().hex]).model_dump(),
+        headers=_bearer("token-a"),
     )
 
     assert response.status_code == 404
@@ -421,7 +481,7 @@ def test_an_unknown_game_reports_404_even_when_the_platform_is_also_wrong():
 def test_requires_bearer_token():
     client, _validator, _publisher = _build()
 
-    response = client.post("/library/refresh")
+    response = client.post(_path(client, library_routes.refresh_library))
 
     assert response.status_code == 401
 
@@ -430,53 +490,65 @@ def test_publishes_for_the_callers_own_sub_and_returns_run_id():
     client, validator, publisher = _build()
     validator.register("token-a", _claims(sub="sub-a"))
 
-    response = client.post("/library/refresh", headers=_bearer("token-a"))
+    response = client.post(_path(client, library_routes.refresh_library), headers=_bearer("token-a"))
 
     assert response.status_code == 202
-    assert response.json() == {"run_id": "run-1"}
+    assert LibraryRefreshResponse.model_validate(response.json()).run_id == "run-1"
     assert publisher.library_refresh_calls == ["sub-a"]
+    assert client.app.state.audit_repository.entries == [("sub-a", ACTION_LIBRARY_REFRESH_REQUESTED, "run-1")]
+
+
+def test_a_refresh_is_not_queued_when_its_history_row_cannot_be_written():
+    client, validator, publisher = _build()
+    validator.register("token-a", _claims(sub="sub-a"))
+    client.app.state.audit_repository.begin_error = RuntimeError("sub-a")
+
+    with pytest.raises(RuntimeError):
+        client.post(_path(client, library_routes.refresh_library), headers=_bearer("token-a"))
+
+    assert publisher.library_refresh_calls == []
 
 
 def test_duplicate_refresh_returns_existing_run_id_instead_of_publishing_again():
     active = FakeJobRun(
         "run-existing",
-        "library_refresh",
+        JOB_KIND_LIBRARY_REFRESH,
         "sub-a",
-        "running",
+        JOB_STATUS_RUNNING,
         lease_expires_at=datetime.now(timezone.utc) + timedelta(minutes=2),
     )
     client, validator, publisher = _build(FakeJobRunsRepository([active]))
     validator.register("token-a", _claims(sub="sub-a"))
 
-    response = client.post("/library/refresh", headers=_bearer("token-a"))
+    response = client.post(_path(client, library_routes.refresh_library), headers=_bearer("token-a"))
 
     assert response.status_code == 202
-    assert response.json() == {"run_id": "run-existing"}
+    assert LibraryRefreshResponse.model_validate(response.json()).run_id == "run-existing"
     assert publisher.library_refresh_calls == []
 
 
 def test_duplicate_refresh_guard_is_scoped_to_the_caller_and_kind():
-    other_users_run = FakeJobRun("run-other", "library_refresh", "sub-b", "running")
-    enrichment_run = FakeJobRun("run-enrichment", "enrichment", None, "running")
+    other_users_run = FakeJobRun("run-other", JOB_KIND_LIBRARY_REFRESH, "sub-b", JOB_STATUS_RUNNING)
+    enrichment_run = FakeJobRun("run-enrichment", JOB_KIND_ENRICHMENT, None, JOB_STATUS_RUNNING)
     client, validator, publisher = _build(FakeJobRunsRepository([other_users_run, enrichment_run]))
     validator.register("token-a", _claims(sub="sub-a"))
 
-    response = client.post("/library/refresh", headers=_bearer("token-a"))
+    response = client.post(_path(client, library_routes.refresh_library), headers=_bearer("token-a"))
 
     assert response.status_code == 202
-    assert response.json() == {"run_id": "run-1"}
+    assert LibraryRefreshResponse.model_validate(response.json()).run_id == "run-1"
     assert publisher.library_refresh_calls == ["sub-a"]
 
 
 def test_a_terminal_run_does_not_block_a_new_refresh():
-    finished = FakeJobRun("run-old", "library_refresh", "sub-a", "succeeded")
+    finished = FakeJobRun("run-old", JOB_KIND_LIBRARY_REFRESH, "sub-a", JOB_STATUS_SUCCEEDED)
     client, validator, publisher = _build(FakeJobRunsRepository([finished]))
     validator.register("token-a", _claims(sub="sub-a"))
 
-    response = client.post("/library/refresh", headers=_bearer("token-a"))
+    response = client.post(_path(client, library_routes.refresh_library), headers=_bearer("token-a"))
 
     assert response.status_code == 202
-    assert response.json() == {"run_id": "run-1"}
+    assert LibraryRefreshResponse.model_validate(response.json()).run_id == "run-1"
     assert publisher.library_refresh_calls == ["sub-a"]
 
 
@@ -484,7 +556,7 @@ def test_a_stale_non_terminal_run_is_superseded_not_returned():
 
     stale = FakeJobRun(
         "run-stale",
-        "library_refresh",
+        JOB_KIND_LIBRARY_REFRESH,
         "sub-a",
         "rate_limited",
         updated_at=datetime.now(timezone.utc) - timedelta(hours=25),
@@ -493,32 +565,30 @@ def test_a_stale_non_terminal_run_is_superseded_not_returned():
     client, validator, publisher = _build(job_runs_repository)
     validator.register("token-a", _claims(sub="sub-a"))
 
-    response = client.post("/library/refresh", headers=_bearer("token-a"))
+    response = client.post(_path(client, library_routes.refresh_library), headers=_bearer("token-a"))
 
     assert response.status_code == 202
-    assert response.json() == {"run_id": "run-1"}
+    assert LibraryRefreshResponse.model_validate(response.json()).run_id == "run-1"
     assert publisher.library_refresh_calls == ["sub-a"]
-    assert job_runs_repository.failed_calls == [
-        ("run-stale", "This refresh made no progress for over 24 hours, so a new one has been started in its place.")
-    ]
-    assert job_runs_repository.runs["run-stale"].status == "failed"
+    assert job_runs_repository.failed_calls == [("run-stale", no_progress_reason(LIBRARY_REFRESH_RUN_NOUN))]
+    assert job_runs_repository.runs["run-stale"].status == JOB_STATUS_FAILED
 
 
 def test_a_running_run_holding_a_live_lease_is_returned_not_superseded():
     alive = FakeJobRun(
         "run-alive",
-        "library_refresh",
+        JOB_KIND_LIBRARY_REFRESH,
         "sub-a",
-        "running",
+        JOB_STATUS_RUNNING,
         lease_expires_at=datetime.now(timezone.utc) + timedelta(minutes=2),
     )
     job_runs_repository = FakeJobRunsRepository([alive])
     client, validator, publisher = _build(job_runs_repository)
     validator.register("token-a", _claims(sub="sub-a"))
 
-    response = client.post("/library/refresh", headers=_bearer("token-a"))
+    response = client.post(_path(client, library_routes.refresh_library), headers=_bearer("token-a"))
 
-    assert response.json() == {"run_id": "run-alive"}
+    assert LibraryRefreshResponse.model_validate(response.json()).run_id == "run-alive"
     assert publisher.library_refresh_calls == []
     assert job_runs_repository.failed_calls == []
 
@@ -526,9 +596,9 @@ def test_a_running_run_holding_a_live_lease_is_returned_not_superseded():
 def test_a_running_run_whose_lease_expired_is_superseded_even_though_updated_at_is_recent():
     dead = FakeJobRun(
         "run-dead",
-        "library_refresh",
+        JOB_KIND_LIBRARY_REFRESH,
         "sub-a",
-        "running",
+        JOB_STATUS_RUNNING,
         updated_at=datetime.now(timezone.utc) - timedelta(minutes=1),
         lease_expires_at=datetime.now(timezone.utc) - timedelta(minutes=5),
     )
@@ -536,34 +606,30 @@ def test_a_running_run_whose_lease_expired_is_superseded_even_though_updated_at_
     client, validator, publisher = _build(job_runs_repository)
     validator.register("token-a", _claims(sub="sub-a"))
 
-    response = client.post("/library/refresh", headers=_bearer("token-a"))
+    response = client.post(_path(client, library_routes.refresh_library), headers=_bearer("token-a"))
 
-    assert response.json() == {"run_id": "run-1"}
+    assert LibraryRefreshResponse.model_validate(response.json()).run_id == "run-1"
     assert publisher.library_refresh_calls == ["sub-a"]
-    assert job_runs_repository.failed_calls == [
-        ("run-dead", "This refresh stopped before it finished, so a new one has been started in its place.")
-    ]
+    assert job_runs_repository.failed_calls == [("run-dead", lease_lapsed_reason(LIBRARY_REFRESH_RUN_NOUN))]
 
 
 def test_a_running_run_that_never_took_a_lease_is_superseded():
-    unleased = FakeJobRun("run-unleased", "library_refresh", "sub-a", "running", lease_expires_at=None)
+    unleased = FakeJobRun("run-unleased", JOB_KIND_LIBRARY_REFRESH, "sub-a", JOB_STATUS_RUNNING, lease_expires_at=None)
     job_runs_repository = FakeJobRunsRepository([unleased])
     client, validator, _publisher = _build(job_runs_repository)
     validator.register("token-a", _claims(sub="sub-a"))
 
-    response = client.post("/library/refresh", headers=_bearer("token-a"))
+    response = client.post(_path(client, library_routes.refresh_library), headers=_bearer("token-a"))
 
-    assert response.json() == {"run_id": "run-1"}
-    assert job_runs_repository.failed_calls == [
-        ("run-unleased", "This refresh stopped before it finished, so a new one has been started in its place.")
-    ]
+    assert LibraryRefreshResponse.model_validate(response.json()).run_id == "run-1"
+    assert job_runs_repository.failed_calls == [("run-unleased", lease_lapsed_reason(LIBRARY_REFRESH_RUN_NOUN))]
 
 
 def test_a_run_within_the_staleness_threshold_is_not_superseded_even_while_rate_limited():
 
     waiting = FakeJobRun(
         "run-waiting",
-        "library_refresh",
+        JOB_KIND_LIBRARY_REFRESH,
         "sub-a",
         "rate_limited",
         updated_at=datetime.now(timezone.utc) - timedelta(hours=8),
@@ -572,10 +638,10 @@ def test_a_run_within_the_staleness_threshold_is_not_superseded_even_while_rate_
     client, validator, publisher = _build(job_runs_repository)
     validator.register("token-a", _claims(sub="sub-a"))
 
-    response = client.post("/library/refresh", headers=_bearer("token-a"))
+    response = client.post(_path(client, library_routes.refresh_library), headers=_bearer("token-a"))
 
     assert response.status_code == 202
-    assert response.json() == {"run_id": "run-waiting"}
+    assert LibraryRefreshResponse.model_validate(response.json()).run_id == "run-waiting"
     assert publisher.library_refresh_calls == []
     assert job_runs_repository.failed_calls == []
 
@@ -585,58 +651,70 @@ def test_queue_not_configured_returns_503():
     client.app.state.queue_publisher = None
     validator.register("token-a", _claims())
 
-    response = client.post("/library/refresh", headers=_bearer("token-a"))
+    response = client.post(_path(client, library_routes.refresh_library), headers=_bearer("token-a"))
 
     assert response.status_code == 503
 
 
 def test_get_status_returns_run_for_owner():
-    run = FakeJobRun("run-1", "library_refresh", "sub-a", "running")
+    run = FakeJobRun("run-1", JOB_KIND_LIBRARY_REFRESH, "sub-a", JOB_STATUS_RUNNING)
     client, validator, _publisher = _build(FakeJobRunsRepository([run]))
     validator.register("token-a", _claims(sub="sub-a"))
 
-    response = client.get("/library/refresh/run-1", headers=_bearer("token-a"))
+    response = client.get(
+        _path(client, library_routes.get_library_refresh_status, run_id="run-1"), headers=_bearer("token-a")
+    )
 
     assert response.status_code == 200
-    assert response.json() == {"run_id": "run-1", "status": "running", "error": None, "result_summary": None}
+    assert LibraryRefreshStatusResponse.model_validate(response.json()) == LibraryRefreshStatusResponse(
+        run_id="run-1", status=JOB_STATUS_RUNNING, error=None, result_summary=None
+    )
 
 
 def test_get_status_returns_result_summary_when_present():
     summary = {"rawg_enriched_titles": ["Elden Ring"], "opencritic_topup_incomplete": False}
-    run = FakeJobRun("run-1", "library_refresh", "sub-a", "succeeded", result_summary=summary)
+    run = FakeJobRun("run-1", JOB_KIND_LIBRARY_REFRESH, "sub-a", JOB_STATUS_SUCCEEDED, result_summary=summary)
     client, validator, _publisher = _build(FakeJobRunsRepository([run]))
     validator.register("token-a", _claims(sub="sub-a"))
 
-    response = client.get("/library/refresh/run-1", headers=_bearer("token-a"))
+    response = client.get(
+        _path(client, library_routes.get_library_refresh_status, run_id="run-1"), headers=_bearer("token-a")
+    )
 
-    assert response.json()["result_summary"] == summary
+    assert LibraryRefreshStatusResponse.model_validate(response.json()).result_summary == summary
 
 
 def test_get_status_unknown_run_returns_404():
     client, validator, _publisher = _build()
     validator.register("token-a", _claims())
 
-    response = client.get("/library/refresh/unknown", headers=_bearer("token-a"))
+    response = client.get(
+        _path(client, library_routes.get_library_refresh_status, run_id="unknown"), headers=_bearer("token-a")
+    )
 
     assert response.status_code == 404
 
 
 def test_get_status_not_owned_returns_404():
-    run = FakeJobRun("run-1", "library_refresh", "sub-b", "succeeded")
+    run = FakeJobRun("run-1", JOB_KIND_LIBRARY_REFRESH, "sub-b", JOB_STATUS_SUCCEEDED)
     client, validator, _publisher = _build(FakeJobRunsRepository([run]))
     validator.register("token-a", _claims(sub="sub-a"))
 
-    response = client.get("/library/refresh/run-1", headers=_bearer("token-a"))
+    response = client.get(
+        _path(client, library_routes.get_library_refresh_status, run_id="run-1"), headers=_bearer("token-a")
+    )
 
     assert response.status_code == 404
 
 
 def test_get_status_enrichment_run_returns_404():
-    run = FakeJobRun("run-1", "enrichment", None, "succeeded")
+    run = FakeJobRun("run-1", JOB_KIND_ENRICHMENT, None, JOB_STATUS_SUCCEEDED)
     client, validator, _publisher = _build(FakeJobRunsRepository([run]))
     validator.register("token-a", _claims())
 
-    response = client.get("/library/refresh/run-1", headers=_bearer("token-a"))
+    response = client.get(
+        _path(client, library_routes.get_library_refresh_status, run_id="run-1"), headers=_bearer("token-a")
+    )
 
     assert response.status_code == 404
 
@@ -645,9 +723,11 @@ def test_get_library_reports_trophy_progress_off_for_an_unlinked_caller():
     client, validator, _publisher = _build(library_repository=FakeLibraryRepository({"sub-a": []}))
     validator.register("token-a", _claims(sub="sub-a"))
 
-    body = client.get("/library", headers=_bearer("token-a")).json()
+    body = LibraryPageResponse.model_validate(
+        client.get(_path(client, library_routes.get_library), headers=_bearer("token-a")).json()
+    )
 
-    assert body["trophy_progress"] == {"state": "off", "reason": "no_link"}
+    assert body.trophy_progress == TrophyProgressResponse(state=TROPHY_PROGRESS_OFF, reason=TROPHY_PROGRESS_NO_LINK)
 
 
 def test_get_library_reports_trophy_progress_off_when_harvesting_is_disabled():
@@ -658,9 +738,11 @@ def test_get_library_reports_trophy_progress_off_when_harvesting_is_disabled():
     )
     validator.register("token-a", _claims(sub="sub-a"))
 
-    body = client.get("/library", headers=_bearer("token-a")).json()
+    body = LibraryPageResponse.model_validate(
+        client.get(_path(client, library_routes.get_library), headers=_bearer("token-a")).json()
+    )
 
-    assert body["trophy_progress"] == {"state": "off", "reason": "harvest_off"}
+    assert body.trophy_progress == TrophyProgressResponse(state=TROPHY_PROGRESS_OFF, reason=TROPHY_PROGRESS_HARVEST_OFF)
 
 
 def test_get_library_withholds_a_stored_percentage_while_harvesting_is_off():
@@ -671,10 +753,12 @@ def test_get_library_withholds_a_stored_percentage_while_harvesting_is_off():
     client, validator, _publisher = _build(library_repository=FakeLibraryRepository(games), repository=repository)
     validator.register("token-a", _claims(sub="sub-a"))
 
-    body = client.get("/library", headers=_bearer("token-a")).json()
+    body = LibraryPageResponse.model_validate(
+        client.get(_path(client, library_routes.get_library), headers=_bearer("token-a")).json()
+    )
 
-    assert body["trophy_progress"]["state"] == "off"
-    assert body["games"][0]["percent_completed"] is None
+    assert body.trophy_progress.state == TROPHY_PROGRESS_OFF
+    assert body.games[0].percent_completed is None
 
 
 def test_get_library_serves_a_stored_percentage_while_harvesting_is_on():
@@ -687,10 +771,12 @@ def test_get_library_serves_a_stored_percentage_while_harvesting_is_on():
     )
     validator.register("token-a", _claims(sub="sub-a"))
 
-    body = client.get("/library", headers=_bearer("token-a")).json()
+    body = LibraryPageResponse.model_validate(
+        client.get(_path(client, library_routes.get_library), headers=_bearer("token-a")).json()
+    )
 
-    assert body["trophy_progress"]["state"] == "on"
-    assert body["games"][0]["percent_completed"] == stored_percent
+    assert body.trophy_progress.state == TROPHY_PROGRESS_ON
+    assert body.games[0].percent_completed == stored_percent
 
 
 def test_get_library_reports_trophy_progress_pending_until_a_refresh_has_fetched_any():
@@ -701,9 +787,13 @@ def test_get_library_reports_trophy_progress_pending_until_a_refresh_has_fetched
     )
     validator.register("token-a", _claims(sub="sub-a"))
 
-    body = client.get("/library", headers=_bearer("token-a")).json()
+    body = LibraryPageResponse.model_validate(
+        client.get(_path(client, library_routes.get_library), headers=_bearer("token-a")).json()
+    )
 
-    assert body["trophy_progress"] == {"state": "pending", "reason": "never_refreshed"}
+    assert body.trophy_progress == TrophyProgressResponse(
+        state=TROPHY_PROGRESS_PENDING, reason=TROPHY_PROGRESS_NEVER_REFRESHED
+    )
 
 
 def test_get_library_reports_trophy_progress_on_once_a_refresh_has_fetched_progress():
@@ -714,22 +804,26 @@ def test_get_library_reports_trophy_progress_on_once_a_refresh_has_fetched_progr
     )
     validator.register("token-a", _claims(sub="sub-a"))
 
-    body = client.get("/library", headers=_bearer("token-a")).json()
+    body = LibraryPageResponse.model_validate(
+        client.get(_path(client, library_routes.get_library), headers=_bearer("token-a")).json()
+    )
 
-    assert body["trophy_progress"] == {"state": "on", "reason": None}
+    assert body.trophy_progress == TrophyProgressResponse(state=TROPHY_PROGRESS_ON, reason=None)
 
 
 def test_get_library_carries_each_rows_trophy_match_state():
     games = [
-        FakeLibraryGameView("g1", "Matched", trophy_match="matched"),
-        FakeLibraryGameView("g2", "Unmatched", trophy_match="unmatched"),
+        FakeLibraryGameView("g1", "Matched", trophy_match=TROPHY_MATCHED),
+        FakeLibraryGameView("g2", "Unmatched", trophy_match=TROPHY_UNMATCHED),
     ]
     client, validator, _publisher = _build(library_repository=FakeLibraryRepository({"sub-a": games}))
     validator.register("token-a", _claims(sub="sub-a"))
 
-    body = client.get("/library", headers=_bearer("token-a")).json()
+    body = LibraryPageResponse.model_validate(
+        client.get(_path(client, library_routes.get_library), headers=_bearer("token-a")).json()
+    )
 
-    assert [row["trophy_match"] for row in body["games"]] == ["matched", "unmatched"]
+    assert [row.trophy_match for row in body.games] == [TROPHY_MATCHED, TROPHY_UNMATCHED]
 
 
 def test_hiding_a_held_game_removes_it_from_the_library_and_counts_it():
@@ -738,20 +832,24 @@ def test_hiding_a_held_game_removes_it_from_the_library_and_counts_it():
     client, validator, _publisher = _build(library_repository=library)
     validator.register("token-a", _claims(sub="sub-a"))
 
-    hide = client.put("/library/g2/hidden", headers=_bearer("token-a"))
-    body = client.get("/library", headers=_bearer("token-a")).json()
+    hide = client.put(_path(client, library_routes.hide_game, game_id="g2"), headers=_bearer("token-a"))
+    body = LibraryPageResponse.model_validate(
+        client.get(_path(client, library_routes.get_library), headers=_bearer("token-a")).json()
+    )
 
     assert hide.status_code == 204
-    assert [row["game_id"] for row in body["games"]] == ["g1"]
-    assert body["hidden_count"] == 1
-    assert library.hidden_filters[-1] == "exclude"
+    assert [row.game_id for row in body.games] == ["g1"]
+    assert body.hidden_count == 1
+    assert library.hidden_filters[-1] == HIDDEN_EXCLUDE
 
 
 def test_hiding_a_game_the_caller_does_not_hold_is_404():
     client, validator, _publisher = _build(library_repository=FakeLibraryRepository({"sub-a": []}))
     validator.register("token-a", _claims(sub="sub-a"))
 
-    assert client.put("/library/g9/hidden", headers=_bearer("token-a")).status_code == 404
+    assert (
+        client.put(_path(client, library_routes.hide_game, game_id="g9"), headers=_bearer("token-a")).status_code == 404
+    )
 
 
 def test_the_hidden_view_lists_only_hidden_games_and_unhiding_is_idempotent():
@@ -760,21 +858,25 @@ def test_the_hidden_view_lists_only_hidden_games_and_unhiding_is_idempotent():
     client, validator, _publisher = _build(library_repository=library)
     validator.register("token-a", _claims(sub="sub-a"))
 
-    body = client.get("/library?hidden=only", headers=_bearer("token-a")).json()
-    first = client.delete("/library/g2/hidden", headers=_bearer("token-a"))
-    second = client.delete("/library/g2/hidden", headers=_bearer("token-a"))
-    after = client.get("/library", headers=_bearer("token-a")).json()
+    body = LibraryPageResponse.model_validate(
+        client.get(_path(client, library_routes.get_library) + "?hidden=only", headers=_bearer("token-a")).json()
+    )
+    first = client.delete(_path(client, library_routes.unhide_game, game_id="g2"), headers=_bearer("token-a"))
+    second = client.delete(_path(client, library_routes.unhide_game, game_id="g2"), headers=_bearer("token-a"))
+    after = LibraryPageResponse.model_validate(
+        client.get(_path(client, library_routes.get_library), headers=_bearer("token-a")).json()
+    )
 
-    assert [row["game_id"] for row in body["games"]] == ["g2"]
+    assert [row.game_id for row in body.games] == ["g2"]
     assert (first.status_code, second.status_code) == (204, 204)
-    assert [row["game_id"] for row in after["games"]] == ["g1", "g2"]
-    assert after["hidden_count"] == 0
+    assert [row.game_id for row in after.games] == ["g1", "g2"]
+    assert after.hidden_count == 0
 
 
 def test_get_library_requires_bearer_token():
     client, _validator, _publisher = _build()
 
-    assert client.get("/library").status_code == 401
+    assert client.get(_path(client, library_routes.get_library)).status_code == 401
 
 
 def test_get_library_returns_callers_own_games_with_ratings_and_genre():
@@ -795,7 +897,7 @@ def test_get_library_returns_callers_own_games_with_ratings_and_genre():
             opencritic_enriched=True,
             psn_enriched=False,
             cover_image_url="https://cdn.example/elden-ring.jpg",
-            platforms=("PS5", "PS4"),
+            platforms=(PS5, PS4),
         ),
         FakeLibraryGameView(
             "game-2", "Store Enriched Only", rawg_enriched=False, opencritic_enriched=False, psn_enriched=True
@@ -804,65 +906,65 @@ def test_get_library_returns_callers_own_games_with_ratings_and_genre():
     client, validator, _publisher = _build(library_repository=FakeLibraryRepository({"sub-a": games}))
     validator.register("token-a", _claims(sub="sub-a"))
 
-    response = client.get("/library", headers=_bearer("token-a"))
+    response = client.get(_path(client, library_routes.get_library), headers=_bearer("token-a"))
 
     assert response.status_code == 200
-    assert response.json() == {
-        "games": [
-            {
-                "game_id": "game-1",
-                "title": "Elden Ring",
-                "genre": "Action RPG",
-                "rawg_rating": 96.0,
-                "opencritic_rating": 94.0,
-                "psn_rating": 4.8,
-                "psn_product_id": "UP0700-CUSA23100_00-ELDENRING0000000",
-                "rawg_enriched": True,
-                "opencritic_enriched": True,
-                "psn_enriched": False,
-                "is_active": True,
-                "percent_completed": None,
-                "source": "psn",
-                "cover_image_url": "https://cdn.example/elden-ring.jpg",
-                "platforms": ["PS5", "PS4"],
-                "trophy_match": "not_attempted",
-            },
-            {
-                "game_id": "game-2",
-                "title": "Store Enriched Only",
-                "genre": None,
-                "rawg_rating": None,
-                "opencritic_rating": None,
-                "psn_rating": None,
-                "psn_product_id": None,
-                "rawg_enriched": False,
-                "opencritic_enriched": False,
-                "psn_enriched": True,
-                "is_active": True,
-                "percent_completed": None,
-                "source": "psn",
-                "cover_image_url": None,
-                "platforms": [],
-                "trophy_match": "not_attempted",
-            },
+    assert LibraryPageResponse.model_validate(response.json()) == LibraryPageResponse(
+        games=[
+            LibraryGameResponse(
+                game_id="game-1",
+                title="Elden Ring",
+                genre="Action RPG",
+                rawg_rating=96.0,
+                opencritic_rating=94.0,
+                psn_rating=4.8,
+                psn_product_id="UP0700-CUSA23100_00-ELDENRING0000000",
+                rawg_enriched=True,
+                opencritic_enriched=True,
+                psn_enriched=False,
+                is_active=True,
+                percent_completed=None,
+                source=LIBRARY_SOURCE_PSN,
+                cover_image_url="https://cdn.example/elden-ring.jpg",
+                platforms=[PS5, PS4],
+                trophy_match=TROPHY_NOT_ATTEMPTED,
+            ),
+            LibraryGameResponse(
+                game_id="game-2",
+                title="Store Enriched Only",
+                genre=None,
+                rawg_rating=None,
+                opencritic_rating=None,
+                psn_rating=None,
+                psn_product_id=None,
+                rawg_enriched=False,
+                opencritic_enriched=False,
+                psn_enriched=True,
+                is_active=True,
+                percent_completed=None,
+                source=LIBRARY_SOURCE_PSN,
+                cover_image_url=None,
+                platforms=[],
+                trophy_match=TROPHY_NOT_ATTEMPTED,
+            ),
         ],
-        "total": 2,
-        "trophy_progress": {"state": "off", "reason": "no_link"},
-        "hidden_count": 0,
-    }
+        total=2,
+        trophy_progress=TrophyProgressResponse(state=TROPHY_PROGRESS_OFF, reason=TROPHY_PROGRESS_NO_LINK),
+        hidden_count=0,
+    )
 
 
 def test_get_library_preserves_platform_order_from_the_repository():
     """Platforms arrive ordered newest-first by ``platforms.sort_order``; the route must not re-sort
     them into alphabetical order, which would read PS3 before PS5."""
-    games = [FakeLibraryGameView("game-1", "99Vidas", platforms=("PS4", "PS3", "PSVITA"))]
+    games = [FakeLibraryGameView("game-1", "99Vidas", platforms=(PS4, PS3, PSVITA))]
     client, validator, _publisher = _build(library_repository=FakeLibraryRepository({"sub-a": games}))
     validator.register("token-a", _claims(sub="sub-a"))
 
-    response = client.get("/library", headers=_bearer("token-a"))
+    response = client.get(_path(client, library_routes.get_library), headers=_bearer("token-a"))
 
     assert response.status_code == 200
-    assert response.json()["games"][0]["platforms"] == ["PS4", "PS3", "PSVITA"]
+    assert LibraryPageResponse.model_validate(response.json()).games[0].platforms == [PS4, PS3, PSVITA]
 
 
 def test_get_library_flags_a_game_the_caller_lost_access_to():
@@ -874,10 +976,10 @@ def test_get_library_flags_a_game_the_caller_lost_access_to():
     client, validator, _publisher = _build(library_repository=FakeLibraryRepository({"sub-a": games}))
     validator.register("token-a", _claims(sub="sub-a"))
 
-    response = client.get("/library", headers=_bearer("token-a"))
+    response = client.get(_path(client, library_routes.get_library), headers=_bearer("token-a"))
 
     assert response.status_code == 200
-    by_title = {game["title"]: game["is_active"] for game in response.json()["games"]}
+    by_title = {game.title: game.is_active for game in LibraryPageResponse.model_validate(response.json()).games}
     assert by_title == {"Still Mine": True, "Lapsed Plus Title": False}
 
 
@@ -885,15 +987,15 @@ def test_get_library_returns_empty_page_for_a_user_with_no_entries():
     client, validator, _publisher = _build()
     validator.register("token-a", _claims(sub="sub-a"))
 
-    response = client.get("/library", headers=_bearer("token-a"))
+    response = client.get(_path(client, library_routes.get_library), headers=_bearer("token-a"))
 
     assert response.status_code == 200
-    assert response.json() == {
-        "games": [],
-        "total": 0,
-        "trophy_progress": {"state": "off", "reason": "no_link"},
-        "hidden_count": 0,
-    }
+    assert LibraryPageResponse.model_validate(response.json()) == LibraryPageResponse(
+        games=[],
+        total=0,
+        trophy_progress=TrophyProgressResponse(state=TROPHY_PROGRESS_OFF, reason=TROPHY_PROGRESS_NO_LINK),
+        hidden_count=0,
+    )
 
 
 def test_get_library_scoped_to_caller_only():
@@ -904,9 +1006,9 @@ def test_get_library_scoped_to_caller_only():
     )
     validator.register("token-a", _claims(sub="sub-a"))
 
-    response = client.get("/library", headers=_bearer("token-a"))
+    response = client.get(_path(client, library_routes.get_library), headers=_bearer("token-a"))
 
-    assert [game["title"] for game in response.json()["games"]] == ["A's Game"]
+    assert [game.title for game in LibraryPageResponse.model_validate(response.json()).games] == ["A's Game"]
 
 
 def test_get_library_search_filters_by_title_substring_case_insensitively():
@@ -914,11 +1016,11 @@ def test_get_library_search_filters_by_title_substring_case_insensitively():
     client, validator, _publisher = _build(library_repository=FakeLibraryRepository({"sub-a": games}))
     validator.register("token-a", _claims(sub="sub-a"))
 
-    response = client.get("/library?q=elden", headers=_bearer("token-a"))
+    response = client.get(_path(client, library_routes.get_library) + "?q=elden", headers=_bearer("token-a"))
 
-    body = response.json()
-    assert [g["title"] for g in body["games"]] == ["Elden Ring"]
-    assert body["total"] == 1
+    body = LibraryPageResponse.model_validate(response.json())
+    assert [g.title for g in body.games] == ["Elden Ring"]
+    assert body.total == 1
 
 
 def test_get_library_genre_filters_exact_match():
@@ -929,11 +1031,11 @@ def test_get_library_genre_filters_exact_match():
     client, validator, _publisher = _build(library_repository=FakeLibraryRepository({"sub-a": games}))
     validator.register("token-a", _claims(sub="sub-a"))
 
-    response = client.get("/library?genre=Puzzle", headers=_bearer("token-a"))
+    response = client.get(_path(client, library_routes.get_library) + "?genre=Puzzle", headers=_bearer("token-a"))
 
-    body = response.json()
-    assert [g["title"] for g in body["games"]] == ["Tetris Effect"]
-    assert body["total"] == 1
+    body = LibraryPageResponse.model_validate(response.json())
+    assert [g.title for g in body.games] == ["Tetris Effect"]
+    assert body.total == 1
 
 
 def test_get_library_sort_by_rating_nulls_last_ascending_and_descending():
@@ -945,11 +1047,19 @@ def test_get_library_sort_by_rating_nulls_last_ascending_and_descending():
     client, validator, _publisher = _build(library_repository=FakeLibraryRepository({"sub-a": games}))
     validator.register("token-a", _claims(sub="sub-a"))
 
-    asc = client.get("/library?sort=rawg_rating&sortDir=asc", headers=_bearer("token-a")).json()
-    assert [g["title"] for g in asc["games"]] == ["Low", "High", "No Rating"]
+    asc = LibraryPageResponse.model_validate(
+        client.get(
+            _path(client, library_routes.get_library) + "?sort=rawg_rating&sortDir=asc", headers=_bearer("token-a")
+        ).json()
+    )
+    assert [g.title for g in asc.games] == ["Low", "High", "No Rating"]
 
-    desc = client.get("/library?sort=rawg_rating&sortDir=desc", headers=_bearer("token-a")).json()
-    assert [g["title"] for g in desc["games"]] == ["High", "Low", "No Rating"]
+    desc = LibraryPageResponse.model_validate(
+        client.get(
+            _path(client, library_routes.get_library) + "?sort=rawg_rating&sortDir=desc", headers=_bearer("token-a")
+        ).json()
+    )
+    assert [g.title for g in desc.games] == ["High", "Low", "No Rating"]
 
 
 def test_get_library_sort_by_percent_completed_nulls_last_ascending_and_descending():
@@ -961,18 +1071,30 @@ def test_get_library_sort_by_percent_completed_nulls_last_ascending_and_descendi
     client, validator, _publisher = _build(library_repository=FakeLibraryRepository({"sub-a": games}))
     validator.register("token-a", _claims(sub="sub-a"))
 
-    asc = client.get("/library?sort=percent_completed&sortDir=asc", headers=_bearer("token-a")).json()
-    assert [g["title"] for g in asc["games"]] == ["Barely Started", "Mostly Done", "No Progress"]
+    asc = LibraryPageResponse.model_validate(
+        client.get(
+            _path(client, library_routes.get_library) + "?sort=percent_completed&sortDir=asc",
+            headers=_bearer("token-a"),
+        ).json()
+    )
+    assert [g.title for g in asc.games] == ["Barely Started", "Mostly Done", "No Progress"]
 
-    desc = client.get("/library?sort=percent_completed&sortDir=desc", headers=_bearer("token-a")).json()
-    assert [g["title"] for g in desc["games"]] == ["Mostly Done", "Barely Started", "No Progress"]
+    desc = LibraryPageResponse.model_validate(
+        client.get(
+            _path(client, library_routes.get_library) + "?sort=percent_completed&sortDir=desc",
+            headers=_bearer("token-a"),
+        ).json()
+    )
+    assert [g.title for g in desc.games] == ["Mostly Done", "Barely Started", "No Progress"]
 
 
 def test_get_library_rejects_unknown_sort_field():
     client, validator, _publisher = _build()
     validator.register("token-a", _claims(sub="sub-a"))
 
-    response = client.get("/library?sort=not_a_real_field", headers=_bearer("token-a"))
+    response = client.get(
+        _path(client, library_routes.get_library) + "?sort=not_a_real_field", headers=_bearer("token-a")
+    )
 
     assert response.status_code == 422
 
@@ -982,11 +1104,11 @@ def test_get_library_pagination_limit_and_offset():
     client, validator, _publisher = _build(library_repository=FakeLibraryRepository({"sub-a": games}))
     validator.register("token-a", _claims(sub="sub-a"))
 
-    response = client.get("/library?limit=2&offset=2", headers=_bearer("token-a"))
+    response = client.get(_path(client, library_routes.get_library) + "?limit=2&offset=2", headers=_bearer("token-a"))
 
-    body = response.json()
-    assert [g["title"] for g in body["games"]] == ["Game 2", "Game 3"]
-    assert body["total"] == 5
+    body = LibraryPageResponse.model_validate(response.json())
+    assert [g.title for g in body.games] == ["Game 2", "Game 3"]
+    assert body.total == 5
 
 
 def test_get_library_genres_returns_distinct_sorted_genres():
@@ -999,20 +1121,20 @@ def test_get_library_genres_returns_distinct_sorted_genres():
     client, validator, _publisher = _build(library_repository=FakeLibraryRepository({"sub-a": games}))
     validator.register("token-a", _claims(sub="sub-a"))
 
-    response = client.get("/library/genres", headers=_bearer("token-a"))
+    response = client.get(_path(client, library_routes.get_library_genres), headers=_bearer("token-a"))
 
     assert response.status_code == 200
-    assert response.json() == {"genres": ["Puzzle", "RPG"]}
+    assert LibraryGenresResponse.model_validate(response.json()) == LibraryGenresResponse(genres=["Puzzle", "RPG"])
 
 
 def test_get_library_genres_empty_for_user_with_no_enriched_genres():
     client, validator, _publisher = _build()
     validator.register("token-a", _claims(sub="sub-a"))
 
-    response = client.get("/library/genres", headers=_bearer("token-a"))
+    response = client.get(_path(client, library_routes.get_library_genres), headers=_bearer("token-a"))
 
     assert response.status_code == 200
-    assert response.json() == {"genres": []}
+    assert LibraryGenresResponse.model_validate(response.json()) == LibraryGenresResponse(genres=[])
 
 
 def test_get_library_percent_completed_comes_from_the_stored_column():
@@ -1024,9 +1146,9 @@ def test_get_library_percent_completed_comes_from_the_stored_column():
     )
     validator.register("token-a", _claims(sub="sub-a"))
 
-    response = client.get("/library", headers=_bearer("token-a"))
+    response = client.get(_path(client, library_routes.get_library), headers=_bearer("token-a"))
 
-    assert response.json()["games"][0]["percent_completed"] == 50
+    assert LibraryPageResponse.model_validate(response.json()).games[0].percent_completed == 50
 
 
 def test_get_library_percent_completed_blank_for_unlinked_user():
@@ -1034,9 +1156,9 @@ def test_get_library_percent_completed_blank_for_unlinked_user():
     client, validator, _publisher = _build(library_repository=FakeLibraryRepository({"sub-a": games}))
     validator.register("token-a", _claims(sub="sub-a"))
 
-    response = client.get("/library", headers=_bearer("token-a"))
+    response = client.get(_path(client, library_routes.get_library), headers=_bearer("token-a"))
 
-    assert response.json()["games"][0]["percent_completed"] is None
+    assert LibraryPageResponse.model_validate(response.json()).games[0].percent_completed is None
 
 
 def test_get_library_percent_completed_blank_when_harvest_trophies_disabled():
@@ -1049,9 +1171,9 @@ def test_get_library_percent_completed_blank_when_harvest_trophies_disabled():
     )
     validator.register("token-a", _claims(sub="sub-a"))
 
-    response = client.get("/library", headers=_bearer("token-a"))
+    response = client.get(_path(client, library_routes.get_library), headers=_bearer("token-a"))
 
-    assert response.json()["games"][0]["percent_completed"] is None
+    assert LibraryPageResponse.model_validate(response.json()).games[0].percent_completed is None
 
 
 def test_get_library_never_calls_psn_to_resolve_completion():
@@ -1078,8 +1200,10 @@ def test_get_library_never_calls_psn_to_resolve_completion():
     )
     validator.register("token-a", _claims(sub="sub-a"))
 
-    response = client.get("/library", headers=_bearer("token-a"))
+    response = client.get(_path(client, library_routes.get_library), headers=_bearer("token-a"))
 
-    by_title = {game["title"]: game["percent_completed"] for game in response.json()["games"]}
+    by_title = {
+        game.title: game.percent_completed for game in LibraryPageResponse.model_validate(response.json()).games
+    }
     assert by_title == {"Game A": 63, "Game B": None}
     assert factory.calls == []

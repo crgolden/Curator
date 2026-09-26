@@ -13,11 +13,14 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import sys
 from datetime import datetime
-from typing import Any, ClassVar
+from typing import Any, ClassVar, NamedTuple
+from uuid import uuid4
 
 import httpx
+import pytest
 from fastapi.testclient import TestClient
 from opentelemetry.instrumentation.httpx import RequestInfo
 from opentelemetry.sdk.trace import TracerProvider
@@ -25,10 +28,11 @@ from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 
 import curator.telemetry as telemetry
-from curator.app import create_app
+from curator.app import HEALTH_PATH, HEALTHY_BODY, create_app
 from curator.persistence.crypto import TokenCrypto
 from curator.settings import Settings
 from test_routes import FakeAgentFactory, FakeRepository, FakeTokenValidator
+from test_values import lowercase_token, new_opaque_token
 
 _SETTINGS_NO_TELEMETRY = Settings(
     oidc_authority="https://identity.example.test",
@@ -156,17 +160,36 @@ def test_configure_telemetry_is_a_noop_when_settings_absent(monkeypatch):
     assert telemetry._es_logging_configured is False
 
 
-def test_configure_telemetry_never_raises_even_if_a_leg_blows_up(monkeypatch):
+def test_configure_telemetry_lets_a_failing_otlp_leg_stop_startup(monkeypatch):
     monkeypatch.setattr(telemetry, "_otel_configured", False)
     monkeypatch.setattr(telemetry, "_es_logging_configured", False)
+    failure = RuntimeError(str(uuid4()))
 
     def _boom(*args, **kwargs):
-        raise RuntimeError("simulated telemetry failure")
+        raise failure
 
     monkeypatch.setattr(telemetry, "_configure_tracing_and_metrics", _boom)
+
+    with pytest.raises(RuntimeError) as raised:
+        telemetry.configure_telemetry(app=object(), settings=_SETTINGS_NO_TELEMETRY)
+
+    assert raised.value is failure
+
+
+def test_configure_telemetry_lets_a_failing_elasticsearch_leg_stop_startup(monkeypatch):
+    monkeypatch.setattr(telemetry, "_otel_configured", False)
+    monkeypatch.setattr(telemetry, "_es_logging_configured", False)
+    failure = RuntimeError(str(uuid4()))
+
+    def _boom(*args, **kwargs):
+        raise failure
+
     monkeypatch.setattr(telemetry, "_configure_elasticsearch_logging", _boom)
 
-    telemetry.configure_telemetry(app=object(), settings=_SETTINGS_NO_TELEMETRY)
+    with pytest.raises(RuntimeError) as raised:
+        telemetry.configure_telemetry(app=object(), settings=_SETTINGS_NO_TELEMETRY)
+
+    assert raised.value is failure
 
 
 def test_register_otlp_providers_registers_exactly_once_across_repeated_calls(monkeypatch):
@@ -291,7 +314,11 @@ def test_configure_tracing_and_metrics_selects_the_stable_http_and_database_semc
 
     telemetry._configure_tracing_and_metrics(app=object(), settings=_SETTINGS_WITH_TELEMETRY)
 
-    assert os.environ[telemetry._SEMCONV_STABILITY_OPT_IN_ENV] == "http,database"
+    assert os.environ[telemetry._SEMCONV_STABILITY_OPT_IN_ENV] == telemetry._SEMCONV_STABILITY_OPT_IN
+
+
+def test_the_semconv_opt_in_is_the_stable_http_and_database_conventions():
+    assert telemetry._SEMCONV_STABILITY_OPT_IN == "http,database"
 
 
 def test_configure_tracing_and_metrics_selects_the_semconv_before_anything_is_instrumented(monkeypatch):
@@ -306,7 +333,7 @@ def test_configure_tracing_and_metrics_selects_the_semconv_before_anything_is_in
 
     telemetry._configure_tracing_and_metrics(app=object(), settings=_SETTINGS_WITH_TELEMETRY)
 
-    assert seen == ["http,database", "http,database"]
+    assert seen == [telemetry._SEMCONV_STABILITY_OPT_IN, telemetry._SEMCONV_STABILITY_OPT_IN]
 
 
 def test_configure_tracing_and_metrics_leaves_an_explicit_semconv_value_alone(monkeypatch):
@@ -337,7 +364,14 @@ def test_instrument_app_excludes_health_from_tracing(monkeypatch):
     assert len(_FakeFastAPIInstrumentor.calls) == 1
     called_app, kwargs = _FakeFastAPIInstrumentor.calls[0]
     assert called_app is app
-    assert kwargs["excluded_urls"] == "health"
+    assert kwargs["excluded_urls"] == telemetry._HEALTH_EXCLUDED_URLS
+
+
+class _IndexCall(NamedTuple):
+    data_stream: str
+    document: dict[str, Any]
+    op_type: str | None
+    require_data_stream: bool | None
 
 
 class _FakeElasticsearchClient:
@@ -347,12 +381,10 @@ class _FakeElasticsearchClient:
         type(self).instances += 1
         self.args = args
         self.kwargs = kwargs
-        self.index_calls: list[dict[str, Any]] = []
+        self.index_calls: list[_IndexCall] = []
 
     def index(self, *, index, document, op_type=None, require_data_stream=None):
-        self.index_calls.append(
-            {"index": index, "document": document, "op_type": op_type, "require_data_stream": require_data_stream}
-        )
+        self.index_calls.append(_IndexCall(index, document, op_type, require_data_stream))
 
 
 class _FakeQueueListener:
@@ -386,8 +418,8 @@ def _settings_with_es(**overrides):
         "token_key": "token-key",
         "database_url": "postgresql://unused",
         "elasticsearch_node": "https://es.example.test:9200",
-        "elasticsearch_username": "curator",
-        "elasticsearch_password": "secret",
+        "elasticsearch_username": lowercase_token(),
+        "elasticsearch_password": new_opaque_token(),
     }
     values.update(overrides)
     return Settings(**values)
@@ -420,8 +452,8 @@ def test_configure_elasticsearch_logging_disables_propagation_on_the_es_client_l
     settings = _settings_with_es()
     root_logger = logging.getLogger()
     original_handlers = list(root_logger.handlers)
-    transport_logger = logging.getLogger("elastic_transport")
-    es_logger = logging.getLogger("elasticsearch")
+    transport_logger = logging.getLogger(telemetry.ELASTIC_TRANSPORT_LOGGER)
+    es_logger = logging.getLogger(telemetry.ELASTICSEARCH_LOGGER)
     original_transport_propagate = transport_logger.propagate
     original_es_propagate = es_logger.propagate
 
@@ -446,35 +478,56 @@ def test_configure_elasticsearch_logging_noop_when_node_absent(monkeypatch):
     assert telemetry._es_logging_configured is False
 
 
-def test_configure_elasticsearch_logging_noop_when_only_username_set(monkeypatch):
+def test_configure_elasticsearch_logging_refuses_a_node_without_a_password(monkeypatch):
     _patch_es_collaborators(monkeypatch)
     settings = _settings_with_es(elasticsearch_password=None)
 
-    telemetry._configure_elasticsearch_logging(settings)
+    with pytest.raises(ValueError, match=re.escape(telemetry.ELASTICSEARCH_CREDENTIALS_MISSING)):
+        telemetry._configure_elasticsearch_logging(settings)
 
     assert _FakeElasticsearchClient.instances == 0
     assert telemetry._es_logging_configured is False
 
 
+def test_the_document_fields_are_the_flat_names_the_grafana_logs_dashboard_reads():
+    assert (
+        telemetry.TIMESTAMP_FIELD,
+        telemetry.MESSAGE_FIELD,
+        telemetry.LOG_LEVEL_FIELD,
+        telemetry.SERVICE_NAME_FIELD,
+        telemetry.LOGGER_NAME_FIELD,
+        telemetry.STACK_TRACE_FIELD,
+    ) == ("@timestamp", "message", "log.level", "service.name", "logger.name", "error.stack_trace")
+    assert telemetry.SERVICE_NAME_VALUE == "crgolden-curator"
+
+
 def test_format_log_record_produces_flat_log_level_and_service_name():
+    logger_name = f"{lowercase_token()}.{lowercase_token()}"
+    detail = lowercase_token()
     record = logging.LogRecord(
-        name="curator.psn_routes",
+        name=logger_name,
         level=logging.WARNING,
         pathname=__file__,
         lineno=1,
-        msg="something happened: %s",
-        args=("detail",),
+        msg="%s",
+        args=(detail,),
         exc_info=None,
     )
 
     doc = telemetry.format_log_record(record)
 
-    assert doc["message"] == "something happened: detail"
-    assert doc["log.level"] == "Warning"
-    assert doc["service.name"] == "crgolden-curator"
-    assert doc["logger.name"] == "curator.psn_routes"
-    assert "log" not in doc
-    assert "error.stack_trace" not in doc
+    assert doc[telemetry.MESSAGE_FIELD] == detail
+    assert doc[telemetry.LOG_LEVEL_FIELD] == telemetry._LEVEL_NAMES[logging.getLevelName(logging.WARNING)]
+    assert doc[telemetry.SERVICE_NAME_FIELD] == telemetry.SERVICE_NAME_VALUE
+    assert doc[telemetry.LOGGER_NAME_FIELD] == logger_name
+    assert telemetry.STACK_TRACE_FIELD not in doc
+    assert set(doc) == {
+        telemetry.TIMESTAMP_FIELD,
+        telemetry.MESSAGE_FIELD,
+        telemetry.LOG_LEVEL_FIELD,
+        telemetry.SERVICE_NAME_FIELD,
+        telemetry.LOGGER_NAME_FIELD,
+    }
 
 
 def test_format_log_record_timestamp_is_parseable_iso_8601():
@@ -490,12 +543,13 @@ def test_format_log_record_timestamp_is_parseable_iso_8601():
 
     doc = telemetry.format_log_record(record)
 
-    assert datetime.fromisoformat(doc["@timestamp"]).tzinfo is not None
+    assert datetime.fromisoformat(doc[telemetry.TIMESTAMP_FIELD]).tzinfo is not None
 
 
 def test_format_log_record_includes_stack_trace_on_exception():
+    failure = new_opaque_token()
     try:
-        raise ValueError("boom")
+        raise ValueError(failure)
     except ValueError:
         exc_info = sys.exc_info()
         record = logging.LogRecord(
@@ -503,28 +557,36 @@ def test_format_log_record_includes_stack_trace_on_exception():
             level=logging.ERROR,
             pathname=__file__,
             lineno=1,
-            msg="failed",
+            msg=lowercase_token(),
             args=(),
             exc_info=exc_info,
         )
 
     doc = telemetry.format_log_record(record)
 
-    assert "ValueError: boom" in doc["error.stack_trace"]
+    assert f"{ValueError.__name__}: {failure}" in doc[telemetry.STACK_TRACE_FIELD]
 
 
-def test_format_log_record_maps_every_python_level_to_the_fleet_vocabulary():
-    for level, expected in (
-        (logging.DEBUG, "Debug"),
-        (logging.INFO, "Information"),
-        (logging.WARNING, "Warning"),
-        (logging.ERROR, "Error"),
-        (logging.CRITICAL, "Fatal"),
-    ):
-        record = logging.LogRecord(
-            name="curator.app", level=level, pathname=__file__, lineno=1, msg="x", args=(), exc_info=None
-        )
-        assert telemetry.format_log_record(record)["log.level"] == expected
+def test_the_level_names_are_the_fleet_serilog_vocabulary():
+    assert telemetry._LEVEL_NAMES == {
+        "DEBUG": "Debug",
+        "INFO": "Information",
+        "WARNING": "Warning",
+        "ERROR": "Error",
+        "CRITICAL": "Fatal",
+    }
+
+
+@pytest.mark.parametrize("level", [logging.DEBUG, logging.INFO, logging.WARNING, logging.ERROR, logging.CRITICAL])
+def test_format_log_record_maps_every_python_level_to_the_fleet_vocabulary(level):
+    record = logging.LogRecord(
+        name=lowercase_token(), level=level, pathname=__file__, lineno=1, msg=lowercase_token(), args=(), exc_info=None
+    )
+
+    assert (
+        telemetry.format_log_record(record)[telemetry.LOG_LEVEL_FIELD]
+        == telemetry._LEVEL_NAMES[logging.getLevelName(level)]
+    )
 
 
 def test_elasticsearch_log_handler_emits_a_create_write_to_the_data_stream():
@@ -535,24 +597,27 @@ def test_elasticsearch_log_handler_emits_a_create_write_to_the_data_stream():
     """
     client = _FakeElasticsearchClient()
     handler = telemetry._ElasticsearchLogHandler(client)
+    message = lowercase_token()
     record = logging.LogRecord(
-        name="curator.app",
+        name=lowercase_token(),
         level=logging.INFO,
         pathname=__file__,
         lineno=1,
-        msg="hello",
+        msg=message,
         args=(),
         exc_info=None,
     )
 
     handler.emit(record)
 
+    assert telemetry._ES_DATA_STREAM == "logs-app-curator"
+    assert telemetry._ES_CREATE_OP_TYPE == "create"
     assert len(client.index_calls) == 1
     call = client.index_calls[0]
-    assert call["index"] == "logs-app-curator"
-    assert call["op_type"] == "create"
-    assert call["require_data_stream"] is True
-    assert call["document"]["message"] == "hello"
+    assert call.data_stream == telemetry._ES_DATA_STREAM
+    assert call.op_type == telemetry._ES_CREATE_OP_TYPE
+    assert call.require_data_stream is True
+    assert call.document[telemetry.MESSAGE_FIELD] == message
 
 
 def test_elasticsearch_log_handler_swallows_index_failures():
@@ -622,20 +687,24 @@ def test_create_app_health_check_unaffected_by_telemetry_wiring(monkeypatch):
     )
     client = TestClient(app)
 
-    response = client.get("/health")
+    response = client.get(HEALTH_PATH)
 
     assert response.status_code == 200
-    assert response.text == "Healthy"
+    assert response.text == HEALTHY_BODY
 
 
-def _traced_span(url_attribute_keys=("http.url", "url.full")):
+def _rawg_base() -> str:
+    return f"https://{telemetry._REDACT_QUERY_PARAM_HOSTS[0]}/{lowercase_token()}"
+
+
+def _traced_span(url, url_attribute_keys=telemetry._URL_SPAN_ATTRIBUTE_KEYS):
     """Start and immediately end a real recording span with URL attributes pre-set, mimicking what
     HTTPXClientInstrumentor does before invoking the async_request_hook -- returns (span, exporter)."""
     exporter = InMemorySpanExporter()
     provider = TracerProvider()
     provider.add_span_processor(SimpleSpanProcessor(exporter))
     tracer = provider.get_tracer(__name__)
-    attributes = {key: "https://api.rawg.io/api/games?key=super-secret&search=Foo" for key in url_attribute_keys}
+    attributes = {key: url for key in url_attribute_keys}
     span = tracer.start_span("test-span", attributes=attributes)
     return span, exporter
 
@@ -650,55 +719,49 @@ def _ended_span(attributes):
     return span, exporter
 
 
-async def test_redact_rawg_key_from_span_strips_key_param_for_rawg_host():
-    span, exporter = _traced_span()
-    request_info = RequestInfo(
-        method=b"GET",
-        url=httpx.URL("https://api.rawg.io/api/games?key=super-secret&search=Foo"),
-        headers=None,
-        stream=None,
-        extensions=None,
-    )
+def _request_info(url):
+    return RequestInfo(method=b"GET", url=httpx.URL(url), headers=None, stream=None, extensions=None)
 
-    await telemetry._redact_rawg_key_from_span(span, request_info)
+
+async def test_redact_rawg_key_from_span_strips_key_param_for_rawg_host():
+    base = _rawg_base()
+    kept_param, kept_value = lowercase_token(), lowercase_token()
+    url = str(httpx.URL(base, params={telemetry._REDACT_QUERY_PARAM_NAME: new_opaque_token(), kept_param: kept_value}))
+    span, exporter = _traced_span(url)
+
+    await telemetry._redact_rawg_key_from_span(span, _request_info(url))
     span.end()
 
     (recorded,) = exporter.get_finished_spans()
-    for attribute_key in ("http.url", "url.full"):
-        assert "super-secret" not in recorded.attributes[attribute_key]
-        assert "search=Foo" in recorded.attributes[attribute_key]
+    sanitized = str(httpx.URL(base, params={kept_param: kept_value}))
+    assert [recorded.attributes[key] for key in telemetry._URL_SPAN_ATTRIBUTE_KEYS] == [
+        sanitized for _ in telemetry._URL_SPAN_ATTRIBUTE_KEYS
+    ]
 
 
 async def test_redact_rawg_key_from_span_leaves_non_rawg_hosts_untouched():
-    span, exporter = _traced_span()
-    request_info = RequestInfo(
-        method=b"GET",
-        url=httpx.URL("https://opencritic-api.p.rapidapi.com/game?platforms=ps5"),
-        headers=None,
-        stream=None,
-        extensions=None,
+    rawg_url = str(httpx.URL(_rawg_base(), params={telemetry._REDACT_QUERY_PARAM_NAME: new_opaque_token()}))
+    span, exporter = _traced_span(rawg_url)
+    other_host_url = str(
+        httpx.URL(
+            f"https://{lowercase_token()}.example.test/{lowercase_token()}",
+            params={telemetry._REDACT_QUERY_PARAM_NAME: new_opaque_token()},
+        )
     )
 
-    await telemetry._redact_rawg_key_from_span(span, request_info)
+    await telemetry._redact_rawg_key_from_span(span, _request_info(other_host_url))
     span.end()
 
     (recorded,) = exporter.get_finished_spans()
-    assert recorded.attributes["http.url"] == "https://api.rawg.io/api/games?key=super-secret&search=Foo"
+    assert recorded.attributes[telemetry._URL_SPAN_ATTRIBUTE_KEYS[0]] == rawg_url
 
 
 async def test_redact_rawg_key_from_span_noop_when_span_not_recording():
-    span, exporter = _ended_span(attributes={"http.url": "https://api.rawg.io/api/games?key=secret"})
+    url = str(httpx.URL(_rawg_base(), params={telemetry._REDACT_QUERY_PARAM_NAME: new_opaque_token()}))
+    span, exporter = _ended_span(attributes={telemetry._URL_SPAN_ATTRIBUTE_KEYS[0]: url})
     assert not span.is_recording()
 
-    request_info = RequestInfo(
-        method=b"GET",
-        url=httpx.URL("https://api.rawg.io/api/games?key=secret"),
-        headers=None,
-        stream=None,
-        extensions=None,
-    )
-
-    await telemetry._redact_rawg_key_from_span(span, request_info)
+    await telemetry._redact_rawg_key_from_span(span, _request_info(url))
 
     (recorded,) = exporter.get_finished_spans()
-    assert recorded.attributes["http.url"] == "https://api.rawg.io/api/games?key=secret"
+    assert recorded.attributes[telemetry._URL_SPAN_ATTRIBUTE_KEYS[0]] == url

@@ -95,7 +95,12 @@ from curator.telemetry import configure_telemetry, shutdown_telemetry
 from curator.token_validation import JwtValidator, TokenValidatorLike
 from curator.trophy_routes import router as trophy_router
 
-logger = logging.getLogger("curator")
+CURATOR_LOGGER_NAME = "curator"
+HEALTH_PATH = "/health"
+HEALTHY_BODY = "Healthy"
+INTERNAL_SERVER_ERROR_BODY = "Internal Server Error"
+
+logger = logging.getLogger(CURATOR_LOGGER_NAME)
 
 
 def create_app(
@@ -172,9 +177,9 @@ def create_app(
     :param redis_client: The shared Redis client backing the distributed PSN rate limiter
         (:class:`~curator.psn.rate_limiter.RedisRateLimiter`) and trophy-read caching
         (:class:`~curator.psn.trophy_cache.CachedTrophyClient`); defaults to
-        :func:`~curator.redis_client.build_redis_client` over ``settings``, which is itself ``None`` when
-        ``settings.redis_host`` is unset -- PSN calls still work with no Redis configured, just uncached
-        and without a shared rate-limit budget.
+        :func:`~curator.redis_client.build_redis_client` over ``settings``. :meth:`Settings.from_config`
+        requires Redis, and the lifespan pings a client this factory built before the app serves anything;
+        only a directly constructed ``settings`` with no host yields ``None``.
     :param trophy_client_factory: Builds a trophy client for a given ``sub``; defaults to
         :func:`_default_trophy_client_factory` over the same collaborators as ``agent_factory``.
     :param identity_client_factory: Builds an :class:`~curator.psn.account_client.AccountClient` for a given
@@ -232,7 +237,7 @@ def create_app(
     )
     store_backfill_service = StoreBackfillService(store_catalog_client, catalog_repository)
     ps_plus_repository = ps_plus_repository or PsPlusRepository(shared_pool)
-    ps_plus_walk_service = PsPlusWalkService(store_catalog_client, ps_plus_repository)
+    ps_plus_walk_service = PsPlusWalkService(store_catalog_client, ps_plus_repository, catalog_repository)
     ps_plus_walk_scheduler = PsPlusWalkScheduler(ps_plus_walk_service, ps_plus_repository)
     job_runs_repository = job_runs_repository or JobRunsRepository(shared_pool)
     audit_repository = audit_repository or AccountActionLogRepository(shared_pool)
@@ -283,7 +288,9 @@ def create_app(
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         if owns_pool and pool is not None:
-            await pool.open()
+            await pool.open(wait=True)
+        if owns_redis and redis_client is not None:
+            await redis_client.ping()
         if queue_depth_monitor is not None:
             queue_depth_monitor.start()
         ps_plus_walk_scheduler.start()
@@ -362,10 +369,10 @@ def create_app(
     app.include_router(social_router)
     app.include_router(public_collections_router)
 
-    @app.get("/health")
+    @app.get(HEALTH_PATH)
     async def health() -> PlainTextResponse:
         """Fleet-convention health probe: plain-text ``"Healthy"``, no auth required."""
-        return PlainTextResponse("Healthy")
+        return PlainTextResponse(HEALTHY_BODY)
 
     @app.exception_handler(Exception)
     async def _log_unhandled_exception(request: Request, exc: Exception) -> PlainTextResponse:
@@ -383,7 +390,7 @@ def create_app(
         plain-text 500 Starlette's own default handler would have returned.
         """
         logger.error("Unhandled exception on %s %s", request.method, request.url.path, exc_info=exc)
-        return PlainTextResponse("Internal Server Error", status_code=500)
+        return PlainTextResponse(INTERNAL_SERVER_ERROR_BODY, status_code=500)
 
     configure_telemetry(app, settings)
 
@@ -404,7 +411,7 @@ def _openapi_schema_with_bearer_auth(app: FastAPI) -> dict[str, Any]:
         "BearerAuth": {"type": "http", "scheme": "bearer", "bearerFormat": "JWT"}
     }
     for path, path_item in schema.get("paths", {}).items():
-        if path == "/health":
+        if path == HEALTH_PATH:
             continue
         for operation in path_item.values():
             operation["security"] = [{"BearerAuth": []}]

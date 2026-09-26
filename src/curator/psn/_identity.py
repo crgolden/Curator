@@ -7,20 +7,34 @@ user") -- this factors that resolution logic out once instead of duplicating it 
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Final
 
 if TYPE_CHECKING:
     from curator.psn.session import PsnSession
 
-_PROFILE_URI = "https://m.np.playstation.com/api/userProfile/v1/internal/users"
-_LEGACY_PROFILE_URI = "https://us-prof.np.community.playstation.net/userProfile/v1/users"
-_MY_ACCOUNT_URL = "https://dms.api.playstation.com/api/v1/devices/accounts/me"
+PROFILE_URI: Final = "https://m.np.playstation.com/api/userProfile/v1/internal/users"
+LEGACY_PROFILE_URI: Final = "https://us-prof.np.community.playstation.net/userProfile/v1/users"
+MY_ACCOUNT_URL: Final = "https://dms.api.playstation.com/api/v1/devices/accounts/me"
+
+ACCOUNT_ID_KEY: Final = "accountId"
+ONLINE_ID_KEY: Final = "onlineId"
+PROFILE_KEY: Final = "profile"
+FIELDS_PARAM: Final = "fields"
+SELF_PATH_ID: Final = "me"
+
+
+def profiles_url(account_id: str) -> str:
+    return f"{PROFILE_URI}/{account_id}/profiles"
+
+
+def legacy_profile_url(online_id: str) -> str:
+    return f"{LEGACY_PROFILE_URI}/{online_id}/profile2"
 
 
 async def own_account_id(session: PsnSession) -> str:
     """Resolve the authenticated account's id via the native session."""
-    response = await session.get(_MY_ACCOUNT_URL)
-    return str(response.json()["accountId"])
+    response = await session.get(MY_ACCOUNT_URL)
+    return str(response.json()[ACCOUNT_ID_KEY])
 
 
 async def account_id_for(session: PsnSession, online_id: str | None, account_id: str | None) -> str:
@@ -28,17 +42,15 @@ async def account_id_for(session: PsnSession, online_id: str | None, account_id:
     if account_id is not None:
         return account_id
     if online_id is not None:
-        data = (
-            await session.get(f"{_LEGACY_PROFILE_URI}/{online_id}/profile2", params={"fields": "accountId"})
-        ).json()["profile"]
-        return str(data["accountId"])
+        response = await session.get(legacy_profile_url(online_id), params={FIELDS_PARAM: ACCOUNT_ID_KEY})
+        return str(response.json()[PROFILE_KEY][ACCOUNT_ID_KEY])
     return await own_account_id(session)
 
 
 async def online_id_for(session: PsnSession, account_id: str) -> str | None:
     """Resolve the online id for an account id (used mapping ``SocialUser`` results)."""
-    data = (await session.get(f"{_PROFILE_URI}/{account_id}/profiles")).json()
-    online_id = data.get("onlineId")
+    data = (await session.get(profiles_url(account_id))).json()
+    online_id = data.get(ONLINE_ID_KEY)
     return str(online_id) if online_id is not None else None
 
 
@@ -56,5 +68,5 @@ async def target_online_id(session: PsnSession, online_id: str | None, account_i
 async def path_account_id(session: PsnSession, online_id: str | None, account_id: str | None) -> str:
     """Return the ``{account_id}`` path segment for a target: literal ``"me"`` for self, else resolved."""
     if online_id is None and account_id is None:
-        return "me"
+        return SELF_PATH_ID
     return await account_id_for(session, online_id, account_id)

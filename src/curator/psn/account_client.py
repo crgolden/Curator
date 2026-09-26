@@ -8,17 +8,29 @@ import base64
 import binascii
 from collections.abc import Callable, Coroutine
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Final
 
 import pycountry
 
+from curator.psn._identity import (
+    ACCOUNT_ID_KEY,
+    FIELDS_PARAM,
+    MY_ACCOUNT_URL,
+    ONLINE_ID_KEY,
+    PROFILE_KEY,
+    legacy_profile_url,
+    profiles_url,
+)
 from curator.psn.session import PsnSession
 
-_PROFILE_URI = "https://m.np.playstation.com/api/userProfile/v1/internal/users"
-_LEGACY_PROFILE_URI = "https://us-prof.np.community.playstation.net/userProfile/v1/users"
+ACCOUNT_ME_URL: Final = "https://accounts.api.playstation.com/api/v1/accounts/me"
 
-_ACCOUNT_ME_URL = "https://accounts.api.playstation.com/api/v1/accounts/me"
-_MY_ACCOUNT_URL = "https://dms.api.playstation.com/api/v1/devices/accounts/me"
+EMAIL_ADDRESSES_KEY: Final = "emailAddresses"
+ADDRESS_KEY: Final = "address"
+IS_MAIN_KEY: Final = "isMain"
+IS_VERIFIED_KEY: Final = "isVerified"
+SIGNIN_ID_KEY: Final = "signinId"
+NP_ID_KEY: Final = "npId"
 
 
 @dataclass(frozen=True, slots=True)
@@ -45,15 +57,15 @@ def _primary_email_entry(account: Any) -> dict[str, Any] | None:
     """
     if not isinstance(account, dict):
         return None
-    emails = account.get("emailAddresses")
+    emails = account.get(EMAIL_ADDRESSES_KEY)
     if isinstance(emails, list):
-        entries = [entry for entry in emails if isinstance(entry, dict) and entry.get("address")]
-        chosen = next((entry for entry in entries if entry.get("isMain")), None) or next(iter(entries), None)
+        entries = [entry for entry in emails if isinstance(entry, dict) and entry.get(ADDRESS_KEY)]
+        chosen = next((entry for entry in entries if entry.get(IS_MAIN_KEY)), None) or next(iter(entries), None)
         if chosen is not None:
             return chosen
-    signin = account.get("signinId")
+    signin = account.get(SIGNIN_ID_KEY)
     if isinstance(signin, str) and signin:
-        return {"address": signin}
+        return {ADDRESS_KEY: signin}
     return None
 
 
@@ -64,7 +76,7 @@ def _primary_email(account: Any) -> str | None:
     top-level ``signinId`` (the sign-in email). Returns ``None`` if no email is present.
     """
     entry = _primary_email_entry(account)
-    return str(entry["address"]) if entry is not None else None
+    return str(entry[ADDRESS_KEY]) if entry is not None else None
 
 
 def _region_from_npid(npid: str) -> str | None:
@@ -107,11 +119,9 @@ class AccountClient:
 
     async def _whoami(self) -> Account:
         account_id = await self._native_own_account_id()
-        online_id = (await self._session.get(f"{_PROFILE_URI}/{account_id}/profiles")).json()["onlineId"]
-        profile = (
-            await self._session.get(f"{_LEGACY_PROFILE_URI}/{online_id}/profile2", params={"fields": "npId"})
-        ).json()
-        npid = (profile.get("profile") or {}).get("npId", "")
+        online_id = (await self._session.get(profiles_url(account_id))).json()[ONLINE_ID_KEY]
+        profile = (await self._session.get(legacy_profile_url(online_id), params={FIELDS_PARAM: NP_ID_KEY})).json()
+        npid = (profile.get(PROFILE_KEY) or {}).get(NP_ID_KEY, "")
         return Account(account_id=account_id, online_id=online_id, region=_region_from_npid(npid))
 
     async def account_email(self) -> str | None:
@@ -126,7 +136,7 @@ class AccountClient:
         return await self._session.run_with_reauth(self._account_email)
 
     async def _account_email(self) -> str | None:
-        response = await self._session.get(_ACCOUNT_ME_URL)
+        response = await self._session.get(ACCOUNT_ME_URL)
         return _primary_email(response.json())
 
     async def account_email_verified(self) -> tuple[str, bool] | None:
@@ -144,16 +154,16 @@ class AccountClient:
         return await self._session.run_with_reauth(self._account_email_verified)
 
     async def _account_email_verified(self) -> tuple[str, bool] | None:
-        response = await self._session.get(_ACCOUNT_ME_URL)
+        response = await self._session.get(ACCOUNT_ME_URL)
         entry = _primary_email_entry(response.json())
         if entry is None:
             return None
-        return str(entry["address"]), bool(entry.get("isVerified"))
+        return str(entry[ADDRESS_KEY]), bool(entry.get(IS_VERIFIED_KEY))
 
     async def _native_own_account_id(self) -> str:
         """Resolve the authenticated account's id via the native session."""
-        response = await self._session.get(_MY_ACCOUNT_URL)
-        return str(response.json()["accountId"])
+        response = await self._session.get(MY_ACCOUNT_URL)
+        return str(response.json()[ACCOUNT_ID_KEY])
 
 
 AccountClientFactory = Callable[[str], Coroutine[Any, Any, "AccountClient"]]

@@ -6,29 +6,73 @@ See ``AGENTS/REPOS/Curator.md`` for why this gateway is distinct from the authen
 
 from __future__ import annotations
 
-import json
 import logging
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from decimal import Decimal, InvalidOperation
-from typing import Any
+from typing import Any, Final
 
 import httpx
 
+from curator.psn._graphql import DATA_KEY, ERRORS_KEY, MESSAGE_KEY, persisted_query_params
 from curator.psn._media import cover_image_url
+from curator.psn._product_node import (
+    BASE_PRICE_KEY,
+    CLASSIFICATION_KEY,
+    DISCOUNT_TEXT_KEY,
+    DISCOUNTED_PRICE_KEY,
+    ID_KEY,
+    IS_FREE_KEY,
+    IS_TIED_TO_SUBSCRIPTION_KEY,
+    MEDIA_KEY,
+    NAME_KEY,
+    NP_TITLE_ID_KEY,
+    PLATFORMS_KEY,
+    PRICE_KEY,
+)
 
 logger = logging.getLogger("curator")
 
 STORE_GRAPHQL_URL = "https://web.np.playstation.com/api/graphql/v1/op"
 
 CATEGORY_GRID_RETRIEVE_OPERATION = "categoryGridRetrieve"
+"""The persisted operation's name, which is also the key its result sits under in ``data``."""
 
 CATEGORY_GRID_RETRIEVE_HASHES = (
     "9845afc0dbaab4965f6563fffc703f588c8e76792000e8610843b8d3ee9c4c09",
     "4ce7d410a4db2c8b635a48c1dcec375906ff63b19dadd87e073f8fd0c0481d35",
 )
 
-INSERTION_IMMUNE_SORT = {"name": "productReleaseDate", "isAscending": True}
+PAGE_ARGS_VARIABLE: Final = "pageArgs"
+SORT_BY_VARIABLE: Final = "sortBy"
+FILTER_BY_VARIABLE: Final = "filterBy"
+SIZE_KEY: Final = "size"
+OFFSET_KEY: Final = "offset"
+
+SORT_FIELD_KEY: Final = "name"
+IS_ASCENDING_KEY: Final = "isAscending"
+PRODUCT_RELEASE_DATE_SORT_FIELD: Final = "productReleaseDate"
+
+INSERTION_IMMUNE_SORT = {SORT_FIELD_KEY: PRODUCT_RELEASE_DATE_SORT_FIELD, IS_ASCENDING_KEY: True}
+
+LOCALE_OVERRIDE_HEADER: Final = "x-psn-store-locale-override"
+APOLLO_REQUIRE_PREFLIGHT_HEADER: Final = "apollo-require-preflight"
+APOLLO_REQUIRE_PREFLIGHT_VALUE: Final = "true"
+APOLLO_OPERATION_NAME_HEADER: Final = "x-apollo-operation-name"
+
+PAGE_INFO_KEY: Final = "pageInfo"
+TOTAL_COUNT_KEY: Final = "totalCount"
+IS_LAST_KEY: Final = "isLast"
+PRODUCTS_KEY: Final = "products"
+REPORTING_NAME_KEY: Final = "reportingName"
+FACET_OPTIONS_KEY: Final = "facetOptions"
+FACET_NAME_KEY: Final = "name"
+FACET_VALUES_KEY: Final = "values"
+FACET_VALUE_KEY_KEY: Final = "key"
+FACET_VALUE_COUNT_KEY: Final = "count"
+
+NOT_WHITELISTED_MARKER: Final = "not whitelisted"
+"""The phrase the gateway's rejection of an unregistered persisted-query hash carries, matched lower-cased."""
 
 CLASSIFICATION_FACET = "storeDisplayClassification"
 
@@ -173,15 +217,15 @@ class StoreCatalogClient:
         :raises StoreCatalogError: On any other unusable response.
         """
         grid = await self._retrieve_grid(category_id, offset=offset, size=size, filter_by=tuple(filter_by))
-        page_info = grid.get("pageInfo") or {}
-        total_count = int(page_info.get("totalCount") or 0)
+        page_info = grid.get(PAGE_INFO_KEY) or {}
+        total_count = int(page_info.get(TOTAL_COUNT_KEY) or 0)
         _raise_for_ignored_filters(grid, tuple(filter_by), total_count, category_id)
-        reporting_name = grid.get("reportingName")
+        reporting_name = grid.get(REPORTING_NAME_KEY)
         return StoreCategoryPage(
-            products=tuple(_to_product(raw) for raw in (grid.get("products") or []) if raw.get("id")),
+            products=tuple(_to_product(raw) for raw in (grid.get(PRODUCTS_KEY) or []) if raw.get(ID_KEY)),
             total_count=total_count,
-            offset=int(page_info.get("offset", offset)),
-            is_last=bool(page_info.get("isLast")),
+            offset=int(page_info.get(OFFSET_KEY, offset)),
+            is_last=bool(page_info.get(IS_LAST_KEY)),
             reporting_name=reporting_name if isinstance(reporting_name, str) else None,
         )
 
@@ -219,23 +263,18 @@ class StoreCatalogClient:
         self, category_id: str, *, offset: int, size: int, sha256_hash: str, filter_by: tuple[str, ...]
     ) -> dict[str, Any]:
         operation_name = CATEGORY_GRID_RETRIEVE_OPERATION
-        params = {
-            "operationName": operation_name,
-            "variables": json.dumps(
-                {
-                    "id": category_id,
-                    "pageArgs": {"size": size, "offset": offset},
-                    "sortBy": INSERTION_IMMUNE_SORT,
-                    "filterBy": list(filter_by),
-                    "facetOptions": [],
-                }
-            ),
-            "extensions": json.dumps({"persistedQuery": {"version": 1, "sha256Hash": sha256_hash}}),
+        variables = {
+            ID_KEY: category_id,
+            PAGE_ARGS_VARIABLE: {SIZE_KEY: size, OFFSET_KEY: offset},
+            SORT_BY_VARIABLE: INSERTION_IMMUNE_SORT,
+            FILTER_BY_VARIABLE: list(filter_by),
+            FACET_OPTIONS_KEY: [],
         }
+        params = persisted_query_params(operation_name, variables, sha256_hash)
         headers = {
-            "x-psn-store-locale-override": self._locale,
-            "apollo-require-preflight": "true",
-            "x-apollo-operation-name": operation_name,
+            LOCALE_OVERRIDE_HEADER: self._locale,
+            APOLLO_REQUIRE_PREFLIGHT_HEADER: APOLLO_REQUIRE_PREFLIGHT_VALUE,
+            APOLLO_OPERATION_NAME_HEADER: operation_name,
         }
 
         response = await self._client.get(STORE_GRAPHQL_URL, params=params, headers=headers)
@@ -245,18 +284,18 @@ class StoreCatalogClient:
         payload: dict[str, Any] = response.json()
         _raise_for_store_errors(payload, operation_name)
 
-        grid: dict[str, Any] = (payload.get("data") or {}).get("categoryGridRetrieve") or {}
+        grid: dict[str, Any] = (payload.get(DATA_KEY) or {}).get(CATEGORY_GRID_RETRIEVE_OPERATION) or {}
         return grid
 
 
 def _facet_census(grid: dict[str, Any], facet_name: str) -> dict[str, int] | None:
     """Return ``{facetKey: count}`` for one facet, or ``None`` if this category doesn't publish it."""
-    for facet in grid.get("facetOptions") or []:
-        if facet.get("name") == facet_name:
+    for facet in grid.get(FACET_OPTIONS_KEY) or []:
+        if facet.get(FACET_NAME_KEY) == facet_name:
             return {
-                str(value.get("key")): int(value.get("count") or 0)
-                for value in facet.get("values") or []
-                if value.get("key") is not None
+                str(value.get(FACET_VALUE_KEY_KEY)): int(value.get(FACET_VALUE_COUNT_KEY) or 0)
+                for value in facet.get(FACET_VALUES_KEY) or []
+                if value.get(FACET_VALUE_KEY_KEY) is not None
             }
     return None
 
@@ -294,22 +333,22 @@ def _raise_for_ignored_filters(
 
 def _raise_for_store_errors(payload: dict[str, Any], operation_name: str) -> None:
     """Translate the gateway's two distinct failure shapes into typed errors."""
-    message = payload.get("message")
-    if isinstance(message, str) and "not whitelisted" in message.lower():
+    message = payload.get(MESSAGE_KEY)
+    if isinstance(message, str) and NOT_WHITELISTED_MARKER in message.lower():
         raise StoreQueryRotatedError(
             f"The persisted-query hash for '{operation_name}' is no longer whitelisted by the PlayStation "
             f"Store; refresh it from the store site's own network traffic and update this client. "
             f"Gateway said: {message.strip()}"
         )
 
-    errors = payload.get("errors")
+    errors = payload.get(ERRORS_KEY)
     if errors:
-        detail = str(errors[0].get("message", "unknown error")).strip()
+        detail = str(errors[0].get(MESSAGE_KEY, "unknown error")).strip()
         raise StoreCatalogError(f"PlayStation Store '{operation_name}' failed: {detail}")
 
 
 def _product_name(raw: dict[str, Any]) -> str | None:
-    name = raw.get("name")
+    name = raw.get(NAME_KEY)
     if not isinstance(name, str):
         return None
 
@@ -319,28 +358,26 @@ def _product_name(raw: dict[str, Any]) -> str | None:
 def _to_price(node: Any) -> StorePrice | None:
     if not isinstance(node, dict):
         return None
-    is_free = node.get("isFree")
-    tied_to_subscription = node.get("isTiedToSubscription")
-    discount_text = node.get("discountText")
+    is_free = node.get(IS_FREE_KEY)
+    tied_to_subscription = node.get(IS_TIED_TO_SUBSCRIPTION_KEY)
+    discount_text = node.get(DISCOUNT_TEXT_KEY)
     return StorePrice(
         is_free=is_free if isinstance(is_free, bool) else None,
         tied_to_subscription=tied_to_subscription if isinstance(tied_to_subscription, bool) else None,
-        base_cents=parse_price_cents(node.get("basePrice")),
-        discounted_cents=parse_price_cents(node.get("discountedPrice")),
+        base_cents=parse_price_cents(node.get(BASE_PRICE_KEY)),
+        discounted_cents=parse_price_cents(node.get(DISCOUNTED_PRICE_KEY)),
         discount_text=discount_text if isinstance(discount_text, str) and discount_text.strip() else None,
     )
 
 
 def _to_product(raw: dict[str, Any]) -> StoreProduct:
     return StoreProduct(
-        product_id=str(raw["id"]),
+        product_id=str(raw[ID_KEY]),
         name=_product_name(raw),
-        platforms=tuple(str(platform) for platform in (raw.get("platforms") or [])),
-        np_title_id=str(raw["npTitleId"]) if raw.get("npTitleId") else None,
-        cover_image_url=cover_image_url(raw.get("media")),
-        classification=str(raw["localizedStoreDisplayClassification"])
-        if raw.get("localizedStoreDisplayClassification")
-        else None,
+        platforms=tuple(str(platform) for platform in (raw.get(PLATFORMS_KEY) or [])),
+        np_title_id=str(raw[NP_TITLE_ID_KEY]) if raw.get(NP_TITLE_ID_KEY) else None,
+        cover_image_url=cover_image_url(raw.get(MEDIA_KEY)),
+        classification=str(raw[CLASSIFICATION_KEY]) if raw.get(CLASSIFICATION_KEY) else None,
         raw=raw,
-        price=_to_price(raw.get("price")),
+        price=_to_price(raw.get(PRICE_KEY)),
     )

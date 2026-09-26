@@ -16,7 +16,7 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import BaseModel
 
-from curator.deps import require_bearer
+from curator.deps import PREFERENCE_NOT_LINKED_DETAIL, require_bearer
 from curator.jobs.queue_publisher import QueuePublisher
 from curator.persistence.refresh_schedules_repository import (
     Cadence,
@@ -29,9 +29,8 @@ from curator.token_validation import TokenClaims
 
 router = APIRouter(tags=["refresh-schedule"])
 
-_NO_LINK_DETAIL = "PSN account not linked."
-_NO_SCHEDULE_DETAIL = "No refresh schedule configured."
-_NO_QUEUE_DETAIL = "Scheduled refreshes are not configured."
+NO_SCHEDULE_DETAIL = "No refresh schedule configured."
+NO_QUEUE_DETAIL = "Scheduled refreshes are not configured."
 
 
 class RefreshScheduleRequest(BaseModel):
@@ -71,7 +70,7 @@ async def get_refresh_schedule(
     repository: RefreshSchedulesRepository = request.app.state.refresh_schedules_repository
     schedule = await repository.get(claims.sub)
     if schedule is None:
-        raise HTTPException(status_code=404, detail=_NO_SCHEDULE_DETAIL)
+        raise HTTPException(status_code=404, detail=NO_SCHEDULE_DETAIL)
     return _response(schedule)
 
 
@@ -92,7 +91,7 @@ async def set_refresh_schedule(
     await _require_link(request, claims.sub)
     queue_publisher: QueuePublisher | None = request.app.state.queue_publisher
     if queue_publisher is None:
-        raise HTTPException(status_code=503, detail=_NO_QUEUE_DETAIL)
+        raise HTTPException(status_code=503, detail=NO_QUEUE_DETAIL)
 
     repository: RefreshSchedulesRepository = request.app.state.refresh_schedules_repository
     current = await repository.get(claims.sub)
@@ -128,7 +127,7 @@ async def delete_refresh_schedule(
 async def _require_link(request: Request, sub: str) -> None:
     repository: Repository = request.app.state.repository
     if await repository.get_link(sub) is None:
-        raise HTTPException(status_code=404, detail=_NO_LINK_DETAIL)
+        raise HTTPException(status_code=404, detail=PREFERENCE_NOT_LINKED_DETAIL)
 
 
 def _response(schedule: RefreshSchedule) -> RefreshScheduleResponse:

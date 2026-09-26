@@ -35,7 +35,8 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 from curator.persistence.config import ConfigError, resolve_setting
 
-DEFAULT_ENV_NAMES: tuple[str, ...] = ("CURATOR_TOKEN_KEY",)
+TOKEN_KEY_ENV = "CURATOR_TOKEN_KEY"
+DEFAULT_ENV_NAMES: tuple[str, ...] = (TOKEN_KEY_ENV,)
 
 SCHEME_AES_GCM_V1 = 0x01
 

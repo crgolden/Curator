@@ -3,7 +3,8 @@ objects (no real database, no unittest.mock) -- same pattern as tests/test_repos
 
 from __future__ import annotations
 
-from curator.psn.repository import PinnedAccountRepository
+from curator.psn.repository import GET_PINNED_ACCOUNT_SQL, PIN_ACCOUNT_SQL, PinnedAccountRepository
+from test_values import new_account_id, new_identity_sub
 
 
 class FakeCursor:
@@ -52,28 +53,23 @@ class FakePool:
 async def test_get_pinned_account_id_returns_none_when_no_row():
     repo = PinnedAccountRepository(FakePool(fetchone_result=None))
 
-    assert await repo.get_pinned_account_id("sub-1") is None
+    assert await repo.get_pinned_account_id(new_identity_sub()) is None
 
 
 async def test_get_pinned_account_id_returns_the_pinned_id():
-    pool = FakePool(fetchone_result=("psn-account-1",))
-    repo = PinnedAccountRepository(pool)
+    identity_sub, account_id = new_identity_sub(), new_account_id()
+    pool = FakePool(fetchone_result=(account_id,))
 
-    result = await repo.get_pinned_account_id("sub-1")
+    result = await PinnedAccountRepository(pool).get_pinned_account_id(identity_sub)
 
-    assert result == "psn-account-1"
-    sql, params = pool.connections[0].executed[0]
-    assert "SELECT psn_account_id FROM psn_test_accounts WHERE identity_sub = %s" in sql
-    assert params == ("sub-1",)
+    assert result == account_id
+    assert pool.connections[0].executed == [(GET_PINNED_ACCOUNT_SQL, (identity_sub,))]
 
 
-async def test_pin_upserts_with_on_conflict():
+async def test_pin_runs_the_upsert_with_the_user_and_account():
+    identity_sub, account_id = new_identity_sub(), new_account_id()
     pool = FakePool()
-    repo = PinnedAccountRepository(pool)
 
-    await repo.pin("sub-1", "psn-account-1")
+    await PinnedAccountRepository(pool).pin(identity_sub, account_id)
 
-    sql, params = pool.connections[0].executed[0]
-    assert "INSERT INTO psn_test_accounts" in sql
-    assert "ON CONFLICT (identity_sub) DO UPDATE SET" in sql
-    assert params == ("sub-1", "psn-account-1")
+    assert pool.connections[0].executed == [(PIN_ACCOUNT_SQL, (identity_sub, account_id))]

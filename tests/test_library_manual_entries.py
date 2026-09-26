@@ -61,7 +61,7 @@ async def test_manual_entry_is_written_with_manual_provenance_and_no_entitlement
     sql, params = pool.connections[0].executed[0]
     assert "'manual'" in sql
     assert "winning_entitlement_id" not in sql, "a manual row has no entitlement to record"
-    assert params == ("sub-a", "game-1", True, False, "Standard")
+    assert params == ("sub-a", "game-1", "Standard")
 
 
 async def test_manual_entry_cannot_overwrite_a_psn_sourced_row():
@@ -99,16 +99,16 @@ async def test_a_written_manual_upsert_reports_success_and_reconciles_platforms(
     assert len(pool.connections[0].executed) > 1, "a written upsert reconciles library_entry_platforms"
 
 
-async def test_a_legacy_platform_leaves_both_booleans_false_and_still_records_the_platform():
+async def test_a_platform_is_recorded_only_in_the_platforms_table():
     pool = FakePool(rowcount=1)
     repository = LibraryRepository(pool)
 
     await repository.upsert_manual_entry("sub-a", "game-1", platforms=("PS3",), owned_edition=None)
 
-    _, upsert_params = pool.connections[0].executed[0]
-    assert upsert_params == ("sub-a", "game-1", False, False, None), (
-        "native_ps5/ps4_eligible have no spelling for PS3, so leaving both false is correct rather than lossy"
-    )
+    upsert_sql, upsert_params = pool.connections[0].executed[0]
+    assert "native_ps5" not in upsert_sql
+    assert "ps4_eligible" not in upsert_sql
+    assert upsert_params == ("sub-a", "game-1", None)
     delete_sql, delete_params = pool.connections[0].executed[1]
     assert "DELETE FROM library_entry_platforms" in delete_sql
     assert delete_params == ("sub-a", "game-1", ["PS3"])

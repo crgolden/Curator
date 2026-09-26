@@ -17,11 +17,26 @@ from joserfc import jwt
 from joserfc.errors import JoseError
 from joserfc.jwk import RSAKey
 
-from curator.token_validation import AuthorityUnavailableError, JwtValidator, TokenError, _parse_scopes
+from curator.token_validation import (
+    EMAIL_CLAIM,
+    IAT_CLAIM,
+    JWKS_URI_KEY,
+    SCOPE_CLAIM,
+    SUB_CLAIM,
+    AuthorityUnavailableError,
+    JwtValidator,
+    TokenError,
+    _parse_scopes,
+    discovery_url,
+)
+from test_values import lowercase_token, new_email_address, new_identity_sub
 
-AUTHORITY = "https://identity.example.test"
-DISCOVERY_URL = f"{AUTHORITY}/.well-known/openid-configuration"
-JWKS_URL = f"{AUTHORITY}/.well-known/jwks"
+AUTHORITY = f"https://{lowercase_token()}.example.test"
+DISCOVERY_URL = discovery_url(AUTHORITY)
+JWKS_URL = f"{AUTHORITY}/{lowercase_token()}"
+SUB = new_identity_sub()
+EMAIL = new_email_address()
+SCOPES = (lowercase_token(), lowercase_token())
 
 
 def _generate_key(kid: str) -> RSAKey:
@@ -32,10 +47,10 @@ def _sign(key: RSAKey, kid: str, **payload_overrides: object) -> str:
     now = int(time.time())
     payload = {
         "iss": AUTHORITY,
-        "sub": "sub-1",
-        "email": "user@example.test",
-        "scope": ["curator", "openid"],
-        "iat": now,
+        SUB_CLAIM: SUB,
+        EMAIL_CLAIM: EMAIL,
+        SCOPE_CLAIM: list(SCOPES),
+        IAT_CLAIM: now,
         "exp": now + 3600,
     }
     payload.update(payload_overrides)
@@ -53,7 +68,7 @@ class FakeFetcher:
     def __call__(self, url: str) -> dict:
         self.urls.append(url)
         if url == DISCOVERY_URL:
-            return {"jwks_uri": JWKS_URL}
+            return {JWKS_URI_KEY: JWKS_URL}
         if url == JWKS_URL:
             return self.jwks
         raise AssertionError(f"unexpected fetch: {url}")
@@ -72,10 +87,10 @@ def test_valid_token_is_accepted_and_claims_extracted():
 
     claims = validator.validate(token)
 
-    assert claims.sub == "sub-1"
-    assert claims.email == "user@example.test"
-    assert claims.scopes == ("curator", "openid")
-    assert claims.has_scope("curator") is True
+    assert claims.sub == SUB
+    assert claims.email == EMAIL
+    assert claims.scopes == SCOPES
+    assert claims.has_scope(SCOPES[0]) is True
     assert claims.iat.tzinfo is not None
 
 
@@ -94,7 +109,7 @@ def test_wrong_issuer_is_rejected():
     key = _generate_key("key-1")
     jwks = {"keys": [key.as_dict(private=False)]}
     validator, _fetcher = _make_validator(jwks)
-    token = _sign(key, "key-1", iss="https://evil.example.test")
+    token = _sign(key, "key-1", iss=f"https://{lowercase_token()}.example.test")
 
     with pytest.raises(TokenError):
         validator.validate(token)
@@ -115,22 +130,22 @@ def test_scope_as_space_delimited_string_is_accepted():
     key = _generate_key("key-1")
     jwks = {"keys": [key.as_dict(private=False)]}
     validator, _fetcher = _make_validator(jwks)
-    token = _sign(key, "key-1", scope="curator openid")
+    token = _sign(key, "key-1", **{SCOPE_CLAIM: " ".join(SCOPES)})
 
     claims = validator.validate(token)
 
-    assert claims.scopes == ("curator", "openid")
+    assert claims.scopes == SCOPES
 
 
 def test_scope_as_json_array_is_accepted():
     key = _generate_key("key-1")
     jwks = {"keys": [key.as_dict(private=False)]}
     validator, _fetcher = _make_validator(jwks)
-    token = _sign(key, "key-1", scope=["curator"])
+    token = _sign(key, "key-1", **{SCOPE_CLAIM: [SCOPES[0]]})
 
     claims = validator.validate(token)
 
-    assert claims.scopes == ("curator",)
+    assert claims.scopes == (SCOPES[0],)
 
 
 def test_missing_sub_is_rejected():
@@ -139,7 +154,7 @@ def test_missing_sub_is_rejected():
     validator, _fetcher = _make_validator(jwks)
     now = int(time.time())
     header = {"alg": "RS256", "kid": "key-1"}
-    payload = {"iss": AUTHORITY, "email": "user@example.test", "iat": now, "exp": now + 3600}
+    payload = {"iss": AUTHORITY, EMAIL_CLAIM: EMAIL, IAT_CLAIM: now, "exp": now + 3600}
     token = jwt.encode(header, payload, key)
 
     with pytest.raises(TokenError):
@@ -152,7 +167,7 @@ def test_missing_email_claim_yields_none_email():
     validator, _fetcher = _make_validator(jwks)
     now = int(time.time())
     header = {"alg": "RS256", "kid": "key-1"}
-    payload = {"iss": AUTHORITY, "sub": "sub-1", "scope": ["curator"], "iat": now, "exp": now + 3600}
+    payload = {"iss": AUTHORITY, SUB_CLAIM: SUB, SCOPE_CLAIM: list(SCOPES), IAT_CLAIM: now, "exp": now + 3600}
     token = jwt.encode(header, payload, key)
 
     claims = validator.validate(token)
@@ -175,8 +190,8 @@ def test_unknown_kid_triggers_a_refetch_and_succeeds_once_the_key_is_present():
 
     claims = validator.validate(token_new)
 
-    assert claims.sub == "sub-1"
-    assert len(fetcher.urls) > fetch_count_after_first_validate
+    assert claims.sub == SUB
+    assert fetcher.urls[fetch_count_after_first_validate:] == [DISCOVERY_URL, JWKS_URL]
 
 
 def test_unknown_kid_still_rejected_after_refetch_if_truly_absent():
@@ -191,8 +206,9 @@ def test_unknown_kid_still_rejected_after_refetch_if_truly_absent():
 
 
 def test_parse_scopes_handles_list_string_and_none():
-    assert _parse_scopes(["a", "b"]) == ("a", "b")
-    assert _parse_scopes("a b") == ("a", "b")
+    first, second = SCOPES
+    assert _parse_scopes([first, second]) == SCOPES
+    assert _parse_scopes(f"{first} {second}") == SCOPES
     assert _parse_scopes(None) == ()
     assert _parse_scopes("") == ()
 
@@ -222,7 +238,7 @@ class KeysetFailsAfterTheFirstFetcher(FakeFetcher):
         if url == JWKS_URL:
             self.keysets_served += 1
             if self.keysets_served > 1:
-                raise urllib.error.HTTPError(url, _IDENTITY_RETURNED_ITS_OWN_500, "Internal Server Error", {}, None)
+                raise urllib.error.HTTPError(url, _IDENTITY_RETURNED_ITS_OWN_500, lowercase_token(), {}, None)
         return super().__call__(url)
 
 
@@ -236,7 +252,7 @@ def _validate_a_token_that_would_otherwise_be_valid(fetch_json) -> None:
     [
         (
             "identity answered with its own 500",
-            urllib.error.HTTPError(DISCOVERY_URL, _IDENTITY_RETURNED_ITS_OWN_500, "Internal Server Error", {}, None),
+            urllib.error.HTTPError(DISCOVERY_URL, _IDENTITY_RETURNED_ITS_OWN_500, lowercase_token(), {}, None),
         ),
         ("identity was unreachable", urllib.error.URLError("connection refused")),
         ("the fetch timed out", TimeoutError("timed out")),

@@ -13,16 +13,38 @@ psycopg.
 from __future__ import annotations
 
 import dataclasses
+import logging
+import uuid
 from datetime import datetime, timezone
 from types import SimpleNamespace
 
 import pytest
 from fastapi.testclient import TestClient
 
-from curator.app import create_app
+from audit_fakes import RecordingAuditRepository
+from curator import me_routes, psn_routes
+from curator.app import CURATOR_LOGGER_NAME, HEALTH_PATH, HEALTHY_BODY, INTERNAL_SERVER_ERROR_BODY, create_app
+from curator.audit.repository import (
+    ACTION_ACCOUNT_DELETED,
+    ACTION_LINK_REQUESTED,
+    ACTION_LINK_REVERIFIED,
+    ACTION_UNLINKED,
+    OUTCOME_COMPLETED,
+    OUTCOME_FAILED,
+)
+from curator.deps import CURATOR_SCOPE, EMAIL_CLAIM_REQUIRED_DETAIL
+from curator.http_headers import AUTHORIZATION_HEADER, BEARER_SCHEME, WWW_AUTHENTICATE_HEADER
+from curator.link_service import (
+    LINK_ERROR_AUTH_FAILED,
+    LINK_ERROR_INVALID_NPSSO,
+    LINK_ERROR_MISMATCH,
+    LINK_ERROR_UNVERIFIED,
+)
+from curator.me_routes import AccountActionsResponse, MeResponse
 from curator.persistence.crypto import TokenCrypto
 from curator.persistence.repository import LinkRecord
 from curator.psn.errors import PsnAuthError
+from curator.psn_routes import LINK_ERROR_MESSAGES, LinkErrorDetail, LinkRequest, LinkResponse
 from curator.settings import Settings
 from curator.token_validation import TokenClaims, TokenError
 
@@ -161,21 +183,8 @@ class FakeRepository:
         self.links.pop(sub, None)
 
 
-class FakeAuditRepository:
-    """Stands in for AccountActionLogRepository: in-memory list of (sub, action, detail) call records."""
-
-    def __init__(self) -> None:
-        self.entries: list[tuple[str, str, str | None]] = []
-
-    async def log(self, identity_sub: str, action: str, detail: str | None = None) -> None:
-        self.entries.append((identity_sub, action, detail))
-
-    async def list_for_user(self, identity_sub: str):
-        return [
-            SimpleNamespace(action=action, detail=detail, occurred_at=datetime(2027, 1, 1, tzinfo=timezone.utc))
-            for sub, action, detail in self.entries
-            if sub == identity_sub
-        ]
+class FakeAuditRepository(RecordingAuditRepository):
+    """Stands in for AccountActionLogRepository: every row with its outcome, in memory."""
 
     async def purge_older_than(self, cutoff) -> int:
         return 0
@@ -314,12 +323,24 @@ class FakeTokenValidator:
         return claims
 
 
-def _claims(sub=SUB, email=EMAIL, iat=NEW_IAT, scopes=("curator",), is_admin=False) -> TokenClaims:
+def _claims(sub=SUB, email=EMAIL, iat=NEW_IAT, scopes=(CURATOR_SCOPE,), is_admin=False) -> TokenClaims:
     return TokenClaims(sub=sub, email=email, iat=iat, scopes=scopes, is_admin=is_admin)
 
 
 def _bearer(token: str) -> dict[str, str]:
-    return {"Authorization": f"Bearer {token}"}
+    return {AUTHORIZATION_HEADER: f"{BEARER_SCHEME} {token}"}
+
+
+def _path(client, handler, **path_parameters) -> str:
+    return str(client.app.url_path_for(handler.__name__, **path_parameters))
+
+
+def _link_body(npsso: str) -> dict[str, object]:
+    return LinkRequest(npsso=npsso).model_dump()
+
+
+def _link_error_detail(kind: str) -> dict[str, object]:
+    return LinkErrorDetail(error=kind, message=LINK_ERROR_MESSAGES[kind]).model_dump()
 
 
 def _make_settings() -> Settings:
@@ -353,7 +374,7 @@ def _build(repository=None, token_crypto=None, agent_factory=None, token_validat
 
 
 def _upsert_app_user_row_the_way_a_real_caller_would(client, token="valid-token"):
-    client.get("/me", headers=_bearer(token))
+    client.get(_path(client, me_routes.me), headers=_bearer(token))
 
 
 def _build_with_valid_token(token="valid-token", **claims_kwargs):
@@ -371,9 +392,9 @@ def test_create_app_returns_a_fastapi_instance():
 
 def test_health_returns_plain_text_healthy():
     client, *_ = _build()
-    response = client.get("/health")
+    response = client.get(HEALTH_PATH)
     assert response.status_code == 200
-    assert response.text == "Healthy"
+    assert response.text == HEALTHY_BODY
 
 
 def test_unhandled_exception_returns_500_and_is_logged(caplog):
@@ -398,11 +419,11 @@ def test_unhandled_exception_returns_500_and_is_logged(caplog):
 
     client = TestClient(app, raise_server_exceptions=False)
 
-    with caplog.at_level("ERROR", logger="curator"):
+    with caplog.at_level(logging.ERROR, logger=CURATOR_LOGGER_NAME):
         response = client.get("/boom")
 
     assert response.status_code == 500
-    assert response.text == "Internal Server Error"
+    assert response.text == INTERNAL_SERVER_ERROR_BODY
     assert any("Unhandled exception" in record.getMessage() for record in caplog.records)
     assert any(record.exc_info is not None for record in caplog.records)
 
@@ -518,26 +539,28 @@ async def test_create_app_wires_injected_redis_client_into_rate_limiter_and_trop
 
 def test_me_without_bearer_token_is_401():
     client, *_ = _build()
-    response = client.get("/me")
+    response = client.get(_path(client, me_routes.me))
     assert response.status_code == 401
-    assert response.headers["www-authenticate"] == "Bearer"
+    assert response.headers[WWW_AUTHENTICATE_HEADER] == BEARER_SCHEME
 
 
 def test_me_with_malformed_authorization_header_is_401():
     client, *_ = _build()
-    response = client.get("/me", headers={"Authorization": "Basic dXNlcjpwYXNz"})
+    response = client.get(
+        _path(client, me_routes.me), headers={AUTHORIZATION_HEADER: f"{uuid.uuid4().hex} {uuid.uuid4().hex}"}
+    )
     assert response.status_code == 401
 
 
 def test_me_with_invalid_token_is_401():
     client, *_ = _build()
-    response = client.get("/me", headers=_bearer("garbage-not-a-real-token"))
+    response = client.get(_path(client, me_routes.me), headers=_bearer("garbage-not-a-real-token"))
     assert response.status_code == 401
 
 
 def test_me_without_curator_scope_is_403():
     client, *_ = _build_with_valid_token(scopes=("openid",))
-    response = client.get("/me", headers=_bearer("valid-token"))
+    response = client.get(_path(client, me_routes.me), headers=_bearer("valid-token"))
     assert response.status_code == 403
 
 
@@ -547,7 +570,7 @@ def test_authenticated_request_upserts_caller_and_touches_login():
     downstream write for a sub that was never upserted would fail at the database.
     """
     client, repo, *_ = _build_with_valid_token()
-    response = client.get("/me", headers=_bearer("valid-token"))
+    response = client.get(_path(client, me_routes.me), headers=_bearer("valid-token"))
     assert response.status_code == 200
     assert SUB in repo.users
     assert repo.login_touches == [SUB]
@@ -555,7 +578,7 @@ def test_authenticated_request_upserts_caller_and_touches_login():
 
 def test_request_without_curator_scope_never_upserts_caller():
     client, repo, *_ = _build_with_valid_token(scopes=("openid",))
-    response = client.get("/me", headers=_bearer("valid-token"))
+    response = client.get(_path(client, me_routes.me), headers=_bearer("valid-token"))
     assert response.status_code == 403
     assert repo.users == set()
     assert repo.login_touches == []
@@ -563,27 +586,27 @@ def test_request_without_curator_scope_never_upserts_caller():
 
 def test_me_without_email_claim_is_403():
     client, *_ = _build_with_valid_token(email=None)
-    response = client.get("/me", headers=_bearer("valid-token"))
+    response = client.get(_path(client, me_routes.me), headers=_bearer("valid-token"))
     assert response.status_code == 403
-    assert response.json()["detail"] == "email claim required"
+    assert response.json()["detail"] == EMAIL_CLAIM_REQUIRED_DETAIL
 
 
 def test_me_reports_unlinked():
     client, *_ = _build_with_valid_token()
-    response = client.get("/me", headers=_bearer("valid-token"))
+    response = client.get(_path(client, me_routes.me), headers=_bearer("valid-token"))
     assert response.status_code == 200
-    body = response.json()
-    assert body["sub"] == SUB
-    assert body["email"] == EMAIL
-    assert body["linked"] is False
-    assert body["psn"] is None
-    assert body["is_admin"] is False
+    body = MeResponse.model_validate(response.json())
+    assert body.sub == SUB
+    assert body.email == EMAIL
+    assert body.linked is False
+    assert body.psn is None
+    assert body.is_admin is False
 
 
 def test_me_reports_is_admin_true_for_an_admin_claim():
     client, *_ = _build_with_valid_token(is_admin=True)
-    response = client.get("/me", headers=_bearer("valid-token"))
-    assert response.json()["is_admin"] is True
+    response = client.get(_path(client, me_routes.me), headers=_bearer("valid-token"))
+    assert MeResponse.model_validate(response.json()).is_admin is True
 
 
 def test_me_with_matching_verified_link_keeps_it_and_touches_verified():
@@ -596,12 +619,12 @@ def test_me_with_matching_verified_link_keeps_it_and_touches_verified():
     validator.register("valid-token", _claims(iat=NEW_IAT))
     client, *_ = _build(repository=repo, token_crypto=crypto, agent_factory=agent_factory, token_validator=validator)
 
-    response = client.get("/me", headers=_bearer("valid-token"))
+    response = client.get(_path(client, me_routes.me), headers=_bearer("valid-token"))
 
     assert response.status_code == 200
     assert repo.delete_calls == []
     assert repo.touch_verified_calls == [SUB]
-    assert response.json()["linked"] is True
+    assert MeResponse.model_validate(response.json()).linked is True
 
 
 def test_me_with_mismatched_email_auto_unlinks():
@@ -614,10 +637,10 @@ def test_me_with_mismatched_email_auto_unlinks():
     validator.register("valid-token", _claims(iat=NEW_IAT))
     client, *_ = _build(repository=repo, token_crypto=crypto, agent_factory=agent_factory, token_validator=validator)
 
-    response = client.get("/me", headers=_bearer("valid-token"))
+    response = client.get(_path(client, me_routes.me), headers=_bearer("valid-token"))
 
     assert repo.delete_calls == [SUB]
-    assert response.json()["linked"] is False
+    assert MeResponse.model_validate(response.json()).linked is False
 
 
 def test_me_with_unverified_email_auto_unlinks():
@@ -630,10 +653,10 @@ def test_me_with_unverified_email_auto_unlinks():
     validator.register("valid-token", _claims(iat=NEW_IAT))
     client, *_ = _build(repository=repo, token_crypto=crypto, agent_factory=agent_factory, token_validator=validator)
 
-    response = client.get("/me", headers=_bearer("valid-token"))
+    response = client.get(_path(client, me_routes.me), headers=_bearer("valid-token"))
 
     assert repo.delete_calls == [SUB]
-    assert response.json()["linked"] is False
+    assert MeResponse.model_validate(response.json()).linked is False
 
 
 def test_me_reverify_network_blip_leaves_link_intact():
@@ -655,11 +678,11 @@ def test_me_reverify_network_blip_leaves_link_intact():
     validator.register("valid-token", _claims(iat=NEW_IAT))
     client, *_ = _build(repository=repo, token_crypto=crypto, agent_factory=factory, token_validator=validator)
 
-    response = client.get("/me", headers=_bearer("valid-token"))
+    response = client.get(_path(client, me_routes.me), headers=_bearer("valid-token"))
 
     assert repo.delete_calls == []
     assert repo.touch_verified_calls == []
-    assert response.json()["linked"] is True
+    assert MeResponse.model_validate(response.json()).linked is True
 
 
 def test_me_reverify_skips_psn_check_when_token_iat_not_newer_than_last_verified():
@@ -672,81 +695,90 @@ def test_me_reverify_skips_psn_check_when_token_iat_not_newer_than_last_verified
     validator.register("valid-token", _claims(iat=OLD_IAT))
     client, *_ = _build(repository=repo, token_crypto=crypto, agent_factory=agent_factory, token_validator=validator)
 
-    response = client.get("/me", headers=_bearer("valid-token"))
+    response = client.get(_path(client, me_routes.me), headers=_bearer("valid-token"))
 
     assert response.status_code == 200
     assert agent_factory.calls == []
     assert repo.delete_calls == []
     assert repo.touch_verified_calls == []
-    assert response.json()["linked"] is True
+    assert MeResponse.model_validate(response.json()).linked is True
 
 
 def test_psn_link_without_bearer_token_is_401():
     client, *_ = _build()
-    response = client.post("/psn/link", json={"npsso": "some-token"})
+    response = client.post(_path(client, psn_routes.psn_link), json=_link_body("some-token"))
     assert response.status_code == 401
 
 
 def test_psn_link_without_curator_scope_is_403():
     client, *_ = _build_with_valid_token(scopes=())
-    response = client.post("/psn/link", json={"npsso": "x"}, headers=_bearer("valid-token"))
+    response = client.post(_path(client, psn_routes.psn_link), json=_link_body("x"), headers=_bearer("valid-token"))
     assert response.status_code == 403
 
 
 def test_psn_link_without_email_claim_is_403():
     client, *_ = _build_with_valid_token(email=None)
-    response = client.post("/psn/link", json={"npsso": "x"}, headers=_bearer("valid-token"))
+    response = client.post(_path(client, psn_routes.psn_link), json=_link_body("x"), headers=_bearer("valid-token"))
     assert response.status_code == 403
-    assert response.json()["detail"] == "email claim required"
+    assert response.json()["detail"] == EMAIL_CLAIM_REQUIRED_DETAIL
 
 
 def test_psn_link_happy_path_then_me_shows_linked_with_expirations():
     client, repo, _crypto, agent_factory, _validator, _audit = _build_with_valid_token()
     agent_factory.email_info = (EMAIL, True)
 
-    response = client.post("/psn/link", json={"npsso": "the-npsso"}, headers=_bearer("valid-token"))
+    response = client.post(
+        _path(client, psn_routes.psn_link), json=_link_body("the-npsso"), headers=_bearer("valid-token")
+    )
 
     assert response.status_code == 200
-    body = response.json()
-    assert body["linked"] is True
-    assert body["psn"]["access_token_expires_at"] is not None
-    assert body["psn"]["refresh_token_expires_at"] is not None
+    body = LinkResponse.model_validate(response.json())
+    assert body.linked is True
+    assert body.psn.access_token_expires_at is not None
+    assert body.psn.refresh_token_expires_at is not None
     assert agent_factory.calls[-1] == (SUB, "the-npsso")
     assert repo.touch_verified_calls == [SUB]
 
-    me_response = client.get("/me", headers=_bearer("valid-token"))
-    me_body = me_response.json()
-    assert me_body["linked"] is True
-    assert me_body["psn"]["access_token_expires_at"] is not None
+    me_response = client.get(_path(client, me_routes.me), headers=_bearer("valid-token"))
+    me_body = MeResponse.model_validate(me_response.json())
+    assert me_body.linked is True
+    assert me_body.psn is not None
+    assert me_body.psn.access_token_expires_at is not None
 
 
 def test_psn_link_mismatch_returns_409():
     client, _repo, _crypto, agent_factory, _validator, _audit = _build_with_valid_token()
     agent_factory.email_info = ("someone-else@example.com", True)
 
-    response = client.post("/psn/link", json={"npsso": "the-npsso"}, headers=_bearer("valid-token"))
+    response = client.post(
+        _path(client, psn_routes.psn_link), json=_link_body("the-npsso"), headers=_bearer("valid-token")
+    )
 
     assert response.status_code == 409
-    assert response.json()["detail"] == {"error": "mismatch", "message": "emails do not match"}
+    assert response.json()["detail"] == _link_error_detail(LINK_ERROR_MISMATCH)
 
 
 def test_psn_link_unverified_returns_409():
     client, _repo, _crypto, agent_factory, _validator, _audit = _build_with_valid_token()
     agent_factory.email_info = (EMAIL, False)
 
-    response = client.post("/psn/link", json={"npsso": "the-npsso"}, headers=_bearer("valid-token"))
+    response = client.post(
+        _path(client, psn_routes.psn_link), json=_link_body("the-npsso"), headers=_bearer("valid-token")
+    )
 
     assert response.status_code == 409
-    assert response.json()["detail"] == {"error": "unverified", "message": "PSN email is not verified"}
+    assert response.json()["detail"] == _link_error_detail(LINK_ERROR_UNVERIFIED)
 
 
 def test_psn_link_invalid_npsso_returns_400():
     client, _repo, _crypto, agent_factory, _validator, _audit = _build_with_valid_token()
 
-    response = client.post("/psn/link", json={"npsso": "{not valid json"}, headers=_bearer("valid-token"))
+    response = client.post(
+        _path(client, psn_routes.psn_link), json=_link_body("{not valid json"), headers=_bearer("valid-token")
+    )
 
     assert response.status_code == 400
-    assert response.json()["detail"]["error"] == "invalid_npsso"
+    assert LinkErrorDetail.model_validate(response.json()["detail"]).error == LINK_ERROR_INVALID_NPSSO
     assert agent_factory.calls == []
 
 
@@ -754,10 +786,12 @@ def test_psn_link_auth_failure_returns_401():
     client, _repo, _crypto, agent_factory, _validator, _audit = _build_with_valid_token()
     agent_factory.raise_kind = "whoami"
 
-    response = client.post("/psn/link", json={"npsso": "the-npsso"}, headers=_bearer("valid-token"))
+    response = client.post(
+        _path(client, psn_routes.psn_link), json=_link_body("the-npsso"), headers=_bearer("valid-token")
+    )
 
     assert response.status_code == 401
-    assert response.json()["detail"] == {"error": "auth_failed", "message": "PSN authentication failed"}
+    assert response.json()["detail"] == _link_error_detail(LINK_ERROR_AUTH_FAILED)
 
 
 def test_psn_unlink_then_me_shows_unlinked():
@@ -770,11 +804,11 @@ def test_psn_unlink_then_me_shows_unlinked():
     validator.register("valid-token", _claims())
     client, *_ = _build(repository=repo, token_crypto=crypto, agent_factory=agent_factory, token_validator=validator)
 
-    response = client.delete("/psn/link", headers=_bearer("valid-token"))
+    response = client.delete(_path(client, psn_routes.psn_unlink), headers=_bearer("valid-token"))
     assert response.status_code == 204
 
-    me_response = client.get("/me", headers=_bearer("valid-token"))
-    assert me_response.json()["linked"] is False
+    me_response = client.get(_path(client, me_routes.me), headers=_bearer("valid-token"))
+    assert MeResponse.model_validate(me_response.json()).linked is False
 
 
 def test_psn_unlink_clears_stored_trophy_progress():
@@ -792,7 +826,7 @@ def test_psn_unlink_clears_stored_trophy_progress():
     validator.register("valid-token", _claims())
     client, *_ = _build(repository=repo, token_crypto=crypto, agent_factory=agent_factory, token_validator=validator)
 
-    response = client.delete("/psn/link", headers=_bearer("valid-token"))
+    response = client.delete(_path(client, psn_routes.psn_unlink), headers=_bearer("valid-token"))
 
     assert response.status_code == 204
     assert client.app.state.library_repository.clear_trophy_progress_calls == [SUB]
@@ -811,7 +845,7 @@ def test_psn_unlink_deletes_any_recurring_refresh_schedule():
     validator.register("valid-token", _claims())
     client, *_ = _build(repository=repo, token_crypto=crypto, agent_factory=agent_factory, token_validator=validator)
 
-    response = client.delete("/psn/link", headers=_bearer("valid-token"))
+    response = client.delete(_path(client, psn_routes.psn_unlink), headers=_bearer("valid-token"))
 
     assert response.status_code == 204
     assert client.app.state.refresh_schedules_repository.delete_calls == [SUB]
@@ -819,13 +853,13 @@ def test_psn_unlink_deletes_any_recurring_refresh_schedule():
 
 def test_psn_unlink_without_bearer_token_is_401():
     client, *_ = _build()
-    response = client.delete("/psn/link")
+    response = client.delete(_path(client, psn_routes.psn_unlink))
     assert response.status_code == 401
 
 
 def test_psn_unlink_without_email_claim_is_403():
     client, *_ = _build_with_valid_token(email=None)
-    response = client.delete("/psn/link", headers=_bearer("valid-token"))
+    response = client.delete(_path(client, psn_routes.psn_unlink), headers=_bearer("valid-token"))
     assert response.status_code == 403
 
 
@@ -838,7 +872,7 @@ def test_delete_me_removes_the_caller_and_their_link():
     client, *_ = _build(repository=repo, token_crypto=crypto, token_validator=validator)
     _upsert_app_user_row_the_way_a_real_caller_would(client)
 
-    response = client.delete("/me", headers=_bearer("valid-token"))
+    response = client.delete(_path(client, me_routes.delete_me), headers=_bearer("valid-token"))
     assert response.status_code == 204
     assert repo.delete_user_calls == [SUB]
     assert SUB not in repo.users
@@ -848,50 +882,76 @@ def test_delete_me_removes_the_caller_and_their_link():
 def test_delete_me_is_idempotent_for_a_caller_with_no_stored_data():
     client, repo, *_ = _build_with_valid_token()
 
-    response = client.delete("/me", headers=_bearer("valid-token"))
+    response = client.delete(_path(client, me_routes.delete_me), headers=_bearer("valid-token"))
     assert response.status_code == 204
     assert repo.delete_user_calls == [SUB]
 
 
 def test_delete_me_without_bearer_token_is_401():
     client, *_ = _build()
-    response = client.delete("/me")
+    response = client.delete(_path(client, me_routes.delete_me))
     assert response.status_code == 401
 
 
 def test_delete_me_without_email_claim_is_403():
     client, *_ = _build_with_valid_token(email=None)
-    response = client.delete("/me", headers=_bearer("valid-token"))
+    response = client.delete(_path(client, me_routes.delete_me), headers=_bearer("valid-token"))
     assert response.status_code == 403
 
 
 def test_delete_me_logs_account_deleted_before_removing_the_user():
     client, _repo, _crypto, _agent_factory, _validator, audit = _build_with_valid_token()
 
-    response = client.delete("/me", headers=_bearer("valid-token"))
+    response = client.delete(_path(client, me_routes.delete_me), headers=_bearer("valid-token"))
 
     assert response.status_code == 204
-    assert (SUB, "account_deleted", None) in audit.entries
+    assert audit.outcomes == [(ACTION_ACCOUNT_DELETED, OUTCOME_COMPLETED)]
 
 
-def test_psn_link_happy_path_logs_link_succeeded():
+def test_delete_me_deletes_nothing_when_the_history_row_cannot_be_written():
+    client, repo, _crypto, _agent_factory, _validator, audit = _build_with_valid_token()
+    audit.begin_error = RuntimeError(EMAIL)
+
+    with pytest.raises(RuntimeError):
+        client.delete(_path(client, me_routes.delete_me), headers=_bearer("valid-token"))
+
+    assert repo.delete_user_calls == []
+
+
+def test_psn_link_happy_path_records_a_completed_link_request():
     client, _repo, _crypto, agent_factory, _validator, audit = _build_with_valid_token()
     agent_factory.email_info = (EMAIL, True)
 
-    response = client.post("/psn/link", json={"npsso": "the-npsso"}, headers=_bearer("valid-token"))
+    response = client.post(
+        _path(client, psn_routes.psn_link), json=_link_body("the-npsso"), headers=_bearer("valid-token")
+    )
 
     assert response.status_code == 200
-    assert (SUB, "link_succeeded", None) in audit.entries
+    assert audit.entries == [(SUB, ACTION_LINK_REQUESTED, None)]
 
 
-def test_psn_link_mismatch_logs_link_failed_with_reason():
+def test_psn_link_mismatch_records_a_failed_link_request_with_the_reason():
     client, _repo, _crypto, agent_factory, _validator, audit = _build_with_valid_token()
     agent_factory.email_info = ("someone-else@example.com", True)
 
-    response = client.post("/psn/link", json={"npsso": "the-npsso"}, headers=_bearer("valid-token"))
+    response = client.post(
+        _path(client, psn_routes.psn_link), json=_link_body("the-npsso"), headers=_bearer("valid-token")
+    )
 
     assert response.status_code == 409
-    assert (SUB, "link_failed", "mismatch") in audit.entries
+    assert [(row.action, row.detail, row.outcome) for row in audit.rows] == [
+        (ACTION_LINK_REQUESTED, LINK_ERROR_MISMATCH, OUTCOME_FAILED)
+    ]
+
+
+def test_psn_link_never_uses_the_npsso_when_the_history_row_cannot_be_written():
+    client, _repo, _crypto, agent_factory, _validator, audit = _build_with_valid_token()
+    audit.begin_error = RuntimeError(EMAIL)
+
+    with pytest.raises(RuntimeError):
+        client.post(_path(client, psn_routes.psn_link), json=_link_body("the-npsso"), headers=_bearer("valid-token"))
+
+    assert agent_factory.calls == []
 
 
 def test_psn_unlink_logs_unlinked():
@@ -906,26 +966,25 @@ def test_psn_unlink_logs_unlinked():
         repository=repo, token_crypto=crypto, agent_factory=agent_factory, token_validator=validator
     )
 
-    response = client.delete("/psn/link", headers=_bearer("valid-token"))
+    response = client.delete(_path(client, psn_routes.psn_unlink), headers=_bearer("valid-token"))
 
     assert response.status_code == 204
-    assert (SUB, "unlinked", None) in audit.entries
+    assert audit.outcomes == [(ACTION_LINK_REVERIFIED, OUTCOME_COMPLETED), (ACTION_UNLINKED, OUTCOME_COMPLETED)]
 
 
 def test_get_my_actions_returns_the_callers_own_history():
     client, _repo, _crypto, agent_factory, _validator, _audit = _build_with_valid_token()
     agent_factory.email_info = (EMAIL, True)
-    client.post("/psn/link", json={"npsso": "the-npsso"}, headers=_bearer("valid-token"))
+    client.post(_path(client, psn_routes.psn_link), json=_link_body("the-npsso"), headers=_bearer("valid-token"))
 
-    response = client.get("/me/actions", headers=_bearer("valid-token"))
+    response = client.get(_path(client, me_routes.get_my_actions), headers=_bearer("valid-token"))
 
     assert response.status_code == 200
-    actions = response.json()["actions"]
-    assert len(actions) == 1
-    assert actions[0]["action"] == "link_succeeded"
+    actions = AccountActionsResponse.model_validate(response.json()).actions
+    assert [(action.action, action.outcome) for action in actions] == [(ACTION_LINK_REQUESTED, OUTCOME_COMPLETED)]
 
 
 def test_get_my_actions_without_bearer_token_is_401():
     client, *_ = _build()
-    response = client.get("/me/actions")
+    response = client.get(_path(client, me_routes.get_my_actions))
     assert response.status_code == 401

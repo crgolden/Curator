@@ -1,0 +1,15 @@
+ALLOWED_PATH_PARAMETERS = {
+    "console_id",
+    "definition_id",
+    "device_id",
+    "game_id",
+    "group_id",
+    "np_communication_id",
+    "online_id",
+    "platform",
+    "provider",
+    "run_id",
+    "share_slug",
+    "site_key",
+    "sub",
+}

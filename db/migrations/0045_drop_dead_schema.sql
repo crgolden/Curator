@@ -18,7 +18,7 @@
 -- which is a different mechanism entirely.
 --
 -- game_enrichment.collection_tier: a five-value editorial ranking with no producer. It is deliberately
--- NOT wired up -- PARKING_LOT §7's settled decisions exclude it from the public catalog, because shipping
+-- NOT wired up -- the settled decision excludes it from the public catalog, because shipping
 -- a permanently-null field to anonymous consumers is worse than not shipping the field. Its CHECK is an
 -- inline column constraint (0001_initial.sql:233) and goes with the column, so no separate DROP
 -- CONSTRAINT is needed. aaa_tier, immediately above it, is the tier the catalog actually publishes.

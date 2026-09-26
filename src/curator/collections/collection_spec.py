@@ -5,8 +5,13 @@ inline spec supplied to ``POST /collections/preview``.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Final
 
 from curator.collections.filter_predicate import FilterPredicate
+
+CAPACITY_FILL_KIND: Final = "capacity_fill"
+FILTER_LIST_KIND: Final = "filter_list"
+COLLECTION_KINDS: Final = (CAPACITY_FILL_KIND, FILTER_LIST_KIND)
 
 
 @dataclass(frozen=True, slots=True)

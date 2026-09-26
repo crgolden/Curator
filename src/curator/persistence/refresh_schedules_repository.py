@@ -10,16 +10,20 @@ from __future__ import annotations
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Any, Literal
+from typing import Any, Final, Literal
 
 from psycopg_pool import AsyncConnectionPool
 
 Cadence = Literal["daily", "weekly", "monthly"]
 
+CADENCE_DAILY: Final[Literal["daily"]] = "daily"
+CADENCE_WEEKLY: Final[Literal["weekly"]] = "weekly"
+CADENCE_MONTHLY: Final[Literal["monthly"]] = "monthly"
+
 _CADENCE_INTERVALS: dict[str, timedelta] = {
-    "daily": timedelta(days=1),
-    "weekly": timedelta(days=7),
-    "monthly": timedelta(days=30),
+    CADENCE_DAILY: timedelta(days=1),
+    CADENCE_WEEKLY: timedelta(days=7),
+    CADENCE_MONTHLY: timedelta(days=30),
 }
 
 

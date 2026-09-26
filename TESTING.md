@@ -35,15 +35,22 @@ else.
 `tests/test_authz.py` exercises this offline (`tests/test_routes.py`'s fakes, reused by importing them
 rather than duplicating — pytest's rootdir-relative import puts `tests/` on `sys.path`, so a bare
 `from test_routes import ...` resolves) but proves a structural property rather than individual status
-codes: every bearer-required route (`GET /me`, `POST /psn/link`, `DELETE /psn/link`) rejects both a
-missing `Authorization` header and a garbage/invalid token; two established callers (user A, user B) never
-leak — A's requests only ever read/write A's row in the fake repository, B's is provably untouched; and no
-route in the app exposes a path parameter at all (the obvious place a caller-supplied "target user"
-identifier could sneak in), which the test locks in via introspecting `app.routes`.
+codes: every bearer-required route rejects a missing `Authorization` header and a garbage token (401) and
+answers 503 when Identity cannot be reached; two established callers (user A, user B) never leak, since A's
+requests only ever read and write A's row in the fake repository and B's is provably untouched; and the
+set of path parameter names across every effective route equals a pinned allowlist in which `sub` is the
+only name that identifies a user.
 
-**`_BEARER_REQUIRED_ROUTES` is a hand-maintained list, and a route missing from it is silently unswept.**
-The four `/me/profile-link*` routes shipped without entries and so had nothing proving they reject a
-missing or garbage token. When you add a protected route, add it there in the same change.
+**`_BEARER_REQUIRED_HANDLERS` lists route handler functions, never paths.** Each test builds its request
+from the route itself: the method it answers, and `url_path_for(handler.__name__, ...)` with every path
+parameter generated. A route declares its path once, in its decorator. The list stays hand-written policy
+rather than derived from the app, so a route that loses `Depends(require_bearer)` fails the three tests;
+`test_every_route_behind_require_bearer_is_listed_in_bearer_required_handlers` fails naming any protected
+route the list omits. When you add a protected route, add its handler in the same change.
+
+**Walk `iter_route_contexts(app.routes)`, never `app.routes`**, which since FastAPI 0.137 holds the
+included routers rather than their routes; a walk over it sees only `/health` and the docs routes and
+passes with nothing checked. The path-parameter test compares for equality so a blind walk fails it.
 
 Three properties of `tests/test_profile_routes.py` that its assertions cannot state for themselves:
 

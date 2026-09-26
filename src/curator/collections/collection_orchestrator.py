@@ -11,7 +11,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 
 from curator.collections.capacity_fill_strategy import StorageBin, fill_capacity_multi_bin
-from curator.collections.collection_spec import CollectionSpec
+from curator.collections.collection_spec import CAPACITY_FILL_KIND, CollectionSpec
 from curator.collections.filter_list_strategy import apply_filter_list, filter_candidates
 from curator.collections.game_candidate import (
     CAPPED_DEFAULT_SIZE,
@@ -22,8 +22,8 @@ from curator.collections.game_candidate import (
     GameCandidate,
     SizeSource,
 )
-from curator.collections.repository import CollectionsRepository, RawCandidateRow
-from curator.psn.title_platform import ConsolePlatform
+from curator.collections.repository import STORAGE_KIND_USB, CollectionsRepository, RawCandidateRow
+from curator.psn.title_platform import PS4, PS5, ConsolePlatform
 from curator.scoring.scoring_service import composite_score, rank_score
 from curator.scoring.size_estimation_service import SizeEstimate, estimate_install_size_gb
 
@@ -35,7 +35,7 @@ BYTES_PER_GB = 1_000_000_000
 IGNORED_FILTER_MIN_PERCENT_COMPLETED = "min_percent_completed"
 IGNORED_FILTER_REASON_NO_TROPHY_DATA = "no_trophy_data"
 
-_NO_CONSOLE_ESTIMATE_PLATFORM: ConsolePlatform = "PS4"
+_NO_CONSOLE_ESTIMATE_PLATFORM: ConsolePlatform = PS4
 """Which platform's size band a collection with **no console attached** estimates against.
 
 A ``filter_list`` collection is not bound to a console, so it has no platform of its own, and the packing
@@ -137,7 +137,7 @@ class CollectionOrchestrator:
             match is only counted once (kept in its normal-match position, not moved to the chained
             position).
         :returns: The :class:`CollectionResult`.
-        :raises ValueError: If ``spec.kind == "capacity_fill"`` and ``console_id`` is missing or unknown,
+        :raises ValueError: If ``spec.kind == CAPACITY_FILL_KIND`` and ``console_id`` is missing or unknown,
             or if ``spec.exclude_installed_on`` names a console that isn't this caller's own.
         """
         platform: ConsolePlatform | None = None
@@ -145,7 +145,7 @@ class CollectionOrchestrator:
         routing_genres: tuple[str, ...] = ()
 
         consoles = None
-        if spec.kind == "capacity_fill" or spec.exclude_installed_on:
+        if spec.kind == CAPACITY_FILL_KIND or spec.exclude_installed_on:
             consoles = await self._repository.list_user_consoles(identity_sub)
 
         if spec.exclude_installed_on:
@@ -155,7 +155,7 @@ class CollectionOrchestrator:
             if unknown:
                 raise ValueError(f"Unknown console_id(s) for this user in exclude_installed_on: {unknown!r}")
 
-        if spec.kind == "capacity_fill":
+        if spec.kind == CAPACITY_FILL_KIND:
             if spec.console_id is None:
                 raise ValueError("capacity_fill requires a console_id")
             assert consoles is not None
@@ -169,14 +169,14 @@ class CollectionOrchestrator:
             attached_devices = [
                 device
                 for device in await self._repository.list_storage_devices(identity_sub)
-                if device.console_id == spec.console_id and (platform != "PS5" or device.kind != "usb")
+                if device.console_id == spec.console_id and (platform != PS5 or device.kind != STORAGE_KIND_USB)
             ]
             bins.extend(
                 StorageBin(bin_id=device.device_id, capacity_gb=device.effective_capacity_gb)
                 for device in attached_devices
             )
 
-        include_non_games = spec.kind == "capacity_fill"
+        include_non_games = spec.kind == CAPACITY_FILL_KIND
         raw_rows = await self._repository.list_candidates(
             identity_sub,
             platform=platform,
@@ -215,7 +215,7 @@ class CollectionOrchestrator:
             for row in raw_rows
         ]
 
-        if spec.kind == "capacity_fill":
+        if spec.kind == CAPACITY_FILL_KIND:
             matched = filter_candidates(candidates, spec, completion_available=completion_available)
             matched_ids = {candidate.game_id for candidate in matched}
             by_id = {candidate.game_id: candidate for candidate in candidates}

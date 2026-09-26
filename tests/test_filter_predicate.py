@@ -5,6 +5,15 @@ from __future__ import annotations
 import pytest
 
 from curator.collections.filter_predicate import (
+    AND_OP,
+    GENRE_IN_OP,
+    OR_OP,
+    PREDICATE_NODES_KEY,
+    PREDICATE_OP_KEY,
+    PREDICATE_THRESHOLD_KEY,
+    PREDICATE_VALUES_KEY,
+    SCORE_AT_LEAST_OP,
+    TIER_IN_OP,
     And,
     GenreIn,
     Or,
@@ -15,6 +24,7 @@ from curator.collections.filter_predicate import (
     predicate_to_dict,
 )
 from curator.collections.game_candidate import GameCandidate
+from test_values import lowercase_token
 
 
 def _candidate(genre="RPG", aaa_tier="AAA", composite_score=80.0):
@@ -91,18 +101,18 @@ def test_predicate_to_dict_and_parse_predicate_round_trip():
     "raw",
     [
         {},
-        {"op": "bogus"},
-        {"op": "genre_in"},
-        {"op": "genre_in", "values": []},
-        {"op": "genre_in", "values": [1, 2]},
-        {"op": "tier_in", "values": "not-a-list"},
-        {"op": "score_at_least"},
-        {"op": "score_at_least", "threshold": "not-a-number"},
-        {"op": "score_at_least", "threshold": True},
-        {"op": "and", "nodes": []},
-        {"op": "or", "nodes": "not-a-list"},
-        {"op": "and", "nodes": [{"op": "bogus"}]},
-        "not-a-dict",
+        {PREDICATE_OP_KEY: lowercase_token()},
+        {PREDICATE_OP_KEY: GENRE_IN_OP},
+        {PREDICATE_OP_KEY: GENRE_IN_OP, PREDICATE_VALUES_KEY: []},
+        {PREDICATE_OP_KEY: GENRE_IN_OP, PREDICATE_VALUES_KEY: [1, 2]},
+        {PREDICATE_OP_KEY: TIER_IN_OP, PREDICATE_VALUES_KEY: lowercase_token()},
+        {PREDICATE_OP_KEY: SCORE_AT_LEAST_OP},
+        {PREDICATE_OP_KEY: SCORE_AT_LEAST_OP, PREDICATE_THRESHOLD_KEY: lowercase_token()},
+        {PREDICATE_OP_KEY: SCORE_AT_LEAST_OP, PREDICATE_THRESHOLD_KEY: True},
+        {PREDICATE_OP_KEY: AND_OP, PREDICATE_NODES_KEY: []},
+        {PREDICATE_OP_KEY: OR_OP, PREDICATE_NODES_KEY: lowercase_token()},
+        {PREDICATE_OP_KEY: AND_OP, PREDICATE_NODES_KEY: [{PREDICATE_OP_KEY: lowercase_token()}]},
+        pytest.param(lowercase_token(), id="not-a-dict"),
     ],
 )
 def test_parse_predicate_rejects_malformed_input(raw):

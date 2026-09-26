@@ -17,9 +17,20 @@ be expressed.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Final
 
 from curator.collections.game_candidate import GameCandidate
+
+PREDICATE_OP_KEY: Final = "op"
+PREDICATE_VALUES_KEY: Final = "values"
+PREDICATE_THRESHOLD_KEY: Final = "threshold"
+PREDICATE_NODES_KEY: Final = "nodes"
+
+GENRE_IN_OP: Final = "genre_in"
+TIER_IN_OP: Final = "tier_in"
+SCORE_AT_LEAST_OP: Final = "score_at_least"
+AND_OP: Final = "and"
+OR_OP: Final = "or"
 
 
 @dataclass(frozen=True, slots=True)
@@ -78,14 +89,14 @@ def predicate_to_dict(predicate: FilterPredicate) -> dict[str, Any]:
     """Serialize ``predicate`` to the JSON shape stored in ``collection_definitions.filter_predicate`` and
     returned over the API. The inverse of :func:`parse_predicate`."""
     if isinstance(predicate, GenreIn):
-        return {"op": "genre_in", "values": list(predicate.values)}
+        return {PREDICATE_OP_KEY: GENRE_IN_OP, PREDICATE_VALUES_KEY: list(predicate.values)}
     if isinstance(predicate, TierIn):
-        return {"op": "tier_in", "values": list(predicate.values)}
+        return {PREDICATE_OP_KEY: TIER_IN_OP, PREDICATE_VALUES_KEY: list(predicate.values)}
     if isinstance(predicate, ScoreAtLeast):
-        return {"op": "score_at_least", "threshold": predicate.threshold}
+        return {PREDICATE_OP_KEY: SCORE_AT_LEAST_OP, PREDICATE_THRESHOLD_KEY: predicate.threshold}
     if isinstance(predicate, And):
-        return {"op": "and", "nodes": [predicate_to_dict(node) for node in predicate.nodes]}
-    return {"op": "or", "nodes": [predicate_to_dict(node) for node in predicate.nodes]}
+        return {PREDICATE_OP_KEY: AND_OP, PREDICATE_NODES_KEY: [predicate_to_dict(node) for node in predicate.nodes]}
+    return {PREDICATE_OP_KEY: OR_OP, PREDICATE_NODES_KEY: [predicate_to_dict(node) for node in predicate.nodes]}
 
 
 def parse_predicate(raw: dict[str, Any]) -> FilterPredicate:
@@ -94,29 +105,29 @@ def parse_predicate(raw: dict[str, Any]) -> FilterPredicate:
     :raises ValueError: If ``raw`` is not a well-formed predicate -- an unrecognized ``op``, a leaf missing
         or misshaping its value, or a combinator with no child nodes. Route callers turn this into a 400.
     """
-    if not isinstance(raw, dict) or "op" not in raw:
+    if not isinstance(raw, dict) or PREDICATE_OP_KEY not in raw:
         raise ValueError("A filter predicate node must be an object with an 'op' field.")
-    op = raw["op"]
-    if op == "genre_in":
-        return GenreIn(values=_string_list(raw, "values"))
-    if op == "tier_in":
-        return TierIn(values=_string_list(raw, "values"))
-    if op == "score_at_least":
-        threshold = raw.get("threshold")
+    op = raw[PREDICATE_OP_KEY]
+    if op == GENRE_IN_OP:
+        return GenreIn(values=_string_list(raw, PREDICATE_VALUES_KEY))
+    if op == TIER_IN_OP:
+        return TierIn(values=_string_list(raw, PREDICATE_VALUES_KEY))
+    if op == SCORE_AT_LEAST_OP:
+        threshold = raw.get(PREDICATE_THRESHOLD_KEY)
         if not isinstance(threshold, int | float) or isinstance(threshold, bool):
             raise ValueError("score_at_least requires a numeric 'threshold'.")
         return ScoreAtLeast(threshold=float(threshold))
-    if op in ("and", "or"):
-        nodes = raw.get("nodes")
+    if op in (AND_OP, OR_OP):
+        nodes = raw.get(PREDICATE_NODES_KEY)
         if not isinstance(nodes, list) or not nodes:
             raise ValueError(f"'{op}' requires a non-empty 'nodes' list.")
         children = tuple(parse_predicate(node) for node in nodes)
-        return And(nodes=children) if op == "and" else Or(nodes=children)
+        return And(nodes=children) if op == AND_OP else Or(nodes=children)
     raise ValueError(f"Unknown predicate op {op!r}.")
 
 
 def _string_list(raw: dict[str, Any], key: str) -> tuple[str, ...]:
     values = raw.get(key)
     if not isinstance(values, list) or not values or not all(isinstance(value, str) for value in values):
-        raise ValueError(f"{raw.get('op')} requires a non-empty list of strings for '{key}'.")
+        raise ValueError(f"{raw.get(PREDICATE_OP_KEY)} requires a non-empty list of strings for '{key}'.")
     return tuple(values)

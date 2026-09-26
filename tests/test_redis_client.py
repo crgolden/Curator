@@ -7,11 +7,13 @@ from __future__ import annotations
 
 from typing import Any
 
+import pytest
 from redis.asyncio import Redis
 from redis.backoff import ExponentialBackoff
 from redis.exceptions import ConnectionError as RedisConnectionError
 from redis.exceptions import TimeoutError as RedisTimeoutError
 
+from curator.persistence.config import ConfigError
 from curator.redis_client import RedisAdapter, build_redis_client
 from curator.settings import Settings
 
@@ -29,8 +31,15 @@ def test_build_redis_client_returns_none_when_host_unset():
 
 
 def test_build_redis_client_builds_real_client_when_host_set():
-    client = build_redis_client(_settings(redis_host="redis.example.test", redis_port=6380, redis_password="secret"))
+    client = build_redis_client(
+        _settings(redis_host="redis.example.test", redis_port=6380, redis_password="secret", redis_ssl=True)
+    )
     assert isinstance(client, Redis)
+
+
+def test_build_redis_client_refuses_a_host_without_its_port_and_tls_flag():
+    with pytest.raises(ConfigError):
+        build_redis_client(_settings(redis_host="redis.example.test"))
 
 
 def test_build_redis_client_configures_connection_resilience():
@@ -40,7 +49,7 @@ def test_build_redis_client_configures_connection_resilience():
     retried against a fresh connection rather than surfacing straight into the caller, and a
     long-idle pooled connection must be health-checked before reuse.
     """
-    client = build_redis_client(_settings(redis_host="redis.example.test"))
+    client = build_redis_client(_settings(redis_host="redis.example.test", redis_port=6380, redis_ssl=True))
     assert client is not None
     connection_kwargs = client.connection_pool.connection_kwargs
 

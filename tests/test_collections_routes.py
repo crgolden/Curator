@@ -2,17 +2,56 @@
 
 from __future__ import annotations
 
+import uuid
 from dataclasses import replace
 
 import psycopg
 from fastapi.testclient import TestClient
+from pydantic import TypeAdapter
 
+from curator import collections_routes
 from curator.app import create_app
-from curator.collections.collection_orchestrator import CollectionResult, IgnoredFilter
-from curator.collections.filter_predicate import And, GenreIn, Or, ScoreAtLeast, TierIn
+from curator.collections.collection_orchestrator import (
+    IGNORED_FILTER_MIN_PERCENT_COMPLETED,
+    IGNORED_FILTER_REASON_NO_TROPHY_DATA,
+    CollectionResult,
+    IgnoredFilter,
+)
+from curator.collections.collection_spec import CAPACITY_FILL_KIND, FILTER_LIST_KIND
+from curator.collections.filter_predicate import (
+    AND_OP,
+    PREDICATE_NODES_KEY,
+    PREDICATE_OP_KEY,
+    And,
+    GenreIn,
+    Or,
+    ScoreAtLeast,
+    TierIn,
+    predicate_to_dict,
+)
 from curator.collections.game_candidate import DEFAULT_SIZE, MEASURED_SIZE, GameCandidate
-from curator.collections.repository import CollectionDefinition, CollectionItem, UserConsole
+from curator.collections.repository import (
+    VISIBILITY_PRIVATE,
+    VISIBILITY_PUBLIC,
+    CollectionDefinition,
+    CollectionItem,
+    UserConsole,
+)
+from curator.collections.sort_order import COMPOSITE_DESC
+from curator.collections_routes import (
+    CollectionItemsPageResponse,
+    CollectionPreviewResponse,
+    CollectionRunResponse,
+    CollectionSpecRequest,
+    DefinitionDetailResponse,
+    DefinitionResponse,
+    IgnoredFilterResponse,
+    SaveDefinitionRequest,
+    UpdateDefinitionRequest,
+    VisibilityUpdateRequest,
+)
 from curator.persistence.crypto import TokenCrypto
+from curator.psn.title_platform import PS5
 from test_routes import (
     FakeAgentFactory,
     FakeRepository,
@@ -20,9 +59,30 @@ from test_routes import (
     _bearer,
     _claims,
     _make_settings,
+    _path,
     _seed_link,
 )
 from test_trophy_routes import FakeTrophyClient, FakeTrophyClientFactory
+from test_values import new_game_id
+
+
+def _spec(**fields: object) -> dict[str, object]:
+    return CollectionSpecRequest.model_validate(fields).model_dump(exclude_unset=True)
+
+
+def _save(**fields: object) -> dict[str, object]:
+    return SaveDefinitionRequest.model_validate(fields).model_dump(exclude_unset=True)
+
+
+def _update(**fields: object) -> dict[str, object]:
+    return UpdateDefinitionRequest.model_validate(fields).model_dump(exclude_unset=True)
+
+
+def _visibility(visibility: str) -> dict[str, object]:
+    return VisibilityUpdateRequest(visibility=visibility).model_dump()
+
+
+_DEFINITION_LIST = TypeAdapter(list[DefinitionResponse])
 
 
 class FakeCatalogRepository:
@@ -118,7 +178,7 @@ class FakeCollectionsRepository:
 
     async def get_definition_by_share_slug(self, share_slug):
         for definition in self.definitions.values():
-            if definition.share_slug == share_slug and definition.visibility != "private":
+            if definition.share_slug == share_slug and definition.visibility != VISIBILITY_PRIVATE:
                 return self._with_live_item_count(definition)
         return None
 
@@ -233,7 +293,7 @@ def _build(orchestrator=None, collections_repository=None, repository=None, trop
 def test_requires_bearer_token():
     client, _validator = _build()
 
-    response = client.post("/collections/preview", json={"kind": "filter_list"})
+    response = client.post(_path(client, collections_routes.preview_collection), json=_spec(kind=FILTER_LIST_KIND))
 
     assert response.status_code == 401
 
@@ -242,7 +302,11 @@ def test_invalid_kind_is_rejected():
     client, validator = _build()
     validator.register("token-a", _claims())
 
-    response = client.post("/collections/preview", json={"kind": "bogus"}, headers=_bearer("token-a"))
+    response = client.post(
+        _path(client, collections_routes.preview_collection),
+        json=_spec(kind=uuid.uuid4().hex),
+        headers=_bearer("token-a"),
+    )
 
     assert response.status_code == 400
 
@@ -253,8 +317,8 @@ def test_orchestrator_value_error_becomes_400():
     validator.register("token-a", _claims())
 
     response = client.post(
-        "/collections/preview",
-        json={"kind": "capacity_fill", "console_id": "missing"},
+        _path(client, collections_routes.preview_collection),
+        json=_spec(kind=CAPACITY_FILL_KIND, console_id="missing"),
         headers=_bearer("token-a"),
     )
 
@@ -278,14 +342,18 @@ def test_returns_generated_candidates():
     client, validator = _build(orchestrator)
     validator.register("token-a", _claims(sub="sub-a"))
 
-    response = client.post("/collections/preview", json={"kind": "filter_list"}, headers=_bearer("token-a"))
+    response = client.post(
+        _path(client, collections_routes.preview_collection),
+        json=_spec(kind=FILTER_LIST_KIND),
+        headers=_bearer("token-a"),
+    )
 
     assert response.status_code == 200
-    body = response.json()
-    assert body["used_gb"] == 50.0
-    assert body["included"][0]["game_id"] == "g1"
+    body = CollectionPreviewResponse.model_validate(response.json())
+    assert body.used_gb == 50.0
+    assert body.included[0].game_id == "g1"
     assert orchestrator.generate_calls[0][0] == "sub-a"
-    assert orchestrator.generate_calls[0][1].kind == "filter_list"
+    assert orchestrator.generate_calls[0][1].kind == FILTER_LIST_KIND
 
 
 def _candidate(game_id: str, *, aaa_tier: str | None = "AAA") -> GameCandidate:
@@ -306,20 +374,24 @@ def test_preview_reports_an_ignored_completion_floor_and_the_silently_dropped_co
         included=(),
         excluded=(),
         used_gb=None,
-        ignored_filters=(IgnoredFilter("min_percent_completed", "no_trophy_data"),),
+        ignored_filters=(IgnoredFilter(IGNORED_FILTER_MIN_PERCENT_COMPLETED, IGNORED_FILTER_REASON_NO_TROPHY_DATA),),
         excluded_for_missing_trophy_data=3,
     )
     client, validator = _build(orchestrator=FakeOrchestrator(result))
     validator.register("token-a", _claims(sub="sub-a"))
 
-    body = client.post(
-        "/collections/preview",
-        json={"kind": "filter_list", "min_percent_completed": 50},
-        headers=_bearer("token-a"),
-    ).json()
+    body = CollectionPreviewResponse.model_validate(
+        client.post(
+            _path(client, collections_routes.preview_collection),
+            json=_spec(kind=FILTER_LIST_KIND, min_percent_completed=50),
+            headers=_bearer("token-a"),
+        ).json()
+    )
 
-    assert body["ignored_filters"] == [{"filter": "min_percent_completed", "reason": "no_trophy_data"}]
-    assert body["excluded_for_missing_trophy_data"] == 3
+    assert body.ignored_filters == [
+        IgnoredFilterResponse(filter=IGNORED_FILTER_MIN_PERCENT_COMPLETED, reason=IGNORED_FILTER_REASON_NO_TROPHY_DATA)
+    ]
+    assert body.excluded_for_missing_trophy_data == 3
 
 
 def test_preview_caps_both_lists_and_reports_their_real_totals():
@@ -333,12 +405,18 @@ def test_preview_caps_both_lists_and_reports_their_real_totals():
     client, validator = _build(FakeOrchestrator(result=result))
     validator.register("token-a", _claims(sub="sub-a"))
 
-    body = client.post("/collections/preview?limit=2", json={"kind": "filter_list"}, headers=_bearer("token-a")).json()
+    body = CollectionPreviewResponse.model_validate(
+        client.post(
+            _path(client, collections_routes.preview_collection) + "?limit=2",
+            json=_spec(kind=FILTER_LIST_KIND),
+            headers=_bearer("token-a"),
+        ).json()
+    )
 
-    assert [g["game_id"] for g in body["included"]] == ["inc-0", "inc-1"]
-    assert [g["game_id"] for g in body["excluded"]] == ["exc-0", "exc-1"]
-    assert body["included_total"] == 7
-    assert body["excluded_total"] == 9
+    assert [g.game_id for g in body.included] == ["inc-0", "inc-1"]
+    assert [g.game_id for g in body.excluded] == ["exc-0", "exc-1"]
+    assert body.included_total == 7
+    assert body.excluded_total == 9
 
 
 def test_preview_returns_every_included_id_even_when_the_body_is_capped():
@@ -352,10 +430,16 @@ def test_preview_returns_every_included_id_even_when_the_body_is_capped():
     client, validator = _build(FakeOrchestrator(result=result))
     validator.register("token-a", _claims(sub="sub-a"))
 
-    body = client.post("/collections/preview?limit=2", json={"kind": "filter_list"}, headers=_bearer("token-a")).json()
+    body = CollectionPreviewResponse.model_validate(
+        client.post(
+            _path(client, collections_routes.preview_collection) + "?limit=2",
+            json=_spec(kind=FILTER_LIST_KIND),
+            headers=_bearer("token-a"),
+        ).json()
+    )
 
-    assert len(body["included"]) == 2
-    assert body["included_game_ids"] == [f"inc-{i}" for i in range(7)]
+    assert len(body.included) == 2
+    assert body.included_game_ids == [f"inc-{i}" for i in range(7)]
 
 
 def test_preview_offset_pages_both_lists_together():
@@ -368,34 +452,48 @@ def test_preview_offset_pages_both_lists_together():
     client, validator = _build(FakeOrchestrator(result=result))
     validator.register("token-a", _claims(sub="sub-a"))
 
-    body = client.post(
-        "/collections/preview?limit=2&offset=4", json={"kind": "filter_list"}, headers=_bearer("token-a")
-    ).json()
+    body = CollectionPreviewResponse.model_validate(
+        client.post(
+            _path(client, collections_routes.preview_collection) + "?limit=2&offset=4",
+            json=_spec(kind=FILTER_LIST_KIND),
+            headers=_bearer("token-a"),
+        ).json()
+    )
 
-    assert [g["game_id"] for g in body["included"]] == ["inc-4"]
-    assert [g["game_id"] for g in body["excluded"]] == ["exc-4"]
-    assert body["included_total"] == 5
+    assert [g.game_id for g in body.included] == ["inc-4"]
+    assert [g.game_id for g in body.excluded] == ["exc-4"]
+    assert body.included_total == 5
 
 
 def test_preview_says_where_each_size_came_from():
     """A bare size_gb cannot tell a client whether 20 GB is a figure somebody measured or the flat
     fallback standing in for one, and only the latter is worth prompting its owner about."""
-    measured_candidate = replace(_candidate("measured"), size_source=MEASURED_SIZE)
-    unknown_candidate = replace(_candidate("unknown"), size_source=DEFAULT_SIZE)
+    measured_candidate = replace(_candidate(new_game_id()), size_source=MEASURED_SIZE)
+    unknown_candidate = replace(_candidate(new_game_id()), size_source=DEFAULT_SIZE)
     result = CollectionResult(included=(measured_candidate, unknown_candidate), excluded=(), used_gb=None)
     client, validator = _build(FakeOrchestrator(result=result))
     validator.register("token-a", _claims(sub="sub-a"))
 
-    body = client.post("/collections/preview", json={"kind": "filter_list"}, headers=_bearer("token-a")).json()
+    body = CollectionPreviewResponse.model_validate(
+        client.post(
+            _path(client, collections_routes.preview_collection) + "",
+            json=_spec(kind=FILTER_LIST_KIND),
+            headers=_bearer("token-a"),
+        ).json()
+    )
 
-    assert [game["size_source"] for game in body["included"]] == [MEASURED_SIZE, DEFAULT_SIZE]
+    assert [game.size_source for game in body.included] == [MEASURED_SIZE, DEFAULT_SIZE]
 
 
 def test_preview_rejects_a_page_size_above_the_ceiling():
     client, validator = _build(FakeOrchestrator())
     validator.register("token-a", _claims(sub="sub-a"))
 
-    response = client.post("/collections/preview?limit=101", json={"kind": "filter_list"}, headers=_bearer("token-a"))
+    response = client.post(
+        _path(client, collections_routes.preview_collection) + "?limit=101",
+        json=_spec(kind=FILTER_LIST_KIND),
+        headers=_bearer("token-a"),
+    )
 
     assert response.status_code == 422
 
@@ -405,9 +503,15 @@ def test_preview_renders_a_tier_less_game_as_null_not_empty_string():
     client, validator = _build(FakeOrchestrator(result=result))
     validator.register("token-a", _claims(sub="sub-a"))
 
-    body = client.post("/collections/preview", json={"kind": "filter_list"}, headers=_bearer("token-a")).json()
+    body = CollectionPreviewResponse.model_validate(
+        client.post(
+            _path(client, collections_routes.preview_collection) + "",
+            json=_spec(kind=FILTER_LIST_KIND),
+            headers=_bearer("token-a"),
+        ).json()
+    )
 
-    assert body["included"][0]["aaa_tier"] is None
+    assert body.included[0].aaa_tier is None
 
 
 def test_preview_passes_min_percent_completed_through_to_spec():
@@ -416,8 +520,8 @@ def test_preview_passes_min_percent_completed_through_to_spec():
     validator.register("token-a", _claims(sub="sub-a"))
 
     client.post(
-        "/collections/preview",
-        json={"kind": "filter_list", "min_percent_completed": 50},
+        _path(client, collections_routes.preview_collection),
+        json=_spec(kind=FILTER_LIST_KIND, min_percent_completed=50),
         headers=_bearer("token-a"),
     )
 
@@ -430,13 +534,13 @@ def test_preview_passes_sort_order_and_exclude_installed_on_through_to_spec():
     validator.register("token-a", _claims(sub="sub-a"))
 
     client.post(
-        "/collections/preview",
-        json={"kind": "filter_list", "sort_order": "composite_desc", "exclude_installed_on": ["c1", "c2"]},
+        _path(client, collections_routes.preview_collection),
+        json=_spec(kind=FILTER_LIST_KIND, sort_order=COMPOSITE_DESC, exclude_installed_on=["c1", "c2"]),
         headers=_bearer("token-a"),
     )
 
     spec = orchestrator.generate_calls[0][1]
-    assert spec.sort_order == "composite_desc"
+    assert spec.sort_order == COMPOSITE_DESC
     assert spec.exclude_installed_on == ("c1", "c2")
 
 
@@ -456,9 +560,13 @@ def test_preview_response_includes_percent_completed():
     client, validator = _build(FakeOrchestrator(result=result))
     validator.register("token-a", _claims(sub="sub-a"))
 
-    response = client.post("/collections/preview", json={"kind": "filter_list"}, headers=_bearer("token-a"))
+    response = client.post(
+        _path(client, collections_routes.preview_collection),
+        json=_spec(kind=FILTER_LIST_KIND),
+        headers=_bearer("token-a"),
+    )
 
-    assert response.json()["included"][0]["percent_completed"] == 87
+    assert CollectionPreviewResponse.model_validate(response.json()).included[0].percent_completed == 87
 
 
 def test_preview_never_resolves_trophy_completion_at_request_time():
@@ -478,7 +586,11 @@ def test_preview_never_resolves_trophy_completion_at_request_time():
     client, validator = _build(orchestrator, repository=repository, trophy_client_factory=factory)
     validator.register("token-a", _claims(sub="sub-a"))
 
-    client.post("/collections/preview", json={"kind": "filter_list"}, headers=_bearer("token-a"))
+    client.post(
+        _path(client, collections_routes.preview_collection),
+        json=_spec(kind=FILTER_LIST_KIND),
+        headers=_bearer("token-a"),
+    )
 
     _, _, completion_map, completion_available = orchestrator.generate_calls[0]
     assert completion_map is None
@@ -492,8 +604,8 @@ def test_preview_threads_the_completion_floor_through_to_the_spec():
     validator.register("token-a", _claims(sub="sub-a"))
 
     client.post(
-        "/collections/preview",
-        json={"kind": "filter_list", "min_percent_completed": 80},
+        _path(client, collections_routes.preview_collection),
+        json=_spec(kind=FILTER_LIST_KIND, min_percent_completed=80),
         headers=_bearer("token-a"),
     )
 
@@ -507,20 +619,18 @@ def test_preview_parses_a_filter_predicate_onto_the_spec():
     validator.register("token-a", _claims(sub="sub-a"))
 
     response = client.post(
-        "/collections/preview",
-        json={
-            "kind": "filter_list",
-            "filter_predicate": {
-                "op": "or",
-                "nodes": [
-                    {"op": "genre_in", "values": ["RPG"]},
-                    {
-                        "op": "and",
-                        "nodes": [{"op": "genre_in", "values": ["Action"]}, {"op": "tier_in", "values": ["Indie"]}],
-                    },
-                ],
-            },
-        },
+        _path(client, collections_routes.preview_collection),
+        json=_spec(
+            kind=FILTER_LIST_KIND,
+            filter_predicate=predicate_to_dict(
+                Or(
+                    nodes=(
+                        GenreIn(values=("RPG",)),
+                        And(nodes=(GenreIn(values=("Action",)), TierIn(values=("Indie",)))),
+                    )
+                )
+            ),
+        ),
         headers=_bearer("token-a"),
     )
 
@@ -536,8 +646,8 @@ def test_preview_rejects_a_malformed_filter_predicate_as_400_not_500():
     validator.register("token-a", _claims(sub="sub-a"))
 
     response = client.post(
-        "/collections/preview",
-        json={"kind": "filter_list", "filter_predicate": {"op": "bogus"}},
+        _path(client, collections_routes.preview_collection),
+        json=_spec(kind=FILTER_LIST_KIND, filter_predicate={PREDICATE_OP_KEY: uuid.uuid4().hex}),
         headers=_bearer("token-a"),
     )
 
@@ -548,7 +658,11 @@ def test_save_definition_rejects_invalid_kind():
     client, validator = _build()
     validator.register("token-a", _claims())
 
-    response = client.post("/collections", json={"name": "x", "kind": "bogus"}, headers=_bearer("token-a"))
+    response = client.post(
+        _path(client, collections_routes.save_definition),
+        json=_save(name="x", kind=uuid.uuid4().hex),
+        headers=_bearer("token-a"),
+    )
 
     assert response.status_code == 400
 
@@ -559,15 +673,15 @@ def test_save_definition_persists_and_returns_it():
     validator.register("token-a", _claims(sub="sub-a"))
 
     response = client.post(
-        "/collections",
-        json={"name": "My RPGs", "kind": "filter_list", "genre_filter": ["RPG"], "min_score": 80.0},
+        _path(client, collections_routes.save_definition),
+        json=_save(name="My RPGs", kind=FILTER_LIST_KIND, genre_filter=["RPG"], min_score=80.0),
         headers=_bearer("token-a"),
     )
 
     assert response.status_code == 201
-    body = response.json()
-    assert body["name"] == "My RPGs"
-    assert body["genre_filter"] == ["RPG"]
+    body = DefinitionResponse.model_validate(response.json())
+    assert body.name == "My RPGs"
+    assert body.genre_filter == ["RPG"]
     assert len(collections_repository.definitions) == 1
 
 
@@ -575,15 +689,16 @@ def test_save_definition_rejects_a_console_the_caller_does_not_own():
     collections_repository = FakeCollectionsRepository()
     client, validator = _build(collections_repository=collections_repository)
     validator.register("token-a", _claims(sub="sub-a"))
+    unowned_console_id = uuid.uuid4().hex
 
     response = client.post(
-        "/collections",
-        json={"name": "Someone else's PS5", "kind": "capacity_fill", "console_id": "console-not-mine"},
+        _path(client, collections_routes.save_definition),
+        json=_save(name="Someone else's PS5", kind=CAPACITY_FILL_KIND, console_id=unowned_console_id),
         headers=_bearer("token-a"),
     )
 
     assert response.status_code == 400
-    assert "Unknown console_id" in response.json()["detail"]
+    assert response.json()["detail"] == collections_routes.unknown_console_detail(unowned_console_id)
     assert collections_repository.definitions == {}
 
 
@@ -591,15 +706,16 @@ def test_save_definition_rejects_an_exclude_installed_on_console_the_caller_does
     collections_repository = FakeCollectionsRepository()
     client, validator = _build(collections_repository=collections_repository)
     validator.register("token-a", _claims(sub="sub-a"))
+    unowned_console_id = uuid.uuid4().hex
 
     response = client.post(
-        "/collections",
-        json={"name": "Not on my Vita", "kind": "filter_list", "exclude_installed_on": ["console-not-mine"]},
+        _path(client, collections_routes.save_definition),
+        json=_save(name="Not on my Vita", kind=FILTER_LIST_KIND, exclude_installed_on=[unowned_console_id]),
         headers=_bearer("token-a"),
     )
 
     assert response.status_code == 400
-    assert "exclude_installed_on" in response.json()["detail"]
+    assert response.json()["detail"] == collections_routes.unknown_excluded_consoles_detail([unowned_console_id])
     assert collections_repository.definitions == {}
 
 
@@ -607,7 +723,7 @@ def test_save_definition_round_trips_sort_order_and_exclude_installed_on():
     console = UserConsole(
         console_id="console-a",
         name="Living room PS5",
-        platform="PS5",
+        platform=PS5,
         raw_capacity_gb=800.0,
         update_buffer_gb=50.0,
         routing_genres=(),
@@ -618,27 +734,27 @@ def test_save_definition_round_trips_sort_order_and_exclude_installed_on():
     validator.register("token-a", _claims(sub="sub-a"))
 
     response = client.post(
-        "/collections",
-        json={
-            "name": "Not on my PS5",
-            "kind": "filter_list",
-            "sort_order": "composite_desc",
-            "exclude_installed_on": ["console-a"],
-        },
+        _path(client, collections_routes.save_definition),
+        json=_save(
+            name="Not on my PS5",
+            kind=FILTER_LIST_KIND,
+            sort_order=COMPOSITE_DESC,
+            exclude_installed_on=["console-a"],
+        ),
         headers=_bearer("token-a"),
     )
 
     assert response.status_code == 201
-    body = response.json()
-    assert body["sort_order"] == "composite_desc"
-    assert body["exclude_installed_on"] == ["console-a"]
+    body = DefinitionResponse.model_validate(response.json())
+    assert body.sort_order == COMPOSITE_DESC
+    assert body.exclude_installed_on == ["console-a"]
 
 
 def test_save_definition_accepts_a_console_the_caller_owns():
     console = UserConsole(
         console_id="console-a",
         name="Living room PS5",
-        platform="PS5",
+        platform=PS5,
         raw_capacity_gb=800.0,
         update_buffer_gb=50.0,
         routing_genres=(),
@@ -649,13 +765,13 @@ def test_save_definition_accepts_a_console_the_caller_owns():
     validator.register("token-a", _claims(sub="sub-a"))
 
     response = client.post(
-        "/collections",
-        json={"name": "PS5 fill", "kind": "capacity_fill", "console_id": "console-a"},
+        _path(client, collections_routes.save_definition),
+        json=_save(name="PS5 fill", kind=CAPACITY_FILL_KIND, console_id="console-a"),
         headers=_bearer("token-a"),
     )
 
     assert response.status_code == 201
-    assert response.json()["console_id"] == "console-a"
+    assert DefinitionResponse.model_validate(response.json()).console_id == "console-a"
 
 
 def test_save_definition_persists_min_percent_completed():
@@ -664,13 +780,13 @@ def test_save_definition_persists_min_percent_completed():
     validator.register("token-a", _claims(sub="sub-a"))
 
     response = client.post(
-        "/collections",
-        json={"name": "Nearly Done", "kind": "filter_list", "min_percent_completed": 75},
+        _path(client, collections_routes.save_definition),
+        json=_save(name="Nearly Done", kind=FILTER_LIST_KIND, min_percent_completed=75),
         headers=_bearer("token-a"),
     )
 
     assert response.status_code == 201
-    assert response.json()["min_percent_completed"] == 75
+    assert DefinitionResponse.model_validate(response.json()).min_percent_completed == 75
     assert collections_repository.definitions["def-1"].min_percent_completed == 75
 
 
@@ -680,8 +796,8 @@ def test_save_definition_duplicate_name_returns_409():
     validator.register("token-a", _claims(sub="sub-a"))
 
     response = client.post(
-        "/collections",
-        json={"name": "My RPGs", "kind": "filter_list"},
+        _path(client, collections_routes.save_definition),
+        json=_save(name="My RPGs", kind=FILTER_LIST_KIND),
         headers=_bearer("token-a"),
     )
 
@@ -694,7 +810,7 @@ def test_list_definitions_scopes_to_caller():
         definition_id="def-a",
         identity_sub="sub-a",
         name="A's list",
-        kind="filter_list",
+        kind=FILTER_LIST_KIND,
         console_id=None,
         genre_filter=(),
         min_score=None,
@@ -705,7 +821,7 @@ def test_list_definitions_scopes_to_caller():
         definition_id="def-b",
         identity_sub="sub-b",
         name="B's list",
-        kind="filter_list",
+        kind=FILTER_LIST_KIND,
         console_id=None,
         genre_filter=(),
         min_score=None,
@@ -716,12 +832,12 @@ def test_list_definitions_scopes_to_caller():
     client, validator = _build(collections_repository=collections_repository)
     validator.register("token-a", _claims(sub="sub-a"))
 
-    response = client.get("/collections", headers=_bearer("token-a"))
+    response = client.get(_path(client, collections_routes.list_definitions), headers=_bearer("token-a"))
 
     assert response.status_code == 200
-    body = response.json()
+    body = _DEFINITION_LIST.validate_python(response.json())
     assert len(body) == 1
-    assert body[0]["definition_id"] == "def-a"
+    assert body[0].definition_id == "def-a"
 
 
 def _definition(definition_id="def-a", identity_sub="sub-a", name="A's list", description=None):
@@ -729,7 +845,7 @@ def _definition(definition_id="def-a", identity_sub="sub-a", name="A's list", de
         definition_id=definition_id,
         identity_sub=identity_sub,
         name=name,
-        kind="filter_list",
+        kind=FILTER_LIST_KIND,
         console_id=None,
         genre_filter=(),
         min_score=None,
@@ -745,13 +861,13 @@ def test_save_definition_stores_the_supplied_game_ids():
     validator.register("token-a", _claims(sub="sub-a"))
 
     response = client.post(
-        "/collections",
-        json={"name": "Handpicked", "game_ids": ["g2", "g1"], "description": "Best of"},
+        _path(client, collections_routes.save_definition),
+        json=_save(name="Handpicked", game_ids=["g2", "g1"], description="Best of"),
         headers=_bearer("token-a"),
     )
 
     assert response.status_code == 201
-    assert response.json()["description"] == "Best of"
+    assert DefinitionResponse.model_validate(response.json()).description == "Best of"
     assert collections_repository.items["def-1"] == ("g2", "g1")
 
 
@@ -760,10 +876,14 @@ def test_save_definition_defaults_kind_so_a_handpicked_list_needs_no_spec():
     client, validator = _build(collections_repository=collections_repository)
     validator.register("token-a", _claims(sub="sub-a"))
 
-    response = client.post("/collections", json={"name": "Handpicked", "game_ids": ["g1"]}, headers=_bearer("token-a"))
+    response = client.post(
+        _path(client, collections_routes.save_definition),
+        json=_save(name="Handpicked", game_ids=["g1"]),
+        headers=_bearer("token-a"),
+    )
 
     assert response.status_code == 201
-    assert response.json()["kind"] == "filter_list"
+    assert DefinitionResponse.model_validate(response.json()).kind == FILTER_LIST_KIND
 
 
 def test_save_definition_persists_and_returns_a_filter_predicate():
@@ -772,22 +892,18 @@ def test_save_definition_persists_and_returns_a_filter_predicate():
     validator.register("token-a", _claims(sub="sub-a"))
 
     response = client.post(
-        "/collections",
-        json={
-            "name": "Criterion-ish",
-            "filter_predicate": {
-                "op": "or",
-                "nodes": [{"op": "genre_in", "values": ["RPG"]}, {"op": "score_at_least", "threshold": 70.0}],
-            },
-        },
+        _path(client, collections_routes.save_definition),
+        json=_save(
+            name="Criterion-ish",
+            filter_predicate=predicate_to_dict(Or(nodes=(GenreIn(values=("RPG",)), ScoreAtLeast(threshold=70.0)))),
+        ),
         headers=_bearer("token-a"),
     )
 
     assert response.status_code == 201
-    assert response.json()["filter_predicate"] == {
-        "op": "or",
-        "nodes": [{"op": "genre_in", "values": ["RPG"]}, {"op": "score_at_least", "threshold": 70.0}],
-    }
+    assert DefinitionResponse.model_validate(response.json()).filter_predicate == predicate_to_dict(
+        Or(nodes=(GenreIn(values=("RPG",)), ScoreAtLeast(threshold=70.0)))
+    )
     saved = collections_repository.definitions["def-1"]
     assert saved.filter_predicate == Or(nodes=(GenreIn(values=("RPG",)), ScoreAtLeast(threshold=70.0)))
 
@@ -798,8 +914,8 @@ def test_save_definition_rejects_a_malformed_filter_predicate_as_400_not_500():
     validator.register("token-a", _claims(sub="sub-a"))
 
     response = client.post(
-        "/collections",
-        json={"name": "Bad", "filter_predicate": {"op": "and", "nodes": []}},
+        _path(client, collections_routes.save_definition),
+        json=_save(name="Bad", filter_predicate={PREDICATE_OP_KEY: AND_OP, PREDICATE_NODES_KEY: []}),
         headers=_bearer("token-a"),
     )
 
@@ -812,9 +928,11 @@ def test_definition_with_no_filter_predicate_returns_null_not_an_empty_object():
     client, validator = _build(collections_repository=collections_repository)
     validator.register("token-a", _claims(sub="sub-a"))
 
-    response = client.post("/collections", json={"name": "Handpicked"}, headers=_bearer("token-a"))
+    response = client.post(
+        _path(client, collections_routes.save_definition), json=_save(name="Handpicked"), headers=_bearer("token-a")
+    )
 
-    assert response.json()["filter_predicate"] is None
+    assert DefinitionResponse.model_validate(response.json()).filter_predicate is None
 
 
 def test_save_definition_rejects_an_unknown_game_id():
@@ -822,7 +940,11 @@ def test_save_definition_rejects_an_unknown_game_id():
     client, validator = _build(collections_repository=collections_repository)
     validator.register("token-a", _claims(sub="sub-a"))
 
-    response = client.post("/collections", json={"name": "Bad", "game_ids": ["g1", "g9"]}, headers=_bearer("token-a"))
+    response = client.post(
+        _path(client, collections_routes.save_definition),
+        json=_save(name="Bad", game_ids=["g1", "g9"]),
+        headers=_bearer("token-a"),
+    )
 
     assert response.status_code == 400
     assert "g9" in response.json()["detail"]
@@ -834,7 +956,11 @@ def test_save_definition_rejects_a_malformed_game_id_as_400_not_500():
     client, validator = _build(collections_repository=collections_repository)
     validator.register("token-a", _claims(sub="sub-a"))
 
-    response = client.post("/collections", json={"name": "Bad", "game_ids": ["not-a-uuid"]}, headers=_bearer("token-a"))
+    response = client.post(
+        _path(client, collections_routes.save_definition),
+        json=_save(name="Bad", game_ids=["not-a-uuid"]),
+        headers=_bearer("token-a"),
+    )
 
     assert response.status_code == 400
     assert "UUID" in response.json()["detail"]
@@ -847,7 +973,9 @@ def test_save_definition_lower_cases_game_ids_before_validating_them():
     validator.register("token-a", _claims(sub="sub-a"))
 
     response = client.post(
-        "/collections", json={"name": "Shouty", "game_ids": [game_id.upper()]}, headers=_bearer("token-a")
+        _path(client, collections_routes.save_definition),
+        json=_save(name="Shouty", game_ids=[game_id.upper()]),
+        headers=_bearer("token-a"),
     )
 
     assert response.status_code == 201
@@ -860,13 +988,15 @@ def test_get_definition_returns_its_items():
     client, validator = _build(collections_repository=collections_repository)
     validator.register("token-a", _claims(sub="sub-a"))
 
-    response = client.get("/collections/def-a", headers=_bearer("token-a"))
+    response = client.get(
+        _path(client, collections_routes.get_definition, definition_id="def-a"), headers=_bearer("token-a")
+    )
 
     assert response.status_code == 200
-    body = response.json()
-    assert body["definition_id"] == "def-a"
-    assert [item["game_id"] for item in body["items"]] == ["g1"]
-    assert body["items"][0]["cover_image_url"] == "g1.png"
+    body = DefinitionDetailResponse.model_validate(response.json())
+    assert body.definition_id == "def-a"
+    assert [item.game_id for item in body.items] == ["g1"]
+    assert body.items[0].cover_image_url == "g1.png"
 
 
 def test_get_definition_items_returns_a_page_and_the_total():
@@ -875,12 +1005,15 @@ def test_get_definition_items_returns_a_page_and_the_total():
     client, validator = _build(collections_repository=collections_repository)
     validator.register("token-a", _claims(sub="sub-a"))
 
-    response = client.get("/collections/def-a/items?limit=2&offset=1", headers=_bearer("token-a"))
+    response = client.get(
+        _path(client, collections_routes.get_definition_items, definition_id="def-a") + "?limit=2&offset=1",
+        headers=_bearer("token-a"),
+    )
 
     assert response.status_code == 200
-    body = response.json()
-    assert [item["game_id"] for item in body["items"]] == ["g2", "g3"]
-    assert body["total"] == 3, "total counts the whole collection, not the page"
+    body = CollectionItemsPageResponse.model_validate(response.json())
+    assert [item.game_id for item in body.items] == ["g2", "g3"]
+    assert body.total == 3, "total counts the whole collection, not the page"
 
 
 def test_get_definition_items_filters_by_title():
@@ -889,9 +1022,12 @@ def test_get_definition_items_filters_by_title():
     client, validator = _build(collections_repository=collections_repository)
     validator.register("token-a", _claims(sub="sub-a"))
 
-    response = client.get("/collections/def-a/items?q=g2", headers=_bearer("token-a"))
+    response = client.get(
+        _path(client, collections_routes.get_definition_items, definition_id="def-a") + "?q=g2",
+        headers=_bearer("token-a"),
+    )
 
-    assert [item["game_id"] for item in response.json()["items"]] == ["g2"]
+    assert [item.game_id for item in CollectionItemsPageResponse.model_validate(response.json()).items] == ["g2"]
 
 
 def test_get_definition_items_rejects_an_unknown_sort_field():
@@ -899,7 +1035,10 @@ def test_get_definition_items_rejects_an_unknown_sort_field():
     client, validator = _build(collections_repository=collections_repository)
     validator.register("token-a", _claims(sub="sub-a"))
 
-    response = client.get("/collections/def-a/items?sort=game_id", headers=_bearer("token-a"))
+    response = client.get(
+        _path(client, collections_routes.get_definition_items, definition_id="def-a") + "?sort=game_id",
+        headers=_bearer("token-a"),
+    )
 
     assert response.status_code == 422
 
@@ -909,7 +1048,9 @@ def test_get_definition_items_not_owned_returns_404():
     client, validator = _build(collections_repository=collections_repository)
     validator.register("token-a", _claims(sub="sub-a"))
 
-    response = client.get("/collections/def-a/items", headers=_bearer("token-a"))
+    response = client.get(
+        _path(client, collections_routes.get_definition_items, definition_id="def-a"), headers=_bearer("token-a")
+    )
 
     assert response.status_code == 404
 
@@ -920,7 +1061,10 @@ def test_remove_definition_item_removes_only_that_title():
     client, validator = _build(collections_repository=collections_repository)
     validator.register("token-a", _claims(sub="sub-a"))
 
-    response = client.delete("/collections/def-a/items/g1", headers=_bearer("token-a"))
+    response = client.delete(
+        _path(client, collections_routes.remove_definition_item, definition_id="def-a", game_id="g1"),
+        headers=_bearer("token-a"),
+    )
 
     assert response.status_code == 204
     assert collections_repository.items["def-a"] == ("g2",)
@@ -932,7 +1076,10 @@ def test_remove_definition_item_not_a_member_returns_404():
     client, validator = _build(collections_repository=collections_repository)
     validator.register("token-a", _claims(sub="sub-a"))
 
-    response = client.delete("/collections/def-a/items/g9", headers=_bearer("token-a"))
+    response = client.delete(
+        _path(client, collections_routes.remove_definition_item, definition_id="def-a", game_id="g9"),
+        headers=_bearer("token-a"),
+    )
 
     assert response.status_code == 404
 
@@ -943,7 +1090,10 @@ def test_remove_definition_item_not_owned_returns_404_without_touching_the_colle
     client, validator = _build(collections_repository=collections_repository)
     validator.register("token-a", _claims(sub="sub-a"))
 
-    response = client.delete("/collections/def-a/items/g1", headers=_bearer("token-a"))
+    response = client.delete(
+        _path(client, collections_routes.remove_definition_item, definition_id="def-a", game_id="g1"),
+        headers=_bearer("token-a"),
+    )
 
     assert response.status_code == 404
     assert collections_repository.items["def-a"] == ("g1",)
@@ -954,7 +1104,9 @@ def test_get_definition_not_owned_returns_404():
     client, validator = _build(collections_repository=collections_repository)
     validator.register("token-a", _claims(sub="sub-a"))
 
-    response = client.get("/collections/def-a", headers=_bearer("token-a"))
+    response = client.get(
+        _path(client, collections_routes.get_definition, definition_id="def-a"), headers=_bearer("token-a")
+    )
 
     assert response.status_code == 404
 
@@ -966,12 +1118,15 @@ def test_patch_definition_renames_and_replaces_membership():
     validator.register("token-a", _claims(sub="sub-a"))
 
     response = client.patch(
-        "/collections/def-a", json={"name": "Renamed", "game_ids": ["g2"]}, headers=_bearer("token-a")
+        _path(client, collections_routes.update_definition, definition_id="def-a"),
+        json=_update(name="Renamed", game_ids=["g2"]),
+        headers=_bearer("token-a"),
     )
 
     assert response.status_code == 200
-    assert response.json()["name"] == "Renamed"
-    assert [item["game_id"] for item in response.json()["items"]] == ["g2"]
+    detail = DefinitionDetailResponse.model_validate(response.json())
+    assert detail.name == "Renamed"
+    assert [item.game_id for item in detail.items] == ["g2"]
     assert collections_repository.items["def-a"] == ("g2",)
 
 
@@ -981,10 +1136,14 @@ def test_patch_definition_leaves_omitted_fields_alone():
     client, validator = _build(collections_repository=collections_repository)
     validator.register("token-a", _claims(sub="sub-a"))
 
-    response = client.patch("/collections/def-a", json={"name": "Renamed"}, headers=_bearer("token-a"))
+    response = client.patch(
+        _path(client, collections_routes.update_definition, definition_id="def-a"),
+        json=_update(name="Renamed"),
+        headers=_bearer("token-a"),
+    )
 
     assert response.status_code == 200
-    assert response.json()["description"] == "Original"
+    assert DefinitionResponse.model_validate(response.json()).description == "Original"
     assert collections_repository.items["def-a"] == ("g1",)
 
 
@@ -993,10 +1152,14 @@ def test_patch_definition_can_clear_a_description_with_an_explicit_null():
     client, validator = _build(collections_repository=collections_repository)
     validator.register("token-a", _claims(sub="sub-a"))
 
-    response = client.patch("/collections/def-a", json={"description": None}, headers=_bearer("token-a"))
+    response = client.patch(
+        _path(client, collections_routes.update_definition, definition_id="def-a"),
+        json=_update(description=None),
+        headers=_bearer("token-a"),
+    )
 
     assert response.status_code == 200
-    assert response.json()["description"] is None
+    assert DefinitionResponse.model_validate(response.json()).description is None
 
 
 def test_patch_definition_duplicate_name_returns_409():
@@ -1004,7 +1167,11 @@ def test_patch_definition_duplicate_name_returns_409():
     client, validator = _build(collections_repository=collections_repository)
     validator.register("token-a", _claims(sub="sub-a"))
 
-    response = client.patch("/collections/def-a", json={"name": "Taken"}, headers=_bearer("token-a"))
+    response = client.patch(
+        _path(client, collections_routes.update_definition, definition_id="def-a"),
+        json=_update(name="Taken"),
+        headers=_bearer("token-a"),
+    )
 
     assert response.status_code == 409
 
@@ -1014,7 +1181,11 @@ def test_patch_definition_not_owned_returns_404():
     client, validator = _build(collections_repository=collections_repository)
     validator.register("token-a", _claims(sub="sub-a"))
 
-    response = client.patch("/collections/def-a", json={"name": "Mine now"}, headers=_bearer("token-a"))
+    response = client.patch(
+        _path(client, collections_routes.update_definition, definition_id="def-a"),
+        json=_update(name="Mine now"),
+        headers=_bearer("token-a"),
+    )
 
     assert response.status_code == 404
     assert collections_repository.definitions["def-a"].name == "A's list"
@@ -1025,7 +1196,9 @@ def test_delete_definition_removes_it():
     client, validator = _build(collections_repository=collections_repository)
     validator.register("token-a", _claims(sub="sub-a"))
 
-    response = client.delete("/collections/def-a", headers=_bearer("token-a"))
+    response = client.delete(
+        _path(client, collections_routes.delete_definition, definition_id="def-a"), headers=_bearer("token-a")
+    )
 
     assert response.status_code == 204
     assert collections_repository.definitions == {}
@@ -1036,7 +1209,9 @@ def test_delete_definition_not_owned_returns_404():
     client, validator = _build(collections_repository=collections_repository)
     validator.register("token-a", _claims(sub="sub-a"))
 
-    response = client.delete("/collections/def-a", headers=_bearer("token-a"))
+    response = client.delete(
+        _path(client, collections_routes.delete_definition, definition_id="def-a"), headers=_bearer("token-a")
+    )
 
     assert response.status_code == 404
     assert "def-a" in collections_repository.definitions
@@ -1047,11 +1222,15 @@ def test_set_visibility_changes_it_and_returns_the_updated_definition():
     client, validator = _build(collections_repository=collections_repository)
     validator.register("token-a", _claims(sub="sub-a"))
 
-    response = client.put("/collections/def-a/visibility", json={"visibility": "public"}, headers=_bearer("token-a"))
+    response = client.put(
+        _path(client, collections_routes.set_visibility, definition_id="def-a"),
+        json=_visibility(VISIBILITY_PUBLIC),
+        headers=_bearer("token-a"),
+    )
 
     assert response.status_code == 200
-    assert response.json()["visibility"] == "public"
-    assert collections_repository.definitions["def-a"].visibility == "public"
+    assert DefinitionResponse.model_validate(response.json()).visibility == VISIBILITY_PUBLIC
+    assert collections_repository.definitions["def-a"].visibility == VISIBILITY_PUBLIC
 
 
 def test_set_visibility_rejects_an_unknown_value():
@@ -1059,10 +1238,14 @@ def test_set_visibility_rejects_an_unknown_value():
     client, validator = _build(collections_repository=collections_repository)
     validator.register("token-a", _claims(sub="sub-a"))
 
-    response = client.put("/collections/def-a/visibility", json={"visibility": "everyone"}, headers=_bearer("token-a"))
+    response = client.put(
+        _path(client, collections_routes.set_visibility, definition_id="def-a"),
+        json=_visibility(uuid.uuid4().hex),
+        headers=_bearer("token-a"),
+    )
 
     assert response.status_code == 400
-    assert collections_repository.definitions["def-a"].visibility == "private"
+    assert collections_repository.definitions["def-a"].visibility == VISIBILITY_PRIVATE
 
 
 def test_set_visibility_not_owned_returns_404():
@@ -1070,29 +1253,37 @@ def test_set_visibility_not_owned_returns_404():
     client, validator = _build(collections_repository=collections_repository)
     validator.register("token-a", _claims(sub="sub-a"))
 
-    response = client.put("/collections/def-a/visibility", json={"visibility": "public"}, headers=_bearer("token-a"))
+    response = client.put(
+        _path(client, collections_routes.set_visibility, definition_id="def-a"),
+        json=_visibility(VISIBILITY_PUBLIC),
+        headers=_bearer("token-a"),
+    )
 
     assert response.status_code == 404
 
 
 def test_follow_a_public_collection():
-    other = replace(_definition(identity_sub="sub-b"), visibility="public")
+    other = replace(_definition(identity_sub="sub-b"), visibility=VISIBILITY_PUBLIC)
     collections_repository = FakeCollectionsRepository([other])
     client, validator = _build(collections_repository=collections_repository)
     validator.register("token-a", _claims(sub="sub-a"))
 
-    response = client.post("/collections/def-a/follow", headers=_bearer("token-a"))
+    response = client.post(
+        _path(client, collections_routes.follow_definition, definition_id="def-a"), headers=_bearer("token-a")
+    )
 
     assert response.status_code == 204
     assert collections_repository.collection_follows["def-a"] == {"sub-a"}
 
 
 def test_cannot_follow_your_own_collection():
-    collections_repository = FakeCollectionsRepository([replace(_definition(), visibility="public")])
+    collections_repository = FakeCollectionsRepository([replace(_definition(), visibility=VISIBILITY_PUBLIC)])
     client, validator = _build(collections_repository=collections_repository)
     validator.register("token-a", _claims(sub="sub-a"))
 
-    response = client.post("/collections/def-a/follow", headers=_bearer("token-a"))
+    response = client.post(
+        _path(client, collections_routes.follow_definition, definition_id="def-a"), headers=_bearer("token-a")
+    )
 
     assert response.status_code == 400
     assert collections_repository.collection_follows.get("def-a", set()) == set()
@@ -1104,7 +1295,9 @@ def test_cannot_follow_a_private_collection():
     client, validator = _build(collections_repository=collections_repository)
     validator.register("token-a", _claims(sub="sub-a"))
 
-    response = client.post("/collections/def-a/follow", headers=_bearer("token-a"))
+    response = client.post(
+        _path(client, collections_routes.follow_definition, definition_id="def-a"), headers=_bearer("token-a")
+    )
 
     assert response.status_code == 404
     assert collections_repository.collection_follows.get("def-a", set()) == set()
@@ -1114,19 +1307,23 @@ def test_follow_unknown_collection_is_404():
     client, validator = _build()
     validator.register("token-a", _claims(sub="sub-a"))
 
-    response = client.post("/collections/nonexistent/follow", headers=_bearer("token-a"))
+    response = client.post(
+        _path(client, collections_routes.follow_definition, definition_id="nonexistent"), headers=_bearer("token-a")
+    )
 
     assert response.status_code == 404
 
 
 def test_unfollow_a_collection():
-    other = replace(_definition(identity_sub="sub-b"), visibility="public")
+    other = replace(_definition(identity_sub="sub-b"), visibility=VISIBILITY_PUBLIC)
     collections_repository = FakeCollectionsRepository([other])
     collections_repository.collection_follows["def-a"] = {"sub-a"}
     client, validator = _build(collections_repository=collections_repository)
     validator.register("token-a", _claims(sub="sub-a"))
 
-    response = client.delete("/collections/def-a/follow", headers=_bearer("token-a"))
+    response = client.delete(
+        _path(client, collections_routes.unfollow_definition, definition_id="def-a"), headers=_bearer("token-a")
+    )
 
     assert response.status_code == 204
     assert collections_repository.collection_follows["def-a"] == set()
@@ -1136,23 +1333,27 @@ def test_unfollow_is_idempotent_even_for_an_unknown_collection():
     client, validator = _build()
     validator.register("token-a", _claims(sub="sub-a"))
 
-    response = client.delete("/collections/nonexistent/follow", headers=_bearer("token-a"))
+    response = client.delete(
+        _path(client, collections_routes.unfollow_definition, definition_id="nonexistent"), headers=_bearer("token-a")
+    )
 
     assert response.status_code == 204
 
 
 def test_lists_followed_collections():
-    followed = replace(_definition(definition_id="def-followed", identity_sub="sub-b"), visibility="public")
-    not_followed = replace(_definition(definition_id="def-not-followed", identity_sub="sub-b"), visibility="public")
+    followed = replace(_definition(definition_id="def-followed", identity_sub="sub-b"), visibility=VISIBILITY_PUBLIC)
+    not_followed = replace(
+        _definition(definition_id="def-not-followed", identity_sub="sub-b"), visibility=VISIBILITY_PUBLIC
+    )
     collections_repository = FakeCollectionsRepository([followed, not_followed])
     collections_repository.collection_follows["def-followed"] = {"sub-a"}
     client, validator = _build(collections_repository=collections_repository)
     validator.register("token-a", _claims(sub="sub-a"))
 
-    response = client.get("/collections/followed", headers=_bearer("token-a"))
+    response = client.get(_path(client, collections_routes.list_followed_collections), headers=_bearer("token-a"))
 
     assert response.status_code == 200
-    assert [d["definition_id"] for d in response.json()] == ["def-followed"]
+    assert [d.definition_id for d in _DEFINITION_LIST.validate_python(response.json())] == ["def-followed"]
 
 
 def test_run_definition_does_not_change_stored_membership():
@@ -1172,7 +1373,9 @@ def test_run_definition_does_not_change_stored_membership():
     client, validator = _build(orchestrator, collections_repository)
     validator.register("token-a", _claims(sub="sub-a"))
 
-    response = client.post("/collections/def-a/runs", headers=_bearer("token-a"))
+    response = client.post(
+        _path(client, collections_routes.run_definition, definition_id="def-a"), headers=_bearer("token-a")
+    )
 
     assert response.status_code == 201
     assert collections_repository.items["def-a"] == ("g1",)
@@ -1184,7 +1387,7 @@ def test_run_definition_does_not_resolve_completion_at_request_time():
     client, validator = _build(orchestrator, collections_repository)
     validator.register("token-a", _claims(sub="sub-a"))
 
-    client.post("/collections/def-a/runs", headers=_bearer("token-a"))
+    client.post(_path(client, collections_routes.run_definition, definition_id="def-a"), headers=_bearer("token-a"))
 
     _, _, completion_map, completion_available = orchestrator.generate_calls[0]
     assert completion_map is None
@@ -1195,7 +1398,9 @@ def test_run_definition_not_found_returns_404():
     client, validator = _build()
     validator.register("token-a", _claims())
 
-    response = client.post("/collections/unknown/runs", headers=_bearer("token-a"))
+    response = client.post(
+        _path(client, collections_routes.run_definition, definition_id="unknown"), headers=_bearer("token-a")
+    )
 
     assert response.status_code == 404
 
@@ -1205,7 +1410,7 @@ def test_run_definition_not_owned_returns_404():
         definition_id="def-a",
         identity_sub="sub-b",
         name="B's list",
-        kind="filter_list",
+        kind=FILTER_LIST_KIND,
         console_id=None,
         genre_filter=(),
         min_score=None,
@@ -1216,7 +1421,9 @@ def test_run_definition_not_owned_returns_404():
     client, validator = _build(collections_repository=collections_repository)
     validator.register("token-a", _claims(sub="sub-a"))
 
-    response = client.post("/collections/def-a/runs", headers=_bearer("token-a"))
+    response = client.post(
+        _path(client, collections_routes.run_definition, definition_id="def-a"), headers=_bearer("token-a")
+    )
 
     assert response.status_code == 404
 
@@ -1226,7 +1433,7 @@ def test_run_definition_generates_and_persists():
         definition_id="def-a",
         identity_sub="sub-a",
         name="My RPGs",
-        kind="filter_list",
+        kind=FILTER_LIST_KIND,
         console_id=None,
         genre_filter=("RPG",),
         min_score=None,
@@ -1248,12 +1455,14 @@ def test_run_definition_generates_and_persists():
     client, validator = _build(orchestrator, collections_repository)
     validator.register("token-a", _claims(sub="sub-a"))
 
-    response = client.post("/collections/def-a/runs", headers=_bearer("token-a"))
+    response = client.post(
+        _path(client, collections_routes.run_definition, definition_id="def-a"), headers=_bearer("token-a")
+    )
 
     assert response.status_code == 201
-    body = response.json()
-    assert body["run_id"] == "run-1"
-    assert body["included"][0]["game_id"] == "g1"
+    body = CollectionRunResponse.model_validate(response.json())
+    assert body.run_id == "run-1"
+    assert body.included[0].game_id == "g1"
     assert len(collections_repository.saved_runs) == 1
     assert orchestrator.generate_calls[0][1].genre_filter == ("RPG",)
 
@@ -1267,7 +1476,7 @@ def test_run_caps_the_response_but_still_persists_every_result():
         definition_id="def-a",
         identity_sub="sub-a",
         name="My RPGs",
-        kind="filter_list",
+        kind=FILTER_LIST_KIND,
         console_id=None,
         genre_filter=(),
         min_score=None,
@@ -1283,11 +1492,16 @@ def test_run_caps_the_response_but_still_persists_every_result():
     client, validator = _build(FakeOrchestrator(result=result), collections_repository)
     validator.register("token-a", _claims(sub="sub-a"))
 
-    body = client.post("/collections/def-a/runs?limit=2", headers=_bearer("token-a")).json()
+    body = CollectionRunResponse.model_validate(
+        client.post(
+            _path(client, collections_routes.run_definition, definition_id="def-a") + "?limit=2",
+            headers=_bearer("token-a"),
+        ).json()
+    )
 
-    assert [g["game_id"] for g in body["included"]] == ["inc-0", "inc-1"]
-    assert body["included_total"] == 6
-    assert body["excluded_total"] == 4
+    assert [g.game_id for g in body.included] == ["inc-0", "inc-1"]
+    assert body.included_total == 6
+    assert body.excluded_total == 4
 
     _, _, _, saved_included, saved_excluded = collections_repository.saved_runs[0]
     assert len(saved_included) == 6

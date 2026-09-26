@@ -5,6 +5,7 @@ from __future__ import annotations
 
 from curator.collections.capacity_fill_strategy import StorageBin, fill_capacity_multi_bin
 from curator.collections.game_candidate import GameCandidate
+from curator.collections.sort_order import COMPOSITE_DESC
 
 
 def _candidate(game_id, size_gb, rank_score=0, composite_score=None, genre=""):
@@ -146,7 +147,7 @@ def test_sort_order_composite_desc_ignores_rank_score():
         _candidate("b", 10, rank_score=1, composite_score=90),
     ]
 
-    result = fill_capacity_multi_bin(candidates, _one_bin(100), sort_order="composite_desc")
+    result = fill_capacity_multi_bin(candidates, _one_bin(100), sort_order=COMPOSITE_DESC)
 
     assert [c.game_id for c in result.installed_by_bin["console"]] == ["b", "a"]
 
@@ -157,7 +158,7 @@ def test_sort_order_composite_desc_nulls_last():
         _candidate("scored", 10, composite_score=1.0),
     ]
 
-    result = fill_capacity_multi_bin(candidates, _one_bin(100), sort_order="composite_desc")
+    result = fill_capacity_multi_bin(candidates, _one_bin(100), sort_order=COMPOSITE_DESC)
 
     assert [c.game_id for c in result.installed_by_bin["console"]] == ["scored", "no_score"]
 

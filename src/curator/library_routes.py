@@ -14,21 +14,29 @@ the only path in this repo that creates a ``games`` row outside ``POST /catalog/
 
 from __future__ import annotations
 
-import logging
 from datetime import datetime, timezone
 from typing import Annotated, Any, Final, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from pydantic import BaseModel, Field, model_validator
 
-from curator.audit.repository import ACTION_LIBRARY_REFRESH_REQUESTED, AccountActionLogRepository
+from curator.audit.recorded import recorded, request_recorder
+from curator.audit.repository import ACTION_LIBRARY_REFRESH_REQUESTED, ACTION_STORE_SEARCH
 from curator.catalog.repository import CatalogRepository, GameSummary
 from curator.catalog_routes import GameSummaryResponse, to_game_summary_response
-from curator.deps import require_bearer
+from curator.deps import PREFERENCE_NOT_LINKED_DETAIL, PSN_AUTH_FAILED_DETAIL, require_bearer
 from curator.jobs.queue_publisher import QueuePublisher
-from curator.jobs.repository import JobRunsRepository
+from curator.jobs.repository import JOB_KIND_LIBRARY_REFRESH, JobRunsRepository
 from curator.jobs.staleness import abandoned_run_reason
-from curator.library.repository import HiddenFilter, LibraryRepository, LibrarySortField, TrophyMatch
+from curator.library.repository import (
+    HIDDEN_EXCLUDE,
+    LIBRARY_SOURCE_PSN,
+    TROPHY_NOT_ATTEMPTED,
+    HiddenFilter,
+    LibraryRepository,
+    LibrarySortField,
+    TrophyMatch,
+)
 from curator.persistence.repository import Repository
 from curator.psn.errors import PsnAuthError
 from curator.psn.models import GameSearchResult
@@ -39,21 +47,29 @@ from curator.psn.social_client import (
     SocialClientFactory,
 )
 from curator.psn.title_platform import (
+    PS4,
+    PS5,
     ConsolePlatform,
     console_platform,
     platform_for_title_id,
     platform_vocabulary_message,
 )
+from curator.query_params import SORT_DIR_PARAM
 from curator.token_validation import TokenClaims
 
 router = APIRouter(prefix="/library", tags=["library"])
-logger = logging.getLogger("curator")
 
 StoreUnavailableReason = Literal["no_psn_link", "psn_auth_failed"]
 """Why a Store search a caller asked for could not be run, as ``GET /library/manual/candidates`` reports it."""
 
-_NO_LINK_DETAIL = "PSN account not linked."
-_AUTH_FAILED_DETAIL = "PSN authentication failed; re-link your account."
+STORE_UNAVAILABLE_NO_PSN_LINK: Final[StoreUnavailableReason] = "no_psn_link"
+STORE_UNAVAILABLE_PSN_AUTH_FAILED: Final[StoreUnavailableReason] = "psn_auth_failed"
+
+SEARCH_TERM_PARAM: Final = "q"
+INCLUDE_STORE_PARAM: Final = "includeStore"
+SEARCH_DOMAIN_PARAM: Final = "domain"
+SEARCH_LIMIT_PARAM: Final = "limit"
+
 _NOT_IN_THE_STORE_DETAIL = "That title is not in the PlayStation Store results for this search."
 _ALREADY_OWNED_DETAIL = "That game is already in your library from PlayStation Network."
 
@@ -70,6 +86,15 @@ to find would be addable-looking and unaddable.
 
 TrophyProgressState = Literal["off", "pending", "on"]
 TrophyProgressReason = Literal["no_link", "harvest_off", "never_refreshed"]
+
+TROPHY_PROGRESS_OFF: Final[TrophyProgressState] = "off"
+TROPHY_PROGRESS_PENDING: Final[TrophyProgressState] = "pending"
+TROPHY_PROGRESS_ON: Final[TrophyProgressState] = "on"
+TROPHY_PROGRESS_NO_LINK: Final[TrophyProgressReason] = "no_link"
+TROPHY_PROGRESS_HARVEST_OFF: Final[TrophyProgressReason] = "harvest_off"
+TROPHY_PROGRESS_NEVER_REFRESHED: Final[TrophyProgressReason] = "never_refreshed"
+
+LIBRARY_REFRESH_RUN_NOUN: Final = "refresh"
 
 
 class LibraryGameResponse(BaseModel):
@@ -94,10 +119,10 @@ class LibraryGameResponse(BaseModel):
     psn_enriched: bool
     is_active: bool
     percent_completed: int | None
-    source: str = "psn"
+    source: str = LIBRARY_SOURCE_PSN
     cover_image_url: str | None
     platforms: list[str] = []
-    trophy_match: TrophyMatch = "not_attempted"
+    trophy_match: TrophyMatch = TROPHY_NOT_ATTEMPTED
 
 
 class TrophyProgressResponse(BaseModel):
@@ -205,7 +230,7 @@ def _requested_platforms(body: ManualGameRequest) -> list[ConsolePlatform]:
         if platform not in resolved:
             resolved.append(platform)
 
-    legacy_pair: tuple[tuple[ConsolePlatform, bool], ...] = (("PS5", body.native_ps5), ("PS4", body.ps4_eligible))
+    legacy_pair: tuple[tuple[ConsolePlatform, bool], ...] = ((PS5, body.native_ps5), (PS4, body.ps4_eligible))
     for platform, requested in legacy_pair:
         if requested and platform not in resolved:
             resolved.append(platform)
@@ -274,9 +299,9 @@ class ManualCandidatesResponse(BaseModel):
 async def manual_add_candidates(
     request: Request,
     claims: Annotated[TokenClaims, Depends(require_bearer)],
-    q: str = Query(min_length=1),
-    include_store: bool = Query(default=False, alias="includeStore"),
-    limit: int = Query(default=10, ge=1, le=MAX_STORE_SEARCH_LIMIT),
+    q: str = Query(min_length=1, alias=SEARCH_TERM_PARAM),
+    include_store: bool = Query(default=False, alias=INCLUDE_STORE_PARAM),
+    limit: int = Query(default=10, ge=1, le=MAX_STORE_SEARCH_LIMIT, alias=SEARCH_LIMIT_PARAM),
 ) -> ManualCandidatesResponse:
     """Answer "what can I still add by hand for this name?" in one call.
 
@@ -309,7 +334,9 @@ async def manual_add_candidates(
     try:
         hits = await _search_the_store(request, claims.sub, q, domain=FULL_GAMES_DOMAIN, limit=limit)
     except HTTPException as exc:
-        unavailable: StoreUnavailableReason = "no_psn_link" if exc.status_code == 404 else "psn_auth_failed"
+        unavailable: StoreUnavailableReason = (
+            STORE_UNAVAILABLE_NO_PSN_LINK if exc.status_code == 404 else STORE_UNAVAILABLE_PSN_AUTH_FAILED
+        )
         return ManualCandidatesResponse(
             catalog=catalog, already_owned=page.excluded_owned, store_unavailable=unavailable
         )
@@ -327,9 +354,9 @@ async def manual_add_candidates(
 async def search_store_for_manual_add(
     request: Request,
     claims: Annotated[TokenClaims, Depends(require_bearer)],
-    q: str = Query(min_length=1),
-    domain: GameSearchDomain = Query(default=FULL_GAMES_DOMAIN),
-    limit: int = Query(default=20, ge=1, le=MAX_STORE_SEARCH_LIMIT),
+    q: str = Query(min_length=1, alias=SEARCH_TERM_PARAM),
+    domain: GameSearchDomain = Query(default=FULL_GAMES_DOMAIN, alias=SEARCH_DOMAIN_PARAM),
+    limit: int = Query(default=20, ge=1, le=MAX_STORE_SEARCH_LIMIT, alias=SEARCH_LIMIT_PARAM),
 ) -> StoreSearchResponse:
     """Search the PlayStation Store by name, so a manual add can be checked against a real store entry.
 
@@ -388,15 +415,16 @@ async def _search_the_store(
     :raises fastapi.HTTPException: 404, if the caller has no PSN link; 401, if PSN rejects the stored token.
     """
     social_client_factory: SocialClientFactory = request.app.state.social_client_factory
-    try:
-        client: SocialClient = await social_client_factory(sub)
-    except RuntimeError as exc:
-        raise HTTPException(status_code=404, detail=_NO_LINK_DETAIL) from exc
+    async with recorded(request_recorder(request), sub, ACTION_STORE_SEARCH, str(domain)):
+        try:
+            client: SocialClient = await social_client_factory(sub)
+        except RuntimeError as exc:
+            raise HTTPException(status_code=404, detail=PREFERENCE_NOT_LINKED_DETAIL) from exc
 
-    try:
-        return await client.universal_search_games(query, domain=domain, limit=limit)
-    except PsnAuthError as exc:
-        raise HTTPException(status_code=401, detail=_AUTH_FAILED_DETAIL) from exc
+        try:
+            return await client.universal_search_games(query, domain=domain, limit=limit)
+        except PsnAuthError as exc:
+            raise HTTPException(status_code=401, detail=PSN_AUTH_FAILED_DETAIL) from exc
 
 
 @router.post("/manual", status_code=204)
@@ -544,10 +572,10 @@ async def get_library(
     q: str | None = Query(default=None),
     genre: str | None = Query(default=None),
     sort: LibrarySortField = Query(default="title"),
-    sort_dir: Literal["asc", "desc"] = Query(default="asc", alias="sortDir"),
+    sort_dir: Literal["asc", "desc"] = Query(default="asc", alias=SORT_DIR_PARAM),
     limit: int = Query(default=20, ge=1, le=100),
     offset: int = Query(default=0, ge=0),
-    hidden: HiddenFilter = Query(default="exclude"),
+    hidden: HiddenFilter = Query(default=HIDDEN_EXCLUDE),
 ) -> LibraryPageResponse:
     """Return one page of the caller's own library, with per-provider (RAWG/OpenCritic) ratings,
     the resolved genre, and PSN's own catalog rating/product id per game.
@@ -584,7 +612,7 @@ async def get_library(
                 opencritic_enriched=game.opencritic_enriched,
                 psn_enriched=game.psn_enriched,
                 is_active=game.is_active,
-                percent_completed=game.percent_completed if trophy_progress.state == "on" else None,
+                percent_completed=game.percent_completed if trophy_progress.state == TROPHY_PROGRESS_ON else None,
                 source=game.source,
                 cover_image_url=game.cover_image_url,
                 platforms=list(game.platforms),
@@ -603,12 +631,12 @@ async def _trophy_progress(request: Request, sub: str) -> TrophyProgressResponse
     library_repository: LibraryRepository = request.app.state.library_repository
     link = await repository.get_link(sub)
     if link is None:
-        return TrophyProgressResponse(state="off", reason="no_link")
+        return TrophyProgressResponse(state=TROPHY_PROGRESS_OFF, reason=TROPHY_PROGRESS_NO_LINK)
     if link.harvest_trophies is not True:
-        return TrophyProgressResponse(state="off", reason="harvest_off")
+        return TrophyProgressResponse(state=TROPHY_PROGRESS_OFF, reason=TROPHY_PROGRESS_HARVEST_OFF)
     if not await library_repository.has_trophy_progress(sub):
-        return TrophyProgressResponse(state="pending", reason="never_refreshed")
-    return TrophyProgressResponse(state="on", reason=None)
+        return TrophyProgressResponse(state=TROPHY_PROGRESS_PENDING, reason=TROPHY_PROGRESS_NEVER_REFRESHED)
+    return TrophyProgressResponse(state=TROPHY_PROGRESS_ON, reason=None)
 
 
 @router.put("/{game_id}/hidden", status_code=204)
@@ -651,9 +679,9 @@ async def refresh_library(
     :raises fastapi.HTTPException: 503, if the job queue isn't configured on this deployment.
     """
     job_runs_repository: JobRunsRepository = request.app.state.job_runs_repository
-    active_run = await job_runs_repository.find_active_run(claims.sub, "library_refresh")
+    active_run = await job_runs_repository.find_active_run(claims.sub, JOB_KIND_LIBRARY_REFRESH)
     if active_run is not None:
-        reason = abandoned_run_reason(active_run, datetime.now(timezone.utc), noun="refresh")
+        reason = abandoned_run_reason(active_run, datetime.now(timezone.utc), noun=LIBRARY_REFRESH_RUN_NOUN)
         if reason is None:
             return LibraryRefreshResponse(run_id=active_run.run_id)
         await job_runs_repository.mark_failed(active_run.run_id, reason)
@@ -662,14 +690,9 @@ async def refresh_library(
     if queue_publisher is None:
         raise HTTPException(status_code=503, detail="Library refresh queue is not configured.")
 
-    run_id = await queue_publisher.publish_library_refresh(claims.sub)
-    audit_repository: AccountActionLogRepository = request.app.state.audit_repository
-    try:
-        await audit_repository.log(claims.sub, ACTION_LIBRARY_REFRESH_REQUESTED, run_id)
-    except Exception:
-        logger.exception(
-            "Failed to write account_action_log entry (sub=%s, action=%s)", claims.sub, ACTION_LIBRARY_REFRESH_REQUESTED
-        )
+    async with recorded(request_recorder(request), claims.sub, ACTION_LIBRARY_REFRESH_REQUESTED) as entry:
+        run_id = await queue_publisher.publish_library_refresh(claims.sub)
+        entry.detail = run_id
     return LibraryRefreshResponse(run_id=run_id)
 
 
@@ -684,7 +707,7 @@ async def get_library_refresh_status(
     """
     job_runs_repository: JobRunsRepository = request.app.state.job_runs_repository
     run = await job_runs_repository.get(run_id)
-    if run is None or run.kind != "library_refresh" or run.identity_sub != claims.sub:
+    if run is None or run.kind != JOB_KIND_LIBRARY_REFRESH or run.identity_sub != claims.sub:
         raise HTTPException(status_code=404, detail="Library refresh run not found.")
 
     return LibraryRefreshStatusResponse(

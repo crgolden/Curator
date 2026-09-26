@@ -12,27 +12,47 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+from urllib.parse import urlparse
 
 from curator.persistence.config import ConfigError, resolve_setting
 from curator.persistence.connection import resolve_database_url
+from curator.persistence.crypto import TOKEN_KEY_ENV
 
-_OIDC_AUTHORITY_ENV_NAMES: tuple[str, ...] = ("OIDC_AUTHORITY",)
-_TOKEN_KEY_ENV_NAMES: tuple[str, ...] = ("CURATOR_TOKEN_KEY",)
+OIDC_AUTHORITY = "OIDC_AUTHORITY"
 
-_ALLOY_ENDPOINT_ENV_NAMES: tuple[str, ...] = ("AlloyEndpoint",)
-_ELASTICSEARCH_NODE_ENV_NAMES: tuple[str, ...] = ("ElasticsearchNode",)
-_ELASTICSEARCH_USERNAME_ENV_NAMES: tuple[str, ...] = ("ElasticsearchUsername",)
-_ELASTICSEARCH_PASSWORD_ENV_NAMES: tuple[str, ...] = ("ElasticsearchPassword",)
+_OIDC_AUTHORITY_ENV_NAMES: tuple[str, ...] = (OIDC_AUTHORITY,)
+_TOKEN_KEY_ENV_NAMES: tuple[str, ...] = (TOKEN_KEY_ENV,)
+
+APP_SERVICE_SITE_NAME = "WEBSITE_SITE_NAME"
+ALLOY_ENDPOINT = "AlloyEndpoint"
+ELASTICSEARCH_NODE = "ElasticsearchNode"
+ELASTICSEARCH_USERNAME = "ElasticsearchUsername"
+ELASTICSEARCH_PASSWORD = "ElasticsearchPassword"
+
+_APP_SERVICE_SITE_NAME_ENV_NAMES: tuple[str, ...] = (APP_SERVICE_SITE_NAME,)
+_ALLOY_ENDPOINT_ENV_NAMES: tuple[str, ...] = (ALLOY_ENDPOINT,)
+_ELASTICSEARCH_NODE_ENV_NAMES: tuple[str, ...] = (ELASTICSEARCH_NODE,)
+_ELASTICSEARCH_USERNAME_ENV_NAMES: tuple[str, ...] = (ELASTICSEARCH_USERNAME,)
+_ELASTICSEARCH_PASSWORD_ENV_NAMES: tuple[str, ...] = (ELASTICSEARCH_PASSWORD,)
 _LOG_LEVEL_ENV_NAMES: tuple[str, ...] = ("LogLevel", "Logging__LogLevel__Default")
 
 _STORE_QUERY_HASH_PREFIX = "StoreQueryHash"
-_SERVICE_BUS_NAMESPACE_ENV_NAMES: tuple[str, ...] = ("ServiceBusNamespace",)
-_SERVICE_BUS_CONNECTION_ENV_NAMES: tuple[str, ...] = ("ServiceBusConnectionString",)
+SERVICE_BUS_NAMESPACE = "ServiceBusNamespace"
+SERVICE_BUS_CONNECTION_STRING = "ServiceBusConnectionString"
+REDIS_HOST = "RedisHost"
+REDIS_PORT = "RedisPort"
+REDIS_PASSWORD = "RedisPassword"
+REDIS_SSL = "RedisSsl"
 
-_REDIS_HOST_ENV_NAMES: tuple[str, ...] = ("RedisHost",)
-_REDIS_PORT_ENV_NAMES: tuple[str, ...] = ("RedisPort",)
-_REDIS_PASSWORD_ENV_NAMES: tuple[str, ...] = ("RedisPassword",)
-_REDIS_SSL_ENV_NAMES: tuple[str, ...] = ("RedisSsl",)
+_SERVICE_BUS_NAMESPACE_ENV_NAMES: tuple[str, ...] = (SERVICE_BUS_NAMESPACE,)
+_SERVICE_BUS_CONNECTION_ENV_NAMES: tuple[str, ...] = (SERVICE_BUS_CONNECTION_STRING,)
+
+_REDIS_HOST_ENV_NAMES: tuple[str, ...] = (REDIS_HOST,)
+_REDIS_PORT_ENV_NAMES: tuple[str, ...] = (REDIS_PORT,)
+_REDIS_PASSWORD_ENV_NAMES: tuple[str, ...] = (REDIS_PASSWORD,)
+_REDIS_SSL_ENV_NAMES: tuple[str, ...] = (REDIS_SSL,)
+
+_BOOLEAN_SPELLINGS: dict[str, bool] = {"true": True, "false": False}
 
 
 @dataclass(frozen=True)
@@ -44,12 +64,15 @@ class Settings:
         claim on every validated access token are derived from this.
     :param token_key: The AES-256-GCM key encrypting stored PSN tokens at rest.
     :param database_url: The PostgreSQL connection URL.
-    :param alloy_endpoint: The Grafana Alloy OTLP gRPC endpoint (traces + metrics); ``None`` disables that
-        telemetry leg entirely.
-    :param elasticsearch_node: The Elasticsearch node URL structured logs ship to; ``None`` (along with
-        either credential being absent) disables that telemetry leg entirely.
-    :param elasticsearch_username: Basic-auth username for ``elasticsearch_node``.
-    :param elasticsearch_password: Basic-auth password for ``elasticsearch_node``.
+    :param alloy_endpoint: The Grafana Alloy OTLP gRPC endpoint (traces + metrics). Required by
+        :meth:`from_config` on App Service (``WEBSITE_SITE_NAME`` present); elsewhere ``None`` disables
+        that telemetry leg.
+    :param elasticsearch_node: The Elasticsearch node URL structured logs ship to. Required by
+        :meth:`from_config` on App Service; elsewhere ``None`` disables that leg.
+    :param elasticsearch_username: Basic-auth username for ``elasticsearch_node``; required whenever the
+        node is set.
+    :param elasticsearch_password: Basic-auth password for ``elasticsearch_node``; required whenever the
+        node is set.
     :param log_level: Threshold for what reaches Elasticsearch, as a standard level name
         (``DEBUG``/``INFO``/``WARNING``/``ERROR``), from ``LogLevel`` or
         ``Logging__LogLevel__Default``; defaults to ``WARNING``.
@@ -63,13 +86,12 @@ class Settings:
         works against the fleet's shared namespace, which has ``DisableLocalAuth`` enabled.
     :param service_bus_connection_string: A Service Bus connection string, for local development or an
         environment without a real managed identity (the fleet's production namespace rejects this outright).
-        Ignored when ``service_bus_namespace`` is set. ``None`` for both disables the queue consumer and the
-        job-publishing routes.
-    :param redis_host: The Redis host backing trophy caching and the distributed PSN rate limiter;
-        ``None`` disables both (uncached trophy reads, no shared rate-limit budget).
-    :param redis_port: The Redis port; defaults to Azure Cache for Redis's SSL port.
-    :param redis_password: Redis auth password, if required.
-    :param redis_ssl: Whether to connect to Redis over TLS; defaults to ``True``.
+        Ignored when ``service_bus_namespace`` is set. :meth:`from_config` requires one of the two.
+    :param redis_host: The Redis host backing trophy caching and the distributed PSN rate limiter. Required
+        by :meth:`from_config`; only a directly constructed :class:`Settings` may leave it ``None``.
+    :param redis_port: The Redis port. Required by :meth:`from_config`.
+    :param redis_password: Redis auth password, if the server requires one.
+    :param redis_ssl: Whether to connect to Redis over TLS. Required by :meth:`from_config`.
     """
 
     oidc_authority: str
@@ -84,9 +106,9 @@ class Settings:
     service_bus_namespace: str | None = None
     service_bus_connection_string: str | None = None
     redis_host: str | None = None
-    redis_port: int = 6380
+    redis_port: int | None = None
     redis_password: str | None = None
-    redis_ssl: bool = True
+    redis_ssl: bool | None = None
 
     @classmethod
     def from_config(cls, dotenv_path: Path | None = None) -> Settings:
@@ -97,26 +119,32 @@ class Settings:
         :raises ConfigError: If a required setting cannot be resolved.
         """
         oidc_authority = _require(
-            "OIDC_AUTHORITY",
+            OIDC_AUTHORITY,
             _OIDC_AUTHORITY_ENV_NAMES,
             dotenv_path,
         )
         token_key = _require(
-            "CURATOR_TOKEN_KEY",
+            TOKEN_KEY_ENV,
             _TOKEN_KEY_ENV_NAMES,
             dotenv_path,
         )
         database_url = resolve_database_url(dotenv_path=dotenv_path)
 
-        alloy_endpoint = resolve_setting(None, env_names=_ALLOY_ENDPOINT_ENV_NAMES, dotenv_path=dotenv_path)
-        elasticsearch_node = resolve_setting(None, env_names=_ELASTICSEARCH_NODE_ENV_NAMES, dotenv_path=dotenv_path)
+        hosted = resolve_setting(None, env_names=_APP_SERVICE_SITE_NAME_ENV_NAMES, dotenv_path=dotenv_path)
+        if hosted:
+            alloy_endpoint: str | None = _require_url(ALLOY_ENDPOINT, _ALLOY_ENDPOINT_ENV_NAMES, dotenv_path)
+            elasticsearch_node: str | None = _require_url(
+                ELASTICSEARCH_NODE, _ELASTICSEARCH_NODE_ENV_NAMES, dotenv_path
+            )
+        else:
+            alloy_endpoint = _optional_url(ALLOY_ENDPOINT, _ALLOY_ENDPOINT_ENV_NAMES, dotenv_path)
+            elasticsearch_node = _optional_url(ELASTICSEARCH_NODE, _ELASTICSEARCH_NODE_ENV_NAMES, dotenv_path)
+        elasticsearch_username: str | None = None
+        elasticsearch_password: str | None = None
+        if elasticsearch_node is not None:
+            elasticsearch_username = _require(ELASTICSEARCH_USERNAME, _ELASTICSEARCH_USERNAME_ENV_NAMES, dotenv_path)
+            elasticsearch_password = _require(ELASTICSEARCH_PASSWORD, _ELASTICSEARCH_PASSWORD_ENV_NAMES, dotenv_path)
         log_level = resolve_setting(None, env_names=_LOG_LEVEL_ENV_NAMES, dotenv_path=dotenv_path)
-        elasticsearch_username = resolve_setting(
-            None, env_names=_ELASTICSEARCH_USERNAME_ENV_NAMES, dotenv_path=dotenv_path
-        )
-        elasticsearch_password = resolve_setting(
-            None, env_names=_ELASTICSEARCH_PASSWORD_ENV_NAMES, dotenv_path=dotenv_path
-        )
         store_query_hashes = _resolve_indexed_keys(_STORE_QUERY_HASH_PREFIX, dotenv_path)
         service_bus_namespace = resolve_setting(
             None, env_names=_SERVICE_BUS_NAMESPACE_ENV_NAMES, dotenv_path=dotenv_path
@@ -124,11 +152,17 @@ class Settings:
         service_bus_connection_string = resolve_setting(
             None, env_names=_SERVICE_BUS_CONNECTION_ENV_NAMES, dotenv_path=dotenv_path
         )
+        if not service_bus_namespace and not service_bus_connection_string:
+            raise ConfigError(
+                f"No Service Bus configured. Set {SERVICE_BUS_NAMESPACE} (or {SERVICE_BUS_CONNECTION_STRING} "
+                "locally) as an environment variable or in a .env file.",
+                SERVICE_BUS_NAMESPACE,
+            )
 
-        redis_host = resolve_setting(None, env_names=_REDIS_HOST_ENV_NAMES, dotenv_path=dotenv_path)
-        redis_port_raw = resolve_setting(None, env_names=_REDIS_PORT_ENV_NAMES, dotenv_path=dotenv_path)
+        redis_host = _require(REDIS_HOST, _REDIS_HOST_ENV_NAMES, dotenv_path)
+        redis_port = _require_int(REDIS_PORT, _REDIS_PORT_ENV_NAMES, dotenv_path)
         redis_password = resolve_setting(None, env_names=_REDIS_PASSWORD_ENV_NAMES, dotenv_path=dotenv_path)
-        redis_ssl_raw = resolve_setting(None, env_names=_REDIS_SSL_ENV_NAMES, dotenv_path=dotenv_path)
+        redis_ssl = _require_bool(REDIS_SSL, _REDIS_SSL_ENV_NAMES, dotenv_path)
 
         return cls(
             oidc_authority=oidc_authority,
@@ -143,9 +177,9 @@ class Settings:
             service_bus_namespace=service_bus_namespace,
             service_bus_connection_string=service_bus_connection_string,
             redis_host=redis_host,
-            redis_port=int(redis_port_raw) if redis_port_raw else 6380,
+            redis_port=redis_port,
             redis_password=redis_password,
-            redis_ssl=redis_ssl_raw.strip().lower() != "false" if redis_ssl_raw else True,
+            redis_ssl=redis_ssl,
         )
 
 
@@ -176,4 +210,49 @@ def _require(key: str, env_names: tuple[str, ...], dotenv_path: Path | None) -> 
     value = resolve_setting(None, env_names=env_names, dotenv_path=dotenv_path)
     if value:
         return value
-    raise ConfigError(f"No {key} found. Set {', '.join(env_names)} as an environment variable or in a .env file.")
+    raise ConfigError(f"No {key} found. Set {', '.join(env_names)} as an environment variable or in a .env file.", key)
+
+
+def _require_url(key: str, env_names: tuple[str, ...], dotenv_path: Path | None) -> str:
+    """Resolve a required absolute URL setting.
+
+    :raises ConfigError: If the setting is missing or has no scheme and host.
+    """
+    raw = _require(key, env_names, dotenv_path)
+    parsed = urlparse(raw)
+    if not parsed.scheme or not parsed.netloc:
+        raise ConfigError(f"{key} must be an absolute URL.", key)
+    return raw
+
+
+def _optional_url(key: str, env_names: tuple[str, ...], dotenv_path: Path | None) -> str | None:
+    """Resolve an optional absolute URL setting: absent is ``None``, present must parse.
+
+    :raises ConfigError: If the setting is present but has no scheme and host.
+    """
+    if not resolve_setting(None, env_names=env_names, dotenv_path=dotenv_path):
+        return None
+    return _require_url(key, env_names, dotenv_path)
+
+
+def _require_int(key: str, env_names: tuple[str, ...], dotenv_path: Path | None) -> int:
+    """Resolve a required integer setting.
+
+    :raises ConfigError: If the setting is missing or is not an integer.
+    """
+    raw = _require(key, env_names, dotenv_path)
+    try:
+        return int(raw)
+    except ValueError as exc:
+        raise ConfigError(f"{key} must be an integer.", key) from exc
+
+
+def _require_bool(key: str, env_names: tuple[str, ...], dotenv_path: Path | None) -> bool:
+    """Resolve a required boolean setting, spelled ``true`` or ``false`` in any case.
+
+    :raises ConfigError: If the setting is missing or is neither ``true`` nor ``false``.
+    """
+    raw = _require(key, env_names, dotenv_path).strip().lower()
+    if raw not in _BOOLEAN_SPELLINGS:
+        raise ConfigError(f"{key} must be true or false.", key)
+    return _BOOLEAN_SPELLINGS[raw]

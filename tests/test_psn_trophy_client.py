@@ -5,8 +5,70 @@ Ported from ``psnpy``'s ``test_capabilities.py``, split to the trophy-data subse
 
 from __future__ import annotations
 
-from curator.psn.models import TitleStat, TrophyCounts, TrophyDetail, TrophyGroups, TrophySummary
-from curator.psn.trophy_client import TrophyClient
+import random
+
+from curator.psn._identity import ACCOUNT_ID_KEY, MY_ACCOUNT_URL, SELF_PATH_ID
+from curator.psn.models import (
+    BRONZE_KEY,
+    GOLD_KEY,
+    TitleStat,
+    TrophyCounts,
+    TrophyDetail,
+    TrophyGroup,
+    TrophyGroups,
+    TrophySummary,
+)
+from curator.psn.title_platform import PS4, PS5
+from curator.psn.trophy_client import (
+    CATEGORY_KEY,
+    EARNED_DATE_KEY,
+    EARNED_KEY,
+    EARNED_TROPHIES_KEY,
+    NAME_KEY,
+    NEXT_OFFSET_KEY,
+    NP_COMMUNICATION_ID_KEY,
+    PLAY_COUNT_KEY,
+    PLAY_DURATION_KEY,
+    PROGRESS_KEY,
+    PS5_NATIVE_GAME_CATEGORY,
+    TIER_KEY,
+    TITLE_ID_KEY,
+    TITLES_KEY,
+    TROPHIES_KEY,
+    TROPHY_EARNED_RATE_KEY,
+    TROPHY_GROUP_ID_KEY,
+    TROPHY_GROUP_NAME_KEY,
+    TROPHY_GROUPS_KEY,
+    TROPHY_ID_KEY,
+    TROPHY_LEVEL_KEY,
+    TROPHY_NAME_KEY,
+    TROPHY_TITLE_NAME_KEY,
+    TROPHY_TITLE_PLATFORM_KEY,
+    TROPHY_TITLES_KEY,
+    TROPHY_TYPE_KEY,
+    UNKNOWN_CATEGORY,
+    TrophyClient,
+    group_trophies_url,
+    title_stats_url,
+    title_trophy_titles_url,
+    trophy_groups_url,
+    trophy_summary_url,
+    trophy_titles_url,
+    user_group_trophies_url,
+    user_trophy_groups_url,
+)
+from test_values import (
+    lowercase_token,
+    new_account_id,
+    new_game_title,
+    new_np_communication_id,
+    new_percent_completed,
+    new_positive_count,
+    new_ps4_title_id,
+    new_small_count,
+    new_trophy_group_id,
+    new_utc_instant,
+)
 
 
 class FakeResponse:
@@ -18,178 +80,195 @@ class FakeResponse:
 
 
 class FakeSession:
-    """Stands in for a ``curator.psn.session.PsnSession`` instance."""
+    """Answers by exact URL. A list body is a queue of pages, one popped per call."""
 
-    def __init__(self, *, own_account_id="123", responses=None):
-        self._own_account_id = own_account_id
-        self._responses = dict(responses or {})
+    def __init__(self, *, own_account_id=None, responses=None):
+        self._responses = {MY_ACCOUNT_URL: {ACCOUNT_ID_KEY: own_account_id or new_account_id()}, **(responses or {})}
         self.get_calls: list[tuple[str, dict]] = []
 
     async def get(self, url, params=None, headers=None):
         self.get_calls.append((url, params or {}))
-        if "devices/accounts/me" in url:
-            return FakeResponse({"accountId": self._own_account_id})
-        matches = [key for key in self._responses if key in url]
-        if matches:
-            best = max(matches, key=len)
-            return FakeResponse(self._responses[best])
-        return FakeResponse({})
+        body = self._responses[url]
+        return FakeResponse(body.pop(0) if isinstance(body, list) else body)
 
     async def run_with_reauth(self, operation):
         return await operation()
 
 
+def _title_entry(name, np_communication_id, platform=PS5):
+    return {
+        TROPHY_TITLE_NAME_KEY: name,
+        NP_COMMUNICATION_ID_KEY: np_communication_id,
+        TROPHY_TITLE_PLATFORM_KEY: platform,
+    }
+
+
 async def test_trophy_summary_for_authenticated_user():
-    body = {"trophyLevel": 42, "progress": 80, "tier": 4, "earnedTrophies": {"bronze": 1, "gold": 2}}
-    client = TrophyClient(FakeSession(own_account_id="999", responses={"trophySummary": body}))
-
-    summary = await client.trophy_summary()
-
-    assert summary == TrophySummary(
-        level=42,
-        progress=80,
-        tier=4,
-        earned=TrophyCounts(bronze=1, gold=2),
-        account_id="999",
+    own_account_id = new_account_id()
+    expected = TrophySummary(
+        level=new_positive_count(),
+        progress=new_percent_completed(),
+        tier=new_small_count(),
+        earned=TrophyCounts(bronze=new_small_count(), gold=new_small_count()),
+        account_id=own_account_id,
     )
+    body = {
+        TROPHY_LEVEL_KEY: expected.level,
+        PROGRESS_KEY: expected.progress,
+        TIER_KEY: expected.tier,
+        EARNED_TROPHIES_KEY: {BRONZE_KEY: expected.earned.bronze, GOLD_KEY: expected.earned.gold},
+    }
+    session = FakeSession(own_account_id=own_account_id, responses={trophy_summary_url(SELF_PATH_ID): body})
+
+    summary = await TrophyClient(session).trophy_summary()
+
+    assert summary == expected
 
 
 async def test_trophy_titles_paginates_until_next_offset_is_zero():
-    page1 = {
-        "trophyTitles": [{"trophyTitleName": "Game A", "npCommunicationId": "NPWR1", "trophyTitlePlatform": "PS5"}],
-        "nextOffset": 1,
-    }
-    page2 = {
-        "trophyTitles": [{"trophyTitleName": "Game B", "npCommunicationId": "NPWR2", "trophyTitlePlatform": "PS4"}],
-        "nextOffset": 0,
-    }
-    responses = iter([page1, page2])
-
-    class PagingSession(FakeSession):
-        async def get(self, url, params=None, headers=None):
-            self.get_calls.append((url, params or {}))
-            if "trophyTitles" in url:
-                return FakeResponse(next(responses))
-            return await super().get(url, params, headers)
-
-    client = TrophyClient(PagingSession())
+    first_name, second_name = new_game_title(), new_game_title()
+    pages = [
+        {TROPHY_TITLES_KEY: [_title_entry(first_name, new_np_communication_id(), PS5)], NEXT_OFFSET_KEY: 1},
+        {TROPHY_TITLES_KEY: [_title_entry(second_name, new_np_communication_id(), PS4)], NEXT_OFFSET_KEY: 0},
+    ]
+    client = TrophyClient(FakeSession(responses={trophy_titles_url(SELF_PATH_ID): pages}))
 
     titles = await client.trophy_titles(limit=100)
 
-    assert [t.name for t in titles] == ["Game A", "Game B"]
-    assert titles[0].platforms == ("PS5",)
+    assert [(t.name, t.platforms) for t in titles] == [(first_name, (PS5,)), (second_name, (PS4,))]
 
 
 async def test_trophy_titles_for_title_flattens_nested_entries():
+    first_name, second_name = new_game_title(), new_game_title()
     body = {
-        "titles": [
-            {"trophyTitles": [{"trophyTitleName": "Game A", "npCommunicationId": "NPWR1"}]},
-            {"trophyTitles": [{"trophyTitleName": "Game B", "npCommunicationId": "NPWR2"}]},
+        TITLES_KEY: [
+            {TROPHY_TITLES_KEY: [_title_entry(first_name, new_np_communication_id())]},
+            {TROPHY_TITLES_KEY: [_title_entry(second_name, new_np_communication_id())]},
         ]
     }
-    client = TrophyClient(FakeSession(responses={"titles/trophyTitles": body}))
+    client = TrophyClient(FakeSession(responses={title_trophy_titles_url(SELF_PATH_ID): body}))
 
-    titles = await client.trophy_titles_for_title(["NPWR1", "NPWR2"])
+    titles = await client.trophy_titles_for_title([new_ps4_title_id(), new_ps4_title_id()])
 
-    assert [t.name for t in titles] == ["Game A", "Game B"]
+    assert [t.name for t in titles] == [first_name, second_name]
 
 
 async def test_title_trophies_merges_meta_and_progress():
+    np_communication_id = new_np_communication_id()
+    trophy_id = new_positive_count()
+    expected = TrophyDetail(
+        trophy_id=trophy_id,
+        name=new_game_title(),
+        detail=None,
+        type=lowercase_token(),
+        earned=True,
+        earned_date=new_utc_instant().isoformat(),
+        rarity=float(new_percent_completed()),
+    )
     meta = {
-        "trophies": [{"trophyId": 1, "trophyName": "First Blood", "trophyType": "bronze", "trophyEarnedRate": "45.5"}],
-        "nextOffset": 0,
+        TROPHIES_KEY: [
+            {
+                TROPHY_ID_KEY: trophy_id,
+                TROPHY_NAME_KEY: expected.name,
+                TROPHY_TYPE_KEY: expected.type,
+                TROPHY_EARNED_RATE_KEY: str(expected.rarity),
+            }
+        ],
+        NEXT_OFFSET_KEY: 0,
     }
-    progress = {"trophies": [{"trophyId": 1, "earned": True, "earnedDateTime": "2024-01-01T00:00:00Z"}]}
+    progress = {TROPHIES_KEY: [{TROPHY_ID_KEY: trophy_id, EARNED_KEY: True, EARNED_DATE_KEY: expected.earned_date}]}
+    group = new_trophy_group_id()
     client = TrophyClient(
         FakeSession(
             responses={
-                "npCommunicationIds/NPWR1/trophyGroups/all/trophies": meta,
-                "users/me/npCommunicationIds/NPWR1/trophyGroups/all/trophies": progress,
+                group_trophies_url(np_communication_id, group): meta,
+                user_group_trophies_url(SELF_PATH_ID, np_communication_id, group): progress,
             }
         )
     )
 
-    details = await client.title_trophies("NPWR1", "PS5")
+    details = await client.title_trophies(np_communication_id, PS5, group=group)
 
-    assert details == [
-        TrophyDetail(
-            trophy_id=1,
-            name="First Blood",
-            detail=None,
-            type="bronze",
-            hidden=None,
-            icon_url=None,
-            earned=True,
-            earned_date="2024-01-01T00:00:00Z",
-            progress_rate=None,
-            rarity=45.5,
-        )
-    ]
+    assert details == [expected]
 
 
 async def test_trophy_groups_merges_title_and_group_progress():
+    np_communication_id = new_np_communication_id()
+    group_id = new_trophy_group_id()
+    title_name, group_name = new_game_title(), new_game_title()
+    title_progress, group_progress = new_percent_completed(), new_percent_completed()
+    earned_gold = new_small_count()
     meta = {
-        "trophyTitleName": "Game A",
-        "trophyGroups": [{"trophyGroupId": "default", "trophyGroupName": "Base Game"}],
+        TROPHY_TITLE_NAME_KEY: title_name,
+        TROPHY_GROUPS_KEY: [{TROPHY_GROUP_ID_KEY: group_id, TROPHY_GROUP_NAME_KEY: group_name}],
     }
     progress = {
-        "trophyTitlePlatform": "PS5",
-        "progress": 50,
-        "trophyGroups": [{"trophyGroupId": "default", "progress": 50, "earnedTrophies": {"gold": 1}}],
+        TROPHY_TITLE_PLATFORM_KEY: PS5,
+        PROGRESS_KEY: title_progress,
+        TROPHY_GROUPS_KEY: [
+            {TROPHY_GROUP_ID_KEY: group_id, PROGRESS_KEY: group_progress, EARNED_TROPHIES_KEY: {GOLD_KEY: earned_gold}}
+        ],
     }
     client = TrophyClient(
         FakeSession(
             responses={
-                "npCommunicationIds/NPWR1/trophyGroups": meta,
-                "users/me/npCommunicationIds/NPWR1/trophyGroups": progress,
+                trophy_groups_url(np_communication_id): meta,
+                user_trophy_groups_url(SELF_PATH_ID, np_communication_id): progress,
             }
         )
     )
 
-    result = await client.trophy_groups("NPWR1", "PS5")
+    result = await client.trophy_groups(np_communication_id, PS5)
 
-    assert isinstance(result, TrophyGroups)
-    assert result.title_name == "Game A"
-    assert result.platforms == ("PS5",)
-    assert result.groups[0].name == "Base Game"
-    assert result.groups[0].earned == TrophyCounts(gold=1)
+    assert result == TrophyGroups(
+        title_name=title_name,
+        platforms=(PS5,),
+        progress=title_progress,
+        defined=TrophyCounts(),
+        earned=TrophyCounts(),
+        groups=(
+            TrophyGroup(
+                group_id=group_id, name=group_name, progress=group_progress, earned=TrophyCounts(gold=earned_gold)
+            ),
+        ),
+    )
 
 
 async def test_title_stats_maps_platform_category_and_duration():
+    hours, minutes, seconds = random.randint(0, 999), random.randint(0, 59), random.randint(0, 59)
+    expected = TitleStat(
+        title_id=new_ps4_title_id(),
+        name=new_game_title(),
+        category=PS5,
+        play_count=new_positive_count(),
+        play_duration_seconds=hours * 3600 + minutes * 60 + seconds,
+    )
     body = {
-        "titles": [
+        TITLES_KEY: [
             {
-                "titleId": "T1",
-                "name": "Game A",
-                "category": "ps5_native_game",
-                "playCount": 10,
-                "playDuration": "PT10H30M15S",
+                TITLE_ID_KEY: expected.title_id,
+                NAME_KEY: expected.name,
+                CATEGORY_KEY: PS5_NATIVE_GAME_CATEGORY,
+                PLAY_COUNT_KEY: expected.play_count,
+                PLAY_DURATION_KEY: f"PT{hours}H{minutes}M{seconds}S",
             }
         ],
-        "nextOffset": 0,
+        NEXT_OFFSET_KEY: 0,
     }
-    client = TrophyClient(FakeSession(responses={"gamelist/v2/users/me/titles": body}))
+    client = TrophyClient(FakeSession(responses={title_stats_url(SELF_PATH_ID): body}))
 
     stats = await client.title_stats()
 
-    assert stats == [
-        TitleStat(
-            title_id="T1",
-            name="Game A",
-            category="PS5",
-            play_count=10,
-            first_played=None,
-            last_played=None,
-            play_duration_seconds=10 * 3600 + 30 * 60 + 15,
-            image_url=None,
-        )
-    ]
+    assert stats == [expected]
 
 
 async def test_title_stats_unknown_category_falls_back():
-    body = {"titles": [{"titleId": "T2", "name": "Old Game", "category": "ps3_game"}], "nextOffset": 0}
-    client = TrophyClient(FakeSession(responses={"gamelist/v2/users/me/titles": body}))
+    body = {
+        TITLES_KEY: [{TITLE_ID_KEY: new_ps4_title_id(), NAME_KEY: new_game_title(), CATEGORY_KEY: lowercase_token()}],
+        NEXT_OFFSET_KEY: 0,
+    }
+    client = TrophyClient(FakeSession(responses={title_stats_url(SELF_PATH_ID): body}))
 
     stats = await client.title_stats()
 
-    assert stats[0].category == "UNKNOWN"
+    assert stats[0].category == UNKNOWN_CATEGORY

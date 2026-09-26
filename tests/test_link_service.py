@@ -7,7 +7,18 @@ from datetime import datetime, timezone
 
 import pytest
 
-from curator.link_service import LinkError, LinkResult, emails_match, link, normalize_email, unlink
+from curator.link_service import (
+    LINK_ERROR_AUTH_FAILED,
+    LINK_ERROR_INVALID_NPSSO,
+    LINK_ERROR_MISMATCH,
+    LINK_ERROR_UNVERIFIED,
+    LinkError,
+    LinkResult,
+    emails_match,
+    link,
+    normalize_email,
+    unlink,
+)
 from curator.persistence.crypto import TokenCrypto
 from curator.persistence.repository import LinkRecord
 from curator.psn.errors import PsnAuthError
@@ -175,7 +186,7 @@ async def test_link_address_mismatch_clears_and_raises():
             agent_factory=agent_factory,
         )
 
-    assert exc_info.value.kind == "mismatch"
+    assert exc_info.value.kind == LINK_ERROR_MISMATCH
     assert repo.delete_calls == [sub]
     assert repo.set_link_account_calls == []
     assert repo.touch_verified_calls == []
@@ -201,7 +212,7 @@ async def test_link_matching_but_unverified_clears_and_raises():
             agent_factory=agent_factory,
         )
 
-    assert exc_info.value.kind == "unverified"
+    assert exc_info.value.kind == LINK_ERROR_UNVERIFIED
     assert repo.delete_calls == [sub]
     assert repo.set_link_account_calls == []
     assert repo.touch_verified_calls == []
@@ -226,7 +237,7 @@ async def test_link_none_email_clears_and_raises_unverified():
             agent_factory=agent_factory,
         )
 
-    assert exc_info.value.kind == "unverified"
+    assert exc_info.value.kind == LINK_ERROR_UNVERIFIED
     assert repo.delete_calls == [sub]
     assert repo.set_link_account_calls == []
     assert repo.touch_verified_calls == []
@@ -251,7 +262,7 @@ async def test_link_psn_auth_error_clears_and_raises_auth_failed():
             agent_factory=agent_factory,
         )
 
-    assert exc_info.value.kind == "auth_failed"
+    assert exc_info.value.kind == LINK_ERROR_AUTH_FAILED
     assert repo.delete_calls == [sub]
     assert repo.set_link_account_calls == []
     assert repo.touch_verified_calls == []
@@ -315,7 +326,7 @@ async def test_link_invalid_npsso_rejected_before_any_agent_call():
             agent_factory=agent_factory,
         )
 
-    assert exc_info.value.kind == "invalid_npsso"
+    assert exc_info.value.kind == LINK_ERROR_INVALID_NPSSO
     assert calls == []
     assert repo.set_link_account_calls == []
     assert repo.delete_calls == []

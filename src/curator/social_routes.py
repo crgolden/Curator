@@ -1,12 +1,12 @@
 from __future__ import annotations
 
-import logging
 from collections.abc import Callable, Coroutine
 from typing import Annotated, Any, TypeVar
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import BaseModel, Field
 
+from curator.audit.recorded import recorded, request_recorder
 from curator.audit.repository import (
     ACTION_CHAT_GROUP_CREATED,
     ACTION_CHAT_GROUP_RENAMED,
@@ -14,9 +14,15 @@ from curator.audit.repository import (
     ACTION_FRIEND_ADDED,
     ACTION_FRIEND_REMOVED,
     ACTION_FRIEND_REQUEST_SENT,
-    AccountActionLogRepository,
+    ACTION_FRIEND_REQUESTS_FETCH,
 )
-from curator.deps import require_bearer, require_preference
+from curator.deps import (
+    HARVEST_IDENTITY,
+    PREFERENCE_NOT_LINKED_DETAIL,
+    PSN_AUTH_FAILED_DETAIL,
+    require_bearer,
+    require_preference,
+)
 from curator.psn.errors import MutationNotAllowedError, NoPendingFriendRequestError, PsnAuthError
 from curator.psn.identifiers import (
     InvalidPsnIdentifierError,
@@ -31,14 +37,37 @@ from curator.token_validation import TokenClaims
 
 router = APIRouter(tags=["social"])
 
-logger = logging.getLogger("curator")
-
 _T = TypeVar("_T")
 
-_NO_LINK_DETAIL = "PSN account not linked."
-_AUTH_FAILED_DETAIL = "PSN authentication failed; re-link your account."
 NO_PENDING_REQUEST_DETAIL = "no_pending_request"
 """``PUT /me/friends/{online_id}``'s 409 detail when the target has not sent the caller a request."""
+NOTHING_SENT_DETAIL = "nothing sent"
+"""The history detail suffix when a destructive call found nothing to act on and sent no PSN write."""
+
+
+def nothing_sent_detail(subject: str) -> str:
+    """History detail for a destructive call that found nothing to act on and sent no PSN write."""
+    return f"{subject} {NOTHING_SENT_DETAIL}"
+
+
+def inviting_detail(group_id: str, invitee_count: int) -> str:
+    """History detail written before an invite reaches PSN."""
+    return f"{group_id} inviting {invitee_count}"
+
+
+def invited_detail(group_id: str, invitee_count: int) -> str:
+    """History detail once PSN has placed the invitees, naming the group that now holds them."""
+    return f"{group_id} invited {invitee_count}"
+
+
+def leaving_detail(group_id: str) -> str:
+    """History detail written before a leave reaches PSN."""
+    return f"{group_id} leaving"
+
+
+def left_detail(group_id: str) -> str:
+    """History detail once PSN has removed the caller from the group."""
+    return f"{group_id} left"
 
 
 class CreateGroupRequest(BaseModel):
@@ -96,15 +125,16 @@ async def list_friend_requests(
     :raises fastapi.HTTPException: 404, if the caller has no PSN link; 403, if ``harvest_identity`` is not
         enabled; 401, if PSN rejects the stored token.
     """
-    await require_preference(request, claims.sub, "harvest_identity")
+    await require_preference(request, claims.sub, HARVEST_IDENTITY)
     factory: SocialClientFactory = request.app.state.social_client_factory
-    try:
-        client = await factory(claims.sub)
-        pending = await client.friend_requests()
-    except RuntimeError as exc:
-        raise HTTPException(status_code=404, detail=_NO_LINK_DETAIL) from exc
-    except PsnAuthError as exc:
-        raise HTTPException(status_code=401, detail=_AUTH_FAILED_DETAIL) from exc
+    async with recorded(request_recorder(request), claims.sub, ACTION_FRIEND_REQUESTS_FETCH):
+        try:
+            client = await factory(claims.sub)
+            pending = await client.friend_requests()
+        except RuntimeError as exc:
+            raise HTTPException(status_code=404, detail=PREFERENCE_NOT_LINKED_DETAIL) from exc
+        except PsnAuthError as exc:
+            raise HTTPException(status_code=401, detail=PSN_AUTH_FAILED_DETAIL) from exc
     return FriendRequestsResponse(
         requests=[FriendRequestResponse(online_id=user.online_id, account_id=user.account_id) for user in pending]
     )
@@ -122,10 +152,9 @@ async def send_friend_request(
     """
     online_id = _valid(validate_online_id, online_id)
     await require_preference(request, claims.sub, FRIEND_WRITES)
-    service = await _service(request, claims.sub)
-
-    await _run(service.send_friend_request(online_id))
-    await _log(request, claims.sub, ACTION_FRIEND_REQUEST_SENT, online_id)
+    async with recorded(request_recorder(request), claims.sub, ACTION_FRIEND_REQUEST_SENT, online_id):
+        service = await _service(request, claims.sub)
+        await _run(service.send_friend_request(online_id))
     return Response(status_code=204)
 
 
@@ -141,13 +170,12 @@ async def accept_friend(
     """
     online_id = _valid(validate_online_id, online_id)
     await require_preference(request, claims.sub, FRIEND_WRITES)
-    service = await _service(request, claims.sub)
-
-    try:
-        await _run(service.accept_friend_request(online_id))
-    except NoPendingFriendRequestError as exc:
-        raise HTTPException(status_code=409, detail=NO_PENDING_REQUEST_DETAIL) from exc
-    await _log(request, claims.sub, ACTION_FRIEND_ADDED, online_id)
+    async with recorded(request_recorder(request), claims.sub, ACTION_FRIEND_ADDED, online_id):
+        service = await _service(request, claims.sub)
+        try:
+            await _run(service.accept_friend_request(online_id))
+        except NoPendingFriendRequestError as exc:
+            raise HTTPException(status_code=409, detail=NO_PENDING_REQUEST_DETAIL) from exc
     return Response(status_code=204)
 
 
@@ -166,10 +194,10 @@ async def remove_friend(
     """
     online_id = _valid(validate_online_id, online_id)
     await require_preference(request, claims.sub, FRIEND_WRITES)
-    service = await _service(request, claims.sub)
-
-    if await _run(service.remove_friend(online_id=online_id)):
-        await _log(request, claims.sub, ACTION_FRIEND_REMOVED, online_id)
+    async with recorded(request_recorder(request), claims.sub, ACTION_FRIEND_REMOVED, online_id) as entry:
+        service = await _service(request, claims.sub)
+        if not await _run(service.remove_friend(online_id=online_id)):
+            entry.detail = nothing_sent_detail(online_id)
     return Response(status_code=204)
 
 
@@ -186,10 +214,10 @@ async def create_chat_group(
     online_ids = [_valid(validate_online_id, member) for member in body.online_ids]
     account_ids = [_valid(validate_account_id, member) for member in body.account_ids]
     await require_preference(request, claims.sub, CHAT_WRITES)
-    service = await _service(request, claims.sub)
-
-    group_id = await _run(service.create_group(online_ids=online_ids, account_ids=account_ids))
-    await _log(request, claims.sub, ACTION_CHAT_GROUP_CREATED, group_id)
+    async with recorded(request_recorder(request), claims.sub, ACTION_CHAT_GROUP_CREATED) as entry:
+        service = await _service(request, claims.sub)
+        group_id = await _run(service.create_group(online_ids=online_ids, account_ids=account_ids))
+        entry.detail = group_id
     return CreateGroupResponse(group_id=group_id)
 
 
@@ -208,10 +236,9 @@ async def rename_chat_group(
     """
     group_id = _valid(validate_group_id, group_id)
     await require_preference(request, claims.sub, CHAT_WRITES)
-    service = await _service(request, claims.sub)
-
-    await _run(service.rename_group(group_id, body.name))
-    await _log(request, claims.sub, ACTION_CHAT_GROUP_RENAMED, group_id)
+    async with recorded(request_recorder(request), claims.sub, ACTION_CHAT_GROUP_RENAMED, group_id):
+        service = await _service(request, claims.sub)
+        await _run(service.rename_group(group_id, body.name))
     return Response(status_code=204)
 
 
@@ -236,15 +263,15 @@ async def invite_to_chat_group(
     online_ids = [_valid(validate_online_id, member) for member in body.online_ids]
     account_ids = [_valid(validate_account_id, member) for member in body.account_ids]
     await require_preference(request, claims.sub, CHAT_WRITES)
-    service = await _service(request, claims.sub)
-
-    resulting_group_id = await _run(service.invite_to_group(group_id, online_ids=online_ids, account_ids=account_ids))
-    await _log(
-        request,
-        claims.sub,
-        ACTION_CHAT_MEMBERSHIP_CHANGED,
-        f"{resulting_group_id or group_id} invited {len(online_ids) + len(account_ids)}",
-    )
+    invitee_count = len(online_ids) + len(account_ids)
+    async with recorded(
+        request_recorder(request), claims.sub, ACTION_CHAT_MEMBERSHIP_CHANGED, inviting_detail(group_id, invitee_count)
+    ) as entry:
+        service = await _service(request, claims.sub)
+        resulting_group_id = await _run(
+            service.invite_to_group(group_id, online_ids=online_ids, account_ids=account_ids)
+        )
+        entry.detail = invited_detail(resulting_group_id or group_id, invitee_count)
     return InviteToGroupResponse(group_id=resulting_group_id)
 
 
@@ -262,10 +289,12 @@ async def leave_chat_group(
     """
     group_id = _valid(validate_group_id, group_id)
     await require_preference(request, claims.sub, CHAT_WRITES)
-    service = await _service(request, claims.sub)
-
-    if await _run(service.leave_group(group_id)):
-        await _log(request, claims.sub, ACTION_CHAT_MEMBERSHIP_CHANGED, f"{group_id} left")
+    async with recorded(
+        request_recorder(request), claims.sub, ACTION_CHAT_MEMBERSHIP_CHANGED, leaving_detail(group_id)
+    ) as entry:
+        service = await _service(request, claims.sub)
+        left = await _run(service.leave_group(group_id))
+        entry.detail = left_detail(group_id) if left else nothing_sent_detail(group_id)
     return Response(status_code=204)
 
 
@@ -281,7 +310,7 @@ async def _service(request: Request, sub: str) -> MutationService:
     try:
         return await factory(sub)
     except RuntimeError as exc:
-        raise HTTPException(status_code=404, detail=_NO_LINK_DETAIL) from exc
+        raise HTTPException(status_code=404, detail=PREFERENCE_NOT_LINKED_DETAIL) from exc
 
 
 async def _run(awaitable: Coroutine[Any, Any, _T]) -> _T:
@@ -290,12 +319,4 @@ async def _run(awaitable: Coroutine[Any, Any, _T]) -> _T:
     except MutationNotAllowedError as exc:
         raise HTTPException(status_code=403, detail=str(exc)) from exc
     except PsnAuthError as exc:
-        raise HTTPException(status_code=401, detail=_AUTH_FAILED_DETAIL) from exc
-
-
-async def _log(request: Request, sub: str, action: str, detail: str | None) -> None:
-    audit_repository: AccountActionLogRepository = request.app.state.audit_repository
-    try:
-        await audit_repository.log(sub, action, detail)
-    except Exception:
-        logger.exception("Failed to write account_action_log entry (sub=%s, action=%s)", sub, action)
+        raise HTTPException(status_code=401, detail=PSN_AUTH_FAILED_DETAIL) from exc

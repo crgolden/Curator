@@ -9,10 +9,20 @@ from uuid import uuid4
 import pytest
 
 from curator.catalog.cover_art import SQUARE_COVER_ART_SQL
-from curator.collections.collection_spec import CollectionSpec
-from curator.collections.filter_predicate import GenreIn
+from curator.collections.collection_spec import CAPACITY_FILL_KIND, FILTER_LIST_KIND, CollectionSpec
+from curator.collections.filter_predicate import GenreIn, predicate_to_dict
 from curator.collections.game_candidate import GameCandidate
-from curator.collections.repository import BROWSABLE_CANDIDATE_SQL, IS_FREE_TO_PLAY_SQL, CollectionsRepository
+from curator.collections.repository import (
+    BROWSABLE_CANDIDATE_SQL,
+    IS_FREE_TO_PLAY_SQL,
+    VISIBILITY_PRIVATE,
+    VISIBILITY_UNLISTED,
+    CollectionsRepository,
+)
+from curator.psn.title_platform import CONSOLE_PLATFORM_IDS, PS4, PS5, PSP, PSVITA
+from test_values import new_game_title
+
+CONSOLE_MODEL = new_game_title()
 
 
 class FakeCursor:
@@ -75,9 +85,7 @@ class FakePool:
 
 
 async def test_list_user_consoles_maps_rows_and_computes_effective_capacity():
-    pool = FakePool(
-        fetchall_results=[[("console-1", "My PS5", "PS5", 3997.0, 200.0, ["RPG"], 0, "PS5 Digital Edition")]]
-    )
+    pool = FakePool(fetchall_results=[[("console-1", "My PS5", PS5, 3997.0, 200.0, ["RPG"], 0, CONSOLE_MODEL)]])
     repo = CollectionsRepository(pool)
 
     consoles = await repo.list_user_consoles("sub-1")
@@ -86,7 +94,7 @@ async def test_list_user_consoles_maps_rows_and_computes_effective_capacity():
     assert consoles[0].console_id == "console-1"
     assert consoles[0].effective_capacity_gb == 3797.0
     assert consoles[0].routing_genres == ("RPG",)
-    assert consoles[0].model == "PS5 Digital Edition"
+    assert consoles[0].model == CONSOLE_MODEL
 
 
 async def test_list_candidates_no_platform_filter():
@@ -123,7 +131,7 @@ async def test_list_candidates_no_platform_filter():
     assert candidates[0].download_size_bytes is None
     conn = pool.connections[0]
     sql, params = conn.executed[0]
-    assert "library_entry_platforms" not in sql
+    assert "lep.platform = %s" not in sql
     assert params == ("sub-1",)
 
 
@@ -167,7 +175,7 @@ async def test_list_candidates_omits_the_completion_clause_when_no_floor_is_set(
     assert params == ("sub-1",)
 
 
-@pytest.mark.parametrize("platform", ["PS5", "PS4", "PS3", "PSVITA", "PSP", "PS2", "PS1"])
+@pytest.mark.parametrize("platform", CONSOLE_PLATFORM_IDS)
 async def test_list_candidates_filters_every_platform_through_library_entry_platforms(platform):
     """The boolean pair could only express PS5 and PS4, so a PS3/Vita/PSP console fell through to an
     unfiltered candidate list -- every game in the library, including PS5-only ones."""
@@ -183,17 +191,31 @@ async def test_list_candidates_filters_every_platform_through_library_entry_plat
     assert params == (platform, platform, "sub-1", platform)
 
 
+async def test_list_candidates_sizes_an_unfiltered_run_from_the_platforms_of_record():
+    """``native_ps5`` is a legacy boolean the platforms table superseded; a run with no platform filter
+    still has to size a PS5-owned game as PS5, read from ``library_entry_platforms``."""
+    pool = FakePool(fetchall_results=[[]])
+    repo = CollectionsRepository(pool)
+
+    await repo.list_candidates("sub-1")
+
+    sql, _params = pool.connections[0].executed[0]
+    assert "le.native_ps5" not in sql
+    assert "FROM library_entry_platforms owned" in sql
+    assert "owned.platform = 'PS5'" in sql
+
+
 async def test_list_candidates_reads_the_measured_size_for_the_platform_being_filled():
     """A game owned on both PS4 and PS5 has two game_measured_sizes rows. The pair-derived CASE always
     picked the PS5 one, so a PS4 capacity fill packed against PS5 sizes."""
     pool = FakePool(fetchall_results=[[]])
     repo = CollectionsRepository(pool)
 
-    await repo.list_candidates("sub-1", platform="PS4")
+    await repo.list_candidates("sub-1", platform=PS4)
 
     sql, params = pool.connections[0].executed[0]
     assert "CASE WHEN le.native_ps5" not in sql
-    assert params == ("PS4", "PS4", "sub-1", "PS4"), (
+    assert params == (PS4, PS4, "sub-1", PS4), (
         "the measured-size and download-size subqueries are in the SELECT list, so their parameters bind "
         "before the WHERE clause's"
     )
@@ -203,7 +225,7 @@ async def test_list_candidates_reads_the_download_size_for_the_platform_being_fi
     pool = FakePool(fetchall_results=[[]])
     repo = CollectionsRepository(pool)
 
-    await repo.list_candidates("sub-1", platform="PSVITA")
+    await repo.list_candidates("sub-1", platform=PSVITA)
 
     sql, _params = pool.connections[0].executed[0]
     assert "FROM game_download_sizes gds" in sql
@@ -259,7 +281,7 @@ async def test_counting_candidates_missing_trophy_data_uses_the_candidate_predic
     pool = FakePool(fetchone_results=[(randint(1, 50),)])
     repo = CollectionsRepository(pool)
 
-    await repo.count_candidates_missing_trophy_data(identity_sub, platform="PS5", exclude_installed_on=("c1",))
+    await repo.count_candidates_missing_trophy_data(identity_sub, platform=PS5, exclude_installed_on=("c1",))
 
     sql, params = pool.connections[0].executed[0]
     assert "le.trophy_percent_completed IS NULL" in sql
@@ -267,16 +289,16 @@ async def test_counting_candidates_missing_trophy_data_uses_the_candidate_predic
     assert "FROM library_entry_platforms lep" in sql
     assert "console_installs" in sql
     assert "library_exclusions" in sql
-    assert params == (identity_sub, "PS5", identity_sub, ["c1"])
+    assert params == (identity_sub, PS5, identity_sub, ["c1"])
 
 
 async def test_platform_media_ceilings_map_only_platforms_that_carry_one():
-    pool = FakePool(fetchall_results=[[("PSP", 1.8), ("PSVITA", 4.0)]])
+    pool = FakePool(fetchall_results=[[(PSP, 1.8), (PSVITA, 4.0)]])
     repo = CollectionsRepository(pool)
 
     ceilings = await repo.list_platform_media_ceilings()
 
-    assert ceilings == {"PSP": 1.8, "PSVITA": 4.0}
+    assert ceilings == {PSP: 1.8, PSVITA: 4.0}
     sql, _params = pool.connections[0].executed[0]
     assert "media_ceiling_gb IS NOT NULL" in sql
 
@@ -341,7 +363,7 @@ async def test_list_candidates_excludes_games_installed_on_the_given_consoles():
 async def test_save_definition_returns_new_id_and_serializes_genre_filter():
     pool = FakePool(fetchone_results=[("def-1",)])
     repo = CollectionsRepository(pool)
-    spec = CollectionSpec(kind="filter_list", genre_filter=("RPG", "Action"), min_score=80.0)
+    spec = CollectionSpec(kind=FILTER_LIST_KIND, genre_filter=("RPG", "Action"), min_score=80.0)
 
     definition_id = await repo.save_definition("sub-1", "My RPGs", spec)
 
@@ -353,7 +375,7 @@ async def test_save_definition_returns_new_id_and_serializes_genre_filter():
         "sub-1",
         "My RPGs",
         None,
-        "filter_list",
+        FILTER_LIST_KIND,
         None,
         ["RPG", "Action"],
         80.0,
@@ -372,13 +394,13 @@ async def test_save_definition_returns_new_id_and_serializes_genre_filter():
 async def test_save_definition_persists_min_percent_completed():
     pool = FakePool(fetchone_results=[("def-1",)])
     repo = CollectionsRepository(pool)
-    spec = CollectionSpec(kind="filter_list", min_percent_completed=75)
+    spec = CollectionSpec(kind=FILTER_LIST_KIND, min_percent_completed=75)
 
     await repo.save_definition("sub-1", "Nearly Done", spec)
 
     _sql, params = pool.connections[0].executed[0]
     assert params is not None
-    assert params[:-3] == ("sub-1", "Nearly Done", None, "filter_list", None, [], None, None, None, False, 75, None)
+    assert params[:-3] == ("sub-1", "Nearly Done", None, FILTER_LIST_KIND, None, [], None, None, None, False, 75, None)
     assert params[-1] is None, "a new collection targets no console until one is assigned"
     assert isinstance(params[-3], str)
     assert len(params[-3]) > 0
@@ -387,7 +409,7 @@ async def test_save_definition_persists_min_percent_completed():
 async def test_save_definition_persists_exclude_installed_on():
     pool = FakePool(fetchone_results=[("def-1",)])
     repo = CollectionsRepository(pool)
-    spec = CollectionSpec(kind="filter_list", exclude_installed_on=("c1", "c2"))
+    spec = CollectionSpec(kind=FILTER_LIST_KIND, exclude_installed_on=("c1", "c2"))
 
     await repo.save_definition("sub-1", "Not on my PS5", spec)
 
@@ -399,7 +421,7 @@ async def test_save_definition_persists_exclude_installed_on():
 async def test_save_definition_serializes_filter_predicate_as_json():
     pool = FakePool(fetchone_results=[("def-1",)])
     repo = CollectionsRepository(pool)
-    spec = CollectionSpec(kind="filter_list", filter_predicate=GenreIn(values=("RPG", "Action")))
+    spec = CollectionSpec(kind=FILTER_LIST_KIND, filter_predicate=GenreIn(values=("RPG", "Action")))
 
     await repo.save_definition("sub-1", "My RPGs", spec)
 
@@ -412,7 +434,7 @@ async def test_save_definition_leaves_filter_predicate_null_when_not_supplied():
     pool = FakePool(fetchone_results=[("def-1",)])
     repo = CollectionsRepository(pool)
 
-    await repo.save_definition("sub-1", "My RPGs", CollectionSpec(kind="filter_list"))
+    await repo.save_definition("sub-1", "My RPGs", CollectionSpec(kind=FILTER_LIST_KIND))
 
     _sql, params = pool.connections[0].executed[0]
     assert params is not None
@@ -424,7 +446,7 @@ async def test_save_definition_stores_membership_ranked_by_position():
     repo = CollectionsRepository(pool)
 
     await repo.save_definition(
-        "sub-1", "My RPGs", CollectionSpec(kind="filter_list"), description="Best of", game_ids=("g2", "g1")
+        "sub-1", "My RPGs", CollectionSpec(kind=FILTER_LIST_KIND), description="Best of", game_ids=("g2", "g1")
     )
 
     executed = pool.connections[0].executed
@@ -438,7 +460,7 @@ async def test_save_definition_drops_duplicate_game_ids():
     pool = FakePool(fetchone_results=[("def-1",)])
     repo = CollectionsRepository(pool)
 
-    await repo.save_definition("sub-1", "Dupes", CollectionSpec(kind="filter_list"), game_ids=("g1", "g2", "g1"))
+    await repo.save_definition("sub-1", "Dupes", CollectionSpec(kind=FILTER_LIST_KIND), game_ids=("g1", "g2", "g1"))
 
     item_inserts = [call for call in pool.connections[0].executed if "collection_definition_items" in call[0]]
     assert [call[1] for call in item_inserts] == [("def-1", "g1", 1), ("def-1", "g2", 2)]
@@ -452,7 +474,7 @@ async def test_list_definitions_maps_rows():
                     "def-1",
                     "sub-1",
                     "My RPGs",
-                    "filter_list",
+                    FILTER_LIST_KIND,
                     None,
                     ["RPG"],
                     80.0,
@@ -462,7 +484,7 @@ async def test_list_definitions_maps_rows():
                     True,
                     60,
                     None,
-                    "unlisted",
+                    VISIBILITY_UNLISTED,
                     "abc123",
                     3,
                     ["c1"],
@@ -478,7 +500,7 @@ async def test_list_definitions_maps_rows():
     assert len(definitions) == 1
     assert definitions[0].definition_id == "def-1"
     assert definitions[0].genre_filter == ("RPG",)
-    assert definitions[0].visibility == "unlisted"
+    assert definitions[0].visibility == VISIBILITY_UNLISTED
     assert definitions[0].share_slug == "abc123"
     assert definitions[0].item_count == 3
     assert definitions[0].min_score == 80.0
@@ -500,7 +522,7 @@ async def test_list_definitions_parses_a_stored_filter_predicate():
                     "def-1",
                     "sub-1",
                     "Criterion-ish",
-                    "filter_list",
+                    FILTER_LIST_KIND,
                     None,
                     [],
                     None,
@@ -509,8 +531,8 @@ async def test_list_definitions_parses_a_stored_filter_predicate():
                     None,
                     False,
                     None,
-                    {"op": "genre_in", "values": ["RPG"]},
-                    "private",
+                    predicate_to_dict(GenreIn(values=("RPG",))),
+                    VISIBILITY_PRIVATE,
                     None,
                     0,
                     [],
@@ -534,7 +556,7 @@ async def test_get_definition_scopes_to_identity_sub():
                 "def-1",
                 "sub-1",
                 "My RPGs",
-                "filter_list",
+                FILTER_LIST_KIND,
                 None,
                 ["RPG"],
                 80.0,
@@ -544,7 +566,7 @@ async def test_get_definition_scopes_to_identity_sub():
                 False,
                 None,
                 None,
-                "private",
+                VISIBILITY_PRIVATE,
                 "xyz789",
                 0,
                 [],
@@ -796,7 +818,7 @@ async def test_save_run_writes_run_and_items():
         )
     ]
 
-    run_id = await repo.save_run("sub-1", None, {"kind": "capacity_fill"}, included, excluded)
+    run_id = await repo.save_run("sub-1", None, {"kind": CAPACITY_FILL_KIND}, included, excluded)
 
     assert run_id == "run-1"
     conn = pool.connections[0]
@@ -813,14 +835,14 @@ async def test_save_run_writes_run_and_items():
 
 async def test_list_measured_sizes_maps_rows():
     recorded_at = datetime(2026, 1, 1, tzinfo=timezone.utc)
-    pool = FakePool(fetchall_results=[[("g1", "PS5", 42.5, "sub-a", recorded_at)]])
+    pool = FakePool(fetchall_results=[[("g1", PS5, 42.5, "sub-a", recorded_at)]])
     repo = CollectionsRepository(pool)
 
     sizes = await repo.list_measured_sizes("g1")
 
     assert len(sizes) == 1
     assert sizes[0].game_id == "g1"
-    assert sizes[0].platform == "PS5"
+    assert sizes[0].platform == PS5
     assert sizes[0].size_gb == 42.5
     assert sizes[0].recorded_by == "sub-a"
     assert sizes[0].recorded_at == recorded_at
@@ -828,7 +850,7 @@ async def test_list_measured_sizes_maps_rows():
 
 async def test_list_measured_sizes_reports_no_contributor_after_recorded_by_is_set_null():
     recorded_at = datetime(2026, 1, 1, tzinfo=timezone.utc)
-    pool = FakePool(fetchall_results=[[("g1", "PS5", 42.5, None, recorded_at)]])
+    pool = FakePool(fetchall_results=[[("g1", PS5, 42.5, None, recorded_at)]])
     repo = CollectionsRepository(pool)
 
     sizes = await repo.list_measured_sizes("g1")
@@ -841,16 +863,16 @@ async def test_upsert_measured_size_upserts_on_game_and_platform():
     pool = FakePool(fetchone_results=[(recorded_at,)])
     repo = CollectionsRepository(pool)
 
-    measured_size = await repo.upsert_measured_size("g1", "PS5", 42.5, "sub-a")
+    measured_size = await repo.upsert_measured_size("g1", PS5, 42.5, "sub-a")
 
     assert measured_size.game_id == "g1"
-    assert measured_size.platform == "PS5"
+    assert measured_size.platform == PS5
     assert measured_size.size_gb == 42.5
     assert measured_size.recorded_by == "sub-a"
     assert measured_size.recorded_at == recorded_at
     conn = pool.connections[0]
     assert "ON CONFLICT (game_id, platform) DO UPDATE" in conn.executed[0][0]
-    assert conn.executed[0][1] == ("g1", "PS5", 42.5, "sub-a")
+    assert conn.executed[0][1] == ("g1", PS5, 42.5, "sub-a")
 
 
 async def test_is_following_collection_is_true_when_a_follow_row_exists():

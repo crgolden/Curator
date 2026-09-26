@@ -13,7 +13,16 @@ from pathlib import Path
 
 
 class ConfigError(Exception):
-    """Raised when required configuration cannot be resolved from any source."""
+    """Raised when required configuration cannot be resolved from any source.
+
+    :param message: The human-readable explanation.
+    :param setting: The setting that is missing or invalid, when there is one, so a caller or a test can
+        name it without parsing ``message``.
+    """
+
+    def __init__(self, message: str, setting: str | None = None) -> None:
+        super().__init__(message)
+        self.setting = setting
 
 
 def _read_dotenv(path: Path) -> dict[str, str]:

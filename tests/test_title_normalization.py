@@ -4,7 +4,7 @@ import uuid
 
 import pytest
 
-from curator.catalog.title_normalization import normalize_name, normalized_title
+from curator.catalog.title_normalization import edition_family, normalize_name, normalized_title
 
 TRADEMARK_SYMBOL = "™"
 REGISTERED_SYMBOL = "®"
@@ -27,6 +27,20 @@ def test_normalize_name_strips_the_trademark_letters_and_the_parentheses_that_he
     title = _word()
 
     assert normalize_name(f"{title} (TM)") == title
+
+
+def test_edition_family_drops_every_edition_keyword_and_the_space_it_leaves() -> None:
+    base = f"{_word()} {_word()}"
+    keywords = [f"{_word()} edition", f"{_word()} cut"]
+
+    assert edition_family(f"{base} {keywords[0]} {keywords[1]}", keywords) == base
+
+
+def test_edition_family_lowers_the_name_before_matching_the_way_functions_does() -> None:
+    base = _word()
+    keyword = f"{_word()} edition"
+
+    assert edition_family(f"{base.upper()} {keyword.upper()}", [keyword]) == base
 
 
 def test_normalize_name_keeps_the_letters_tm_inside_a_word() -> None:

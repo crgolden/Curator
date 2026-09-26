@@ -6,7 +6,7 @@ from __future__ import annotations
 import pytest
 
 from curator.collections.game_candidate import GameCandidate
-from curator.collections.sort_order import resolve_sort_key
+from curator.collections.sort_order import COMPOSITE_DESC, resolve_sort_key
 
 
 def _candidate(composite_score):
@@ -33,7 +33,7 @@ def test_none_returns_the_default_key_unchanged():
 def test_composite_desc_resolves_to_a_different_key_than_the_default():
     default = lambda candidate: ("default-sentinel",)  # noqa: E731
 
-    key = resolve_sort_key("composite_desc", default=default)
+    key = resolve_sort_key(COMPOSITE_DESC, default=default)
 
     assert key is not default
     assert key(_candidate(42.0)) == (True, 42.0)

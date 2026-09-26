@@ -3,8 +3,7 @@
 --
 -- Adds collection_definitions.exclude_installed_on: console ids whose currently-installed games
 -- (console_installs.installed = true) are excluded from that definition's candidate pool entirely --
--- e.g. "what's left for my Vita that isn't already on my PS5". Closes WP8 reproduction-test gap #6 --
--- see AGENTS/PARKING_LOT.md and Tools/PlayStation/LIFECYCLE_AUDIT.md's "what it would take" list.
+-- e.g. "what's left for my Vita that isn't already on my PS5".
 --
 -- No FK on the array elements (Postgres has no native array-FK, same as genre_filter TEXT[] above having
 -- no FK to genres); curator.collections.collection_orchestrator.CollectionOrchestrator validates every id

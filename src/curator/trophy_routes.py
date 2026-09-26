@@ -1,30 +1,47 @@
 from __future__ import annotations
 
-import logging
 from collections.abc import Callable, Coroutine
-from typing import Annotated, Any, TypeVar
+from typing import Annotated, Any, Final, TypeVar
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel
 
-from curator.audit.repository import ACTION_TROPHY_FETCH, AccountActionLogRepository
-from curator.deps import require_bearer, require_preference
+from curator.audit.recorded import recorded, request_recorder
+from curator.audit.repository import ACTION_TROPHY_FETCH
+from curator.deps import (
+    HARVEST_TROPHIES,
+    PREFERENCE_NOT_LINKED_DETAIL,
+    PSN_AUTH_FAILED_DETAIL,
+    require_bearer,
+    require_preference,
+)
 from curator.psn.errors import PsnAuthError
 from curator.psn.identifiers import (
     InvalidPsnIdentifierError,
     validate_np_communication_id,
     validate_trophy_group,
 )
-from curator.psn.models import TrophyCounts, TrophyDetail, TrophyGroup, TrophyGroups, TrophySummary, TrophyTitle
+from curator.psn.models import (
+    ALL_TROPHY_GROUPS,
+    TrophyCounts,
+    TrophyDetail,
+    TrophyGroup,
+    TrophyGroups,
+    TrophySummary,
+    TrophyTitle,
+)
 from curator.psn.trophy_cache import CachedTrophyClient
 from curator.psn.trophy_client import TrophyClient, TrophyClientFactory
 from curator.token_validation import TokenClaims
 
 router = APIRouter(prefix="/trophies", tags=["trophies"])
-logger = logging.getLogger("curator")
 
-_NO_LINK_DETAIL = "PSN account not linked."
-_AUTH_FAILED_DETAIL = "PSN authentication failed; re-link your account."
+_SUMMARY_DETAIL = "summary"
+_TITLES_DETAIL = "titles"
+
+LIMIT_PARAM: Final = "limit"
+PLATFORM_PARAM: Final = "platform"
+GROUP_PARAM: Final = "group"
 
 
 class TrophyCountsResponse(BaseModel):
@@ -119,9 +136,10 @@ async def get_trophy_summary(
     :raises fastapi.HTTPException: 404, if the caller has no PSN link; 403, if ``harvest_trophies`` is not
         enabled for this user; 401, if PSN rejects the stored token.
     """
-    await require_preference(request, claims.sub, "harvest_trophies")
-    client = await _trophy_client(request, claims)
-    summary = await _call(client.trophy_summary)
+    await require_preference(request, claims.sub, HARVEST_TROPHIES)
+    async with recorded(request_recorder(request), claims.sub, ACTION_TROPHY_FETCH, _SUMMARY_DETAIL):
+        client = await _trophy_client(request, claims)
+        summary = await _call(client.trophy_summary)
     return _summary_response(summary)
 
 
@@ -129,16 +147,17 @@ async def get_trophy_summary(
 async def get_trophy_titles(
     request: Request,
     claims: Annotated[TokenClaims, Depends(require_bearer)],
-    limit: int = Query(default=100, ge=1, le=500),
+    limit: int = Query(default=100, ge=1, le=500, alias=LIMIT_PARAM),
 ) -> TrophyTitlesResponse:
     """List the caller's games that have trophies, with per-game progress.
 
     :raises fastapi.HTTPException: 404, if the caller has no PSN link; 403, if ``harvest_trophies`` is not
         enabled for this user; 401, if PSN rejects the stored token.
     """
-    await require_preference(request, claims.sub, "harvest_trophies")
-    client = await _trophy_client(request, claims)
-    titles = await _call(client.trophy_titles, limit=limit)
+    await require_preference(request, claims.sub, HARVEST_TROPHIES)
+    async with recorded(request_recorder(request), claims.sub, ACTION_TROPHY_FETCH, _TITLES_DETAIL):
+        client = await _trophy_client(request, claims)
+        titles = await _call(client.trophy_titles, limit=limit)
     return TrophyTitlesResponse(titles=[_title_response(title) for title in titles])
 
 
@@ -147,8 +166,8 @@ async def get_title_trophies(
     request: Request,
     np_communication_id: str,
     claims: Annotated[TokenClaims, Depends(require_bearer)],
-    platform: str = Query(...),
-    group: str = Query(default="all"),
+    platform: str = Query(..., alias=PLATFORM_PARAM),
+    group: str = Query(default=ALL_TROPHY_GROUPS, alias=GROUP_PARAM),
 ) -> TitleTrophiesResponse:
     """List every trophy in a title, merged with the caller's earned progress and rarity.
 
@@ -160,9 +179,10 @@ async def get_title_trophies(
     """
     np_communication_id = _valid(validate_np_communication_id, np_communication_id)
     group = _valid(validate_trophy_group, group)
-    await require_preference(request, claims.sub, "harvest_trophies")
-    client = await _trophy_client(request, claims)
-    trophies = await _call(client.title_trophies, np_communication_id, platform, group=group)
+    await require_preference(request, claims.sub, HARVEST_TROPHIES)
+    async with recorded(request_recorder(request), claims.sub, ACTION_TROPHY_FETCH, np_communication_id):
+        client = await _trophy_client(request, claims)
+        trophies = await _call(client.title_trophies, np_communication_id, platform, group=group)
     return TitleTrophiesResponse(trophies=[_detail_response(trophy) for trophy in trophies])
 
 
@@ -171,7 +191,7 @@ async def get_trophy_groups(
     request: Request,
     np_communication_id: str,
     claims: Annotated[TokenClaims, Depends(require_bearer)],
-    platform: str = Query(...),
+    platform: str = Query(..., alias=PLATFORM_PARAM),
 ) -> TrophyGroupsResponse:
     """Get a title's trophy-group breakdown (base game + each DLC), with the caller's earned progress.
 
@@ -182,27 +202,19 @@ async def get_trophy_groups(
         token.
     """
     np_communication_id = _valid(validate_np_communication_id, np_communication_id)
-    await require_preference(request, claims.sub, "harvest_trophies")
-    client = await _trophy_client(request, claims)
-    groups = await _call(client.trophy_groups, np_communication_id, platform)
+    await require_preference(request, claims.sub, HARVEST_TROPHIES)
+    async with recorded(request_recorder(request), claims.sub, ACTION_TROPHY_FETCH, np_communication_id):
+        client = await _trophy_client(request, claims)
+        groups = await _call(client.trophy_groups, np_communication_id, platform)
     return _groups_response(groups)
 
 
 async def _trophy_client(request: Request, claims: TokenClaims) -> TrophyClient | CachedTrophyClient:
     trophy_client_factory: TrophyClientFactory = request.app.state.trophy_client_factory
     try:
-        client = await trophy_client_factory(claims.sub)
+        return await trophy_client_factory(claims.sub)
     except RuntimeError as exc:
-        raise HTTPException(status_code=404, detail=_NO_LINK_DETAIL) from exc
-
-    audit_repository: AccountActionLogRepository = request.app.state.audit_repository
-    try:
-        await audit_repository.log(claims.sub, ACTION_TROPHY_FETCH)
-    except Exception:
-        logger.exception(
-            "Failed to write account_action_log entry (sub=%s, action=%s)", claims.sub, ACTION_TROPHY_FETCH
-        )
-    return client
+        raise HTTPException(status_code=404, detail=PREFERENCE_NOT_LINKED_DETAIL) from exc
 
 
 _T = TypeVar("_T")
@@ -220,7 +232,7 @@ async def _call(method: Callable[..., Coroutine[Any, Any, _T]], *args: Any, **kw
     try:
         return await method(*args, **kwargs)
     except PsnAuthError as exc:
-        raise HTTPException(status_code=401, detail=_AUTH_FAILED_DETAIL) from exc
+        raise HTTPException(status_code=401, detail=PSN_AUTH_FAILED_DETAIL) from exc
 
 
 def _counts_response(counts: TrophyCounts) -> TrophyCountsResponse:

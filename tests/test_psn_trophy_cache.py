@@ -3,7 +3,20 @@
 from __future__ import annotations
 
 from curator.psn.models import TitleStat, TrophyCounts, TrophyDetail, TrophyGroups, TrophySummary, TrophyTitle
-from curator.psn.trophy_cache import CachedTrophyClient
+from curator.psn.title_platform import PS5
+from curator.psn.trophy_cache import DEFAULT_TTL_SECONDS, CachedTrophyClient
+from test_values import (
+    lowercase_token,
+    new_account_id,
+    new_game_title,
+    new_np_communication_id,
+    new_online_id,
+    new_percent_completed,
+    new_positive_count,
+    new_ps4_title_id,
+    new_small_count,
+    new_trophy_group_id,
+)
 
 
 class FakeRedis:
@@ -21,6 +34,33 @@ class FakeRedis:
 
 class FakeTrophyClient:
     def __init__(self):
+        self.summary = TrophySummary(
+            level=new_positive_count(),
+            progress=new_percent_completed(),
+            tier=new_small_count(),
+            earned=TrophyCounts(gold=new_small_count()),
+            account_id=new_account_id(),
+        )
+        self.titles = [
+            TrophyTitle(
+                name=new_game_title(),
+                np_communication_id=new_np_communication_id(),
+                platforms=(PS5,),
+                progress=new_percent_completed(),
+                earned=TrophyCounts(gold=new_small_count()),
+                defined=TrophyCounts(gold=new_small_count()),
+            )
+        ]
+        self.details = [TrophyDetail(trophy_id=new_positive_count(), name=new_game_title(), detail=lowercase_token())]
+        self.groups = TrophyGroups(
+            title_name=new_game_title(),
+            platforms=(PS5,),
+            progress=new_percent_completed(),
+            defined=TrophyCounts(gold=new_small_count()),
+            earned=TrophyCounts(gold=new_small_count()),
+            groups=(),
+        )
+        self.stats = [TitleStat(title_id=new_ps4_title_id(), name=new_game_title(), play_count=new_small_count())]
         self.summary_calls = 0
         self.titles_calls = 0
         self.titles_for_title_calls = []
@@ -30,88 +70,81 @@ class FakeTrophyClient:
 
     async def trophy_summary(self, online_id=None, account_id=None):
         self.summary_calls += 1
-        return TrophySummary(level=10, progress=50, tier=2, earned=TrophyCounts(gold=1), account_id="123")
+        return self.summary
 
     async def trophy_titles(self, online_id=None, account_id=None, limit=100):
         self.titles_calls += 1
-        return [
-            TrophyTitle(
-                name="Game A",
-                np_communication_id="NPWR1",
-                platforms=("PS5",),
-                progress=50,
-                earned=TrophyCounts(gold=1),
-                defined=TrophyCounts(gold=2),
-            )
-        ]
+        return self.titles
 
     async def trophy_titles_for_title(self, title_ids, online_id=None, account_id=None):
         self.titles_for_title_calls.append((tuple(title_ids), online_id, account_id))
         return []
 
     async def title_trophies(
-        self, np_communication_id, platform, online_id=None, account_id=None, group="all", limit=None
+        self, np_communication_id, platform, online_id=None, account_id=None, group=None, limit=None
     ):
         self.title_trophies_calls.append((np_communication_id, platform, online_id, account_id, group, limit))
-        return [TrophyDetail(trophy_id=1, name="First Blood", detail="Do the thing", earned=True, rarity=42.0)]
+        return self.details
 
     async def trophy_groups(self, np_communication_id, platform, online_id=None, account_id=None):
         self.trophy_groups_calls.append((np_communication_id, platform, online_id, account_id))
-        return TrophyGroups(
-            title_name="Game A",
-            platforms=("PS5",),
-            progress=50,
-            defined=TrophyCounts(gold=2),
-            earned=TrophyCounts(gold=1),
-            groups=(),
-        )
+        return self.groups
 
     async def title_stats(self, online_id=None, account_id=None, limit=200):
         self.title_stats_calls += 1
-        return [TitleStat(title_id="CUSA00419_00", name="Game A", play_count=3)]
+        return self.stats
 
 
 async def test_trophy_summary_calls_through_and_caches():
     client = FakeTrophyClient()
     redis = FakeRedis()
-    cached = CachedTrophyClient(client, redis, ttl_seconds=900)
+    cached = CachedTrophyClient(client, redis)
 
     first = await cached.trophy_summary()
     second = await cached.trophy_summary()
 
-    assert first == second
+    assert first == second == client.summary
     assert client.summary_calls == 1
-    assert redis.set_calls[0][2] == 900
+    assert redis.set_calls[0][2] == DEFAULT_TTL_SECONDS
+
+
+async def test_trophy_summary_honours_a_configured_ttl():
+    ttl_seconds = new_positive_count()
+    redis = FakeRedis()
+
+    await CachedTrophyClient(FakeTrophyClient(), redis, ttl_seconds=ttl_seconds).trophy_summary()
+
+    assert redis.set_calls[0][2] == ttl_seconds
 
 
 async def test_trophy_summary_different_targets_use_different_cache_keys():
     client = FakeTrophyClient()
     cached = CachedTrophyClient(client, FakeRedis())
 
-    await cached.trophy_summary(online_id="Alice")
-    await cached.trophy_summary(online_id="Bob")
+    await cached.trophy_summary(online_id=new_online_id())
+    await cached.trophy_summary(online_id=new_online_id())
 
     assert client.summary_calls == 2
 
 
 async def test_trophy_titles_calls_through_and_caches():
     client = FakeTrophyClient()
-    redis = FakeRedis()
-    cached = CachedTrophyClient(client, redis)
+    cached = CachedTrophyClient(client, FakeRedis())
 
     first = await cached.trophy_titles()
     second = await cached.trophy_titles()
 
-    assert first == second
+    assert first == second == client.titles
     assert client.titles_calls == 1
 
 
 async def test_trophy_titles_different_limits_use_different_cache_keys():
     client = FakeTrophyClient()
     cached = CachedTrophyClient(client, FakeRedis())
+    first_limit = new_positive_count()
 
-    await cached.trophy_titles(limit=10)
-    await cached.trophy_titles(limit=50)
+    await cached.trophy_titles(limit=first_limit)
+    await cached.trophy_titles(limit=first_limit + 1)
 
     assert client.titles_calls == 2
 
@@ -119,46 +152,45 @@ async def test_trophy_titles_different_limits_use_different_cache_keys():
 async def test_trophy_titles_for_title_passes_through_uncached():
     client = FakeTrophyClient()
     redis = FakeRedis()
-    cached = CachedTrophyClient(client, redis)
+    title_id, online_id = new_ps4_title_id(), new_online_id()
 
-    result = await cached.trophy_titles_for_title(["CUSA00419_00"], online_id="Alice")
+    result = await CachedTrophyClient(client, redis).trophy_titles_for_title([title_id], online_id=online_id)
 
     assert result == []
-    assert client.titles_for_title_calls == [(("CUSA00419_00",), "Alice", None)]
+    assert client.titles_for_title_calls == [((title_id,), online_id, None)]
     assert redis.set_calls == []
 
 
 async def test_title_trophies_passes_through_uncached():
     client = FakeTrophyClient()
     redis = FakeRedis()
-    cached = CachedTrophyClient(client, redis)
+    np_communication_id, group, limit = new_np_communication_id(), new_trophy_group_id(), new_positive_count()
 
-    result = await cached.title_trophies("NPWR1", "PS5", group="default", limit=10)
+    result = await CachedTrophyClient(client, redis).title_trophies(np_communication_id, PS5, group=group, limit=limit)
 
-    assert result[0].name == "First Blood"
-    assert client.title_trophies_calls == [("NPWR1", "PS5", None, None, "default", 10)]
+    assert result == client.details
+    assert client.title_trophies_calls == [(np_communication_id, PS5, None, None, group, limit)]
     assert redis.set_calls == []
 
 
 async def test_trophy_groups_passes_through_uncached():
     client = FakeTrophyClient()
     redis = FakeRedis()
-    cached = CachedTrophyClient(client, redis)
+    np_communication_id, account_id = new_np_communication_id(), new_account_id()
 
-    result = await cached.trophy_groups("NPWR1", "PS5", account_id="123")
+    result = await CachedTrophyClient(client, redis).trophy_groups(np_communication_id, PS5, account_id=account_id)
 
-    assert result.title_name == "Game A"
-    assert client.trophy_groups_calls == [("NPWR1", "PS5", None, "123")]
+    assert result == client.groups
+    assert client.trophy_groups_calls == [(np_communication_id, PS5, None, account_id)]
     assert redis.set_calls == []
 
 
 async def test_title_stats_passes_through_uncached():
     client = FakeTrophyClient()
     redis = FakeRedis()
-    cached = CachedTrophyClient(client, redis)
 
-    result = await cached.title_stats(limit=5)
+    result = await CachedTrophyClient(client, redis).title_stats(limit=new_positive_count())
 
-    assert result[0].title_id == "CUSA00419_00"
+    assert result == client.stats
     assert client.title_stats_calls == 1
     assert redis.set_calls == []

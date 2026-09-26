@@ -1,11 +1,13 @@
 from __future__ import annotations
 
-from typing import Annotated
+from typing import Annotated, Final
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 
 from curator.collections.repository import (
+    STORAGE_KIND_M2,
+    STORAGE_KIND_USB,
     CollectionsRepository,
     StorageDevice,
     StorageDeviceKind,
@@ -15,6 +17,13 @@ from curator.deps import require_bearer
 from curator.token_validation import TokenClaims
 
 router = APIRouter(prefix="/storage-devices", tags=["storage-devices"])
+
+STORAGE_DEVICE_NOT_FOUND_DETAIL: Final = "Storage device not found."
+INVALID_STORAGE_DEVICE_KIND_DETAIL: Final = f'kind must be "{STORAGE_KIND_M2}" or "{STORAGE_KIND_USB}".'
+
+
+def unknown_console_detail(console_id: str) -> str:
+    return f"Unknown console_id {console_id!r} for this user."
 
 
 class StorageDeviceRequest(BaseModel):
@@ -87,7 +96,7 @@ def _storage_device_kind(value: str) -> StorageDeviceKind:
     try:
         return storage_device_kind(value)
     except ValueError as exc:
-        raise HTTPException(status_code=400, detail='kind must be "m2" or "usb".') from exc
+        raise HTTPException(status_code=400, detail=INVALID_STORAGE_DEVICE_KIND_DETAIL) from exc
 
 
 async def _require_owned_console(repository: CollectionsRepository, identity_sub: str, console_id: str) -> None:
@@ -95,7 +104,7 @@ async def _require_owned_console(repository: CollectionsRepository, identity_sub
     ``collections_routes.save_collection`` validates a collection's own ``console_id`` before it can be
     used, rather than trusting a foreign key alone to surface the mistake as an opaque 500."""
     if await repository.get_console(identity_sub, console_id) is None:
-        raise HTTPException(status_code=400, detail=f"Unknown console_id {console_id!r} for this user.")
+        raise HTTPException(status_code=400, detail=unknown_console_detail(console_id))
 
 
 @router.post("", status_code=201)
@@ -143,7 +152,7 @@ async def get_storage_device(
     repository: CollectionsRepository = request.app.state.collections_repository
     device = await repository.get_storage_device(claims.sub, device_id)
     if device is None:
-        raise HTTPException(status_code=404, detail="Storage device not found.")
+        raise HTTPException(status_code=404, detail=STORAGE_DEVICE_NOT_FOUND_DETAIL)
     return _to_response(device)
 
 
@@ -163,7 +172,7 @@ async def update_storage_device(
         claims.sub, device_id, name=body.name, capacity_gb=body.capacity_gb, buffer_gb=body.buffer_gb
     )
     if device is None:
-        raise HTTPException(status_code=404, detail="Storage device not found.")
+        raise HTTPException(status_code=404, detail=STORAGE_DEVICE_NOT_FOUND_DETAIL)
     return _to_response(device)
 
 
@@ -178,7 +187,7 @@ async def delete_storage_device(
     repository: CollectionsRepository = request.app.state.collections_repository
     deleted = await repository.delete_storage_device(claims.sub, device_id)
     if not deleted:
-        raise HTTPException(status_code=404, detail="Storage device not found.")
+        raise HTTPException(status_code=404, detail=STORAGE_DEVICE_NOT_FOUND_DETAIL)
 
 
 @router.put("/{device_id}/attach/{console_id}")
@@ -193,7 +202,7 @@ async def attach_storage_device(
     """
     repository: CollectionsRepository = request.app.state.collections_repository
     if await repository.get_storage_device(claims.sub, device_id) is None:
-        raise HTTPException(status_code=404, detail="Storage device not found.")
+        raise HTTPException(status_code=404, detail=STORAGE_DEVICE_NOT_FOUND_DETAIL)
     await _require_owned_console(repository, claims.sub, console_id)
     device = await repository.set_storage_device_attachment(claims.sub, device_id, console_id)
     assert device is not None
@@ -212,7 +221,7 @@ async def detach_storage_device(
     """
     repository: CollectionsRepository = request.app.state.collections_repository
     if await repository.get_storage_device(claims.sub, device_id) is None:
-        raise HTTPException(status_code=404, detail="Storage device not found.")
+        raise HTTPException(status_code=404, detail=STORAGE_DEVICE_NOT_FOUND_DETAIL)
     device = await repository.set_storage_device_attachment(claims.sub, device_id, None)
     assert device is not None
     return _to_response(device)
@@ -228,7 +237,7 @@ async def get_storage_device_installs(
     """
     repository: CollectionsRepository = request.app.state.collections_repository
     if await repository.get_storage_device(claims.sub, device_id) is None:
-        raise HTTPException(status_code=404, detail="Storage device not found.")
+        raise HTTPException(status_code=404, detail=STORAGE_DEVICE_NOT_FOUND_DETAIL)
     game_ids = await repository.list_storage_device_installed_game_ids(device_id)
     return StorageDeviceInstallsResponse(game_ids=sorted(game_ids))
 
@@ -257,7 +266,7 @@ async def set_storage_device_install(
     collections_repository: CollectionsRepository = request.app.state.collections_repository
     device = await collections_repository.get_storage_device(claims.sub, device_id)
     if device is None:
-        raise HTTPException(status_code=404, detail="Storage device not found.")
+        raise HTTPException(status_code=404, detail=STORAGE_DEVICE_NOT_FOUND_DETAIL)
 
     await collections_repository.set_storage_device_install(device_id, game_id, body.installed)
     return StorageDeviceInstallResponse(device_id=device_id, game_id=game_id, installed=body.installed)

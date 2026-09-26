@@ -16,15 +16,19 @@ of what the real SQL does.
 
 from __future__ import annotations
 
+import random
 from random import randint
+from typing import get_args
 from uuid import uuid4
 
 from fastapi.testclient import TestClient
 
+from curator import collections_routes, enrichment_keys_routes, psn_routes
 from curator.app import create_app
 from curator.collections.collection_orchestrator import CollectionResult
 from curator.collections.game_candidate import GameCandidate
-from curator.collections.repository import CollectionsRepository
+from curator.collections.repository import STORAGE_KIND_USB, CollectionsRepository
+from curator.enrichment_keys_routes import Provider
 from curator.persistence.crypto import TokenCrypto
 from test_collections_repository import FakePool
 from test_collections_routes import FakeCatalogRepository, FakeOrchestrator, _definition
@@ -42,6 +46,7 @@ from test_routes import (
     _bearer,
     _claims,
     _make_settings,
+    _path,
     _seed_link,
 )
 
@@ -97,7 +102,10 @@ def test_a_collection_run_never_writes_console_or_storage_device_install_state()
     client = TestClient(app)
     validator.register("token-a", _claims(sub=definition.identity_sub))
 
-    response = client.post(f"/collections/{definition.definition_id}/runs", headers=_bearer("token-a"))
+    response = client.post(
+        _path(client, collections_routes.run_definition, definition_id=definition.definition_id),
+        headers=_bearer("token-a"),
+    )
 
     assert response.status_code == 201
     assert collections_repository.set_console_install_calls == []
@@ -136,7 +144,10 @@ def test_deleting_an_enrichment_key_does_not_reverify_the_psn_link():
     )
     client = TestClient(app)
 
-    response = client.delete("/me/enrichment-keys/rawg", headers=_bearer("valid-token"))
+    response = client.delete(
+        _path(client, enrichment_keys_routes.delete_enrichment_key, provider=random.choice(get_args(Provider))),
+        headers=_bearer("valid-token"),
+    )
 
     assert response.status_code == 204
     assert agent_factory.calls == []
@@ -164,7 +175,7 @@ def test_unlinking_psn_does_reverify_the_link_unlike_deleting_a_key():
     )
     client = TestClient(app)
 
-    response = client.delete("/psn/link", headers=_bearer("valid-token"))
+    response = client.delete(_path(client, psn_routes.psn_unlink), headers=_bearer("valid-token"))
 
     assert response.status_code == 204
     assert agent_factory.calls == [(sub, None)]
@@ -175,7 +186,7 @@ async def test_moving_a_storage_device_between_consoles_touches_only_the_storage
     device_id = f"device-{uuid4()}"
     console_id = f"console-{uuid4()}"
     capacity_gb = float(randint(100, 2000))
-    pool = FakePool(fetchone_results=[(device_id, console_id, "Drive", "usb", capacity_gb, 0.0)])
+    pool = FakePool(fetchone_results=[(device_id, console_id, "Drive", STORAGE_KIND_USB, capacity_gb, 0.0)])
     repo = CollectionsRepository(pool)
 
     device = await repo.set_storage_device_attachment(identity_sub, device_id, console_id)

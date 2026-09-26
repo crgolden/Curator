@@ -14,8 +14,8 @@
 -- own shape rather than a growing history: the previous measurement is genuinely superseded, not kept for
 -- trend analysis, so there is nothing a second row for the same key would preserve that an UPDATE doesn't.
 --
--- recorded_by is an accountability trail, not ownership -- "any authenticated user may write" (WP13's
--- settled design, see AGENTS/PARKING_LOT.md) means this is catalog-wide contributed data, the same trust
+-- recorded_by is an accountability trail, not ownership -- any authenticated user may write, which
+-- makes this catalog-wide contributed data, the same trust
 -- model as a RAWG/OpenCritic API key contribution. It is therefore ON DELETE SET NULL, not CASCADE: a
 -- contributor deleting their account must not silently delete a measured size every other owner's
 -- capacity_fill collections may already be sized against.

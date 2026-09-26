@@ -1,32 +1,40 @@
 from __future__ import annotations
 
-import logging
 import re
 from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from pydantic import BaseModel
 
-from curator.audit.repository import ACTION_FOLLOWED, ACTION_UNFOLLOWED, AccountActionLogRepository
-from curator.collections.repository import CollectionsRepository
+from curator.audit.recorded import recorded, request_recorder
+from curator.audit.repository import (
+    ACTION_FOLLOWED,
+    ACTION_PROFILE_LOOKUP,
+    ACTION_UNFOLLOWED,
+    OUTCOME_FAILED,
+    AccountActionLogRepository,
+)
+from curator.collections.repository import VISIBILITY_PUBLIC, CollectionsRepository
 from curator.deps import require_bearer
 from curator.library.repository import LibraryRepository, LibrarySortField
 from curator.library_routes import LibraryGenresResponse
 from curator.persistence.follow_repository import FollowEdge, FollowRepository
-from curator.persistence.profile_link_repository import ProfileLink, ProfileLinkRepository
+from curator.persistence.profile_link_repository import ProfileLink, ProfileLinkRepository, profile_link_url
 from curator.persistence.profile_repository import ProfileRepository, ProfileSettings
 from curator.persistence.repository import LinkRecord, Repository
 from curator.psn.errors import PsnAuthError
 from curator.psn.models import TrophyCounts
 from curator.psn.social_client import SocialClientFactory
 from curator.psn.trophy_client import TrophyClientFactory
+from curator.query_params import SORT_DIR_PARAM
 from curator.token_validation import TokenClaims
 from curator.trophy_routes import TrophyCountsResponse
 
 router = APIRouter(tags=["profile"])
-logger = logging.getLogger("curator")
 
 _USER_NOT_FOUND_DETAIL = "User not found."
+_TROPHIES_LOOKUP = "trophies"
+_IDENTITY_LOOKUP = "identity"
 
 _HANDLE_PATTERN = re.compile(r"[A-Za-z0-9_-]{3,16}")
 
@@ -273,7 +281,7 @@ async def set_my_profile_link(
         site_key=site.site_key,
         display_name=site.display_name,
         handle=handle,
-        url=site.url_template.replace("{handle}", handle),
+        url=profile_link_url(site.url_template, handle),
     )
 
 
@@ -408,11 +416,14 @@ async def _cross_user_trophies(
         return None
 
     trophy_client_factory: TrophyClientFactory = request.app.state.trophy_client_factory
-    try:
-        viewer_client = await trophy_client_factory(claims.sub)
-        summary = await viewer_client.trophy_summary(account_id=target_link.psn_account_id)
-    except (RuntimeError, PsnAuthError):
-        return None
+    async with recorded(request_recorder(request), claims.sub, ACTION_PROFILE_LOOKUP, _TROPHIES_LOOKUP) as entry:
+        try:
+            viewer_client = await trophy_client_factory(claims.sub)
+            summary = await viewer_client.trophy_summary(account_id=target_link.psn_account_id)
+        except (RuntimeError, PsnAuthError) as exc:
+            entry.outcome = OUTCOME_FAILED
+            entry.detail = f"{_TROPHIES_LOOKUP} {type(exc).__name__}"
+            return None
     return ProfileTrophySummaryResponse(level=summary.level, tier=summary.tier, earned=_counts_response(summary.earned))
 
 
@@ -441,11 +452,14 @@ async def _cross_user_identity(
         return None
 
     social_client_factory: SocialClientFactory = request.app.state.social_client_factory
-    try:
-        viewer_client = await social_client_factory(claims.sub)
-        online_id = await viewer_client.online_id(target_link.psn_account_id)
-    except (RuntimeError, PsnAuthError):
-        return None
+    async with recorded(request_recorder(request), claims.sub, ACTION_PROFILE_LOOKUP, _IDENTITY_LOOKUP) as entry:
+        try:
+            viewer_client = await social_client_factory(claims.sub)
+            online_id = await viewer_client.online_id(target_link.psn_account_id)
+        except (RuntimeError, PsnAuthError) as exc:
+            entry.outcome = OUTCOME_FAILED
+            entry.detail = f"{_IDENTITY_LOOKUP} {type(exc).__name__}"
+            return None
     if online_id is None:
         return None
     return ProfileIdentityResponse(online_id=online_id)
@@ -469,9 +483,8 @@ async def follow_user(sub: str, request: Request, claims: Annotated[TokenClaims,
         raise HTTPException(status_code=400, detail="Cannot follow yourself.")
 
     follow_repository: FollowRepository = request.app.state.follow_repository
-    await follow_repository.follow(claims.sub, sub)
-
-    await _log(request, claims.sub, ACTION_FOLLOWED, sub)
+    async with recorded(request_recorder(request), claims.sub, ACTION_FOLLOWED, sub):
+        await follow_repository.follow(claims.sub, sub)
     return Response(status_code=204)
 
 
@@ -487,7 +500,8 @@ async def unfollow_user(
     follow_repository: FollowRepository = request.app.state.follow_repository
     removed = await follow_repository.unfollow(claims.sub, sub)
     if removed:
-        await _log(request, claims.sub, ACTION_UNFOLLOWED, sub)
+        audit_repository: AccountActionLogRepository = request.app.state.audit_repository
+        await audit_repository.log(claims.sub, ACTION_UNFOLLOWED, sub)
     return Response(status_code=204)
 
 
@@ -580,7 +594,7 @@ async def get_user_library(
     q: str | None = Query(default=None),
     genre: str | None = Query(default=None),
     sort: LibrarySortField = Query(default="title"),
-    sort_dir: Literal["asc", "desc"] = Query(default="asc", alias="sortDir"),
+    sort_dir: Literal["asc", "desc"] = Query(default="asc", alias=SORT_DIR_PARAM),
     limit: int = Query(default=20, ge=1, le=100),
     offset: int = Query(default=0, ge=0),
 ) -> ProfileLibraryPageResponse:
@@ -649,7 +663,7 @@ async def get_user_collections(
             item_count=definition.item_count,
         )
         for definition in definitions
-        if viewer_is_owner or definition.visibility == "public"
+        if viewer_is_owner or definition.visibility == VISIBILITY_PUBLIC
     ]
 
 
@@ -689,16 +703,3 @@ def _settings_response(settings: ProfileSettings) -> ProfileSettingsResponse:
         show_trophies=settings.show_trophies,
         show_identity=settings.show_identity,
     )
-
-
-async def _log(request: Request, sub: str, action: str, detail: str) -> None:
-    """Write one audit entry -- the other user's sub only, never PSN data.
-
-    Never lets a logging failure break the user-facing request, matching ``curator.enrichment_keys_routes``
-    ``_log`` precedent.
-    """
-    audit_repository: AccountActionLogRepository = request.app.state.audit_repository
-    try:
-        await audit_repository.log(sub, action, detail)
-    except Exception:
-        logger.exception("Failed to write account_action_log entry (sub=%s, action=%s)", sub, action)

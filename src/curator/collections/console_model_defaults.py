@@ -9,6 +9,8 @@ from.
 
 from __future__ import annotations
 
+from curator.psn.title_platform import PS4, PS5
+
 MODEL_CAPACITY_GB: dict[str, float] = {
     "PS5 Digital Edition": 667.0,
     "PS5 Disc Edition": 667.0,
@@ -22,8 +24,8 @@ MODEL_CAPACITY_GB: dict[str, float] = {
     "PS4 Pro": 850.0,
 }
 
-_PLATFORM_FALLBACK_GB: dict[str, float] = {"PS5": 667.0, "PS4": 430.0}
-_UNKNOWN_PLATFORM_FALLBACK_GB = 500.0
+PLATFORM_FALLBACK_GB: dict[str, float] = {PS5: 667.0, PS4: 430.0}
+UNKNOWN_PLATFORM_FALLBACK_GB = 500.0
 
 
 def default_capacity_gb(platform: str, model: str | None) -> tuple[float, bool]:
@@ -39,4 +41,4 @@ def default_capacity_gb(platform: str, model: str | None) -> tuple[float, bool]:
     """
     if model is not None and model in MODEL_CAPACITY_GB:
         return MODEL_CAPACITY_GB[model], True
-    return _PLATFORM_FALLBACK_GB.get(platform, _UNKNOWN_PLATFORM_FALLBACK_GB), False
+    return PLATFORM_FALLBACK_GB.get(platform, UNKNOWN_PLATFORM_FALLBACK_GB), False

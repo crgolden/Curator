@@ -12,10 +12,18 @@ import uuid
 
 import pytest
 
-from curator.catalog.content_kind import BROWSABLE_KIND_SQL, EVERY_KIND
+from curator.catalog.content_kind import BROWSABLE_KIND_SQL, EVERY_KIND, GAME_KIND
 from curator.catalog.cover_art import SQUARE_COVER_ART_SQL
-from curator.catalog.repository import GAME_UPSERT_ADVISORY_LOCK_CLASS, CatalogRepository
-from curator.psn.store_client import StorePrice, StoreProduct
+from curator.catalog.repository import (
+    EDITION_KEYWORDS_SQL,
+    GAME_UPSERT_ADVISORY_LOCK_CLASS,
+    LINK_STORE_CONCEPT_SQL,
+    CatalogRepository,
+)
+from curator.psn._product_node import BASE_PRICE_KEY, ID_KEY, IS_FREE_KEY, NP_TITLE_ID_KEY, PRICE_KEY
+from curator.psn.store_client import FULL_GAME_CLASSIFICATION, StorePrice, StoreProduct
+from curator.psn.title_platform import PS4
+from test_values import new_game_title, new_non_game_kind, new_price_cents, new_ps4_title_id, new_store_product_id
 
 
 class FakeCursor:
@@ -156,11 +164,13 @@ async def test_browsing_one_kind_selects_exactly_that_kind():
     pool = FakePool(fetchone_results=[(0,)], fetchall_results=[[]])
     repo = CatalogRepository(pool)
 
-    await repo.list_games(kind="media_app")
+    kind = new_non_game_kind()
+
+    await repo.list_games(kind=kind)
 
     count_sql, count_params = pool.connections[0].executed[0]
     assert "g.content_kind = %s" in count_sql
-    assert count_params == ("media_app",)
+    assert count_params == (kind,)
 
 
 async def test_browsing_by_price_puts_unpriced_games_last_in_either_direction():
@@ -192,6 +202,13 @@ async def test_browsing_joins_the_most_recently_walked_price():
     assert "ORDER BY pcc.price_fetched_at DESC LIMIT 1" in select_sql
 
 
+def _statement(pool, fragment):
+    for sql, params in pool.connections[0].executed:
+        if fragment in sql:
+            return sql, params
+    raise AssertionError(f"no executed statement contained {fragment}")
+
+
 async def test_backfill_writes_the_parsed_price_and_stamps_when_it_was_fetched():
     base_cents, discounted_cents = uuid.uuid4().int % 9999 + 1, uuid.uuid4().int % 9999 + 1
     product = StoreProduct(
@@ -200,7 +217,7 @@ async def test_backfill_writes_the_parsed_price_and_stamps_when_it_was_fetched()
         platforms=("PS4",),
         np_title_id="CUSA00207_00",
         cover_image_url=None,
-        classification="Full Game",
+        classification=FULL_GAME_CLASSIFICATION,
         price=StorePrice(
             is_free=False,
             tied_to_subscription=True,
@@ -214,7 +231,7 @@ async def test_backfill_writes_the_parsed_price_and_stamps_when_it_was_fetched()
 
     await repo.backfill_store_products([product])
 
-    cache_sql, cache_params = pool.connections[0].executed[1]
+    cache_sql, cache_params = _statement(pool, "INSERT INTO psn_catalog_cache")
     assert "price_fetched_at" in cache_sql
     assert cache_params is not None
     assert cache_params[5:] == (False, True, base_cents, discounted_cents, "-50%", True)
@@ -227,14 +244,14 @@ async def test_backfill_without_a_price_node_leaves_a_stored_price_alone():
         platforms=("PS4",),
         np_title_id="CUSA00207_00",
         cover_image_url=None,
-        classification="Full Game",
+        classification=FULL_GAME_CLASSIFICATION,
     )
     pool = FakePool(fetchone_results=[("game-1",)])
     repo = CatalogRepository(pool)
 
     await repo.backfill_store_products([product])
 
-    cache_sql, cache_params = pool.connections[0].executed[1]
+    cache_sql, cache_params = _statement(pool, "INSERT INTO psn_catalog_cache")
     assert cache_params is not None
     assert cache_params[-1] is False, "no price node means price_fetched_at stays what it was"
     assert "COALESCE(EXCLUDED.price_fetched_at, psn_catalog_cache.price_fetched_at)" in cache_sql
@@ -257,14 +274,19 @@ async def test_backfill_keeps_the_whole_product_node_the_walk_already_paid_for()
     """_to_product projected six fields and dropped price, sortingOptions, skus and the sibling concepts
     collection -- out of a response POST /catalog/backfill already makes. Recovering any of them later
     costs a second full walk of a live, shifting collection, so the node is persisted whole."""
-    node = {"id": "P1", "npTitleId": "CUSA00207_00", "price": {"basePrice": "$19.99", "isFree": False}}
+    product_id, title_id = new_store_product_id(), new_ps4_title_id()
+    node = {
+        ID_KEY: product_id,
+        NP_TITLE_ID_KEY: title_id,
+        PRICE_KEY: {BASE_PRICE_KEY: f"${new_price_cents() / 100:.2f}", IS_FREE_KEY: False},
+    }
     product = StoreProduct(
-        product_id="P1",
-        name="Bloodborne",
-        platforms=("PS4",),
-        np_title_id="CUSA00207_00",
+        product_id=product_id,
+        name=new_game_title(),
+        platforms=(PS4,),
+        np_title_id=title_id,
         cover_image_url="cover.jpg",
-        classification="Full Game",
+        classification=FULL_GAME_CLASSIFICATION,
         raw=node,
     )
     pool = FakePool(fetchone_results=[("game-1",)])
@@ -272,7 +294,7 @@ async def test_backfill_keeps_the_whole_product_node_the_walk_already_paid_for()
 
     await repo.backfill_store_products([product])
 
-    cache_sql, cache_params = pool.connections[0].executed[1]
+    cache_sql, cache_params = _statement(pool, "INSERT INTO psn_catalog_cache")
     assert "INSERT INTO psn_catalog_cache" in cache_sql
     assert cache_params is not None
     stored_raw = cache_params[4]
@@ -286,15 +308,76 @@ async def test_backfill_never_blanks_a_stored_payload_with_an_empty_one():
         platforms=("PS4",),
         np_title_id="CUSA00207_00",
         cover_image_url=None,
-        classification="Full Game",
+        classification=FULL_GAME_CLASSIFICATION,
     )
     pool = FakePool(fetchone_results=[("game-1",)])
     repo = CatalogRepository(pool)
 
     await repo.backfill_store_products([product])
 
-    cache_sql, _params = pool.connections[0].executed[1]
+    cache_sql, _params = _statement(pool, "INSERT INTO psn_catalog_cache")
     assert "raw = CASE WHEN EXCLUDED.raw = '{}'::jsonb THEN psn_catalog_cache.raw ELSE EXCLUDED.raw END" in cache_sql
+
+
+async def test_backfill_takes_the_shared_game_upsert_lock():
+    title = f"Ghost of {uuid.uuid4().hex}"
+    product = StoreProduct(
+        product_id=str(uuid.uuid4()),
+        name=title,
+        platforms=("PS4",),
+        np_title_id=None,
+        cover_image_url=None,
+        classification=FULL_GAME_CLASSIFICATION,
+    )
+    pool = FakePool(fetchone_results=[(str(uuid.uuid4()),)])
+    repo = CatalogRepository(pool)
+
+    await repo.backfill_store_products([product])
+
+    lock_sql, lock_params = _statement(pool, "pg_advisory_xact_lock")
+    assert "pg_advisory_xact_lock" in lock_sql
+    assert lock_params == (GAME_UPSERT_ADVISORY_LOCK_CLASS, title.lower())
+
+
+async def test_backfill_opens_a_game_enrichment_row_so_the_catalog_pass_reaches_the_game():
+    product = StoreProduct(
+        product_id=str(uuid.uuid4()),
+        name=f"Ghost of {uuid.uuid4().hex}",
+        platforms=("PS4",),
+        np_title_id=None,
+        cover_image_url=None,
+        classification=FULL_GAME_CLASSIFICATION,
+    )
+    game_id = str(uuid.uuid4())
+    pool = FakePool(fetchone_results=[None, (game_id,)])
+    repo = CatalogRepository(pool)
+
+    await repo.backfill_store_products([product])
+
+    enrichment_sql, enrichment_params = _statement(pool, "INSERT INTO game_enrichment")
+    assert "ON CONFLICT (game_id) DO NOTHING" in enrichment_sql
+    assert enrichment_params == (game_id,)
+
+
+async def test_backfill_fills_a_walked_cover_into_a_game_that_has_none():
+    cover = f"https://image.api.playstation.com/{uuid.uuid4().hex}.png"
+    product = StoreProduct(
+        product_id=str(uuid.uuid4()),
+        name=f"Ghost of {uuid.uuid4().hex}",
+        platforms=("PS4",),
+        np_title_id=None,
+        cover_image_url=cover,
+        classification=FULL_GAME_CLASSIFICATION,
+    )
+    game_id = str(uuid.uuid4())
+    pool = FakePool(fetchone_results=[(game_id,)])
+    repo = CatalogRepository(pool)
+
+    await repo.backfill_store_products([product])
+
+    fill_sql, fill_params = _statement(pool, "store_cover_image_url IS NULL")
+    assert "UPDATE games SET store_cover_image_url" in fill_sql
+    assert fill_params == (cover, game_id)
 
 
 async def test_title_id_for_game_prefers_the_most_recently_fetched_row():
@@ -418,7 +501,7 @@ async def test_linking_a_store_concept_writes_the_concept_row_and_fills_only_an_
 
     executed = pool.connections[0].executed
     assert "INSERT INTO game_concepts" in executed[0][0]
-    assert "ON CONFLICT (concept_id) DO NOTHING" in executed[0][0]
+    assert "ON CONFLICT DO NOTHING" in executed[0][0]
     assert executed[0][1] == (concept_id, game_id, product_id)
     assert "store_cover_image_url IS NULL" in executed[1][0]
     assert executed[1][1] == (cover, game_id)
@@ -447,10 +530,10 @@ async def test_admitting_a_store_title_creates_the_game_its_concept_and_an_enric
 
     assert (game_id, created) == (expected_game_id, True)
     statements = [sql for sql, _params in pool.connections[0].executed]
-    assert "INSERT INTO games" in statements[3]
-    assert "INSERT INTO game_concepts" in statements[4]
-    assert "INSERT INTO game_enrichment" in statements[5]
-    assert pool.connections[0].executed[4][1] == (concept_id, expected_game_id, product_id)
+    assert "INSERT INTO games" in statements[4]
+    assert "INSERT INTO game_concepts" in statements[5]
+    assert "INSERT INTO game_enrichment" in statements[6]
+    assert pool.connections[0].executed[5][1] == (concept_id, expected_game_id, product_id)
 
 
 async def test_admitting_a_store_title_keeps_the_cover_the_search_already_returned():
@@ -468,7 +551,7 @@ async def test_admitting_a_store_title_keeps_the_cover_the_search_already_return
         cover_image_url=cover,
     )
 
-    insert_sql, insert_params = pool.connections[0].executed[3]
+    insert_sql, insert_params = pool.connections[0].executed[4]
     assert insert_params is not None
     assert "INSERT INTO games" in insert_sql
     assert "store_cover_image_url" in insert_sql
@@ -549,6 +632,98 @@ async def test_admitting_a_title_whose_concept_is_already_mapped_writes_nothing_
     assert not any("INSERT" in sql for sql in statements)
 
 
+async def test_admitting_a_title_whose_concept_is_mapped_looks_the_concept_up_together_with_its_name():
+    """A concept is not a product: the same concept can hold a game and its soundtrack app, so the concept
+    alone cannot say which game a hit is."""
+    concept_id = str(uuid.uuid4().int)[:6]
+    title = f"Ghost of {uuid.uuid4().hex}"
+    pool = FakePool(fetchone_results=[(str(uuid.uuid4()),)])
+    repo = CatalogRepository(pool)
+
+    await repo.admit_store_game(concept_id=concept_id, name=title)
+
+    lookup_sql, lookup_params = pool.connections[0].executed[1]
+    assert "FROM game_concepts" in lookup_sql
+    assert "normalized_title = %s" in lookup_sql
+    assert lookup_params == (concept_id, title.lower())
+
+
+async def test_admitting_a_differently_named_product_under_a_held_concept_creates_its_own_game():
+    expected_game_id = str(uuid.uuid4())
+    pool = FakePool(fetchone_results=[None, None, (expected_game_id,)])
+    repo = CatalogRepository(pool)
+
+    game_id, created = await repo.admit_store_game(
+        concept_id=str(uuid.uuid4().int)[:6], name=f"Ghost of {uuid.uuid4().hex} Official Soundtrack"
+    )
+
+    assert (game_id, created) == (expected_game_id, True)
+    statements = [sql for sql, _params in pool.connections[0].executed]
+    assert any("INSERT INTO games" in sql for sql in statements)
+    assert any("INSERT INTO game_concepts" in sql for sql in statements)
+
+
+async def test_admitting_an_edition_of_a_product_a_shared_concept_holds_reuses_that_products_game():
+    """Functions groups a concept's entitlements by their edition family, so a Store hit that names the
+    base edition of a product already under the concept is that product, not a third row."""
+    concept_id = str(uuid.uuid4().int)[:6]
+    base_title = f"ghost of {uuid.uuid4().hex}"
+    edition_keyword = f"{uuid.uuid4().hex[:8]} edition"
+    game_game_id = str(uuid.uuid4())
+    soundtrack_game_id = str(uuid.uuid4())
+    siblings = [
+        (game_game_id, f"{base_title} {edition_keyword}"),
+        (soundtrack_game_id, f"{base_title} official soundtrack"),
+    ]
+    pool = FakePool(fetchone_results=[None], fetchall_results=[siblings, [(edition_keyword,)]])
+    repo = CatalogRepository(pool)
+
+    game_id, created = await repo.admit_store_game(concept_id=concept_id, name=base_title.title())
+
+    assert (game_id, created) == (game_game_id, False)
+    statements = [sql for sql, _params in pool.connections[0].executed]
+    assert statements[2].strip().startswith("SELECT gc.game_id, g.normalized_title")
+    assert statements[3] == EDITION_KEYWORDS_SQL
+    assert not any("INSERT" in sql for sql in statements)
+
+
+async def test_admitting_a_name_no_sibling_family_matches_falls_through_to_the_title_lookup():
+    concept_id = str(uuid.uuid4().int)[:6]
+    expected_game_id = str(uuid.uuid4())
+    siblings = [
+        (str(uuid.uuid4()), f"ghost of {uuid.uuid4().hex}"),
+        (str(uuid.uuid4()), f"ghost of {uuid.uuid4().hex}"),
+    ]
+    pool = FakePool(
+        fetchone_results=[None, None, (expected_game_id,)],
+        fetchall_results=[siblings, [(f"{uuid.uuid4().hex[:8]} edition",)]],
+    )
+    repo = CatalogRepository(pool)
+
+    game_id, created = await repo.admit_store_game(concept_id=concept_id, name=f"Ghost of {uuid.uuid4().hex}")
+
+    assert (game_id, created) == (expected_game_id, True)
+    statements = [sql for sql, _params in pool.connections[0].executed]
+    assert any("INSERT INTO games" in sql for sql in statements)
+
+
+async def test_admitting_under_a_concept_that_holds_no_game_never_reads_the_edition_keywords():
+    pool = FakePool(fetchone_results=[None, None, (str(uuid.uuid4()),)])
+    repo = CatalogRepository(pool)
+
+    await repo.admit_store_game(concept_id=str(uuid.uuid4().int)[:6], name=f"Ghost of {uuid.uuid4().hex}")
+
+    statements = [sql for sql, _params in pool.connections[0].executed]
+    assert EDITION_KEYWORDS_SQL not in statements
+
+
+async def test_linking_a_store_concept_names_no_conflict_target():
+    """The link must hold under both the old single-column key and 0072's (concept_id, game_id) key, since
+    the Functions writer and this migration cannot deploy at the same instant."""
+    assert "ON CONFLICT DO NOTHING" in LINK_STORE_CONCEPT_SQL
+    assert "ON CONFLICT (" not in LINK_STORE_CONCEPT_SQL
+
+
 async def test_admitting_a_title_the_catalog_already_holds_by_name_reuses_that_game():
     existing_game_id = str(uuid.uuid4())
     pool = FakePool(fetchone_results=[None, (existing_game_id,)])
@@ -576,9 +751,9 @@ async def test_admitting_a_store_title_keys_it_the_way_a_library_refresh_would()
     lock_sql, lock_params = executed[0]
     assert "pg_advisory_xact_lock" in lock_sql
     assert lock_params == (GAME_UPSERT_ADVISORY_LOCK_CLASS, title.lower())
-    _lookup_sql, lookup_params = executed[2]
+    _lookup_sql, lookup_params = executed[3]
     assert lookup_params == (title.lower(),)
-    _insert_sql, insert_params = executed[3]
+    _insert_sql, insert_params = executed[4]
     assert insert_params == (title, title.lower(), None)
 
 
@@ -597,19 +772,18 @@ async def test_backfill_keys_a_store_product_the_way_a_library_refresh_would():
         platforms=("PS4",),
         np_title_id="CUSA00207_00",
         cover_image_url=None,
-        classification="Full Game",
+        classification=FULL_GAME_CLASSIFICATION,
     )
     pool = FakePool(fetchone_results=[None, ("game-1",)])
     repo = CatalogRepository(pool)
 
     await repo.backfill_store_products([product])
 
-    executed = pool.connections[0].executed
-    _lookup_sql, lookup_params = executed[0]
+    _lookup_sql, lookup_params = _statement(pool, "SELECT game_id FROM games WHERE normalized_title")
     assert lookup_params == (title.lower(),)
-    insert_sql, insert_params = executed[1]
+    insert_sql, insert_params = _statement(pool, "INSERT INTO games")
     assert "INSERT INTO games" in insert_sql
-    assert insert_params == (title, title.lower())
+    assert insert_params == (title, title.lower(), GAME_KIND, None)
 
 
 async def test_admitting_a_store_title_leaves_rawg_attempted_at_unset():
@@ -620,7 +794,7 @@ async def test_admitting_a_store_title_leaves_rawg_attempted_at_unset():
 
     await repo.admit_store_game(concept_id=str(uuid.uuid4().int)[:6], name=f"Ghost of {uuid.uuid4().hex}")
 
-    enrichment_sql, _params = pool.connections[0].executed[5]
+    enrichment_sql, _params = pool.connections[0].executed[6]
     assert "rawg_attempted_at" not in enrichment_sql
     assert "ON CONFLICT (game_id) DO NOTHING" in enrichment_sql
 

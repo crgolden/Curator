@@ -2,10 +2,22 @@
 
 from __future__ import annotations
 
+from typing import get_args
 from uuid import uuid4
 
+import pytest
+
 from curator.catalog.cover_art import SQUARE_COVER_ART_SQL
-from curator.library.repository import _OWNED_PLATFORMS_SQL, HIDDEN_REASON, LibraryRepository
+from curator.library.repository import (
+    _OWNED_PLATFORMS_SQL,
+    _SORT_COLUMNS,
+    HIDDEN_REASON,
+    TROPHY_MATCHED,
+    TROPHY_NOT_ATTEMPTED,
+    TROPHY_UNMATCHED,
+    LibraryRepository,
+    LibrarySortField,
+)
 
 
 class FakeCursor:
@@ -130,8 +142,8 @@ async def test_list_entries_with_enrichment_maps_rows_and_total():
     assert total == 2
     assert len(games) == 2
     assert games[0].game_id == "game-1"
-    assert games[0].trophy_match == "matched"
-    assert games[1].trophy_match == "not_attempted"
+    assert games[0].trophy_match == TROPHY_MATCHED
+    assert games[1].trophy_match == TROPHY_NOT_ATTEMPTED
     assert games[0].genre == "Action RPG"
     assert games[0].rawg_rating == 96.0
     assert games[0].opencritic_rating == 94.0
@@ -196,7 +208,7 @@ async def test_list_entries_with_enrichment_reports_psn_enriched_from_the_column
     assert "COALESCE(ge.psn_enriched, false)" in select_sql
     assert games[0].psn_rating is None
     assert games[0].psn_enriched is True
-    assert games[0].trophy_match == "unmatched", "a refresh tried and matched nothing"
+    assert games[0].trophy_match == TROPHY_UNMATCHED, "a refresh tried and matched nothing"
 
 
 async def test_list_entries_leaves_hidden_games_out_by_default():
@@ -293,25 +305,19 @@ async def test_list_entries_with_enrichment_rejects_unknown_sort_field():
     raise AssertionError("expected a KeyError for an unknown sort field")
 
 
-async def test_list_entries_with_enrichment_orders_by_sort_column_nulls_last():
+def test_the_sort_allow_list_covers_exactly_the_declared_sort_fields():
+    assert set(_SORT_COLUMNS) == set(get_args(LibrarySortField))
+
+
+@pytest.mark.parametrize("sort", get_args(LibrarySortField))
+async def test_list_entries_with_enrichment_orders_by_sort_column_nulls_last(sort):
     pool = FakePool(fetchone_results=[(0,)], fetchall_results=[[]])
     repo = LibraryRepository(pool)
 
-    await repo.list_entries_with_enrichment("sub-1", sort="psn_rating", sort_dir="desc")
+    await repo.list_entries_with_enrichment("sub-1", sort=sort, sort_dir="desc")
 
     select_sql, _ = pool.connections[0].executed[1]
-    assert "ORDER BY ge.psn_rating DESC NULLS LAST, g.canonical_title ASC" in select_sql
-
-
-async def test_list_entries_with_enrichment_sorts_by_percent_completed():
-    pool = FakePool(fetchone_results=[(0,)], fetchall_results=[[]])
-    repo = LibraryRepository(pool)
-
-    await repo.list_entries_with_enrichment("sub-1", sort="percent_completed", sort_dir="desc")
-
-    select_sql, _ = pool.connections[0].executed[1]
-    assert "ORDER BY le.trophy_percent_completed DESC NULLS LAST, g.canonical_title ASC" in select_sql
-    assert "cover_image_url" in select_sql
+    assert f"ORDER BY {_SORT_COLUMNS[sort]} DESC NULLS LAST, g.canonical_title ASC" in select_sql
 
 
 async def test_list_entries_with_enrichment_reads_platforms_as_a_scalar_subquery():

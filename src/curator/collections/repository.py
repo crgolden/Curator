@@ -18,7 +18,7 @@ import secrets
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any, Literal
+from typing import Any, Final, Literal
 
 from psycopg_pool import AsyncConnectionPool
 
@@ -31,7 +31,17 @@ from curator.psn.title_platform import ConsolePlatform
 CollectionItemSortField = Literal["rank", "title", "critical_score", "oc_score", "psn_rating"]
 StorageDeviceKind = Literal["m2", "usb"]
 
-_STORAGE_DEVICE_KINDS: dict[str, StorageDeviceKind] = {"m2": "m2", "usb": "usb"}
+VISIBILITY_PRIVATE: Final = "private"
+VISIBILITY_UNLISTED: Final = "unlisted"
+VISIBILITY_PUBLIC: Final = "public"
+VISIBILITIES: Final = (VISIBILITY_PRIVATE, VISIBILITY_UNLISTED, VISIBILITY_PUBLIC)
+
+STORAGE_KIND_M2: Final[StorageDeviceKind] = "m2"
+STORAGE_KIND_USB: Final[StorageDeviceKind] = "usb"
+_STORAGE_DEVICE_KINDS: dict[str, StorageDeviceKind] = {
+    STORAGE_KIND_M2: STORAGE_KIND_M2,
+    STORAGE_KIND_USB: STORAGE_KIND_USB,
+}
 
 
 def storage_device_kind(value: str) -> StorageDeviceKind:
@@ -162,7 +172,7 @@ class CollectionDefinition:
     include_inactive: bool = False
     min_percent_completed: int | None = None
     filter_predicate: FilterPredicate | None = None
-    visibility: str = "private"
+    visibility: str = VISIBILITY_PRIVATE
     share_slug: str | None = None
     item_count: int = 0
     exclude_installed_on: tuple[str, ...] = ()
@@ -763,7 +773,11 @@ class CollectionsRepository:
             id that is not one of ``identity_sub``'s own consoles is ignored rather than honoured.
         :param include_non_games: Keep entries whose ``games.content_kind`` says they are not games.
         """
-        size_platform_sql = "CASE WHEN le.native_ps5 THEN 'PS5' ELSE 'PS4' END"
+        size_platform_sql = """CASE WHEN EXISTS (
+                               SELECT 1 FROM library_entry_platforms owned
+                               WHERE owned.identity_sub = le.identity_sub AND owned.game_id = le.game_id
+                                 AND owned.platform = 'PS5'
+                           ) THEN 'PS5' ELSE 'PS4' END"""
         params: list[Any] = []
         if platform is not None:
             size_platform_sql = "%s"

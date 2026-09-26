@@ -1,21 +1,23 @@
 from __future__ import annotations
 
-import logging
 from datetime import datetime
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import BaseModel
 
-from curator.audit.repository import (
-    ACTION_LINK_FAILED,
-    ACTION_LINK_SUCCEEDED,
-    ACTION_UNLINKED,
-    AccountActionLogRepository,
-)
+from curator.audit.recorded import ActionRecorder, recorded
+from curator.audit.repository import ACTION_LINK_REQUESTED, ACTION_UNLINKED
 from curator.deps import require_verified_caller
 from curator.library.repository import LibraryRepository
-from curator.link_service import AgentFactory, LinkError
+from curator.link_service import (
+    LINK_ERROR_AUTH_FAILED,
+    LINK_ERROR_INVALID_NPSSO,
+    LINK_ERROR_MISMATCH,
+    LINK_ERROR_UNVERIFIED,
+    AgentFactory,
+    LinkError,
+)
 from curator.link_service import link as link_account
 from curator.link_service import unlink as unlink_account
 from curator.me_routes import PsnSummary
@@ -25,21 +27,26 @@ from curator.persistence.repository import Repository
 from curator.reverify import reverify_link
 from curator.token_validation import TokenClaims
 
-logger = logging.getLogger("curator")
-
 router = APIRouter(tags=["account"])
 
 _ERROR_STATUS = {
-    "invalid_npsso": 400,
-    "auth_failed": 401,
-    "mismatch": 409,
-    "unverified": 409,
+    LINK_ERROR_INVALID_NPSSO: 400,
+    LINK_ERROR_AUTH_FAILED: 401,
+    LINK_ERROR_MISMATCH: 409,
+    LINK_ERROR_UNVERIFIED: 409,
 }
-_ERROR_DETAIL = {
-    "mismatch": "emails do not match",
-    "unverified": "PSN email is not verified",
-    "auth_failed": "PSN authentication failed",
+LINK_ERROR_MESSAGES = {
+    LINK_ERROR_MISMATCH: "emails do not match",
+    LINK_ERROR_UNVERIFIED: "PSN email is not verified",
+    LINK_ERROR_AUTH_FAILED: "PSN authentication failed",
 }
+
+
+class LinkErrorDetail(BaseModel):
+    """The ``detail`` of a refused ``POST /psn/link``: ``error`` is stable, ``message`` may change wording."""
+
+    error: str
+    message: str
 
 
 class LinkRequest(BaseModel):
@@ -72,27 +79,28 @@ async def psn_link(
     token_crypto: TokenCrypto = request.app.state.token_crypto
     agent_factory: AgentFactory = request.app.state.agent_factory
     redis_adapter = request.app.state.redis_adapter
-    audit_repository: AccountActionLogRepository = request.app.state.audit_repository
+    recorder: ActionRecorder = request.app.state.audit_repository
 
     assert claims.email is not None, "psn_link requires a verified caller (claims.email must be set)"
 
-    try:
-        result = await link_account(
-            claims.sub,
-            body.npsso,
-            claims.email,
-            repository=repository,
-            token_crypto=token_crypto,
-            agent_factory=agent_factory,
-            redis=redis_adapter,
-        )
-    except LinkError as exc:
-        await _log(audit_repository, claims.sub, ACTION_LINK_FAILED, exc.kind)
-        status_code = _ERROR_STATUS.get(exc.kind, 400)
-        message = _ERROR_DETAIL.get(exc.kind, str(exc))
-        raise HTTPException(status_code=status_code, detail={"error": exc.kind, "message": message}) from exc
+    async with recorded(recorder, claims.sub, ACTION_LINK_REQUESTED) as entry:
+        try:
+            result = await link_account(
+                claims.sub,
+                body.npsso,
+                claims.email,
+                repository=repository,
+                token_crypto=token_crypto,
+                agent_factory=agent_factory,
+                redis=redis_adapter,
+            )
+        except LinkError as exc:
+            entry.detail = exc.kind
+            status_code = _ERROR_STATUS.get(exc.kind, 400)
+            message = LINK_ERROR_MESSAGES.get(exc.kind, str(exc))
+            detail = LinkErrorDetail(error=exc.kind, message=message).model_dump()
+            raise HTTPException(status_code=status_code, detail=detail) from exc
 
-    await _log(audit_repository, claims.sub, ACTION_LINK_SUCCEEDED)
     return LinkResponse(
         linked=True,
         psn=PsnSummary(
@@ -123,34 +131,25 @@ async def psn_unlink(
     token_crypto: TokenCrypto = request.app.state.token_crypto
     agent_factory: AgentFactory = request.app.state.agent_factory
     redis_adapter = request.app.state.redis_adapter
-    audit_repository: AccountActionLogRepository = request.app.state.audit_repository
+    recorder: ActionRecorder = request.app.state.audit_repository
     library_repository: LibraryRepository = request.app.state.library_repository
+    refresh_schedules_repository: RefreshSchedulesRepository = request.app.state.refresh_schedules_repository
 
     await reverify_link(
-        claims, repository=repository, token_crypto=token_crypto, agent_factory=agent_factory, redis=redis_adapter
+        claims,
+        repository=repository,
+        token_crypto=token_crypto,
+        agent_factory=agent_factory,
+        recorder=recorder,
+        redis=redis_adapter,
     )
-    await unlink_account(claims.sub, repository=repository, token_crypto=token_crypto, redis=redis_adapter)
-    await library_repository.clear_trophy_progress(claims.sub)
-    refresh_schedules_repository: RefreshSchedulesRepository = request.app.state.refresh_schedules_repository
-    await refresh_schedules_repository.delete(claims.sub)
-    await _log(audit_repository, claims.sub, ACTION_UNLINKED)
+    async with recorded(recorder, claims.sub, ACTION_UNLINKED):
+        await unlink_account(claims.sub, repository=repository, token_crypto=token_crypto, redis=redis_adapter)
+        await library_repository.clear_trophy_progress(claims.sub)
+        await refresh_schedules_repository.delete(claims.sub)
     return Response(status_code=204)
 
 
 def _iso(value: datetime | None) -> str | None:
     """Render a datetime as ISO-8601, or ``None``."""
     return value.isoformat() if value is not None else None
-
-
-async def _log(audit_repository: AccountActionLogRepository, sub: str, action: str, detail: str | None = None) -> None:
-    """Write one audit entry, never letting a logging failure break the user-facing request.
-
-    :param audit_repository: The :class:`~curator.audit.repository.AccountActionLogRepository`.
-    :param sub: The Identity ``sub`` claim of the affected user.
-    :param action: One of the ``account_action_log.action`` CHECK values.
-    :param detail: A short human-readable summary (never the npsso, a token, or raw PSN data).
-    """
-    try:
-        await audit_repository.log(sub, action, detail)
-    except Exception:
-        logger.exception("Failed to write account_action_log entry (sub=%s, action=%s)", sub, action)

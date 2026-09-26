@@ -8,21 +8,52 @@ from __future__ import annotations
 
 from collections.abc import Callable, Coroutine
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Final
 
 from curator.psn import _identity
+from curator.psn._identity import ACCOUNT_ID_KEY, SELF_PATH_ID
 from curator.psn.account_client import AccountClient
 from curator.psn.errors import NoPendingFriendRequestError
 from curator.psn.models import SentMessage
 from curator.psn.safety import CHAT_WRITES, FRIEND_WRITES, MutationGuard
 from curator.psn.session import PsnSession
-from curator.psn.social_client import SocialClient
-
-_GAMING_LOUNGE_URI = "https://m.np.playstation.com/api/gamingLoungeGroups/v1"
-_PROFILE_URI = "https://m.np.playstation.com/api/userProfile/v1/internal/users"
+from curator.psn.social_client import GAMING_LOUNGE_URI, GROUP_ID_KEY, GROUPS_KEY, SocialClient, friend_url
 
 NO_FRIEND_RELATION = "no-friend"
 """PSN's ``friendRelation`` for two accounts with neither a friendship nor a pending request between them."""
+
+INVITEES_KEY: Final = "invitees"
+GROUP_NAME_KEY: Final = "groupName"
+VALUE_KEY: Final = "value"
+MESSAGE_TYPE_KEY: Final = "messageType"
+BODY_KEY: Final = "body"
+MESSAGE_UID_KEY: Final = "messageUid"
+CREATED_TIMESTAMP_KEY: Final = "createdTimestamp"
+TEXT_MESSAGE_TYPE: Final = 1
+
+
+def groups_url() -> str:
+    return f"{GAMING_LOUNGE_URI}/{GROUPS_KEY}"
+
+
+def group_url(group_id: str) -> str:
+    return f"{groups_url()}/{group_id}"
+
+
+def group_messages_url(group_id: str) -> str:
+    return f"{group_url(group_id)}/threads/{group_id}/messages"
+
+
+def group_invitees_url(group_id: str) -> str:
+    return f"{group_url(group_id)}/{INVITEES_KEY}"
+
+
+def group_member_url(group_id: str, account_id: str) -> str:
+    return f"{group_url(group_id)}/members/{account_id}"
+
+
+def _invitees(account_ids: list[str]) -> dict[str, list[dict[str, str]]]:
+    return {INVITEES_KEY: [{ACCOUNT_ID_KEY: account_id} for account_id in account_ids]}
 
 
 def _epoch_millis_iso(value: Any) -> str | None:
@@ -74,13 +105,8 @@ class MutationService:
         """
         await self._require(CHAT_WRITES)
         members = await self._resolve_account_ids(online_ids, account_ids)
-        response = (
-            await self._session.post(
-                f"{_GAMING_LOUNGE_URI}/groups",
-                json={"invitees": [{"accountId": account_id} for account_id in members]},
-            )
-        ).json()
-        group_id = response.get("groupId")
+        response = (await self._session.post(groups_url(), json=_invitees(members))).json()
+        group_id = response.get(GROUP_ID_KEY)
         return str(group_id) if group_id is not None else None
 
     async def rename_group(self, group_id: str, name: str) -> None:
@@ -90,7 +116,7 @@ class MutationService:
         :param name: The new group name.
         """
         await self._require(CHAT_WRITES)
-        await self._session.patch(f"{_GAMING_LOUNGE_URI}/groups/{group_id}", json={"groupName": {"value": name}})
+        await self._session.patch(group_url(group_id), json={GROUP_NAME_KEY: {VALUE_KEY: name}})
 
     async def send_message(self, group_id: str, text: str) -> SentMessage:
         """Send a text message to a chat group.
@@ -102,12 +128,11 @@ class MutationService:
         await self._require(CHAT_WRITES)
         data = (
             await self._session.post(
-                f"{_GAMING_LOUNGE_URI}/groups/{group_id}/threads/{group_id}/messages",
-                json={"messageType": 1, "body": text},
+                group_messages_url(group_id), json={MESSAGE_TYPE_KEY: TEXT_MESSAGE_TYPE, BODY_KEY: text}
             )
         ).json()
         return SentMessage(
-            message_uid=data.get("messageUid"), created_at=_epoch_millis_iso(data.get("createdTimestamp"))
+            message_uid=data.get(MESSAGE_UID_KEY), created_at=_epoch_millis_iso(data.get(CREATED_TIMESTAMP_KEY))
         )
 
     async def invite_to_group(
@@ -129,13 +154,8 @@ class MutationService:
         """
         await self._require(CHAT_WRITES)
         members = await self._resolve_account_ids(online_ids, account_ids)
-        response = (
-            await self._session.post(
-                f"{_GAMING_LOUNGE_URI}/groups/{group_id}/invitees",
-                json={"invitees": [{"accountId": account_id} for account_id in members]},
-            )
-        ).json()
-        resulting_group_id = response.get("groupId")
+        response = (await self._session.post(group_invitees_url(group_id), json=_invitees(members))).json()
+        resulting_group_id = response.get(GROUP_ID_KEY)
         return str(resulting_group_id) if resulting_group_id is not None else None
 
     async def kick_from_group(
@@ -152,7 +172,7 @@ class MutationService:
         """
         await self._require(CHAT_WRITES)
         target_account_id = await _identity.account_id_for(self._session, online_id, account_id)
-        await self._session.delete(f"{_GAMING_LOUNGE_URI}/groups/{group_id}/members/{target_account_id}")
+        await self._session.delete(group_member_url(group_id, target_account_id))
 
     async def leave_group(self, group_id: str) -> bool:
         """Leave a chat group. Destructive, so the membership is read first.
@@ -164,7 +184,7 @@ class MutationService:
         await self._require(CHAT_WRITES)
         if group_id not in await self._social_client.chat_group_ids():
             return False
-        await self._session.delete(f"{_GAMING_LOUNGE_URI}/groups/{group_id}/members/me")
+        await self._session.delete(group_member_url(group_id, SELF_PATH_ID))
         return True
 
     async def accept_friend(self, online_id: str | None = None, account_id: str | None = None) -> None:
@@ -177,7 +197,7 @@ class MutationService:
         """
         await self._require(FRIEND_WRITES)
         target_account_id = await _identity.account_id_for(self._session, online_id, account_id)
-        await self._session.put(f"{_PROFILE_URI}/me/friends/{target_account_id}")
+        await self._session.put(friend_url(target_account_id))
 
     async def send_friend_request(self, online_id: str) -> None:
         """Send a friend request to ``online_id``.
@@ -201,7 +221,7 @@ class MutationService:
         )
         if requester is None:
             raise NoPendingFriendRequestError(f"{online_id} has not sent a friend request.")
-        await self._session.put(f"{_PROFILE_URI}/me/friends/{requester.account_id}")
+        await self._session.put(friend_url(requester.account_id))
 
     async def remove_friend(self, online_id: str | None = None, account_id: str | None = None) -> bool:
         """Remove a friend, or decline a pending friend request. Destructive, so the standing is read first.
@@ -216,7 +236,7 @@ class MutationService:
         standing = await self._social_client.friendship(account_id=target_account_id)
         if standing.relation == NO_FRIEND_RELATION:
             return False
-        await self._session.delete(f"{_PROFILE_URI}/me/friends/{target_account_id}")
+        await self._session.delete(friend_url(target_account_id))
         return True
 
 

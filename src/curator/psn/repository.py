@@ -6,7 +6,19 @@ backed by a shared :class:`~psycopg_pool.AsyncConnectionPool`, raw parameterized
 
 from __future__ import annotations
 
+from typing import Final
+
 from psycopg_pool import AsyncConnectionPool
+
+GET_PINNED_ACCOUNT_SQL: Final = "SELECT psn_account_id FROM psn_test_accounts WHERE identity_sub = %s"
+
+PIN_ACCOUNT_SQL: Final = """
+    INSERT INTO psn_test_accounts (identity_sub, psn_account_id, pinned_at)
+    VALUES (%s, %s, now())
+    ON CONFLICT (identity_sub) DO UPDATE SET
+        psn_account_id = EXCLUDED.psn_account_id,
+        pinned_at = now()
+"""
 
 
 class PinnedAccountRepository:
@@ -25,7 +37,7 @@ class PinnedAccountRepository:
         :returns: The pinned PSN account id, or ``None``.
         """
         async with self._pool.connection() as conn, conn.cursor() as cur:
-            await cur.execute("SELECT psn_account_id FROM psn_test_accounts WHERE identity_sub = %s", (identity_sub,))
+            await cur.execute(GET_PINNED_ACCOUNT_SQL, (identity_sub,))
             row = await cur.fetchone()
         return str(row[0]) if row else None
 
@@ -36,13 +48,4 @@ class PinnedAccountRepository:
         :param psn_account_id: The PSN account id to pin.
         """
         async with self._pool.connection() as conn, conn.cursor() as cur:
-            await cur.execute(
-                """
-                INSERT INTO psn_test_accounts (identity_sub, psn_account_id, pinned_at)
-                VALUES (%s, %s, now())
-                ON CONFLICT (identity_sub) DO UPDATE SET
-                    psn_account_id = EXCLUDED.psn_account_id,
-                    pinned_at = now()
-                """,
-                (identity_sub, psn_account_id),
-            )
+            await cur.execute(PIN_ACCOUNT_SQL, (identity_sub, psn_account_id))

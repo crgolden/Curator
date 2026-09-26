@@ -8,19 +8,44 @@ from pydantic import BaseModel
 
 from curator.catalog.repository import CatalogRepository
 from curator.collections.collection_orchestrator import CollectionOrchestrator, CollectionResult
-from curator.collections.collection_spec import CollectionSpec
+from curator.collections.collection_spec import (
+    CAPACITY_FILL_KIND,
+    COLLECTION_KINDS,
+    FILTER_LIST_KIND,
+    CollectionSpec,
+)
 from curator.collections.filter_predicate import FilterPredicate, parse_predicate, predicate_to_dict
 from curator.collections.game_candidate import GameCandidate
 from curator.collections.repository import (
+    VISIBILITIES,
+    VISIBILITY_PRIVATE,
+    VISIBILITY_PUBLIC,
+    VISIBILITY_UNLISTED,
     CollectionDefinition,
     CollectionItem,
     CollectionItemSortField,
     CollectionsRepository,
 )
 from curator.deps import require_bearer
+from curator.query_params import SORT_DIR_PARAM
 from curator.token_validation import TokenClaims
 
 router = APIRouter(prefix="/collections", tags=["collections"])
+
+INVALID_KIND_DETAIL = f"kind must be '{CAPACITY_FILL_KIND}' or '{FILTER_LIST_KIND}'."
+INVALID_VISIBILITY_DETAIL = (
+    f'visibility must be "{VISIBILITY_PRIVATE}", "{VISIBILITY_UNLISTED}", or "{VISIBILITY_PUBLIC}".'
+)
+
+
+def unknown_console_detail(console_id: str) -> str:
+    """The 400 body for a ``console_id`` the caller does not own."""
+    return f"Unknown console_id {console_id!r} for this user."
+
+
+def unknown_excluded_consoles_detail(console_ids: list[str]) -> str:
+    """The 400 body for ``exclude_installed_on`` entries the caller does not own."""
+    return f"Unknown console_id(s) for this user in exclude_installed_on: {console_ids!r}."
 
 
 def _parse_filter_predicate(raw: dict[str, Any] | None) -> FilterPredicate | None:
@@ -137,8 +162,8 @@ async def preview_collection(
     :raises fastapi.HTTPException: 400, if ``kind`` is invalid or (for ``"capacity_fill"``) ``console_id``
         is missing or unknown.
     """
-    if spec.kind not in ("capacity_fill", "filter_list"):
-        raise HTTPException(status_code=400, detail="kind must be 'capacity_fill' or 'filter_list'.")
+    if spec.kind not in COLLECTION_KINDS:
+        raise HTTPException(status_code=400, detail=INVALID_KIND_DETAIL)
 
     filter_predicate = _parse_filter_predicate(spec.filter_predicate)
     orchestrator: CollectionOrchestrator = request.app.state.collection_orchestrator
@@ -205,7 +230,7 @@ class SaveDefinitionRequest(BaseModel):
     """
 
     name: str
-    kind: str = "filter_list"
+    kind: str = FILTER_LIST_KIND
     description: str | None = None
     game_ids: list[str] = []
     console_id: str | None = None
@@ -338,8 +363,8 @@ async def save_definition(
     :raises fastapi.HTTPException: 400, if ``kind`` is invalid, ``console_id`` is not the caller's, or a
         game id is unknown; 409, if the caller already has a collection with this name.
     """
-    if body.kind not in ("capacity_fill", "filter_list"):
-        raise HTTPException(status_code=400, detail="kind must be 'capacity_fill' or 'filter_list'.")
+    if body.kind not in COLLECTION_KINDS:
+        raise HTTPException(status_code=400, detail=INVALID_KIND_DETAIL)
 
     filter_predicate = _parse_filter_predicate(body.filter_predicate)
     collections_repository: CollectionsRepository = request.app.state.collections_repository
@@ -348,13 +373,10 @@ async def save_definition(
         consoles = await collections_repository.list_user_consoles(claims.sub)
         owned_console_ids = {console.console_id for console in consoles}
         if body.console_id is not None and body.console_id not in owned_console_ids:
-            raise HTTPException(status_code=400, detail=f"Unknown console_id {body.console_id!r} for this user.")
+            raise HTTPException(status_code=400, detail=unknown_console_detail(body.console_id))
         unknown_exclusions = [cid for cid in body.exclude_installed_on if cid not in owned_console_ids]
         if unknown_exclusions:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Unknown console_id(s) for this user in exclude_installed_on: {unknown_exclusions!r}.",
-            )
+            raise HTTPException(status_code=400, detail=unknown_excluded_consoles_detail(unknown_exclusions))
         if body.install_target_console_id is not None and body.install_target_console_id not in owned_console_ids:
             raise HTTPException(
                 status_code=400,
@@ -484,7 +506,7 @@ async def get_definition_items(
     q: str | None = Query(default=None),
     genre: str | None = Query(default=None),
     sort: CollectionItemSortField = Query(default="rank"),
-    sort_dir: Literal["asc", "desc"] = Query(default="asc", alias="sortDir"),
+    sort_dir: Literal["asc", "desc"] = Query(default="asc", alias=SORT_DIR_PARAM),
     limit: int = Query(default=50, ge=1, le=100),
     offset: int = Query(default=0, ge=0),
 ) -> CollectionItemsPageResponse:
@@ -603,8 +625,8 @@ async def set_visibility(
     :raises fastapi.HTTPException: 404, if the collection doesn't exist or isn't the caller's own; 400, if
         ``visibility`` isn't ``"private"``/``"unlisted"``/``"public"``.
     """
-    if body.visibility not in ("private", "unlisted", "public"):
-        raise HTTPException(status_code=400, detail='visibility must be "private", "unlisted", or "public".')
+    if body.visibility not in VISIBILITIES:
+        raise HTTPException(status_code=400, detail=INVALID_VISIBILITY_DETAIL)
 
     collections_repository: CollectionsRepository = request.app.state.collections_repository
     updated = await collections_repository.set_definition_visibility(claims.sub, definition_id, body.visibility)
@@ -641,7 +663,7 @@ async def follow_definition(
     """
     collections_repository: CollectionsRepository = request.app.state.collections_repository
     definition = await collections_repository.get_definition_any_owner(definition_id)
-    if definition is None or definition.visibility == "private":
+    if definition is None or definition.visibility == VISIBILITY_PRIVATE:
         raise HTTPException(status_code=404, detail="Collection definition not found.")
     if definition.identity_sub == claims.sub:
         raise HTTPException(status_code=400, detail="Cannot follow your own collection.")

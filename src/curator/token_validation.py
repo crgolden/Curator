@@ -34,6 +34,20 @@ _DISCOVERY_FETCH_TIMEOUT_SECONDS = 10.0
 
 AUTHORITY_UNAVAILABLE_DETAIL = "Identity is unavailable, so the bearer token could not be verified."
 
+DISCOVERY_PATH = "/.well-known/openid-configuration"
+JWKS_URI_KEY = "jwks_uri"
+
+SUB_CLAIM = "sub"
+EMAIL_CLAIM = "email"
+IAT_CLAIM = "iat"
+SCOPE_CLAIM = "scope"
+ADMIN_CLAIM = "curator.admin"
+
+
+def discovery_url(authority: str) -> str:
+    """Return the OIDC discovery document URL for ``authority``."""
+    return f"{authority.rstrip('/')}{DISCOVERY_PATH}"
+
 
 class TokenError(Exception):
     """Raised when a bearer token fails validation for any reason: bad signature, wrong issuer, expired/
@@ -136,20 +150,20 @@ class JwtValidator:
         except JoseError as exc:
             raise TokenError(str(exc)) from exc
 
-        sub = claims.get("sub")
+        sub = claims.get(SUB_CLAIM)
         if not sub:
             raise TokenError("Token carries no sub claim.")
 
-        iat = claims.get("iat")
+        iat = claims.get(IAT_CLAIM)
         if iat is None:
             raise TokenError("Token carries no iat claim.")
 
         return TokenClaims(
             sub=sub,
-            email=claims.get("email"),
+            email=claims.get(EMAIL_CLAIM),
             iat=datetime.fromtimestamp(iat, tz=timezone.utc),
-            scopes=_parse_scopes(claims.get("scope")),
-            is_admin=_is_true(claims.get("curator.admin")),
+            scopes=_parse_scopes(claims.get(SCOPE_CLAIM)),
+            is_admin=_is_true(claims.get(ADMIN_CLAIM)),
         )
 
     def _decode(self, token: str) -> dict[str, Any]:
@@ -182,8 +196,8 @@ class JwtValidator:
         """
         if self._keyset is None or force:
             try:
-                discovery = self._fetch_json(f"{self._authority}/.well-known/openid-configuration")
-                jwks = cast(KeySetSerialization, self._fetch_json(discovery["jwks_uri"]))
+                discovery = self._fetch_json(discovery_url(self._authority))
+                jwks = cast(KeySetSerialization, self._fetch_json(discovery[JWKS_URI_KEY]))
                 keyset = KeySet.import_key_set(jwks)
             except (OSError, ValueError, KeyError, JoseError) as exc:
                 raise AuthorityUnavailableError(AUTHORITY_UNAVAILABLE_DETAIL) from exc

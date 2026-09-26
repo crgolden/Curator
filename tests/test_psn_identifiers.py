@@ -1,5 +1,6 @@
 import pytest
 
+from curator.psn._identity import PROFILE_URI, SELF_PATH_ID
 from curator.psn.identifiers import (
     InvalidPsnIdentifierError,
     validate_account_id,
@@ -8,7 +9,10 @@ from curator.psn.identifiers import (
     validate_online_id,
     validate_trophy_group,
 )
+from curator.psn.models import ALL_TROPHY_GROUPS
+from curator.psn.mutation_service import group_member_url
 from curator.psn.session import PsnSession
+from test_values import new_group_id, new_trophy_group_id
 
 _TRAVERSAL_PAYLOADS = (
     "..",
@@ -54,7 +58,9 @@ def test_np_communication_id_rejects_everything_else(value):
         validate_np_communication_id(value)
 
 
-@pytest.mark.parametrize("value", ["all", "default", "001", "1"])
+@pytest.mark.parametrize(
+    "value", [ALL_TROPHY_GROUPS, pytest.param(new_trophy_group_id(), id=new_trophy_group_id.__name__), "1"]
+)
 def test_trophy_group_accepts_alphanumeric_selectors(value):
     assert validate_trophy_group(value) == value
 
@@ -92,21 +98,12 @@ def test_group_id_rejects_anything_matching_neither_shape(value):
         validate_group_id(value)
 
 
-def test_verified_url_rejects_a_percent_encoded_traversal_segment():
+@pytest.mark.parametrize("traversal", ["%2e%2e/%2e%2e", "a%2F..%2Fb", "a\\..\\b"])
+def test_verified_url_rejects_an_encoded_or_backslashed_traversal_segment(traversal):
     with pytest.raises(ValueError, match="traversal"):
-        PsnSession._verified_url("https://m.np.playstation.com/api/%2e%2e/%2e%2e/etc/passwd")
-
-
-def test_verified_url_rejects_a_percent_encoded_separator_hiding_a_traversal():
-    with pytest.raises(ValueError, match="traversal"):
-        PsnSession._verified_url("https://m.np.playstation.com/api/a%2F..%2Fb")
-
-
-def test_verified_url_rejects_a_backslash_traversal_segment():
-    with pytest.raises(ValueError, match="traversal"):
-        PsnSession._verified_url("https://m.np.playstation.com/api/a\\..\\b")
+        PsnSession._verified_url(f"{PROFILE_URI}/{traversal}")
 
 
 def test_verified_url_allows_an_ordinary_psn_path():
-    url = "https://m.np.playstation.com/api/gamingLoungeGroups/v1/groups/abc-1/members/me"
+    url = group_member_url(new_group_id(), SELF_PATH_ID)
     assert PsnSession._verified_url(url) == url

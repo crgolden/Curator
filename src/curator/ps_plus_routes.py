@@ -17,13 +17,11 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 
 from curator.catalog.ps_plus_repository import PsPlusRepository, PsPlusTier, PsPlusTitle
-from curator.deps import require_bearer
+from curator.deps import PREFERENCE_NOT_LINKED_DETAIL, require_bearer
 from curator.persistence.repository import Repository
 from curator.token_validation import TokenClaims
 
 router = APIRouter(tags=["ps-plus"])
-
-_NO_LINK_DETAIL = "PSN account not linked."
 
 
 class PsPlusTitleResponse(BaseModel):
@@ -120,7 +118,7 @@ async def get_ps_plus_rotation_summary(
 async def _require_link(request: Request, sub: str) -> None:
     repository: Repository = request.app.state.repository
     if await repository.get_link(sub) is None:
-        raise HTTPException(status_code=404, detail=_NO_LINK_DETAIL)
+        raise HTTPException(status_code=404, detail=PREFERENCE_NOT_LINKED_DETAIL)
 
 
 def _title(title: PsPlusTitle) -> PsPlusTitleResponse:

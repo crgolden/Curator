@@ -2,17 +2,29 @@
 
 from __future__ import annotations
 
-from curator.catalog.store_backfill_service import StoreBackfillService
+from curator.catalog.store_backfill_service import (
+    FILTER_NOT_APPLIED,
+    NO_PRODUCTS,
+    PAGE_BUDGET_EXHAUSTED,
+    QUERY_ROTATED,
+    StoreBackfillService,
+)
 from curator.psn.store_client import (
+    FULL_GAME_CLASSIFICATION,
     FULL_GAME_FILTER,
     StoreCategoryPage,
     StoreFilterIgnoredError,
     StoreProduct,
     StoreQueryRotatedError,
 )
+from test_values import new_game_title
+
+NOT_A_FULL_GAME = new_game_title()
 
 
-def product(product_id="P1", name="Bloodborne", np_title_id="CUSA00207_00", cover="cover.jpg", cls="Full Game"):
+def product(
+    product_id="P1", name="Bloodborne", np_title_id="CUSA00207_00", cover="cover.jpg", cls=FULL_GAME_CLASSIFICATION
+):
     return StoreProduct(
         product_id=product_id,
         name=name,
@@ -99,7 +111,7 @@ async def test_an_unhonoured_filter_stops_the_walk_instead_of_seeding_a_wrong_ca
     progress = await _service(client, repository).backfill_category("cat-1")
 
     assert not progress.completed
-    assert progress.stopped_reason == "filter_not_applied"
+    assert progress.stopped_reason == FILTER_NOT_APPLIED
     assert repository.written == []
 
 
@@ -181,7 +193,7 @@ async def test_a_walk_stopped_by_its_page_budget_reports_no_shortfall():
     progress = await _service(client, repository).backfill_category("cat-1", max_pages=1)
 
     assert not progress.completed
-    assert progress.stopped_reason == "page_budget_exhausted"
+    assert progress.stopped_reason == PAGE_BUDGET_EXHAUSTED
     assert progress.coverage_shortfall == 0
 
 
@@ -222,7 +234,9 @@ async def test_writes_each_page_as_it_is_read_so_an_interrupted_walk_still_seeds
 
 
 async def test_add_ons_are_not_written_into_the_games_catalog():
-    client = FakeStoreClient([page([product("P1", cls="Full Game"), product("P2", cls="Add-On")], is_last=True)])
+    client = FakeStoreClient(
+        [page([product("P1", cls=FULL_GAME_CLASSIFICATION), product("P2", cls=NOT_A_FULL_GAME)], is_last=True)]
+    )
     repository = FakeCatalogRepository()
 
     await _service(client, repository).backfill_category("cat-1")
@@ -232,7 +246,7 @@ async def test_add_ons_are_not_written_into_the_games_catalog():
 
 async def test_a_page_of_only_add_ons_writes_nothing_but_keeps_walking():
     client = FakeStoreClient(
-        [page([product("P1", cls="Add-On")], offset=0), page([product("P2")], offset=1, is_last=True)]
+        [page([product("P1", cls=NOT_A_FULL_GAME)], offset=0), page([product("P2")], offset=1, is_last=True)]
     )
     repository = FakeCatalogRepository()
 
@@ -269,7 +283,7 @@ async def test_a_page_budget_stops_the_walk_and_says_so():
 
     assert progress.pages_read == 3
     assert progress.completed is False
-    assert progress.stopped_reason == "page_budget_exhausted"
+    assert progress.stopped_reason == PAGE_BUDGET_EXHAUSTED
 
 
 async def test_a_rotated_query_hash_halts_the_walk_with_its_own_reason():
@@ -279,7 +293,7 @@ async def test_a_rotated_query_hash_halts_the_walk_with_its_own_reason():
     progress = await _service(client, repository).backfill_category("cat-1")
 
     assert progress.completed is False
-    assert progress.stopped_reason == "query_rotated"
+    assert progress.stopped_reason == QUERY_ROTATED
     assert repository.written == []
 
 
@@ -315,7 +329,7 @@ async def test_a_category_yielding_no_products_at_all_does_not_report_success():
 
     progress = await _service(client, repository).backfill_category("cat-1")
 
-    assert progress.stopped_reason == "no_products", (
+    assert progress.stopped_reason == NO_PRODUCTS, (
         "a mistyped category id answers 200 with an empty grid, and reporting that as a completed walk "
         "is indistinguishable from having backfilled the whole category"
     )

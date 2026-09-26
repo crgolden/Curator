@@ -10,6 +10,7 @@ import pytest
 
 from curator import telemetry
 from curator.jobs.queue_depth_monitor import QueueDepthMonitor
+from test_values import lowercase_token
 
 
 class FakeRuntimeProperties:
@@ -47,41 +48,44 @@ def _clear_queue_depth_gauges():
 
 _POLL_INTERVAL_SECONDS = 0.01
 
+FIRST_QUEUE = lowercase_token()
+SECOND_QUEUE = lowercase_token()
+
 
 async def test_poll_once_records_active_and_dead_letter_counts_per_queue():
     admin_client = FakeAdminClient(
         {
-            "curator-library-refresh": FakeRuntimeProperties(active_message_count=2, dead_letter_message_count=1),
-            "curator-enrichment": FakeRuntimeProperties(active_message_count=0, dead_letter_message_count=0),
+            FIRST_QUEUE: FakeRuntimeProperties(active_message_count=2, dead_letter_message_count=1),
+            SECOND_QUEUE: FakeRuntimeProperties(active_message_count=0, dead_letter_message_count=0),
         }
     )
-    monitor = QueueDepthMonitor(admin_client, ["curator-library-refresh", "curator-enrichment"])
+    monitor = QueueDepthMonitor(admin_client, [FIRST_QUEUE, SECOND_QUEUE])
 
     await monitor.poll_once()
 
-    assert telemetry._QUEUE_ACTIVE_COUNTS == {"curator-library-refresh": 2, "curator-enrichment": 0}
-    assert telemetry._QUEUE_DEAD_LETTER_COUNTS == {"curator-library-refresh": 1, "curator-enrichment": 0}
+    assert telemetry._QUEUE_ACTIVE_COUNTS == {FIRST_QUEUE: 2, SECOND_QUEUE: 0}
+    assert telemetry._QUEUE_DEAD_LETTER_COUNTS == {FIRST_QUEUE: 1, SECOND_QUEUE: 0}
 
 
 async def test_poll_once_continues_past_a_failing_queue():
     admin_client = FakeAdminClient(
-        {"curator-enrichment": FakeRuntimeProperties(active_message_count=5, dead_letter_message_count=0)},
-        raises_for=("curator-library-refresh",),
+        {SECOND_QUEUE: FakeRuntimeProperties(active_message_count=5, dead_letter_message_count=0)},
+        raises_for=(FIRST_QUEUE,),
     )
-    monitor = QueueDepthMonitor(admin_client, ["curator-library-refresh", "curator-enrichment"])
+    monitor = QueueDepthMonitor(admin_client, [FIRST_QUEUE, SECOND_QUEUE])
 
     await monitor.poll_once()
 
-    assert admin_client.calls == ["curator-library-refresh", "curator-enrichment"]
-    assert "curator-library-refresh" not in telemetry._QUEUE_ACTIVE_COUNTS
-    assert telemetry._QUEUE_ACTIVE_COUNTS == {"curator-enrichment": 5}
+    assert admin_client.calls == [FIRST_QUEUE, SECOND_QUEUE]
+    assert FIRST_QUEUE not in telemetry._QUEUE_ACTIVE_COUNTS
+    assert telemetry._QUEUE_ACTIVE_COUNTS == {SECOND_QUEUE: 5}
 
 
 async def test_poll_once_skips_a_queue_reporting_no_counts():
     admin_client = FakeAdminClient(
-        {"curator-library-refresh": FakeRuntimeProperties(active_message_count=None, dead_letter_message_count=None)}
+        {FIRST_QUEUE: FakeRuntimeProperties(active_message_count=None, dead_letter_message_count=None)}
     )
-    monitor = QueueDepthMonitor(admin_client, ["curator-library-refresh"])
+    monitor = QueueDepthMonitor(admin_client, [FIRST_QUEUE])
 
     await monitor.poll_once()
 

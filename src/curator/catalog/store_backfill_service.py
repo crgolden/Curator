@@ -9,7 +9,7 @@ import asyncio
 import logging
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import Literal, Protocol
+from typing import Final, Literal, Protocol
 
 from curator.psn.store_client import (
     FULL_GAME_FILTER,
@@ -30,7 +30,12 @@ BackfillStoppedReason = Literal["query_rotated", "filter_not_applied", "no_produ
 """Why a category's walk stopped short; ``None`` means it reached the last page. Narrower than PS Plus's
 :data:`~curator.catalog.ps_plus_repository.WalkStoppedReason`, which adds ``category_renamed``."""
 
-_CATEGORY_INDEPENDENT_STOPS: frozenset[BackfillStoppedReason] = frozenset({"query_rotated", "filter_not_applied"})
+QUERY_ROTATED: Final[BackfillStoppedReason] = "query_rotated"
+FILTER_NOT_APPLIED: Final[BackfillStoppedReason] = "filter_not_applied"
+NO_PRODUCTS: Final[BackfillStoppedReason] = "no_products"
+PAGE_BUDGET_EXHAUSTED: Final[BackfillStoppedReason] = "page_budget_exhausted"
+
+_CATEGORY_INDEPENDENT_STOPS: frozenset[BackfillStoppedReason] = frozenset({QUERY_ROTATED, FILTER_NOT_APPLIED})
 
 
 def next_page_offset(page: StoreCategoryPage, requested_offset: int) -> int:
@@ -151,7 +156,7 @@ class StoreBackfillService:
                     products_seen=products_seen,
                     games_created=games_created,
                     covers_cached=covers_cached,
-                    stopped_reason="query_rotated",
+                    stopped_reason=QUERY_ROTATED,
                     seen_product_ids=seen_product_ids,
                     reported_total=reported_total,
                     start_offset=start_offset,
@@ -166,7 +171,7 @@ class StoreBackfillService:
                     products_seen=products_seen,
                     games_created=games_created,
                     covers_cached=covers_cached,
-                    stopped_reason="filter_not_applied",
+                    stopped_reason=FILTER_NOT_APPLIED,
                     seen_product_ids=seen_product_ids,
                     reported_total=reported_total,
                     start_offset=start_offset,
@@ -194,7 +199,7 @@ class StoreBackfillService:
                     products_seen=products_seen,
                     games_created=games_created,
                     covers_cached=covers_cached,
-                    stopped_reason="no_products" if walked_the_whole_category_and_found_nothing else None,
+                    stopped_reason=NO_PRODUCTS if walked_the_whole_category_and_found_nothing else None,
                     seen_product_ids=seen_product_ids,
                     reported_total=reported_total,
                     start_offset=start_offset,
@@ -228,7 +233,7 @@ class StoreBackfillService:
             products_seen=products_seen,
             games_created=games_created,
             covers_cached=covers_cached,
-            stopped_reason="page_budget_exhausted",
+            stopped_reason=PAGE_BUDGET_EXHAUSTED,
             seen_product_ids=seen_product_ids,
             reported_total=reported_total,
             start_offset=start_offset,

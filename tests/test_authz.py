@@ -11,16 +11,43 @@ them -- pytest's rootdir-relative import inserts ``tests/`` onto ``sys.path``, s
 
 from __future__ import annotations
 
+import uuid
 from datetime import datetime, timezone
 
 import pytest
+from fastapi.routing import iter_route_contexts
 from fastapi.testclient import TestClient
-from starlette.routing import Match
 
+from audit_fakes import RecordingAuditRepository
+from authz_constants import ALLOWED_PATH_PARAMETERS
+from curator import (
+    catalog_routes,
+    collections_routes,
+    consoles_routes,
+    devices_routes,
+    enrichment_keys_routes,
+    enrichment_routes,
+    identity_routes,
+    library_routes,
+    me_routes,
+    measured_sizes_routes,
+    preferences_routes,
+    presence_routes,
+    profile_routes,
+    ps_plus_routes,
+    psn_routes,
+    refresh_schedules_routes,
+    social_routes,
+    storage_devices_routes,
+    trophy_routes,
+)
 from curator.app import create_app
 from curator.deps import require_bearer
+from curator.http_headers import BEARER_SCHEME, WWW_AUTHENTICATE_HEADER
+from curator.me_routes import MeResponse
 from curator.persistence.crypto import TokenCrypto
 from curator.persistence.repository import LinkRecord
+from curator.psn_routes import LinkRequest
 from curator.token_validation import AUTHORITY_UNAVAILABLE_DETAIL, AuthorityUnavailableError, TokenClaims
 from test_routes import (
     FakeAgentFactory,
@@ -34,124 +61,101 @@ from test_routes import (
     _make_settings,
 )
 
-_BEARER_REQUIRED_ROUTES = [
-    ("get", "/me", {}),
-    ("post", "/psn/link", {"json": {"npsso": "whatever"}}),
-    ("delete", "/psn/link", {}),
-    ("get", "/trophies/summary", {}),
-    ("get", "/trophies/titles", {}),
-    ("get", "/trophies/titles/NPWR1", {"params": {"platform": "PS5"}}),
-    ("get", "/trophies/titles/NPWR1/groups", {"params": {"platform": "PS5"}}),
-    ("get", "/me/psn-preferences", {}),
-    (
-        "put",
-        "/me/psn-preferences",
-        {
-            "json": {
-                "harvest_trophies": True,
-                "harvest_identity": True,
-                "harvest_presence": True,
-                "harvest_devices": True,
-            }
-        },
-    ),
-    ("get", "/identity", {}),
-    ("get", "/presence", {}),
-    ("get", "/devices", {}),
-    ("get", "/me/profile-settings", {}),
-    (
-        "put",
-        "/me/profile-settings",
-        {
-            "json": {
-                "is_public": True,
-                "show_library": True,
-                "show_collections": True,
-                "show_trophies": True,
-                "show_identity": True,
-            }
-        },
-    ),
-    ("get", "/me/profile-link-sites", {}),
-    ("get", "/me/profile-links", {}),
-    ("put", "/me/profile-links/psnprofiles", {"json": {"handle": "someone"}}),
-    ("delete", "/me/profile-links/psnprofiles", {}),
-    ("get", "/users/sub-x/profile", {}),
-    ("post", "/users/sub-x/follow", {}),
-    ("delete", "/users/sub-x/follow", {}),
-    ("get", "/users/sub-x/followers", {}),
-    ("get", "/users/sub-x/following", {}),
-    ("get", "/users/sub-x/library", {}),
-    ("get", "/users/sub-x/collections", {}),
-    ("post", "/enrichment/runs/run-x/cancel", {}),
-    ("get", "/me/ps-plus-rotation", {}),
-    ("get", "/me/ps-plus-rotation/summary", {}),
-    ("post", "/catalog/ps-plus/walk", {"json": {}}),
-    ("put", "/library/game-x/hidden", {}),
-    ("delete", "/library/game-x/hidden", {}),
-    ("get", "/me/friend-requests", {}),
-    ("post", "/me/friend-requests/someone", {}),
-    ("put", "/me/friends/someone", {}),
-    ("delete", "/me/friends/someone", {}),
-    ("post", "/me/chat/groups", {"json": {}}),
-    ("patch", "/me/chat/groups/ba08b67ca0b044b7688a29abdc884f37b5dd47cd-215", {"json": {"name": "x"}}),
-    ("post", "/me/chat/groups/ba08b67ca0b044b7688a29abdc884f37b5dd47cd-215/invitees", {"json": {}}),
-    ("delete", "/me/chat/groups/ba08b67ca0b044b7688a29abdc884f37b5dd47cd-215/members/me", {}),
-    ("put", "/consoles/console-x/device-link", {"json": {"device_id": "device-x"}}),
-    ("delete", "/consoles/console-x/device-link", {}),
-    ("delete", "/me", {}),
-    ("get", "/me/actions", {}),
-    ("get", "/me/enrichment-keys", {}),
-    ("put", "/me/enrichment-keys/rawg", {"json": {"api_key": "key-x"}}),
-    ("delete", "/me/enrichment-keys/rawg", {}),
-    ("get", "/me/refresh-schedule", {}),
-    ("put", "/me/refresh-schedule", {"json": {"cadence": "weekly"}}),
-    ("delete", "/me/refresh-schedule", {}),
-    ("get", "/users/sub-x/library/genres", {}),
-    ("get", "/library", {}),
-    ("get", "/library/genres", {}),
-    ("get", "/library/manual/candidates", {"params": {"q": "a-title"}}),
-    ("get", "/library/manual/search", {"params": {"q": "a-title"}}),
-    ("post", "/library/manual", {"json": {"game_id": "game-x"}}),
-    ("delete", "/library/manual/game-x", {}),
-    ("post", "/library/refresh", {}),
-    ("get", "/library/refresh/run-x", {}),
-    ("post", "/collections/preview", {"json": {"kind": "filter_list"}}),
-    ("post", "/collections", {"json": {"name": "a-collection"}}),
-    ("get", "/collections", {}),
-    ("get", "/collections/followed", {}),
-    ("get", "/collections/definition-x", {}),
-    ("patch", "/collections/definition-x", {"json": {}}),
-    ("delete", "/collections/definition-x", {}),
-    ("get", "/collections/definition-x/items", {}),
-    ("delete", "/collections/definition-x/items/game-x", {}),
-    ("put", "/collections/definition-x/visibility", {"json": {"visibility": "public"}}),
-    ("post", "/collections/definition-x/follow", {}),
-    ("delete", "/collections/definition-x/follow", {}),
-    ("post", "/collections/definition-x/runs", {}),
-    ("post", "/consoles", {"json": {"name": "a-console", "platform": "PS5"}}),
-    ("get", "/consoles", {}),
-    ("get", "/consoles/console-x", {}),
-    ("patch", "/consoles/console-x", {"json": {}}),
-    ("delete", "/consoles/console-x", {}),
-    ("get", "/consoles/console-x/installs", {}),
-    ("put", "/consoles/console-x/installs/game-x", {"json": {"installed": True}}),
-    ("post", "/storage-devices", {"json": {"name": "a-drive", "kind": "usb", "capacity_gb": 1000.0}}),
-    ("get", "/storage-devices", {}),
-    ("get", "/storage-devices/device-x", {}),
-    ("patch", "/storage-devices/device-x", {"json": {}}),
-    ("delete", "/storage-devices/device-x", {}),
-    ("put", "/storage-devices/device-x/attach/console-x", {}),
-    ("delete", "/storage-devices/device-x/attach", {}),
-    ("get", "/storage-devices/device-x/installs", {}),
-    ("put", "/storage-devices/device-x/installs/game-x", {"json": {"installed": True}}),
-    ("get", "/games/game-x/measured-sizes", {}),
-    ("put", "/games/game-x/measured-sizes/PS5", {"json": {"size_gb": 42.0}}),
-    ("get", "/catalog/genres/drift", {}),
-    ("post", "/catalog/backfill", {"json": {"category_ids": ["category-x"]}}),
-    ("post", "/enrichment/runs", {}),
-    ("get", "/enrichment/runs/latest", {}),
-    ("get", "/enrichment/runs/run-x", {}),
+_BEARER_REQUIRED_HANDLERS = [
+    me_routes.me,
+    me_routes.delete_me,
+    me_routes.get_my_actions,
+    psn_routes.psn_link,
+    psn_routes.psn_unlink,
+    catalog_routes.genre_vocabulary_drift,
+    catalog_routes.backfill_catalog,
+    catalog_routes.walk_ps_plus_catalog,
+    enrichment_routes.start_enrichment_run,
+    enrichment_routes.cancel_enrichment_run,
+    enrichment_routes.get_latest_enrichment_run,
+    enrichment_routes.get_enrichment_run_status,
+    library_routes.manual_add_candidates,
+    library_routes.search_store_for_manual_add,
+    library_routes.add_manual_game,
+    library_routes.remove_manual_game,
+    library_routes.get_library_genres,
+    library_routes.get_library,
+    library_routes.hide_game,
+    library_routes.unhide_game,
+    library_routes.refresh_library,
+    library_routes.get_library_refresh_status,
+    collections_routes.preview_collection,
+    collections_routes.save_definition,
+    collections_routes.list_definitions,
+    collections_routes.list_followed_collections,
+    collections_routes.get_definition,
+    collections_routes.get_definition_items,
+    collections_routes.remove_definition_item,
+    collections_routes.update_definition,
+    collections_routes.set_visibility,
+    collections_routes.delete_definition,
+    collections_routes.follow_definition,
+    collections_routes.unfollow_definition,
+    collections_routes.run_definition,
+    consoles_routes.create_console,
+    consoles_routes.list_consoles,
+    consoles_routes.get_console,
+    consoles_routes.update_console,
+    consoles_routes.delete_console,
+    consoles_routes.link_console_device,
+    consoles_routes.unlink_console_device,
+    consoles_routes.get_console_installs,
+    consoles_routes.set_console_install,
+    storage_devices_routes.create_storage_device,
+    storage_devices_routes.list_storage_devices,
+    storage_devices_routes.get_storage_device,
+    storage_devices_routes.update_storage_device,
+    storage_devices_routes.delete_storage_device,
+    storage_devices_routes.attach_storage_device,
+    storage_devices_routes.detach_storage_device,
+    storage_devices_routes.get_storage_device_installs,
+    storage_devices_routes.set_storage_device_install,
+    measured_sizes_routes.list_measured_sizes,
+    measured_sizes_routes.set_measured_size,
+    trophy_routes.get_trophy_summary,
+    trophy_routes.get_trophy_titles,
+    trophy_routes.get_title_trophies,
+    trophy_routes.get_trophy_groups,
+    preferences_routes.get_psn_preferences,
+    preferences_routes.set_psn_preferences,
+    identity_routes.get_identity,
+    presence_routes.get_presence,
+    devices_routes.get_devices,
+    enrichment_keys_routes.get_enrichment_key_status,
+    enrichment_keys_routes.set_enrichment_key,
+    enrichment_keys_routes.delete_enrichment_key,
+    profile_routes.get_my_profile_settings,
+    profile_routes.set_my_profile_settings,
+    profile_routes.list_profile_link_sites,
+    profile_routes.get_my_profile_links,
+    profile_routes.set_my_profile_link,
+    profile_routes.delete_my_profile_link,
+    profile_routes.get_user_profile,
+    profile_routes.follow_user,
+    profile_routes.unfollow_user,
+    profile_routes.get_followers,
+    profile_routes.get_following,
+    profile_routes.get_user_library_genres,
+    profile_routes.get_user_library,
+    profile_routes.get_user_collections,
+    refresh_schedules_routes.get_refresh_schedule,
+    refresh_schedules_routes.set_refresh_schedule,
+    refresh_schedules_routes.delete_refresh_schedule,
+    ps_plus_routes.get_ps_plus_rotation,
+    ps_plus_routes.get_ps_plus_rotation_summary,
+    social_routes.list_friend_requests,
+    social_routes.send_friend_request,
+    social_routes.accept_friend,
+    social_routes.remove_friend,
+    social_routes.create_chat_group,
+    social_routes.rename_chat_group,
+    social_routes.invite_to_chat_group,
+    social_routes.leave_chat_group,
 ]
 
 
@@ -162,14 +166,14 @@ def _dependency_calls(dependant):
         yield from _dependency_calls(sub_dependant)
 
 
-def _route_dispatched_to(routes, method: str, path: str):
-    """The route ``method path`` would actually reach: the first full match, exactly as the router picks it."""
-    scope = {"type": "http", "method": method, "path": path, "root_path": "", "headers": []}
-    for route in routes:
-        match, _ = route.matches(scope)
-        if match is Match.FULL:
-            return route
-    return None
+def _effective_routes(app):
+    """Every route the app dispatches to, with its included prefix and dependencies applied.
+
+    Since FastAPI 0.137 ``app.routes`` holds one ``_IncludedRouter`` per ``include_router`` call rather than
+    the routes themselves, so iterating it directly sees no API route at all -- and a detector built on it
+    passes with nothing to check. ``iter_route_contexts`` is the public walk over the effective routes.
+    """
+    return [context.route for context in iter_route_contexts(app.routes)]
 
 
 def _reaches_require_bearer(route) -> bool:
@@ -177,8 +181,34 @@ def _reaches_require_bearer(route) -> bool:
     return dependant is not None and any(call is require_bearer for call in _dependency_calls(dependant))
 
 
-def test_every_route_behind_require_bearer_is_listed_in_bearer_required_routes():
-    """``_BEARER_REQUIRED_ROUTES`` is hand-maintained and feeds three ``parametrize`` decorators, so a
+def _unlisted_bearer_routes(app) -> list[str]:
+    listed = set(_BEARER_REQUIRED_HANDLERS)
+    return [
+        f"{'/'.join(sorted(route.methods))} {route.path}"
+        for route in _effective_routes(app)
+        if _reaches_require_bearer(route) and route.endpoint not in listed
+    ]
+
+
+def _request_line_for(app, handler) -> tuple[str, str]:
+    """The one method ``handler`` answers, and its path with every parameter filled by a generated value.
+
+    The path comes from the route declaration itself (``url_path_for``), so a test names the handler and
+    never restates the URL; the generated parameters are never judged, because every listed route refuses
+    the request before its body runs.
+    """
+    route = next(route for route in _effective_routes(app) if getattr(route, "endpoint", None) is handler)
+    (method,) = route.methods
+    parameters = {name: uuid.uuid4().hex for name in route.param_convertors}
+    return method, app.url_path_for(handler.__name__, **parameters)
+
+
+def _path_parameter_names(app) -> set[str]:
+    return {name for route in _effective_routes(app) for name in getattr(route, "param_convertors", {})}
+
+
+def test_every_route_behind_require_bearer_is_listed_in_bearer_required_handlers():
+    """``_BEARER_REQUIRED_HANDLERS`` is hand-maintained and feeds three ``parametrize`` decorators, so a
     protected route missing from it is never asserted at all and the suite still passes. This is the check
     that discriminates: it asks the app which routes actually reach
     :func:`~curator.deps.require_bearer` -- directly or through ``require_verified_caller``/
@@ -188,21 +218,12 @@ def test_every_route_behind_require_bearer_is_listed_in_bearer_required_routes()
     ``require_bearer`` from its own body, so it never appears in the dependency graph, which is the same
     reason those routes answer anonymously.
 
-    Coverage is judged by which route each listed path is *dispatched to*, not by which patterns it
-    happens to match. A listed ``/collections/followed`` matches ``/collections/{definition_id}`` as well,
-    so a match-based test would credit the second route to the first entry and leave it unasserted.
+    The list stays a hand-written policy rather than a list derived from the app, so a route that loses its
+    ``require_bearer`` dependency still fails the three tests below instead of silently leaving them.
     """
     client, *_ = _build()
-    routes = client.app.routes
-    dispatched_to = [_route_dispatched_to(routes, method.upper(), path) for method, path, _ in _BEARER_REQUIRED_ROUTES]
 
-    unlisted = [
-        f"{'/'.join(sorted(route.methods))} {route.path}"
-        for route in routes
-        if _reaches_require_bearer(route) and not any(reached is route for reached in dispatched_to)
-    ]
-
-    assert unlisted == []
+    assert _unlisted_bearer_routes(client.app) == []
 
 
 class RecordingRepository(FakeRepository):
@@ -269,19 +290,25 @@ def _seed_custom_link(repo: RecordingRepository, crypto: TokenCrypto, sub: str, 
     )
 
 
-@pytest.mark.parametrize(("method", "path", "kwargs"), _BEARER_REQUIRED_ROUTES)
-def test_bearer_required_routes_reject_missing_authorization_header(method, path, kwargs):
+@pytest.mark.parametrize("handler", _BEARER_REQUIRED_HANDLERS, ids=lambda handler: handler.__name__)
+def test_bearer_required_routes_reject_missing_authorization_header(handler):
     client, *_ = _build()
-    response = getattr(client, method)(path, **kwargs)
+    method, path = _request_line_for(client.app, handler)
+
+    response = client.request(method, path)
+
     assert response.status_code == 401
 
 
-@pytest.mark.parametrize(("method", "path", "kwargs"), _BEARER_REQUIRED_ROUTES)
-def test_bearer_required_routes_reject_garbage_token(method, path, kwargs):
+@pytest.mark.parametrize("handler", _BEARER_REQUIRED_HANDLERS, ids=lambda handler: handler.__name__)
+def test_bearer_required_routes_reject_garbage_token(handler):
     client, *_ = _build()
-    response = getattr(client, method)(path, headers=_bearer("garbage-not-a-real-token"), **kwargs)
+    method, path = _request_line_for(client.app, handler)
+
+    response = client.request(method, path, headers=_bearer(uuid.uuid4().hex))
+
     assert response.status_code == 401
-    assert response.headers.get("WWW-Authenticate") == "Bearer"
+    assert response.headers.get(WWW_AUTHENTICATE_HEADER) == BEARER_SCHEME
 
 
 class UnreachableAuthorityValidator:
@@ -291,14 +318,15 @@ class UnreachableAuthorityValidator:
         raise AuthorityUnavailableError(AUTHORITY_UNAVAILABLE_DETAIL)
 
 
-@pytest.mark.parametrize(("method", "path", "kwargs"), _BEARER_REQUIRED_ROUTES)
-def test_bearer_required_routes_answer_503_when_identity_cannot_be_reached(method, path, kwargs):
+@pytest.mark.parametrize("handler", _BEARER_REQUIRED_HANDLERS, ids=lambda handler: handler.__name__)
+def test_bearer_required_routes_answer_503_when_identity_cannot_be_reached(handler):
     client, *_ = _build(token_validator=UnreachableAuthorityValidator())
+    method, path = _request_line_for(client.app, handler)
 
-    response = getattr(client, method)(path, headers=_bearer("a-token-nobody-got-to-look-at"), **kwargs)
+    response = client.request(method, path, headers=_bearer(uuid.uuid4().hex))
 
     assert response.status_code == 503
-    assert "WWW-Authenticate" not in response.headers
+    assert WWW_AUTHENTICATE_HEADER not in response.headers
     assert response.json()["detail"] == AUTHORITY_UNAVAILABLE_DETAIL
 
 
@@ -321,23 +349,27 @@ def test_cross_user_isolation_between_two_established_callers():
         token_crypto=crypto,
         agent_factory=agent_factory,
         token_validator=validator,
+        audit_repository=RecordingAuditRepository(),
     )
     app.state.library_repository = FakeLibraryRepository()
     app.state.refresh_schedules_repository = FakeRefreshSchedulesRepository()
     client = TestClient(app)
+    me_path = app.url_path_for(me_routes.me.__name__)
+    link_path = app.url_path_for(psn_routes.psn_link.__name__)
+    relink_npsso = uuid.uuid4().hex
 
-    me_response = client.get("/me", headers=_bearer("token-a"))
+    me_response = client.get(me_path, headers=_bearer("token-a"))
     assert me_response.status_code == 200
     assert repo.delete_calls == []
 
     baseline = len(repo.all_subs_seen)
 
-    me_body = me_response.json()
-    assert me_body["sub"] == "sub-a"
-    assert me_body["linked"] is True
+    me_body = MeResponse.model_validate(me_response.json())
+    assert me_body.sub == "sub-a"
+    assert me_body.linked is True
     assert repo.links["sub-b"].psn_account_id == "psn-account-b"
 
-    delete_response = client.delete("/psn/link", headers=_bearer("token-a"))
+    delete_response = client.delete(link_path, headers=_bearer("token-a"))
     assert delete_response.status_code == 204
     assert repo.delete_calls == ["sub-a"]
     assert "sub-b" in repo.links
@@ -346,9 +378,11 @@ def test_cross_user_isolation_between_two_established_callers():
     assert repo.links["sub-b"].refresh_token_expires_at == datetime(2026, 2, 1, 2, tzinfo=timezone.utc)
 
     agent_factory.account_id = "psn-account-a-relinked"
-    link_response = client.post("/psn/link", json={"npsso": "a-new-npsso"}, headers=_bearer("token-a"))
+    link_response = client.post(
+        link_path, json=LinkRequest(npsso=relink_npsso).model_dump(), headers=_bearer("token-a")
+    )
     assert link_response.status_code == 200
-    assert agent_factory.calls[-1] == ("sub-a", "a-new-npsso")
+    assert agent_factory.calls[-1] == ("sub-a", relink_npsso)
     assert repo.set_link_account_calls[-1] == ("sub-a", "psn-account-a-relinked")
 
     assert repo.links["sub-b"].psn_account_id == "psn-account-b"
@@ -358,32 +392,25 @@ def test_cross_user_isolation_between_two_established_callers():
     assert subs_touched_by_a == {"sub-a"}
 
 
-_ALLOWED_PATH_PARAMETERS = {"console_id", "game_id", "np_communication_id", "sub", "online_id", "group_id"}
-
-
 def test_no_route_exposes_a_caller_suppliable_user_identifier_path_parameter():
     """No route path parameter may be a "target user" identifier (a ``{sub}``-shaped segment letting one
     user name another's data) -- every route still keys identity exclusively off the validated token's own
-    ``sub``. ``{console_id}``/``{game_id}`` (``PUT /consoles/{console_id}/installs/{game_id}``) and
-    ``{np_communication_id}`` (``GET /trophies/titles/{np_communication_id}`` and its ``/groups``
-    sibling) are the sole *resource*-naming exceptions: they name a console/game/PSN title, not a user.
-    ``consoles_routes`` re-checks the resource's ownership against the caller's own ``sub`` before acting
-    (see ``test_consoles_routes.py``); ``trophy_routes`` needs no such check because
-    ``np_communication_id`` only ever selects *which title* to read the caller's own trophy data for --
-    there is no cross-user data reachable through it.
+    ``sub``. Every other parameter names a *resource* (a console, collection definition, storage device,
+    game, chat group, PSN title, online id, platform, enrichment provider, job run, share slug or profile
+    link site), never a user. ``consoles_routes`` and its siblings re-check the resource's ownership against
+    the caller's own ``sub`` before acting (see ``test_consoles_routes.py``); ``trophy_routes`` needs no such
+    check because ``np_communication_id`` only ever selects *which title* to read the caller's own trophy
+    data for -- there is no cross-user data reachable through it.
 
     ``{sub}`` (``curator.profile_routes``'s ``/users/{sub}/...`` family) is the one deliberate exception
     that *does* name another user's account, on purpose -- see that module's docstring and
     ``curator.deps``'s module docstring for the full rationale (viewer-B-looks-at-owner-A's-public-profile,
     always using B's own stored PSN session, never A's).
+
+    The set is compared for equality, so a new path parameter fails here until someone decides which kind
+    it names, and a walk that saw no route (the ``app.routes`` blindness above) fails rather than passing
+    with nothing checked.
     """
     client, *_ = _build()
-    app = client.app
 
-    route_paths = [route.path for route in app.routes if hasattr(route, "path")]
-    assert route_paths, "expected at least one route to introspect"
-    for path in route_paths:
-        for segment in path.split("/"):
-            if segment.startswith("{") and segment.endswith("}"):
-                name = segment[1:-1]
-                assert name in _ALLOWED_PATH_PARAMETERS, f"route {path!r} exposes an unexpected path parameter {name!r}"
+    assert _path_parameter_names(client.app) == ALLOWED_PATH_PARAMETERS

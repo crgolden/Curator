@@ -6,6 +6,7 @@ import importlib.util
 import pathlib
 import sys
 
+import elasticsearch
 import pytest
 
 import curator.app
@@ -35,5 +36,5 @@ def test_shim_does_not_import_curator_or_elasticsearch_at_module_scope():
     source = _APP_SHIM_PATH.read_text(encoding="utf-8")
     import_lines = [line.strip() for line in source.splitlines() if line.startswith(("import ", "from "))]
 
-    assert not [line for line in import_lines if "elasticsearch" in line]
+    assert not [line for line in import_lines if elasticsearch.__name__ in line]
     assert not [line for line in import_lines if line.startswith(("import curator", "from curator"))]

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 import unicodedata
+from collections.abc import Iterable
 
 _TRADEMARK_SYMBOLS = re.compile(r"[™®©]")
 _TRADEMARK_LETTERS = re.compile(r"TM\b")
@@ -34,3 +35,16 @@ def normalized_title(name: str) -> str:
     :param name: A non-empty display form.
     """
     return name.strip().lower()
+
+
+def edition_family(name: str, edition_keywords: Iterable[str]) -> str:
+    """Return the name with every ``edition_ranks`` keyword removed, the key ``Functions`` groups a
+    concept's products by (``CanonicalizationService.EditionFamily``).
+
+    :param name: A display form or a ``games.normalized_title`` key.
+    :param edition_keywords: The ``edition_ranks`` keywords, already lower-case.
+    """
+    family = name.lower()
+    for keyword in edition_keywords:
+        family = family.replace(keyword, "")
+    return _WHITESPACE.sub(" ", family).strip()

@@ -8,7 +8,15 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import date
-from typing import Any
+from typing import Any, Final
+
+BRONZE_KEY: Final = "bronze"
+SILVER_KEY: Final = "silver"
+GOLD_KEY: Final = "gold"
+PLATINUM_KEY: Final = "platinum"
+
+ALL_TROPHY_GROUPS: Final = "all"
+"""PSN's trophy-group selector for every group in a title at once."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -442,8 +450,8 @@ def trophy_counts(source: dict[str, Any] | None) -> TrophyCounts:
     if source is None:
         return TrophyCounts()
     return TrophyCounts(
-        int(source.get("bronze", 0) or 0),
-        int(source.get("silver", 0) or 0),
-        int(source.get("gold", 0) or 0),
-        int(source.get("platinum", 0) or 0),
+        int(source.get(BRONZE_KEY, 0) or 0),
+        int(source.get(SILVER_KEY, 0) or 0),
+        int(source.get(GOLD_KEY, 0) or 0),
+        int(source.get(PLATINUM_KEY, 0) or 0),
     )

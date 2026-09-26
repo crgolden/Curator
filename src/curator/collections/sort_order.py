@@ -17,13 +17,16 @@ caller's input order is itself deterministic -- see ``CollectionsRepository.list
 from __future__ import annotations
 
 from collections.abc import Callable
+from typing import Final
 
 from curator.collections.game_candidate import GameCandidate
 
 SortKey = Callable[[GameCandidate], tuple[object, ...]]
 
+COMPOSITE_DESC: Final = "composite_desc"
+
 _SORT_ORDERS: dict[str, SortKey] = {
-    "composite_desc": lambda candidate: (candidate.composite_score is not None, candidate.composite_score or 0.0),
+    COMPOSITE_DESC: lambda candidate: (candidate.composite_score is not None, candidate.composite_score or 0.0),
 }
 
 

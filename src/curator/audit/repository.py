@@ -33,6 +33,19 @@ ACTION_CHAT_MESSAGE_SENT = "chat_message_sent"
 ACTION_CHAT_MEMBERSHIP_CHANGED = "chat_membership_changed"
 ACTION_FRIEND_REQUEST_SENT = "friend_request_sent"
 ACTION_CHAT_GROUP_RENAMED = "chat_group_renamed"
+ACTION_LINK_REQUESTED = "link_requested"
+ACTION_LINK_REVERIFIED = "link_reverified"
+ACTION_IDENTITY_FETCH = "identity_fetch"
+ACTION_PRESENCE_FETCH = "presence_fetch"
+ACTION_DEVICES_FETCH = "devices_fetch"
+ACTION_FRIEND_REQUESTS_FETCH = "friend_requests_fetch"
+ACTION_PROFILE_LOOKUP = "profile_lookup"
+ACTION_STORE_SEARCH = "store_search"
+ACTION_DEVICE_LINK_CHECK = "device_link_check"
+
+OUTCOME_STARTED = "started"
+OUTCOME_COMPLETED = "completed"
+OUTCOME_FAILED = "failed"
 
 PSN_MUTATION_ACTIONS: tuple[str, ...] = (
     ACTION_FRIEND_ADDED,
@@ -54,6 +67,7 @@ class AccountActionLogEntry:
     action: str
     detail: str | None
     occurred_at: datetime
+    outcome: str
 
 
 class AccountActionLogRepository:
@@ -78,6 +92,47 @@ class AccountActionLogRepository:
         async with self._pool.connection() as conn, conn.cursor() as cur:
             await cur.execute(sql, (identity_sub, action, detail))
 
+    async def begin(self, identity_sub: str, action: str, detail: str | None = None) -> str:
+        """Record, before it happens, an action about to use ``identity_sub``'s PSN token.
+
+        The row is written ``started``; :meth:`finish` marks the outcome. Nothing may touch the token until
+        this returns, so a history write that cannot land stops the action.
+
+        :param identity_sub: The Identity ``sub`` claim of the affected user.
+        :param action: One of the ``account_action_log.action`` CHECK values.
+        :param detail: A short human-readable summary; never the npsso, a token, or raw PSN response data.
+        :returns: The new row's ``log_id``.
+        :raises RuntimeError: If the insert returned no id.
+        """
+        sql = (
+            "INSERT INTO account_action_log (identity_sub, action, detail, outcome) "
+            "VALUES (%s, %s, %s, %s) RETURNING log_id"
+        )
+        async with self._pool.connection() as conn, conn.cursor() as cur:
+            await cur.execute(sql, (identity_sub, action, detail, OUTCOME_STARTED))
+            row = await cur.fetchone()
+        if row is None:
+            raise RuntimeError(f"account_action_log insert returned no log_id (action={action}).")
+        return str(row[0])
+
+    async def finish(self, log_id: str, outcome: str, detail: str | None = None) -> None:
+        """Mark the outcome of an action recorded by :meth:`begin`.
+
+        :param log_id: The id :meth:`begin` returned.
+        :param outcome: :data:`OUTCOME_COMPLETED` or :data:`OUTCOME_FAILED`.
+        :param detail: Replaces the row's detail when given; the stored detail stays otherwise.
+        :raises RuntimeError: If no ``started`` row carries ``log_id``.
+        """
+        sql = (
+            "UPDATE account_action_log SET outcome = %s, detail = COALESCE(%s, detail) "
+            "WHERE log_id = %s AND outcome = %s"
+        )
+        async with self._pool.connection() as conn, conn.cursor() as cur:
+            await cur.execute(sql, (outcome, detail, log_id, OUTCOME_STARTED))
+            updated = cur.rowcount
+        if updated != 1:
+            raise RuntimeError(f"account_action_log row {log_id} was not a started row; outcome not recorded.")
+
     async def list_for_user(self, identity_sub: str) -> list[AccountActionLogEntry]:
         """Return every logged action for ``identity_sub``, oldest first.
 
@@ -86,7 +141,7 @@ class AccountActionLogRepository:
         :param identity_sub: The Identity ``sub`` claim of the user requesting their history.
         """
         sql = (
-            "SELECT log_id, identity_sub, action, detail, occurred_at FROM account_action_log "
+            "SELECT log_id, identity_sub, action, detail, occurred_at, outcome FROM account_action_log "
             "WHERE identity_sub = %s ORDER BY occurred_at ASC"
         )
         async with self._pool.connection() as conn, conn.cursor() as cur:
@@ -99,6 +154,7 @@ class AccountActionLogRepository:
                 action=row[2],
                 detail=row[3],
                 occurred_at=row[4],
+                outcome=row[5],
             )
             for row in rows
         ]
@@ -106,21 +162,21 @@ class AccountActionLogRepository:
     async def count_since(self, identity_sub: str, actions: tuple[str, ...], since: datetime) -> int:
         """Count this user's logged ``actions`` at or after ``since``.
 
-        Backs the per-user daily cap on PSN mutations -- the audit trail doubles as the meter, since a row
-        is written precisely when a mutation succeeded. The count is best-effort in one direction only: a
-        failed audit write leaves a real mutation uncounted (``curator.social_routes`` will not fail a
-        mutation that already landed on PSN just because the log write did), so the cap can undercount but
-        never overcount.
+        Backs the per-user daily cap on PSN mutations -- the audit trail doubles as the meter. Every attempt
+        is written before it reaches PSN, so ``started`` and ``completed`` rows both count and only a
+        ``failed`` one does not: an attempt whose outcome was never confirmed is counted, so the cap can
+        overcount but never undercount. The caller's own in-flight attempt is among the rows counted.
 
         :param identity_sub: The Identity ``sub`` claim of the affected user.
         :param actions: The action names to count.
         :param since: Only rows with ``occurred_at`` at or after this timestamp are counted.
         """
         sql = (
-            "SELECT COUNT(*) FROM account_action_log WHERE identity_sub = %s AND action = ANY(%s) AND occurred_at >= %s"
+            "SELECT COUNT(*) FROM account_action_log WHERE identity_sub = %s AND action = ANY(%s) "
+            "AND occurred_at >= %s AND outcome <> %s"
         )
         async with self._pool.connection() as conn, conn.cursor() as cur:
-            await cur.execute(sql, (identity_sub, list(actions), since))
+            await cur.execute(sql, (identity_sub, list(actions), since, OUTCOME_FAILED))
             row = await cur.fetchone()
         return int(row[0]) if row else 0
 

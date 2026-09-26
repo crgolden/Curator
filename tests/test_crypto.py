@@ -10,7 +10,7 @@ import pytest
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 from curator.persistence.config import ConfigError
-from curator.persistence.crypto import SCHEME_AES_GCM_V1, InvalidToken, TokenCrypto
+from curator.persistence.crypto import SCHEME_AES_GCM_V1, TOKEN_KEY_ENV, InvalidToken, TokenCrypto
 
 NONCE_SIZE_BYTES = 12
 TAG_SIZE_BYTES = 16
@@ -135,7 +135,7 @@ def test_from_config_prefers_explicit_key():
 
 def test_from_config_reads_env_var(monkeypatch, tmp_path):
     key = TokenCrypto.generate_key()
-    monkeypatch.setenv("CURATOR_TOKEN_KEY", key.decode("ascii"))
+    monkeypatch.setenv(TOKEN_KEY_ENV, key.decode("ascii"))
 
     crypto = TokenCrypto.from_config(dotenv_path=tmp_path / "absent.env")
 
@@ -144,7 +144,7 @@ def test_from_config_reads_env_var(monkeypatch, tmp_path):
 
 
 def test_from_config_reads_dotenv(monkeypatch, tmp_path):
-    monkeypatch.delenv("CURATOR_TOKEN_KEY", raising=False)
+    monkeypatch.delenv(TOKEN_KEY_ENV, raising=False)
     key = TokenCrypto.generate_key()
     dotenv = tmp_path / ".env"
     dotenv.write_text(f"CURATOR_TOKEN_KEY={key.decode('ascii')}\n", encoding="utf-8")
@@ -156,7 +156,7 @@ def test_from_config_reads_dotenv(monkeypatch, tmp_path):
 
 
 def test_from_config_missing_raises_config_error(monkeypatch, tmp_path):
-    monkeypatch.delenv("CURATOR_TOKEN_KEY", raising=False)
+    monkeypatch.delenv(TOKEN_KEY_ENV, raising=False)
     with pytest.raises(ConfigError):
         TokenCrypto.from_config(dotenv_path=tmp_path / "absent.env")
 

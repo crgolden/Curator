@@ -11,7 +11,19 @@ from __future__ import annotations
 import json
 from typing import TYPE_CHECKING, Any, Protocol
 
-from curator.psn.models import TitleStat, TrophyCounts, TrophyDetail, TrophyGroups, TrophySummary, TrophyTitle
+from curator.psn.models import (
+    ALL_TROPHY_GROUPS,
+    BRONZE_KEY,
+    GOLD_KEY,
+    PLATINUM_KEY,
+    SILVER_KEY,
+    TitleStat,
+    TrophyCounts,
+    TrophyDetail,
+    TrophyGroups,
+    TrophySummary,
+    TrophyTitle,
+)
 
 if TYPE_CHECKING:
     from curator.psn.trophy_client import TrophyClient
@@ -32,15 +44,15 @@ class RedisLike(Protocol):
 
 
 def _counts_to_dict(counts: TrophyCounts) -> dict[str, int]:
-    return {"bronze": counts.bronze, "silver": counts.silver, "gold": counts.gold, "platinum": counts.platinum}
+    return {BRONZE_KEY: counts.bronze, SILVER_KEY: counts.silver, GOLD_KEY: counts.gold, PLATINUM_KEY: counts.platinum}
 
 
 def _counts_from_dict(data: dict[str, Any]) -> TrophyCounts:
     return TrophyCounts(
-        bronze=data.get("bronze", 0),
-        silver=data.get("silver", 0),
-        gold=data.get("gold", 0),
-        platinum=data.get("platinum", 0),
+        bronze=data.get(BRONZE_KEY, 0),
+        silver=data.get(SILVER_KEY, 0),
+        gold=data.get(GOLD_KEY, 0),
+        platinum=data.get(PLATINUM_KEY, 0),
     )
 
 
@@ -155,7 +167,7 @@ class CachedTrophyClient:
         platform: str,
         online_id: str | None = None,
         account_id: str | None = None,
-        group: str = "all",
+        group: str = ALL_TROPHY_GROUPS,
         limit: int | None = None,
     ) -> list[TrophyDetail]:
         """Uncached passthrough to :meth:`~curator.psn.trophy_client.TrophyClient.title_trophies`."""

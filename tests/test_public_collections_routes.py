@@ -4,12 +4,34 @@ API. No Authorization header is ever sent in these tests; that omission is the p
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 from fastapi.testclient import TestClient
 
+from curator import public_collections_routes
 from curator.app import create_app
-from curator.collections.repository import CollectionDefinition, CollectionItem
+from curator.collections.collection_spec import FILTER_LIST_KIND
+from curator.collections.repository import (
+    VISIBILITY_PRIVATE,
+    VISIBILITY_PUBLIC,
+    VISIBILITY_UNLISTED,
+    CollectionDefinition,
+    CollectionItem,
+)
 from curator.persistence.crypto import TokenCrypto
-from test_routes import FakeAgentFactory, FakeRepository, FakeTokenValidator, _make_settings
+from curator.public_collections_routes import PublicCollectionResponse
+from test_routes import FakeAgentFactory, FakeRepository, FakeTokenValidator, _make_settings, _path
+from test_values import (
+    new_console_id,
+    new_cover_image_url,
+    new_definition_id,
+    new_game_id,
+    new_game_title,
+    new_genre_name,
+    new_identity_sub,
+    new_percent_completed,
+    new_share_slug,
+)
 
 
 class FakeCollectionsRepository:
@@ -19,7 +41,7 @@ class FakeCollectionsRepository:
 
     async def get_definition_by_share_slug(self, share_slug):
         definition = self._by_slug.get(share_slug)
-        if definition is None or definition.visibility == "private":
+        if definition is None or definition.visibility == VISIBILITY_PRIVATE:
             return None
         return definition
 
@@ -27,35 +49,38 @@ class FakeCollectionsRepository:
         return self._items.get(definition_id, [])
 
 
-def _definition(definition_id="def-a", visibility="public", share_slug="abc123"):
-    return CollectionDefinition(
-        definition_id=definition_id,
-        identity_sub="sub-a",
-        name="A's shared list",
-        kind="filter_list",
-        console_id=None,
-        genre_filter=(),
-        min_score=None,
-        aaa_tier_filter=None,
-        sort_order=None,
-        description="curated",
-        visibility=visibility,
-        share_slug=share_slug,
+def _definition(**overrides):
+    return replace(
+        CollectionDefinition(
+            definition_id=new_definition_id(),
+            identity_sub=new_identity_sub(),
+            name=new_game_title(),
+            kind=FILTER_LIST_KIND,
+            console_id=None,
+            genre_filter=(),
+            min_score=None,
+            aaa_tier_filter=None,
+            sort_order=None,
+            description=new_game_title(),
+            visibility=VISIBILITY_PUBLIC,
+            share_slug=new_share_slug(),
+        ),
+        **overrides,
     )
 
 
-def _item(game_id="g1"):
+def _item():
     return CollectionItem(
-        game_id=game_id,
+        game_id=new_game_id(),
         rank=1,
-        title="Elden Ring",
+        title=new_game_title(),
         franchise=None,
-        genre="RPG",
-        aaa_tier="AAA",
+        genre=new_genre_name(),
+        aaa_tier=new_genre_name(),
         critical_score=95.0,
         oc_score=90.0,
         psn_rating=4.8,
-        cover_image_url="elden-ring.png",
+        cover_image_url=new_cover_image_url(),
         owner_has_access=True,
     )
 
@@ -74,36 +99,40 @@ def _build(collections_repository=None):
     return TestClient(app)
 
 
-def test_returns_a_public_collection_with_no_auth_header_at_all():
-    repo = FakeCollectionsRepository([_definition(visibility="public")], {"def-a": [_item()]})
-    client = _build(repo)
+def _get(client, share_slug):
+    return client.get(_path(client, public_collections_routes.get_public_collection, share_slug=share_slug))
 
-    response = client.get("/public/collections/abc123")
+
+def test_returns_a_public_collection_with_no_auth_header_at_all():
+    definition = _definition(visibility=VISIBILITY_PUBLIC)
+    item = _item()
+    client = _build(FakeCollectionsRepository([definition], {definition.definition_id: [item]}))
+
+    response = _get(client, definition.share_slug)
 
     assert response.status_code == 200
-    body = response.json()
-    assert body["definition_id"] == "def-a"
-    assert body["name"] == "A's shared list"
-    assert body["visibility"] == "public"
-    assert len(body["items"]) == 1
-    assert body["items"][0]["game_id"] == "g1"
+    body = PublicCollectionResponse.model_validate(response.json())
+    assert body.definition_id == definition.definition_id
+    assert body.name == definition.name
+    assert body.visibility == VISIBILITY_PUBLIC
+    assert [served.game_id for served in body.items] == [item.game_id]
 
 
 def test_returns_an_unlisted_collection_too():
-    repo = FakeCollectionsRepository([_definition(visibility="unlisted")])
-    client = _build(repo)
+    definition = _definition(visibility=VISIBILITY_UNLISTED)
+    client = _build(FakeCollectionsRepository([definition]))
 
-    response = client.get("/public/collections/abc123")
+    response = _get(client, definition.share_slug)
 
     assert response.status_code == 200
-    assert response.json()["visibility"] == "unlisted"
+    assert PublicCollectionResponse.model_validate(response.json()).visibility == VISIBILITY_UNLISTED
 
 
 def test_a_private_collections_slug_404s_exactly_like_an_unknown_one():
-    repo = FakeCollectionsRepository([_definition(visibility="private")])
-    client = _build(repo)
+    definition = _definition(visibility=VISIBILITY_PRIVATE)
+    client = _build(FakeCollectionsRepository([definition]))
 
-    response = client.get("/public/collections/abc123")
+    response = _get(client, definition.share_slug)
 
     assert response.status_code == 404
 
@@ -111,19 +140,21 @@ def test_a_private_collections_slug_404s_exactly_like_an_unknown_one():
 def test_unknown_slug_404s():
     client = _build()
 
-    response = client.get("/public/collections/does-not-exist")
+    response = _get(client, new_share_slug())
 
     assert response.status_code == 404
 
 
 def test_response_omits_authoring_fields_an_anonymous_viewer_should_not_see():
+    console_id, genre = new_console_id(), new_genre_name()
+    definition = _definition(
+        console_id=console_id, genre_filter=(genre,), min_percent_completed=new_percent_completed()
+    )
+    client = _build(FakeCollectionsRepository([definition]))
 
-    repo = FakeCollectionsRepository([_definition()])
-    client = _build(repo)
+    response = _get(client, definition.share_slug)
 
-    response = client.get("/public/collections/abc123")
-
-    body = response.json()
-    assert "console_id" not in body
-    assert "genre_filter" not in body
-    assert "min_percent_completed" not in body
+    assert response.status_code == 200
+    assert console_id not in response.text
+    assert genre not in response.text
+    assert set(response.json()) == set(PublicCollectionResponse.model_fields)

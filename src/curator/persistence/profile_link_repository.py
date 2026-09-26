@@ -14,6 +14,13 @@ from dataclasses import dataclass
 
 from psycopg_pool import AsyncConnectionPool
 
+HANDLE_PLACEHOLDER = "{handle}"
+
+
+def profile_link_url(url_template: str, handle: str) -> str:
+    """Resolve a site's stored ``url_template`` for one handle."""
+    return url_template.replace(HANDLE_PLACEHOLDER, handle)
+
 
 @dataclass(frozen=True, slots=True)
 class ProfileLinkSite:
@@ -78,7 +85,7 @@ class ProfileLinkRepository:
                 site_key=row[0],
                 display_name=row[1],
                 handle=row[2],
-                url=row[3].replace("{handle}", row[2]),
+                url=profile_link_url(row[3], row[2]),
             )
             for row in rows
         ]

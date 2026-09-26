@@ -1,8 +1,8 @@
 """Walks the PS Plus catalog categories and records membership with a lifecycle.
 
-Unlike the catalog backfill, nothing here creates ``games`` and nothing filters to full games: bundles
-and premium editions are members too, and ``classification`` records what each is. The decisions behind
-the walk are in ``AGENTS/REPOS/Curator.md``.
+Nothing filters which members are recorded: bundles and premium editions are members too, and
+``classification`` records what each is. Only the full games among them are admitted to the shared
+catalog. The decisions behind the walk are in ``AGENTS/REPOS/Curator.md``.
 """
 
 from __future__ import annotations
@@ -15,14 +15,19 @@ from datetime import datetime, timezone
 from typing import Protocol
 
 from curator.catalog.ps_plus_repository import PsPlusCategory, PsPlusTier, PsPlusWalkWriter, WalkStoppedReason
-from curator.catalog.store_backfill_service import DEFAULT_PAGE_DELAY_SECONDS, PAGE_SIZE, next_page_offset
+from curator.catalog.store_backfill_service import (
+    DEFAULT_PAGE_DELAY_SECONDS,
+    FILTER_NOT_APPLIED,
+    NO_PRODUCTS,
+    PAGE_BUDGET_EXHAUSTED,
+    PAGE_SIZE,
+    QUERY_ROTATED,
+    CatalogBackfillWriter,
+    next_page_offset,
+)
 from curator.psn.store_client import StoreCatalogClient, StoreFilterIgnoredError, StoreQueryRotatedError
 
 CATEGORY_RENAMED: WalkStoppedReason = "category_renamed"
-QUERY_ROTATED: WalkStoppedReason = "query_rotated"
-FILTER_NOT_APPLIED: WalkStoppedReason = "filter_not_applied"
-NO_PRODUCTS: WalkStoppedReason = "no_products"
-PAGE_BUDGET_EXHAUSTED: WalkStoppedReason = "page_budget_exhausted"
 
 
 class PsPlusWalkStore(Protocol):
@@ -63,6 +68,7 @@ class PsPlusWalkService:
 
     :param client: The anonymous storefront client.
     :param repository: Where categories are read and memberships written.
+    :param catalog: Where a member that is a full game is admitted to the shared catalog.
     :param page_delay_seconds: Pacing between page requests.
     :param clock: Supplies the instants stamped on walks and memberships.
     """
@@ -71,12 +77,14 @@ class PsPlusWalkService:
         self,
         client: StoreCatalogClient,
         repository: PsPlusWalkStore,
+        catalog: CatalogBackfillWriter,
         *,
         page_delay_seconds: float = DEFAULT_PAGE_DELAY_SECONDS,
         clock: Callable[[], datetime] | None = None,
     ) -> None:
         self._client = client
         self._repository = repository
+        self._catalog = catalog
         self._page_delay_seconds = page_delay_seconds
         self._clock = clock or (lambda: datetime.now(timezone.utc))
 
@@ -155,6 +163,9 @@ class PsPlusWalkService:
             seen_product_ids.update(product.product_id for product in page.products)
             if page.products:
                 await writer.record_products(walk_id, page.products, self._clock())
+                full_games = [product for product in page.products if product.is_full_game]
+                if full_games:
+                    await self._catalog.backfill_store_products(full_games)
 
             offset = next_page_offset(page, offset)
             if page.is_last or not page.products:

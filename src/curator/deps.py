@@ -36,19 +36,37 @@ from typing import Annotated
 
 from fastapi import Depends, HTTPException, Request
 
+from curator.http_headers import AUTHORIZATION_HEADER, BEARER_SCHEME, WWW_AUTHENTICATE_HEADER
 from curator.persistence.repository import LinkRecord, Repository
+from curator.psn.safety import CHAT_WRITES, FRIEND_WRITES
 from curator.token_validation import AuthorityUnavailableError, TokenClaims, TokenError, TokenValidatorLike
 
-_CURATOR_SCOPE = "curator"
+_BEARER_CHALLENGE = {WWW_AUTHENTICATE_HEADER: BEARER_SCHEME}
+
+CURATOR_SCOPE = "curator"
+EMAIL_CLAIM_REQUIRED_DETAIL = "email claim required"
+
+HARVEST_TROPHIES = "harvest_trophies"
+HARVEST_IDENTITY = "harvest_identity"
+HARVEST_PRESENCE = "harvest_presence"
+HARVEST_DEVICES = "harvest_devices"
 
 _PSN_CAPABILITIES = {
-    "harvest_trophies",
-    "harvest_identity",
-    "harvest_presence",
-    "harvest_devices",
-    "allow_friend_writes",
-    "allow_chat_writes",
+    HARVEST_TROPHIES,
+    HARVEST_IDENTITY,
+    HARVEST_PRESENCE,
+    HARVEST_DEVICES,
+    FRIEND_WRITES,
+    CHAT_WRITES,
 }
+
+PREFERENCE_NOT_LINKED_DETAIL = "PSN account not linked."
+PSN_AUTH_FAILED_DETAIL = "PSN authentication failed; re-link your account."
+
+
+def preference_disabled_detail(category: str) -> str:
+    """Return the 403 detail :func:`require_preference` answers when ``category`` is off."""
+    return f"PSN data category '{category}' is not enabled for this user"
 
 
 async def require_bearer(request: Request) -> TokenClaims:
@@ -69,7 +87,7 @@ async def require_bearer(request: Request) -> TokenClaims:
         raise HTTPException(
             status_code=401,
             detail="Bearer token required.",
-            headers={"WWW-Authenticate": "Bearer"},
+            headers=_BEARER_CHALLENGE,
         )
 
     validator: TokenValidatorLike = request.app.state.token_validator
@@ -81,10 +99,10 @@ async def require_bearer(request: Request) -> TokenClaims:
         raise HTTPException(
             status_code=401,
             detail=str(exc),
-            headers={"WWW-Authenticate": "Bearer"},
+            headers=_BEARER_CHALLENGE,
         ) from exc
 
-    if not claims.has_scope(_CURATOR_SCOPE):
+    if not claims.has_scope(CURATOR_SCOPE):
         raise HTTPException(status_code=403, detail="curator scope required.")
 
     repository: Repository = request.app.state.repository
@@ -119,7 +137,7 @@ def require_verified_caller(claims: Annotated[TokenClaims, Depends(require_beare
         that must compare emails can safely proceed without.
     """
     if not claims.email:
-        raise HTTPException(status_code=403, detail="email claim required")
+        raise HTTPException(status_code=403, detail=EMAIL_CLAIM_REQUIRED_DETAIL)
     return claims
 
 
@@ -158,10 +176,10 @@ async def require_preference(request: Request, sub: str, category: str) -> LinkR
     repository: Repository = request.app.state.repository
     link = await repository.get_link(sub)
     if link is None:
-        raise HTTPException(status_code=404, detail="PSN account not linked.")
+        raise HTTPException(status_code=404, detail=PREFERENCE_NOT_LINKED_DETAIL)
 
     if getattr(link, category) is not True:
-        raise HTTPException(status_code=403, detail=f"PSN data category '{category}' is not enabled for this user")
+        raise HTTPException(status_code=403, detail=preference_disabled_detail(category))
 
     return link
 
@@ -172,11 +190,11 @@ def _extract_bearer_token(request: Request) -> str | None:
     :param request: The incoming request.
     :returns: The token, or ``None`` if the header is absent or not in the ``Bearer`` scheme.
     """
-    header = request.headers.get("Authorization")
+    header = request.headers.get(AUTHORIZATION_HEADER)
     if not header:
         return None
 
     scheme, _, token = header.partition(" ")
-    if scheme.lower() != "bearer" or not token:
+    if scheme.lower() != BEARER_SCHEME.lower() or not token:
         return None
     return token

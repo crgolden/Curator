@@ -8,6 +8,10 @@ import random
 import string
 import uuid
 from datetime import datetime, timedelta, timezone
+from typing import get_args
+
+from curator.catalog.content_kind import CONTENT_KINDS, GAME_KIND, ContentKind
+from curator.catalog.ps_plus_repository import PsPlusTier
 
 _LOWER_FIRST_HALF = string.ascii_lowercase[:13]
 _LOWER_SECOND_HALF = string.ascii_lowercase[13:]
@@ -111,3 +115,78 @@ def new_positive_count(ceiling: int = 500) -> int:
 
 def new_percent_completed() -> int:
     return random.randint(1, 99)
+
+
+def new_email_address() -> str:
+    return f"{lowercase_token()}@{lowercase_token()}.{lowercase_token(3)}"
+
+
+def new_opaque_token() -> str:
+    return uuid.uuid4().hex
+
+
+def new_sha256_hash() -> str:
+    return f"{uuid.uuid4().hex}{uuid.uuid4().hex}"
+
+
+def new_np_communication_id() -> str:
+    return f"NPWR{random.randint(0, 99999):05d}_00"
+
+
+def new_trophy_group_id() -> str:
+    return f"{random.randint(1, 999):03d}"
+
+
+def new_small_count() -> int:
+    return random.randint(1, 9)
+
+
+def new_review_score() -> float:
+    return round(random.uniform(1, 100), 1)
+
+
+def new_psn_rating() -> float:
+    return round(random.uniform(1, 5), 2)
+
+
+def new_genre_name() -> str:
+    return lowercase_token().capitalize()
+
+
+def new_facet_key() -> str:
+    return lowercase_token().upper()
+
+
+_PS_PLUS_TIERS: tuple[PsPlusTier, ...] = get_args(PsPlusTier)
+
+
+def new_ps_plus_tier() -> PsPlusTier:
+    return random.choice(_PS_PLUS_TIERS)
+
+
+def new_non_game_kind() -> ContentKind:
+    return random.choice([kind for kind in CONTENT_KINDS if kind != GAME_KIND])
+
+
+def new_run_id() -> str:
+    return str(uuid.uuid4())
+
+
+def new_result_summary() -> dict[str, object]:
+    return {lowercase_token(): {lowercase_token(): lowercase_token()}}
+
+
+def new_flag() -> bool:
+    return random.choice((True, False))
+
+
+def new_size_gb() -> float:
+    return round(random.uniform(1, 2000), 1)
+
+
+def new_storage_device_id() -> str:
+    return str(uuid.uuid4())
+
+
+def new_short_interval() -> timedelta:
+    return timedelta(seconds=random.randint(60, 600))

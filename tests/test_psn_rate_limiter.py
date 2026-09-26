@@ -5,6 +5,7 @@ from __future__ import annotations
 import time
 
 from curator.psn.rate_limiter import RedisRateLimiter
+from test_values import lowercase_token
 
 
 class FakeRedis:
@@ -67,22 +68,24 @@ async def test_acquire_over_budget_sleeps_out_the_oldest_entry(monkeypatch):
 async def test_acquire_prunes_entries_older_than_the_window():
     redis = FakeRedis()
     now = time.time()
-    redis.members = {"stale": now - 120}
+    stale_member = lowercase_token()
+    redis.members = {stale_member: now - 120}
     limiter = RedisRateLimiter(redis, max_requests=5, window_seconds=60)
 
     await limiter.acquire()
 
-    assert "stale" not in redis.members
+    assert stale_member not in redis.members
     assert len(redis.members) == 1
 
 
 async def test_acquire_sets_expiry_on_the_key():
     redis = FakeRedis()
-    limiter = RedisRateLimiter(redis, key="curator:psn:ratelimit", max_requests=5, window_seconds=60)
+    key = lowercase_token()
+    limiter = RedisRateLimiter(redis, key=key, max_requests=5, window_seconds=60)
 
     await limiter.acquire()
 
-    assert redis.expire_calls[-1] == ("curator:psn:ratelimit", 120)
+    assert redis.expire_calls[-1] == (key, 120)
 
 
 def _record_sleep(sleeps: list[float]):

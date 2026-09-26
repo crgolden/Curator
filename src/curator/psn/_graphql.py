@@ -9,12 +9,38 @@ just with different operations, headers, and error-checking needs.
 from __future__ import annotations
 
 import json
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Final
 
 if TYPE_CHECKING:
     from curator.psn.session import PsnSession
 
 GRAPHQL_URL = "https://m.np.playstation.com/api/graphql/v1/op"
+
+OPERATION_NAME_PARAM: Final = "operationName"
+VARIABLES_PARAM: Final = "variables"
+EXTENSIONS_PARAM: Final = "extensions"
+PERSISTED_QUERY_KEY: Final = "persistedQuery"
+VERSION_KEY: Final = "version"
+SHA256_HASH_KEY: Final = "sha256Hash"
+
+DATA_KEY: Final = "data"
+ERRORS_KEY: Final = "errors"
+MESSAGE_KEY: Final = "message"
+
+
+def persisted_query_params(operation_name: str, variables: dict[str, Any], sha256_hash: str) -> dict[str, str]:
+    """The query-string parameters that name one persisted query and its variables.
+
+    :param operation_name: The persisted operation's name.
+    :param variables: The query variables, JSON-encoded into the ``variables`` parameter.
+    :param sha256_hash: The hash the gateway registered the query document under.
+    :returns: The ``operationName``/``variables``/``extensions`` parameters.
+    """
+    return {
+        OPERATION_NAME_PARAM: operation_name,
+        VARIABLES_PARAM: json.dumps(variables),
+        EXTENSIONS_PARAM: json.dumps({PERSISTED_QUERY_KEY: {VERSION_KEY: 1, SHA256_HASH_KEY: sha256_hash}}),
+    }
 
 
 async def run_persisted_query(
@@ -39,13 +65,9 @@ async def run_persisted_query(
     :raises RuntimeError: If ``check_errors`` is ``True`` and PSN returns GraphQL errors.
     """
     operation_name, sha256_hash = operation
-    params = {
-        "operationName": operation_name,
-        "variables": json.dumps(variables),
-        "extensions": json.dumps({"persistedQuery": {"version": 1, "sha256Hash": sha256_hash}}),
-    }
+    params = persisted_query_params(operation_name, variables, sha256_hash)
     response: dict[str, Any] = (await session.get(GRAPHQL_URL, params=params, headers=headers)).json()
-    if check_errors and response.get("errors"):
-        message = response["errors"][0].get("message", "unknown error")
+    if check_errors and response.get(ERRORS_KEY):
+        message = response[ERRORS_KEY][0].get(MESSAGE_KEY, "unknown error")
         raise RuntimeError(f"PSN GraphQL '{operation_name}' failed: {message.strip()}")
     return response

@@ -6,14 +6,24 @@ from typing import Annotated, Literal
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel
 
-from curator.catalog.content_kind import EVERY_KIND, ContentKind
+from curator.catalog.content_kind import GAME_KIND, ContentKind
 from curator.catalog.ps_plus_repository import PsPlusTier, WalkStoppedReason
 from curator.catalog.ps_plus_walk_service import PsPlusWalkService
 from curator.catalog.repository import CatalogPrice, CatalogRepository, CatalogSortField, GameSummary
-from curator.catalog.store_backfill_service import BackfillStoppedReason, StoreBackfillService
+from curator.catalog.store_backfill_service import NO_PRODUCTS, BackfillStoppedReason, StoreBackfillService
 from curator.deps import optional_bearer, require_admin
 from curator.persistence.repository import Repository
 from curator.psn.store_client import PRODUCT_GENRES_FACET, PS4_GAMES_CATEGORY_ID, StoreCatalogClient
+from curator.query_params import (
+    AAA_TIER_PARAM,
+    CATEGORY_ID_PARAM,
+    FRANCHISE_PARAM,
+    GENRE_PARAM,
+    LIMIT_PARAM,
+    OFFSET_PARAM,
+    SORT_DIR_PARAM,
+    SORT_PARAM,
+)
 from curator.token_validation import TokenClaims
 
 router = APIRouter(prefix="/catalog", tags=["catalog"])
@@ -21,6 +31,18 @@ router = APIRouter(prefix="/catalog", tags=["catalog"])
 CatalogKindQuery = Literal["game", "media_app", "add_on", "demo", "soundtrack", "theme", "subscription", "all"]
 
 PUBLIC_COLLECTIONS_LIMIT = 20
+
+EXCLUDE_OWNED_PARAM = "excludeOwned"
+
+DEFAULT_GAMES_LIMIT = 50
+
+MAX_GAMES_LIMIT = 200
+
+ALL_CATEGORIES_EMPTY_MESSAGE = (
+    "Every requested category returned an empty grid. The storefront answered, so these "
+    "are most likely not storefront category ids. A 2xx here would be indistinguishable "
+    "from having backfilled every category."
+)
 
 
 class CatalogPriceResponse(BaseModel):
@@ -156,6 +178,13 @@ class CategoryBackfillResult(BaseModel):
     stopped_reason: BackfillStoppedReason | None
 
 
+class BackfillRejectedDetail(BaseModel):
+    """The ``detail`` of the 422 ``POST /catalog/backfill`` answers when every category was empty."""
+
+    message: str
+    categories: list[CategoryBackfillResult]
+
+
 class CatalogBackfillResponse(BaseModel):
     """The ``POST /catalog/backfill`` response body."""
 
@@ -212,15 +241,15 @@ async def list_games(
     request: Request,
     claims: Annotated[TokenClaims | None, Depends(optional_bearer)],
     q: str | None = Query(default=None),
-    franchise: str | None = Query(default=None),
-    genre: str | None = Query(default=None),
-    aaa_tier: str | None = Query(default=None, alias="aaaTier"),
-    exclude_owned: bool = Query(default=False, alias="excludeOwned"),
-    kind: CatalogKindQuery = Query(default="game"),
-    sort: CatalogSortField = Query(default="title"),
-    sort_dir: Literal["asc", "desc"] = Query(default="asc", alias="sortDir"),
-    limit: int = Query(default=50, ge=1, le=200),
-    offset: int = Query(default=0, ge=0),
+    franchise: str | None = Query(default=None, alias=FRANCHISE_PARAM),
+    genre: str | None = Query(default=None, alias=GENRE_PARAM),
+    aaa_tier: str | None = Query(default=None, alias=AAA_TIER_PARAM),
+    exclude_owned: bool = Query(default=False, alias=EXCLUDE_OWNED_PARAM),
+    kind: CatalogKindQuery = Query(default=GAME_KIND),
+    sort: CatalogSortField = Query(default="title", alias=SORT_PARAM),
+    sort_dir: Literal["asc", "desc"] = Query(default="asc", alias=SORT_DIR_PARAM),
+    limit: int = Query(default=DEFAULT_GAMES_LIMIT, ge=1, le=MAX_GAMES_LIMIT, alias=LIMIT_PARAM),
+    offset: int = Query(default=0, ge=0, alias=OFFSET_PARAM),
 ) -> CatalogGamesResponse:
     """Browse the shared game catalog, optionally filtered by title, franchise, genre, or publisher tier.
 
@@ -250,7 +279,7 @@ async def list_games(
         genre=genre,
         aaa_tier=aaa_tier,
         exclude_owned_by=claims.sub if exclude_owned and claims else None,
-        kind=EVERY_KIND if kind == "all" else kind,
+        kind=kind,
         sort=sort,
         sort_dir=sort_dir,
         limit=limit,
@@ -330,7 +359,7 @@ async def list_genres(request: Request) -> CatalogGenresResponse:
 async def genre_vocabulary_drift(
     request: Request,
     _claims: Annotated[TokenClaims, Depends(require_admin)],
-    category_id: str = Query(default=PS4_GAMES_CATEGORY_ID, alias="categoryId"),
+    category_id: str = Query(default=PS4_GAMES_CATEGORY_ID, alias=CATEGORY_ID_PARAM),
 ) -> CatalogGenreDriftResponse:
     """Report where the ``genres`` reference table and the storefront's live ``productGenres`` facet
     disagree. Admin-scoped.
@@ -417,17 +446,12 @@ async def backfill_catalog(
         )
         for progress in summary.categories
     ]
-    if categories and all(result.stopped_reason == "no_products" for result in categories):
+    if categories and all(result.stopped_reason == NO_PRODUCTS for result in categories):
         raise HTTPException(
             status_code=422,
-            detail={
-                "message": (
-                    "Every requested category returned an empty grid. The storefront answered, so these "
-                    "are most likely not storefront category ids. A 2xx here would be indistinguishable "
-                    "from having backfilled every category."
-                ),
-                "categories": [result.model_dump(mode="json") for result in categories],
-            },
+            detail=BackfillRejectedDetail(message=ALL_CATEGORIES_EMPTY_MESSAGE, categories=categories).model_dump(
+                mode="json"
+            ),
         )
 
     return CatalogBackfillResponse(

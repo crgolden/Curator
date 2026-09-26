@@ -12,7 +12,16 @@ import pytest
 from azure.servicebus import ServiceBusMessage
 from opentelemetry.sdk.trace import TracerProvider
 
-from curator.jobs.queue_publisher import QueuePublisher
+from curator.jobs.queue_publisher import (
+    _DIAGNOSTIC_ID_PROPERTY,
+    _TRACE_PARENT_KEY,
+    IDENTITY_SUB_FIELD,
+    RUN_ID_FIELD,
+    SCHEDULED_FOR_FIELD,
+    QueuePublisher,
+)
+from curator.jobs.repository import JOB_KIND_ENRICHMENT, JOB_KIND_LIBRARY_REFRESH
+from test_values import new_identity_sub
 
 _TRACE_PARENT_PATTERN = r"^00-[0-9a-f]{32}-[0-9a-f]{16}-[0-9a-f]{2}$"
 
@@ -51,13 +60,20 @@ async def test_publish_library_refresh_sends_identity_sub_and_returns_run_id():
     job_runs_repository = FakeJobRunsRepository()
     publisher = _make_publisher(library_sender=library_sender, job_runs_repository=job_runs_repository)
 
-    run_id = await publisher.publish_library_refresh("sub-1")
+    sub = new_identity_sub()
+
+    run_id = await publisher.publish_library_refresh(sub)
 
     assert uuid.UUID(run_id)
     assert len(library_sender.sent) == 1
     body = json.loads(str(library_sender.sent[0]))
-    assert body == {"run_id": run_id, "identity_sub": "sub-1"}
-    assert job_runs_repository.created == [(run_id, "library_refresh", "sub-1")]
+    assert body == {RUN_ID_FIELD: run_id, IDENTITY_SUB_FIELD: sub}
+    assert job_runs_repository.created == [(run_id, JOB_KIND_LIBRARY_REFRESH, sub)]
+
+
+def test_the_message_fields_and_trace_properties_are_the_names_the_worker_reads():
+    assert (RUN_ID_FIELD, IDENTITY_SUB_FIELD, SCHEDULED_FOR_FIELD) == ("run_id", "identity_sub", "scheduled_for")
+    assert (_TRACE_PARENT_KEY, _DIAGNOSTIC_ID_PROPERTY) == ("traceparent", "Diagnostic-Id")
 
 
 async def test_publish_enrichment_run_sends_to_enrichment_sender_only():
@@ -74,15 +90,15 @@ async def test_publish_enrichment_run_sends_to_enrichment_sender_only():
     assert library_sender.sent == []
     assert len(enrichment_sender.sent) == 1
     body = json.loads(str(enrichment_sender.sent[0]))
-    assert body == {"run_id": run_id}
-    assert job_runs_repository.created == [(run_id, "enrichment", None)]
+    assert body == {RUN_ID_FIELD: run_id}
+    assert job_runs_repository.created == [(run_id, JOB_KIND_ENRICHMENT, None)]
 
 
 async def test_each_publish_generates_a_distinct_run_id():
     publisher = _make_publisher()
 
-    run_id_1 = await publisher.publish_library_refresh("sub-1")
-    run_id_2 = await publisher.publish_library_refresh("sub-1")
+    run_id_1 = await publisher.publish_library_refresh(new_identity_sub())
+    run_id_2 = await publisher.publish_library_refresh(new_identity_sub())
 
     assert run_id_1 != run_id_2
 
@@ -111,10 +127,10 @@ async def test_library_refresh_message_carries_the_calling_span_trace_id(recordi
     publisher = _make_publisher(library_sender=library_sender)
 
     with recording_tracer.start_as_current_span("POST /library/refresh") as span:
-        await publisher.publish_library_refresh("sub-1")
+        await publisher.publish_library_refresh(new_identity_sub())
         expected_trace_id = format(span.get_span_context().trace_id, "032x")
 
-    assert expected_trace_id in _property(library_sender.sent[0], "traceparent")
+    assert expected_trace_id in _property(library_sender.sent[0], _TRACE_PARENT_KEY)
 
 
 async def test_library_refresh_message_carries_both_property_names_the_worker_reads(recording_tracer):
@@ -122,11 +138,11 @@ async def test_library_refresh_message_carries_both_property_names_the_worker_re
     publisher = _make_publisher(library_sender=library_sender)
 
     with recording_tracer.start_as_current_span("POST /library/refresh"):
-        await publisher.publish_library_refresh("sub-1")
+        await publisher.publish_library_refresh(new_identity_sub())
 
     message = library_sender.sent[0]
-    assert _property(message, "Diagnostic-Id") == _property(message, "traceparent")
-    assert re.match(_TRACE_PARENT_PATTERN, _property(message, "traceparent"))
+    assert _property(message, _DIAGNOSTIC_ID_PROPERTY) == _property(message, _TRACE_PARENT_KEY)
+    assert re.match(_TRACE_PARENT_PATTERN, _property(message, _TRACE_PARENT_KEY))
 
 
 async def test_enrichment_message_carries_trace_context_too(recording_tracer):
@@ -136,14 +152,14 @@ async def test_enrichment_message_carries_trace_context_too(recording_tracer):
     with recording_tracer.start_as_current_span("POST /enrichment/run"):
         await publisher.publish_enrichment_run()
 
-    assert re.match(_TRACE_PARENT_PATTERN, _property(enrichment_sender.sent[0], "traceparent"))
+    assert re.match(_TRACE_PARENT_PATTERN, _property(enrichment_sender.sent[0], _TRACE_PARENT_KEY))
 
 
 async def test_publish_outside_a_span_sends_a_message_with_no_trace_properties():
     library_sender = FakeSender()
     publisher = _make_publisher(library_sender=library_sender)
 
-    await publisher.publish_library_refresh("sub-1")
+    await publisher.publish_library_refresh(new_identity_sub())
 
     assert not library_sender.sent[0].application_properties
 
@@ -158,7 +174,7 @@ async def test_scheduled_refresh_carries_no_trace_context(recording_tracer):
     )
 
     with recording_tracer.start_as_current_span("PUT /library/refresh/schedule"):
-        await publisher.publish_scheduled_library_refresh("sub-1", datetime(2026, 9, 1, 12, 0, 0))
+        await publisher.publish_scheduled_library_refresh(new_identity_sub(), datetime(2026, 9, 1, 12, 0, 0))
 
     message, _ = scheduled_sender.scheduled[0]
     assert not message.application_properties

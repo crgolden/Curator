@@ -14,12 +14,21 @@ privacy tenet: no email is ever persisted or logged here, only compared in memor
 
 from __future__ import annotations
 
+from curator.audit.recorded import ActionRecorder, recorded
+from curator.audit.repository import ACTION_LINK_REVERIFIED, OUTCOME_FAILED
 from curator.link_service import AgentFactory, normalize_email
 from curator.persistence.crypto import TokenCrypto
 from curator.persistence.db_token_store import DbTokenStore, RedisLike
 from curator.persistence.repository import Repository
 from curator.psn.errors import PsnAuthError
 from curator.token_validation import TokenClaims
+
+REVERIFY_AUTH_FAILED = "auth_failed"
+"""History detail when PSN rejected the stored token, which clears the link."""
+REVERIFY_PSN_UNAVAILABLE = "psn_unavailable"
+"""History detail when PSN could not answer, which leaves the link intact."""
+REVERIFY_STALE_UNLINKED = "stale_unlinked"
+"""History detail when PSN's email no longer matches the caller's, which clears the link."""
 
 
 async def reverify_link(
@@ -28,6 +37,7 @@ async def reverify_link(
     repository: Repository,
     token_crypto: TokenCrypto,
     agent_factory: AgentFactory,
+    recorder: ActionRecorder,
     redis: RedisLike | None = None,
 ) -> None:
     """Re-check the caller's stored PSN link against ``claims``, if it hasn't been checked since this token
@@ -37,9 +47,9 @@ async def reverify_link(
     issued no earlier than ``claims.iat`` (an older, or same-vintage, token being re-presented must not
     repeatedly re-hit PSN). Otherwise: clears the link (auto-unlink; every other row is preserved) when PSN
     reports no email, an unverified email, or a mismatched email, and when PSN authentication itself fails
-    (the stored tokens are dead anyway). Any other exception -- a network blip, PSN being briefly
-    unreachable, ... -- is swallowed and the link is left intact; the next re-check (next newer token)
-    tries again.
+    (the stored tokens are dead anyway). Any other PSN failure -- a network blip, PSN being briefly
+    unreachable, ... -- leaves the link intact and the history row ``failed``; the next re-check (next newer
+    token) tries again. The history row is written before the PSN call and its write is never tolerated.
 
     :param claims: The validated caller. Callers of this function are expected to have already enforced
         ``claims.email is not None`` (see :func:`curator.deps.require_verified_caller`) -- a route that
@@ -47,6 +57,7 @@ async def reverify_link(
     :param repository: The :class:`~curator.persistence.repository.Repository` to read/write through.
     :param token_crypto: The :class:`~curator.persistence.crypto.TokenCrypto` used to clear a stale link.
     :param agent_factory: Builds the PSN agent for this ``sub``.
+    :param recorder: The history repository the re-check is recorded in before it uses the token.
     :param redis: The shared Redis adapter backing the access-token cache (``None`` disables it); passed
         through so clearing a stale link also drops its cached access token immediately.
     """
@@ -57,23 +68,29 @@ async def reverify_link(
     if link.last_verified_at is not None and claims.iat <= link.last_verified_at:
         return
 
-    try:
-        agent = await agent_factory(claims.sub)
-        email_info = await agent.account_email_verified()
-    except PsnAuthError:
-        await DbTokenStore(claims.sub, repository, token_crypto, redis).clear()
-        return
-    except Exception:
-        return
-
     assert claims.email is not None, "reverify_link requires a verified caller (claims.email must be set)"
 
-    stale = (
-        email_info is None
-        or email_info[1] is not True
-        or normalize_email(email_info[0]) != normalize_email(claims.email)
-    )
-    if stale:
-        await DbTokenStore(claims.sub, repository, token_crypto, redis).clear()
-    else:
-        await repository.touch_link_verified(claims.sub)
+    async with recorded(recorder, claims.sub, ACTION_LINK_REVERIFIED) as entry:
+        try:
+            agent = await agent_factory(claims.sub)
+            email_info = await agent.account_email_verified()
+        except PsnAuthError:
+            entry.outcome = OUTCOME_FAILED
+            entry.detail = REVERIFY_AUTH_FAILED
+            await DbTokenStore(claims.sub, repository, token_crypto, redis).clear()
+            return
+        except Exception:
+            entry.outcome = OUTCOME_FAILED
+            entry.detail = REVERIFY_PSN_UNAVAILABLE
+            return
+
+        stale = (
+            email_info is None
+            or email_info[1] is not True
+            or normalize_email(email_info[0]) != normalize_email(claims.email)
+        )
+        if stale:
+            entry.detail = REVERIFY_STALE_UNLINKED
+            await DbTokenStore(claims.sub, repository, token_crypto, redis).clear()
+        else:
+            await repository.touch_link_verified(claims.sub)

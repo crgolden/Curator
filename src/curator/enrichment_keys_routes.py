@@ -1,17 +1,14 @@
 from __future__ import annotations
 
 import logging
-from typing import Annotated, Literal
+from typing import Annotated, Final, Literal
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import BaseModel
 
-from curator.audit.repository import (
-    ACTION_ENRICHMENT_KEY_ADDED,
-    ACTION_ENRICHMENT_KEY_REMOVED,
-    AccountActionLogRepository,
-)
+from curator.audit.recorded import recorded, request_recorder
+from curator.audit.repository import ACTION_ENRICHMENT_KEY_ADDED, ACTION_ENRICHMENT_KEY_REMOVED
 from curator.deps import require_bearer
 from curator.enrichment.opencritic_client import OpenCriticApiError, OpenCriticClient
 from curator.enrichment.rawg_client import RawgApiError, RawgClient
@@ -19,12 +16,15 @@ from curator.persistence.crypto import TokenCrypto
 from curator.persistence.enrichment_keys_repository import EnrichmentKeysRepository
 from curator.token_validation import TokenClaims
 
-_PROVIDER_NAMES: dict[str, str] = {"rawg": "RAWG", "opencritic": "OpenCritic"}
+Provider = Literal["rawg", "opencritic"]
+
+RAWG_PROVIDER: Final[Provider] = "rawg"
+OPENCRITIC_PROVIDER: Final[Provider] = "opencritic"
+
+_PROVIDER_NAMES: dict[Provider, str] = {RAWG_PROVIDER: "RAWG", OPENCRITIC_PROVIDER: "OpenCritic"}
 
 router = APIRouter(tags=["enrichment-keys"])
 logger = logging.getLogger("curator")
-
-Provider = Literal["rawg", "opencritic"]
 
 
 class EnrichmentKeyStatusResponse(BaseModel):
@@ -92,18 +92,16 @@ async def set_enrichment_key(
         raise HTTPException(status_code=400, detail="api_key must not be empty.")
 
     http_client: httpx.AsyncClient = request.app.state.http_client
-    await _validate_key(provider, api_key, http_client)
-
     enrichment_keys_repository: EnrichmentKeysRepository = request.app.state.enrichment_keys_repository
     token_crypto: TokenCrypto = request.app.state.token_crypto
-    key_enc = token_crypto.encrypt(api_key.encode())
 
-    if provider == "rawg":
-        await enrichment_keys_repository.upsert_rawg_key(claims.sub, key_enc)
-    else:
-        await enrichment_keys_repository.upsert_opencritic_key(claims.sub, key_enc)
-
-    await _log(request, claims.sub, ACTION_ENRICHMENT_KEY_ADDED, provider)
+    async with recorded(request_recorder(request), claims.sub, ACTION_ENRICHMENT_KEY_ADDED, provider):
+        await _validate_key(provider, api_key, http_client)
+        key_enc = token_crypto.encrypt(api_key.encode())
+        if provider == RAWG_PROVIDER:
+            await enrichment_keys_repository.upsert_rawg_key(claims.sub, key_enc)
+        else:
+            await enrichment_keys_repository.upsert_opencritic_key(claims.sub, key_enc)
     return Response(status_code=204)
 
 
@@ -114,12 +112,11 @@ async def delete_enrichment_key(
     """Delete the caller's key for ``provider``, if one is configured."""
     enrichment_keys_repository: EnrichmentKeysRepository = request.app.state.enrichment_keys_repository
 
-    if provider == "rawg":
-        await enrichment_keys_repository.delete_rawg_key(claims.sub)
-    else:
-        await enrichment_keys_repository.delete_opencritic_key(claims.sub)
-
-    await _log(request, claims.sub, ACTION_ENRICHMENT_KEY_REMOVED, provider)
+    async with recorded(request_recorder(request), claims.sub, ACTION_ENRICHMENT_KEY_REMOVED, provider):
+        if provider == RAWG_PROVIDER:
+            await enrichment_keys_repository.delete_rawg_key(claims.sub)
+        else:
+            await enrichment_keys_repository.delete_opencritic_key(claims.sub)
     return Response(status_code=204)
 
 
@@ -141,7 +138,7 @@ async def _validate_key(provider: Provider, api_key: str, http_client: httpx.Asy
     """
     provider_name = _PROVIDER_NAMES[provider]
     try:
-        if provider == "rawg":
+        if provider == RAWG_PROVIDER:
             await RawgClient(http_client, api_key).validate_key()
         else:
             await OpenCriticClient(http_client, api_key).validate_key()
@@ -163,16 +160,3 @@ async def _validate_key(provider: Provider, api_key: str, http_client: httpx.Asy
         raise HTTPException(
             status_code=503, detail=f"Couldn't reach {provider_name} to validate this key. Try again shortly."
         ) from None
-
-
-async def _log(request: Request, sub: str, action: str, provider: str) -> None:
-    """Write one audit entry naming the provider only -- never the key value.
-
-    Never lets a logging failure break the user-facing request, matching ``curator.psn_routes``'s
-    ``_log`` precedent.
-    """
-    audit_repository: AccountActionLogRepository = request.app.state.audit_repository
-    try:
-        await audit_repository.log(sub, action, provider)
-    except Exception:
-        logger.exception("Failed to write account_action_log entry (sub=%s, action=%s)", sub, action)

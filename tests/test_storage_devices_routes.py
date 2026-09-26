@@ -4,12 +4,49 @@
 
 from __future__ import annotations
 
-from fastapi.testclient import TestClient
+from dataclasses import replace
 
+from fastapi.testclient import TestClient
+from pydantic import TypeAdapter
+
+from curator import storage_devices_routes
 from curator.app import create_app
-from curator.collections.repository import StorageDevice, UserConsole
+from curator.collections.repository import (
+    STORAGE_KIND_M2,
+    STORAGE_KIND_USB,
+    StorageDevice,
+    StorageDeviceKind,
+    UserConsole,
+)
 from curator.persistence.crypto import TokenCrypto
-from test_routes import FakeAgentFactory, FakeRepository, FakeTokenValidator, _bearer, _claims, _make_settings
+from curator.psn.title_platform import PS5
+from curator.storage_devices_routes import (
+    INVALID_STORAGE_DEVICE_KIND_DETAIL,
+    STORAGE_DEVICE_NOT_FOUND_DETAIL,
+    StorageDeviceInstallRequest,
+    StorageDeviceInstallResponse,
+    StorageDeviceInstallsResponse,
+    StorageDeviceRequest,
+    StorageDeviceResponse,
+    StorageDeviceUpdateRequest,
+    unknown_console_detail,
+)
+from test_routes import FakeAgentFactory, FakeRepository, FakeTokenValidator, _bearer, _claims, _make_settings, _path
+from test_values import (
+    lowercase_token,
+    new_console_id,
+    new_game_id,
+    new_identity_sub,
+    new_opaque_token,
+    new_size_gb,
+    new_storage_device_id,
+)
+
+SUB_A = new_identity_sub()
+SUB_B = new_identity_sub()
+TOKEN_A = new_opaque_token()
+
+_DEVICES = TypeAdapter(list[StorageDeviceResponse])
 
 
 class FakeCollectionsRepository:
@@ -23,7 +60,6 @@ class FakeCollectionsRepository:
         self._devices: dict[str, StorageDevice] = {d.device_id: d for d in (devices or [])}
         self._installs: dict[str, dict[str, bool]] = {}
         self.set_install_calls = []
-        self._next_id = 1
 
     async def get_console(self, identity_sub, console_id):
         if self._console_owners.get(console_id) != identity_sub:
@@ -31,10 +67,8 @@ class FakeCollectionsRepository:
         return self._consoles.get(console_id)
 
     async def create_storage_device(self, identity_sub, *, name, kind, capacity_gb, buffer_gb=0.0, console_id=None):
-        device_id = f"d{self._next_id}"
-        self._next_id += 1
         device = StorageDevice(
-            device_id=device_id,
+            device_id=new_storage_device_id(),
             identity_sub=identity_sub,
             console_id=console_id,
             name=name,
@@ -42,7 +76,7 @@ class FakeCollectionsRepository:
             capacity_gb=capacity_gb,
             buffer_gb=buffer_gb,
         )
-        self._devices[device_id] = device
+        self._devices[device.device_id] = device
         return device
 
     async def list_storage_devices(self, identity_sub):
@@ -101,27 +135,41 @@ class FakeCollectionsRepository:
         return {game_id for game_id, installed in self._installs.get(device_id, {}).items() if installed}
 
 
-def _console(console_id="c1"):
+def _console() -> UserConsole:
     return UserConsole(
-        console_id=console_id,
-        name="My PS5",
-        platform="PS5",
-        raw_capacity_gb=825.0,
+        console_id=new_console_id(),
+        name=lowercase_token(),
+        platform=PS5,
+        raw_capacity_gb=new_size_gb(),
         update_buffer_gb=0.0,
         routing_genres=(),
         fill_order=0,
     )
 
 
-def _device(device_id="d1", identity_sub="sub-a", kind="usb", console_id=None):
+def _device(
+    identity_sub: str, *, kind: StorageDeviceKind = STORAGE_KIND_USB, console_id: str | None = None
+) -> StorageDevice:
     return StorageDevice(
-        device_id=device_id,
+        device_id=new_storage_device_id(),
         identity_sub=identity_sub,
         console_id=console_id,
-        name="My USB drive",
+        name=lowercase_token(),
         kind=kind,
-        capacity_gb=1000.0,
+        capacity_gb=new_size_gb(),
         buffer_gb=0.0,
+    )
+
+
+def _response(device: StorageDevice) -> StorageDeviceResponse:
+    return StorageDeviceResponse(
+        device_id=device.device_id,
+        console_id=device.console_id,
+        name=device.name,
+        kind=device.kind,
+        capacity_gb=device.capacity_gb,
+        buffer_gb=device.buffer_gb,
+        effective_capacity_gb=device.effective_capacity_gb,
     )
 
 
@@ -140,201 +188,295 @@ def _build(collections_repository=None):
     return TestClient(app), validator
 
 
+def _device_path(client, handler, device: StorageDevice, **path_parameters) -> str:
+    return _path(client, handler, device_id=device.device_id, **path_parameters)
+
+
+def _install_body(installed: bool) -> dict[str, object]:
+    return StorageDeviceInstallRequest(installed=installed).model_dump()
+
+
 def test_requires_bearer_token():
     client, _validator = _build()
+    body = StorageDeviceRequest(name=lowercase_token(), kind=STORAGE_KIND_USB, capacity_gb=new_size_gb()).model_dump()
 
-    response = client.post("/storage-devices", json={"name": "d", "kind": "usb", "capacity_gb": 500.0})
+    response = client.post(_path(client, storage_devices_routes.create_storage_device), json=body)
 
     assert response.status_code == 401
 
 
 def test_creates_an_unattached_device():
     client, validator = _build()
-    validator.register("token-a", _claims(sub="sub-a"))
+    validator.register(TOKEN_A, _claims(sub=SUB_A))
+    name = lowercase_token()
+    capacity_gb = new_size_gb()
 
     response = client.post(
-        "/storage-devices",
-        json={"name": "Travel drive", "kind": "usb", "capacity_gb": 500.0},
-        headers=_bearer("token-a"),
+        _path(client, storage_devices_routes.create_storage_device),
+        json=StorageDeviceRequest(name=name, kind=STORAGE_KIND_USB, capacity_gb=capacity_gb).model_dump(),
+        headers=_bearer(TOKEN_A),
     )
 
     assert response.status_code == 201
-    body = response.json()
-    assert body["console_id"] is None
-    assert body["effective_capacity_gb"] == 500.0
+    body = StorageDeviceResponse.model_validate(response.json())
+    assert body == StorageDeviceResponse(
+        device_id=body.device_id,
+        console_id=None,
+        name=name,
+        kind=STORAGE_KIND_USB,
+        capacity_gb=capacity_gb,
+        buffer_gb=0.0,
+        effective_capacity_gb=capacity_gb,
+    )
 
 
 def test_create_device_rejects_unknown_kind():
     client, validator = _build()
-    validator.register("token-a", _claims(sub="sub-a"))
+    validator.register(TOKEN_A, _claims(sub=SUB_A))
+    unknown_kind = lowercase_token()
+    body = StorageDeviceRequest(name=lowercase_token(), kind=unknown_kind, capacity_gb=new_size_gb()).model_dump()
 
     response = client.post(
-        "/storage-devices",
-        json={"name": "Odd drive", "kind": "sd-card", "capacity_gb": 64.0},
-        headers=_bearer("token-a"),
+        _path(client, storage_devices_routes.create_storage_device), json=body, headers=_bearer(TOKEN_A)
     )
 
     assert response.status_code == 400
+    assert response.json()["detail"] == INVALID_STORAGE_DEVICE_KIND_DETAIL
 
 
 def test_create_device_rejects_a_console_that_isnt_the_callers():
-    repo = FakeCollectionsRepository(consoles=[_console("c1")], console_owners={"c1": "sub-b"})
+    console = _console()
+    repo = FakeCollectionsRepository(consoles=[console], console_owners={console.console_id: SUB_B})
     client, validator = _build(repo)
-    validator.register("token-a", _claims(sub="sub-a"))
+    validator.register(TOKEN_A, _claims(sub=SUB_A))
 
     response = client.post(
-        "/storage-devices",
-        json={"name": "Drive", "kind": "usb", "capacity_gb": 500.0, "console_id": "c1"},
-        headers=_bearer("token-a"),
+        _path(client, storage_devices_routes.create_storage_device),
+        json=StorageDeviceRequest(
+            name=lowercase_token(), kind=STORAGE_KIND_USB, capacity_gb=new_size_gb(), console_id=console.console_id
+        ).model_dump(),
+        headers=_bearer(TOKEN_A),
     )
 
     assert response.status_code == 400
+    assert response.json()["detail"] == unknown_console_detail(console.console_id)
 
 
 def test_lists_only_the_callers_own_devices():
-    repo = FakeCollectionsRepository(devices=[_device("d1", "sub-a"), _device("d2", "sub-b")])
+    own_device = _device(SUB_A)
+    repo = FakeCollectionsRepository(devices=[own_device, _device(SUB_B)])
     client, validator = _build(repo)
-    validator.register("token-a", _claims(sub="sub-a"))
+    validator.register(TOKEN_A, _claims(sub=SUB_A))
 
-    response = client.get("/storage-devices", headers=_bearer("token-a"))
+    response = client.get(_path(client, storage_devices_routes.list_storage_devices), headers=_bearer(TOKEN_A))
 
     assert response.status_code == 200
-    assert [d["device_id"] for d in response.json()] == ["d1"]
+    assert _DEVICES.validate_python(response.json()) == [_response(own_device)]
 
 
 def test_get_device_404s_for_another_users_device():
-    repo = FakeCollectionsRepository(devices=[_device("d1", "sub-b")])
+    device = _device(SUB_B)
+    repo = FakeCollectionsRepository(devices=[device])
     client, validator = _build(repo)
-    validator.register("token-a", _claims(sub="sub-a"))
+    validator.register(TOKEN_A, _claims(sub=SUB_A))
 
-    response = client.get("/storage-devices/d1", headers=_bearer("token-a"))
+    response = client.get(
+        _device_path(client, storage_devices_routes.get_storage_device, device), headers=_bearer(TOKEN_A)
+    )
 
     assert response.status_code == 404
+    assert response.json()["detail"] == STORAGE_DEVICE_NOT_FOUND_DETAIL
 
 
 def test_patches_a_device():
-    repo = FakeCollectionsRepository(devices=[_device("d1", "sub-a")])
+    device = _device(SUB_A)
+    new_name = lowercase_token()
+    repo = FakeCollectionsRepository(devices=[device])
     client, validator = _build(repo)
-    validator.register("token-a", _claims(sub="sub-a"))
+    validator.register(TOKEN_A, _claims(sub=SUB_A))
 
-    response = client.patch("/storage-devices/d1", json={"name": "Renamed"}, headers=_bearer("token-a"))
+    response = client.patch(
+        _device_path(client, storage_devices_routes.update_storage_device, device),
+        json=StorageDeviceUpdateRequest(name=new_name).model_dump(exclude_unset=True),
+        headers=_bearer(TOKEN_A),
+    )
 
     assert response.status_code == 200
-    body = response.json()
-    assert body["name"] == "Renamed"
-    assert body["kind"] == "usb"
+    assert StorageDeviceResponse.model_validate(response.json()) == _response(replace(device, name=new_name))
 
 
 def test_deletes_a_device():
-    repo = FakeCollectionsRepository(devices=[_device("d1", "sub-a")])
+    device = _device(SUB_A)
+    repo = FakeCollectionsRepository(devices=[device])
     client, validator = _build(repo)
-    validator.register("token-a", _claims(sub="sub-a"))
+    validator.register(TOKEN_A, _claims(sub=SUB_A))
 
-    response = client.delete("/storage-devices/d1", headers=_bearer("token-a"))
+    response = client.delete(
+        _device_path(client, storage_devices_routes.delete_storage_device, device), headers=_bearer(TOKEN_A)
+    )
 
     assert response.status_code == 204
-    assert "d1" not in repo._devices
+    assert device.device_id not in repo._devices
 
 
 def test_attaches_a_device_to_the_callers_own_console():
-    repo = FakeCollectionsRepository(
-        consoles=[_console("c1")], console_owners={"c1": "sub-a"}, devices=[_device("d1", "sub-a")]
-    )
+    console = _console()
+    device = _device(SUB_A)
+    repo = FakeCollectionsRepository(consoles=[console], console_owners={console.console_id: SUB_A}, devices=[device])
     client, validator = _build(repo)
-    validator.register("token-a", _claims(sub="sub-a"))
+    validator.register(TOKEN_A, _claims(sub=SUB_A))
 
-    response = client.put("/storage-devices/d1/attach/c1", headers=_bearer("token-a"))
+    response = client.put(
+        _device_path(client, storage_devices_routes.attach_storage_device, device, console_id=console.console_id),
+        headers=_bearer(TOKEN_A),
+    )
 
     assert response.status_code == 200
-    assert response.json()["console_id"] == "c1"
+    assert StorageDeviceResponse.model_validate(response.json()) == _response(
+        replace(device, console_id=console.console_id)
+    )
 
 
 def test_attach_rejects_a_console_that_isnt_the_callers():
-    repo = FakeCollectionsRepository(
-        consoles=[_console("c1")], console_owners={"c1": "sub-b"}, devices=[_device("d1", "sub-a")]
-    )
+    console = _console()
+    device = _device(SUB_A)
+    repo = FakeCollectionsRepository(consoles=[console], console_owners={console.console_id: SUB_B}, devices=[device])
     client, validator = _build(repo)
-    validator.register("token-a", _claims(sub="sub-a"))
+    validator.register(TOKEN_A, _claims(sub=SUB_A))
 
-    response = client.put("/storage-devices/d1/attach/c1", headers=_bearer("token-a"))
+    response = client.put(
+        _device_path(client, storage_devices_routes.attach_storage_device, device, console_id=console.console_id),
+        headers=_bearer(TOKEN_A),
+    )
 
     assert response.status_code == 400
+    assert response.json()["detail"] == unknown_console_detail(console.console_id)
 
 
 def test_detaches_a_device():
-    repo = FakeCollectionsRepository(devices=[_device("d1", "sub-a", console_id="c1")])
+    device = _device(SUB_A, console_id=new_console_id())
+    repo = FakeCollectionsRepository(devices=[device])
     client, validator = _build(repo)
-    validator.register("token-a", _claims(sub="sub-a"))
+    validator.register(TOKEN_A, _claims(sub=SUB_A))
 
-    response = client.delete("/storage-devices/d1/attach", headers=_bearer("token-a"))
+    response = client.delete(
+        _device_path(client, storage_devices_routes.detach_storage_device, device), headers=_bearer(TOKEN_A)
+    )
 
     assert response.status_code == 200
-    assert response.json()["console_id"] is None
+    assert StorageDeviceResponse.model_validate(response.json()) == _response(replace(device, console_id=None))
 
 
 def test_sets_install_state_on_an_m2_device_for_a_ps5_game():
-    repo = FakeCollectionsRepository(devices=[_device("d1", "sub-a", kind="m2")])
+    device = _device(SUB_A, kind=STORAGE_KIND_M2)
+    game_id = new_game_id()
+    repo = FakeCollectionsRepository(devices=[device])
     client, validator = _build(repo)
-    validator.register("token-a", _claims(sub="sub-a"))
+    validator.register(TOKEN_A, _claims(sub=SUB_A))
 
-    response = client.put("/storage-devices/d1/installs/g1", json={"installed": True}, headers=_bearer("token-a"))
+    response = client.put(
+        _device_path(client, storage_devices_routes.set_storage_device_install, device, game_id=game_id),
+        json=_install_body(True),
+        headers=_bearer(TOKEN_A),
+    )
 
     assert response.status_code == 200
-    assert repo.set_install_calls == [("d1", "g1", True)]
+    assert StorageDeviceInstallResponse.model_validate(response.json()) == StorageDeviceInstallResponse(
+        device_id=device.device_id, game_id=game_id, installed=True
+    )
+    assert repo.set_install_calls == [(device.device_id, game_id, True)]
 
 
 def test_allows_installing_a_ps5_game_on_usb_storage():
-
-    repo = FakeCollectionsRepository(devices=[_device("d1", "sub-a", kind="usb")])
+    device = _device(SUB_A, kind=STORAGE_KIND_USB)
+    game_id = new_game_id()
+    repo = FakeCollectionsRepository(devices=[device])
     client, validator = _build(repo)
-    validator.register("token-a", _claims(sub="sub-a"))
+    validator.register(TOKEN_A, _claims(sub=SUB_A))
 
-    response = client.put("/storage-devices/d1/installs/g1", json={"installed": True}, headers=_bearer("token-a"))
+    response = client.put(
+        _device_path(client, storage_devices_routes.set_storage_device_install, device, game_id=game_id),
+        json=_install_body(True),
+        headers=_bearer(TOKEN_A),
+    )
 
     assert response.status_code == 200
-    assert repo.set_install_calls == [("d1", "g1", True)]
+    assert repo.set_install_calls == [(device.device_id, game_id, True)]
 
 
 def test_allows_installing_a_ps4_game_on_usb_storage():
-    repo = FakeCollectionsRepository(devices=[_device("d1", "sub-a", kind="usb")])
+    device = _device(SUB_A, kind=STORAGE_KIND_USB)
+    game_id = new_game_id()
+    repo = FakeCollectionsRepository(devices=[device])
     client, validator = _build(repo)
-    validator.register("token-a", _claims(sub="sub-a"))
+    validator.register(TOKEN_A, _claims(sub=SUB_A))
 
-    response = client.put("/storage-devices/d1/installs/g1", json={"installed": True}, headers=_bearer("token-a"))
+    response = client.put(
+        _device_path(client, storage_devices_routes.set_storage_device_install, device, game_id=game_id),
+        json=_install_body(True),
+        headers=_bearer(TOKEN_A),
+    )
 
     assert response.status_code == 200
-    assert repo.set_install_calls == [("d1", "g1", True)]
+    assert repo.set_install_calls == [(device.device_id, game_id, True)]
 
 
 def test_allows_uninstalling_a_game_from_usb_storage():
-    repo = FakeCollectionsRepository(devices=[_device("d1", "sub-a", kind="usb")])
+    device = _device(SUB_A, kind=STORAGE_KIND_USB)
+    game_id = new_game_id()
+    repo = FakeCollectionsRepository(devices=[device])
     client, validator = _build(repo)
-    validator.register("token-a", _claims(sub="sub-a"))
+    validator.register(TOKEN_A, _claims(sub=SUB_A))
 
-    response = client.put("/storage-devices/d1/installs/g1", json={"installed": False}, headers=_bearer("token-a"))
+    response = client.put(
+        _device_path(client, storage_devices_routes.set_storage_device_install, device, game_id=game_id),
+        json=_install_body(False),
+        headers=_bearer(TOKEN_A),
+    )
 
     assert response.status_code == 200
-    assert repo.set_install_calls == [("d1", "g1", False)]
+    assert repo.set_install_calls == [(device.device_id, game_id, False)]
 
 
 def test_install_device_404s_for_another_users_device():
-    repo = FakeCollectionsRepository(devices=[_device("d1", "sub-b")])
+    device = _device(SUB_B)
+    repo = FakeCollectionsRepository(devices=[device])
     client, validator = _build(repo)
-    validator.register("token-a", _claims(sub="sub-a"))
+    validator.register(TOKEN_A, _claims(sub=SUB_A))
 
-    response = client.put("/storage-devices/d1/installs/g1", json={"installed": True}, headers=_bearer("token-a"))
+    response = client.put(
+        _device_path(client, storage_devices_routes.set_storage_device_install, device, game_id=new_game_id()),
+        json=_install_body(True),
+        headers=_bearer(TOKEN_A),
+    )
 
     assert response.status_code == 404
+    assert response.json()["detail"] == STORAGE_DEVICE_NOT_FOUND_DETAIL
 
 
 def test_gets_installed_game_ids_for_a_device():
-    repo = FakeCollectionsRepository(devices=[_device("d1", "sub-a", kind="m2")])
+    device = _device(SUB_A, kind=STORAGE_KIND_M2)
+    installed_game_id = new_game_id()
+    uninstalled_game_id = new_game_id()
+    repo = FakeCollectionsRepository(devices=[device])
     client, validator = _build(repo)
-    validator.register("token-a", _claims(sub="sub-a"))
-    client.put("/storage-devices/d1/installs/g1", json={"installed": True}, headers=_bearer("token-a"))
-    client.put("/storage-devices/d1/installs/g2", json={"installed": False}, headers=_bearer("token-a"))
+    validator.register(TOKEN_A, _claims(sub=SUB_A))
+    client.put(
+        _device_path(client, storage_devices_routes.set_storage_device_install, device, game_id=installed_game_id),
+        json=_install_body(True),
+        headers=_bearer(TOKEN_A),
+    )
+    client.put(
+        _device_path(client, storage_devices_routes.set_storage_device_install, device, game_id=uninstalled_game_id),
+        json=_install_body(False),
+        headers=_bearer(TOKEN_A),
+    )
 
-    response = client.get("/storage-devices/d1/installs", headers=_bearer("token-a"))
+    response = client.get(
+        _device_path(client, storage_devices_routes.get_storage_device_installs, device), headers=_bearer(TOKEN_A)
+    )
 
     assert response.status_code == 200
-    assert response.json()["game_ids"] == ["g1"]
+    assert StorageDeviceInstallsResponse.model_validate(response.json()) == StorageDeviceInstallsResponse(
+        game_ids=[installed_game_id]
+    )

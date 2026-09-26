@@ -4,12 +4,21 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
+from typing import Final
 
 import httpx
 
+from curator.http_headers import RETRY_AFTER_HEADER
+
 OPENCRITIC_BASE_URL = "https://opencritic-api.p.rapidapi.com"
+GAME_PATH: Final = "/game"
+RAPIDAPI_HOST_HEADER: Final = "x-rapidapi-host"
+RAPIDAPI_KEY_HEADER: Final = "x-rapidapi-key"
+PLATFORMS_PARAM: Final = "platforms"
+VALIDATION_PLATFORM: Final = "ps5"
 
 MAX_PROVIDER_DETAIL_CHARS = 300
+REDACTED_PLACEHOLDER: Final = "[redacted]"
 
 
 class OpenCriticApiError(Exception):
@@ -45,7 +54,7 @@ def _response_detail(response: httpx.Response, api_key: str) -> str | None:
     if not text:
         return None
     if api_key:
-        text = text.replace(api_key, "[redacted]")
+        text = text.replace(api_key, REDACTED_PLACEHOLDER)
     if len(text) > MAX_PROVIDER_DETAIL_CHARS:
         text = text[:MAX_PROVIDER_DETAIL_CHARS] + "..."
     return text
@@ -55,7 +64,7 @@ def _parse_retry_after(response: httpx.Response) -> float | None:
     """Parse a ``Retry-After`` header (RFC 7231: either delay-seconds or an HTTP-date) into seconds from
     now, or ``None`` if the header is absent or not parseable as either form.
     """
-    value = response.headers.get("Retry-After")
+    value = response.headers.get(RETRY_AFTER_HEADER)
     if value is None:
         return None
     value = value.strip()
@@ -79,7 +88,7 @@ class OpenCriticClient:
 
     def __init__(self, client: httpx.AsyncClient, rapidapi_key: str) -> None:
         self._client = client
-        self._headers = {"x-rapidapi-host": "opencritic-api.p.rapidapi.com", "x-rapidapi-key": rapidapi_key}
+        self._headers = {RAPIDAPI_HOST_HEADER: httpx.URL(OPENCRITIC_BASE_URL).host, RAPIDAPI_KEY_HEADER: rapidapi_key}
 
     async def validate_key(self) -> None:
         """Confirm ``rapidapi_key`` is accepted by OpenCritic, spending one non-search request.
@@ -87,8 +96,8 @@ class OpenCriticClient:
         :raises OpenCriticApiError: If OpenCritic rejects the key (401/403) or the request otherwise fails.
         """
         response = await self._client.get(
-            f"{OPENCRITIC_BASE_URL}/game",
-            params={"platforms": "ps5", "sort": "name", "order": "asc", "skip": 0},
+            f"{OPENCRITIC_BASE_URL}{GAME_PATH}",
+            params={PLATFORMS_PARAM: VALIDATION_PLATFORM, "sort": "name", "order": "asc", "skip": 0},
             headers=self._headers,
         )
         self._raise_for_status(response)
@@ -101,5 +110,5 @@ class OpenCriticClient:
                 f"OpenCritic request failed with status {exc.response.status_code}",
                 status_code=exc.response.status_code,
                 retry_after_seconds=_parse_retry_after(exc.response),
-                provider_detail=_response_detail(exc.response, self._headers["x-rapidapi-key"]),
+                provider_detail=_response_detail(exc.response, self._headers[RAPIDAPI_KEY_HEADER]),
             ) from None

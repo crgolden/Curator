@@ -14,10 +14,19 @@ from types import SimpleNamespace
 import pytest
 from fastapi import HTTPException
 
-from curator.deps import require_preference
+from curator.deps import (
+    HARVEST_DEVICES,
+    HARVEST_IDENTITY,
+    HARVEST_PRESENCE,
+    HARVEST_TROPHIES,
+    PREFERENCE_NOT_LINKED_DETAIL,
+    preference_disabled_detail,
+    require_preference,
+)
 from curator.persistence.repository import LinkRecord
+from test_values import new_account_id, new_identity_sub
 
-SUB = "sub-1"
+SUB = new_identity_sub()
 
 
 class FakeRepository:
@@ -37,7 +46,7 @@ def _link(
     harvest_devices: bool = False,
 ) -> LinkRecord:
     return LinkRecord(
-        psn_account_id="psn-account-1",
+        psn_account_id=new_account_id(),
         token_response_enc=b"encrypted",
         access_token_expires_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
         refresh_token_expires_at=datetime(2026, 2, 1, tzinfo=timezone.utc),
@@ -60,9 +69,10 @@ async def test_require_preference_raises_404_when_no_link():
     request = _request(repository)
 
     with pytest.raises(HTTPException) as exc_info:
-        await require_preference(request, SUB, "harvest_trophies")
+        await require_preference(request, SUB, HARVEST_TROPHIES)
 
     assert exc_info.value.status_code == 404
+    assert exc_info.value.detail == PREFERENCE_NOT_LINKED_DETAIL
 
 
 async def test_require_preference_raises_403_when_category_flag_off():
@@ -71,10 +81,10 @@ async def test_require_preference_raises_403_when_category_flag_off():
     request = _request(repository)
 
     with pytest.raises(HTTPException) as exc_info:
-        await require_preference(request, SUB, "harvest_trophies")
+        await require_preference(request, SUB, HARVEST_TROPHIES)
 
     assert exc_info.value.status_code == 403
-    assert "harvest_trophies" in exc_info.value.detail
+    assert exc_info.value.detail == preference_disabled_detail(HARVEST_TROPHIES)
 
 
 async def test_require_preference_returns_link_when_category_flag_on():
@@ -82,12 +92,12 @@ async def test_require_preference_returns_link_when_category_flag_on():
     seeded = _link(harvest_trophies=True)
     repository.links[SUB] = seeded
 
-    result = await require_preference(_request(repository), SUB, "harvest_trophies")
+    result = await require_preference(_request(repository), SUB, HARVEST_TROPHIES)
 
     assert result == seeded
 
 
-@pytest.mark.parametrize("category", ["harvest_identity", "harvest_presence", "harvest_devices"])
+@pytest.mark.parametrize("category", [HARVEST_IDENTITY, HARVEST_PRESENCE, HARVEST_DEVICES])
 async def test_require_preference_checks_the_named_category_independently(category):
     repository = FakeRepository()
     repository.links[SUB] = _link(harvest_trophies=True)
@@ -97,3 +107,4 @@ async def test_require_preference_checks_the_named_category_independently(catego
         await require_preference(request, SUB, category)
 
     assert exc_info.value.status_code == 403
+    assert exc_info.value.detail == preference_disabled_detail(category)

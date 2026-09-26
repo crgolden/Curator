@@ -4,15 +4,21 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
-from typing import Any, TypeVar
+from typing import Any, Final, TypeVar
 
 import httpx
 
+from curator.http_headers import RETRY_AFTER_HEADER
 from curator.psn.session import NullRateLimiter, RateLimiter
 
 RAWG_BASE_URL = "https://api.rawg.io/api"
+GENRES_PATH: Final = "/genres"
+KEY_PARAM: Final = "key"
+PAGE_SIZE_PARAM: Final = "page_size"
+VALIDATION_PAGE_SIZE: Final = 1
 
 MAX_PROVIDER_DETAIL_CHARS = 300
+REDACTED_PLACEHOLDER: Final = "[redacted]"
 
 
 class RawgApiError(Exception):
@@ -66,7 +72,7 @@ def _response_detail(response: httpx.Response, api_key: str) -> str | None:
     if not text:
         return None
     if api_key:
-        text = text.replace(api_key, "[redacted]")
+        text = text.replace(api_key, REDACTED_PLACEHOLDER)
     if len(text) > MAX_PROVIDER_DETAIL_CHARS:
         text = text[:MAX_PROVIDER_DETAIL_CHARS] + "..."
     return text
@@ -76,7 +82,7 @@ def _parse_retry_after(response: httpx.Response) -> float | None:
     """Parse a ``Retry-After`` header (RFC 7231: either delay-seconds or an HTTP-date) into seconds from
     now, or ``None`` if the header is absent or not parseable as either form.
     """
-    value = response.headers.get("Retry-After")
+    value = response.headers.get(RETRY_AFTER_HEADER)
     if value is None:
         return None
     value = value.strip()
@@ -114,7 +120,10 @@ class RawgClient:
 
         :raises RawgApiError: If RAWG rejects the key (401/403) or the request otherwise fails.
         """
-        response = await self._get(f"{RAWG_BASE_URL}/genres", params={"key": self._api_key, "page_size": 1})
+        response = await self._get(
+            f"{RAWG_BASE_URL}{GENRES_PATH}",
+            params={KEY_PARAM: self._api_key, PAGE_SIZE_PARAM: VALIDATION_PAGE_SIZE},
+        )
         self._raise_for_status(response)
 
     async def _get(self, url: str, *, params: dict[str, Any]) -> httpx.Response:

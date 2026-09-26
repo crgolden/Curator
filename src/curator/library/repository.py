@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Any, Literal
+from typing import Any, Final, Literal
 
 from psycopg import AsyncCursor
 from psycopg_pool import AsyncConnectionPool
@@ -24,6 +24,15 @@ HiddenFilter = Literal["exclude", "only"]
 TrophyMatch = Literal["matched", "unmatched", "not_attempted"]
 """Whether a library entry has been resolved to a PSN trophy title: matched to one, tried and not
 matched, or never tried."""
+
+HIDDEN_EXCLUDE: Final[HiddenFilter] = "exclude"
+HIDDEN_ONLY: Final[HiddenFilter] = "only"
+
+TROPHY_MATCHED: Final[TrophyMatch] = "matched"
+TROPHY_UNMATCHED: Final[TrophyMatch] = "unmatched"
+TROPHY_NOT_ATTEMPTED: Final[TrophyMatch] = "not_attempted"
+
+LIBRARY_SOURCE_PSN: Final = "psn"
 
 HIDDEN_REASON = "hidden"
 """The ``library_exclusions.reason`` a user-initiated hide writes."""
@@ -103,17 +112,17 @@ class LibraryGameView:
     is_active: bool = True
     np_communication_id: str | None = None
     percent_completed: int | None = None
-    source: str = "psn"
+    source: str = LIBRARY_SOURCE_PSN
     cover_image_url: str | None = None
     platforms: tuple[str, ...] = ()
-    trophy_match: TrophyMatch = "not_attempted"
+    trophy_match: TrophyMatch = TROPHY_NOT_ATTEMPTED
 
 
 def trophy_match_state(np_communication_id: str | None, attempted_at: object | None) -> TrophyMatch:
     """Derive an entry's trophy-match state from the two persisted columns."""
     if np_communication_id:
-        return "matched"
-    return "unmatched" if attempted_at is not None else "not_attempted"
+        return TROPHY_MATCHED
+    return TROPHY_UNMATCHED if attempted_at is not None else TROPHY_NOT_ATTEMPTED
 
 
 class LibraryRepository:
@@ -168,30 +177,21 @@ class LibraryRepository:
             distinction: answering 204 either way told a user their game had been added when nothing had
             changed, which is what a lapsed PS3 entitlement looks like from the outside.
 
-        ``library_entry_platforms`` is the platform of record. ``native_ps5``/``ps4_eligible`` are still
-        written, derived from ``platforms``, because the Functions worker's canonicalization pass reads
-        them; a manual entry on PS3, Vita or PSP therefore leaves both ``false``, which is correct rather
-        than lossy -- the pair has no spelling for those platforms.
+        ``library_entry_platforms`` is the platform of record and the only place a platform is written.
 
         :param platforms: Every platform the user owns this game on.
         """
-        native_ps5 = "PS5" in platforms
-        ps4_eligible = "PS4" in platforms
         async with self._pool.connection() as conn, conn.cursor() as cur:
             await cur.execute(
                 """
-                INSERT INTO library_entries (
-                    identity_sub, game_id, native_ps5, ps4_eligible, owned_edition, is_active, source, last_seen_at
-                )
-                VALUES (%s, %s, %s, %s, %s, true, 'manual', now())
+                INSERT INTO library_entries (identity_sub, game_id, owned_edition, is_active, source, last_seen_at)
+                VALUES (%s, %s, %s, true, 'manual', now())
                 ON CONFLICT (identity_sub, game_id) DO UPDATE SET
-                    native_ps5 = EXCLUDED.native_ps5,
-                    ps4_eligible = EXCLUDED.ps4_eligible,
                     owned_edition = EXCLUDED.owned_edition,
                     last_seen_at = now()
                 WHERE library_entries.source = 'manual'
                 """,
-                (identity_sub, game_id, native_ps5, ps4_eligible, owned_edition),
+                (identity_sub, game_id, owned_edition),
             )
             if not cur.rowcount:
                 return False
@@ -322,7 +322,7 @@ class LibraryRepository:
         sort_dir: str = "asc",
         limit: int = 20,
         offset: int = 0,
-        hidden: HiddenFilter = "exclude",
+        hidden: HiddenFilter = HIDDEN_EXCLUDE,
     ) -> tuple[list[LibraryGameView], int]:
         """Return one page of a user's library, joined with its genre/ratings/enrichment status,
         for ``GET /library``'s (and ``GET /users/{sub}/library``'s) table -- plus the total count of
@@ -350,7 +350,10 @@ class LibraryRepository:
         :param hidden: ``"exclude"`` leaves out the games the owner hid (``library_exclusions``);
             ``"only"`` lists nothing else, for unhiding. A hide is orthogonal to ``is_active``.
         """
-        conditions: list[str] = ["le.identity_sub = %s", f"{'' if hidden == 'only' else 'NOT '}{_HIDDEN_EXISTS_SQL}"]
+        conditions: list[str] = [
+            "le.identity_sub = %s",
+            f"{'' if hidden == HIDDEN_ONLY else 'NOT '}{_HIDDEN_EXISTS_SQL}",
+        ]
         params: list[Any] = [identity_sub]
         if search:
             conditions.append("g.canonical_title ILIKE %s")

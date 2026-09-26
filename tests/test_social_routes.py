@@ -8,36 +8,68 @@ missing link, a withheld consent flag and a guard refusal into status codes, and
 
 from __future__ import annotations
 
+import pytest
 from fastapi.testclient import TestClient
 
+from audit_fakes import RecordingAuditRepository
+from curator import social_routes
 from curator.app import create_app
+from curator.audit.repository import (
+    ACTION_CHAT_GROUP_CREATED,
+    ACTION_CHAT_GROUP_RENAMED,
+    ACTION_CHAT_MEMBERSHIP_CHANGED,
+    ACTION_FRIEND_ADDED,
+    ACTION_FRIEND_REMOVED,
+    ACTION_FRIEND_REQUEST_SENT,
+    OUTCOME_COMPLETED,
+    OUTCOME_FAILED,
+    OUTCOME_STARTED,
+)
+from curator.deps import HARVEST_IDENTITY, PREFERENCE_NOT_LINKED_DETAIL, preference_disabled_detail
 from curator.persistence.crypto import TokenCrypto
 from curator.psn.errors import MutationNotAllowedError, NoPendingFriendRequestError, PsnAuthError
 from curator.psn.models import SocialUser
-from curator.social_routes import NO_PENDING_REQUEST_DETAIL
+from curator.psn.safety import FRIEND_WRITES
+from curator.social_routes import (
+    NO_PENDING_REQUEST_DETAIL,
+    CreateGroupRequest,
+    CreateGroupResponse,
+    FriendRequestResponse,
+    FriendRequestsResponse,
+    InviteToGroupRequest,
+    InviteToGroupResponse,
+    RenameGroupRequest,
+    invited_detail,
+    left_detail,
+    nothing_sent_detail,
+)
 from test_routes import (
-    EMAIL,
-    SUB,
     FakeRepository,
     FakeTokenValidator,
     _bearer,
     _claims,
     _make_settings,
+    _path,
     _seed_link,
 )
-from test_values import new_account_id, new_group_id, new_online_id
+from test_values import (
+    lowercase_token,
+    new_account_id,
+    new_email_address,
+    new_group_id,
+    new_identity_sub,
+    new_online_id,
+    new_opaque_token,
+)
 
-
-class FakeAuditRepository:
-    def __init__(self):
-        self.entries: list[tuple[str, str, str | None]] = []
-
-    async def log(self, identity_sub, action, detail=None):
-        self.entries.append((identity_sub, action, detail))
+SUB = new_identity_sub()
+EMAIL = new_email_address()
+TOKEN = new_opaque_token()
 
 
 class FakeMutationService:
-    """Records every call; ``friends`` and ``groups`` model the PSN state a destructive call reads first."""
+    """Records every call; ``friends`` and ``groups`` model the PSN state a destructive call reads first.
+    ``history`` is the audit fake whose rows each call snapshots into ``history_at_call``."""
 
     def __init__(self, *, raises=None, group_id=None, friends=(), groups=()):
         self._raises = raises
@@ -45,9 +77,13 @@ class FakeMutationService:
         self.friends = set(friends)
         self.groups = set(groups)
         self.calls: list[tuple[str, tuple, dict]] = []
+        self.history: RecordingAuditRepository | None = None
+        self.history_at_call: list[list[tuple[str, str]]] = []
 
     def _record(self, name, *args, **kwargs):
         self.calls.append((name, args, kwargs))
+        if self.history is not None:
+            self.history_at_call.append(self.history.outcomes)
         if self._raises is not None:
             raise self._raises
 
@@ -94,24 +130,25 @@ class FakeSocialClient:
         return list(self._pending)
 
 
-def _build(*, service=None, unlinked_factory=False, social_client=None, **flags):
+def _build(*, service=None, unlinked_factory=False, social_client=None, linked=True, **flags):
     repository = FakeRepository()
-    if flags.pop("linked", True):
+    if linked:
         _seed_link(repository, TokenCrypto(TokenCrypto.generate_key()), SUB, **flags)
 
     validator = FakeTokenValidator()
-    validator.register("valid-token", _claims(sub=SUB, email=EMAIL))
+    validator.register(TOKEN, _claims(sub=SUB, email=EMAIL))
     service = service if service is not None else FakeMutationService()
-    audit = FakeAuditRepository()
+    audit = RecordingAuditRepository()
+    service.history = audit
 
     async def factory(sub):
         if unlinked_factory:
-            raise RuntimeError("no link")
+            raise RuntimeError(sub)
         return service
 
     async def social_factory(sub):
         if unlinked_factory or social_client is None:
-            raise RuntimeError("no link")
+            raise RuntimeError(sub)
         return social_client
 
     app = create_app(
@@ -125,107 +162,147 @@ def _build(*, service=None, unlinked_factory=False, social_client=None, **flags)
     return TestClient(app), service, audit
 
 
+def _friend_path(client, online_id: str) -> str:
+    return _path(client, social_routes.accept_friend, online_id=online_id)
+
+
+def _unfriend_path(client, online_id: str) -> str:
+    return _path(client, social_routes.remove_friend, online_id=online_id)
+
+
+def _friend_request_path(client, online_id: str) -> str:
+    return _path(client, social_routes.send_friend_request, online_id=online_id)
+
+
+def _friend_requests_path(client) -> str:
+    return _path(client, social_routes.list_friend_requests)
+
+
+def _groups_path(client) -> str:
+    return _path(client, social_routes.create_chat_group)
+
+
+def _group_path(client, group_id: str) -> str:
+    return _path(client, social_routes.rename_chat_group, group_id=group_id)
+
+
+def _invitees_path(client, group_id: str) -> str:
+    return _path(client, social_routes.invite_to_chat_group, group_id=group_id)
+
+
+def _membership_path(client, group_id: str) -> str:
+    return _path(client, social_routes.leave_chat_group, group_id=group_id)
+
+
 def test_accept_friend_without_a_psn_link_is_404():
     client, service, _ = _build(linked=False)
 
-    response = client.put(f"/me/friends/{new_online_id()}", headers=_bearer("valid-token"))
+    response = client.put(_friend_path(client, new_online_id()), headers=_bearer(TOKEN))
 
     assert response.status_code == 404
+    assert response.json()["detail"] == PREFERENCE_NOT_LINKED_DETAIL
     assert service.calls == []
 
 
 def test_accept_friend_without_friend_write_consent_is_403():
     client, service, _ = _build(allow_friend_writes=False, allow_chat_writes=True)
 
-    response = client.put(f"/me/friends/{new_online_id()}", headers=_bearer("valid-token"))
+    response = client.put(_friend_path(client, new_online_id()), headers=_bearer(TOKEN))
 
     assert response.status_code == 403
-    assert "allow_friend_writes" in response.json()["detail"]
+    assert response.json()["detail"] == preference_disabled_detail(FRIEND_WRITES)
     assert service.calls == []
 
 
 def test_sending_a_friend_request_without_consent_is_403_and_writes_nothing():
     client, service, audit = _build(allow_friend_writes=False)
 
-    response = client.post(f"/me/friend-requests/{new_online_id()}", headers=_bearer("valid-token"))
+    response = client.post(_friend_request_path(client, new_online_id()), headers=_bearer(TOKEN))
 
     assert response.status_code == 403
+    assert response.json()["detail"] == preference_disabled_detail(FRIEND_WRITES)
     assert service.calls == []
-    assert audit.entries == []
+    assert audit.rows == [], "a consent refusal is decided from the database before any history row or PSN call"
 
 
 def test_accepting_when_no_request_is_pending_is_409_and_sends_nothing_to_psn():
     requester = new_online_id()
-    refusing = FakeMutationService(raises=NoPendingFriendRequestError(f"{requester} has not sent a friend request."))
+    refusing = FakeMutationService(raises=NoPendingFriendRequestError(requester))
     client, service, audit = _build(service=refusing, allow_friend_writes=True)
 
-    response = client.put(f"/me/friends/{requester}", headers=_bearer("valid-token"))
+    response = client.put(_friend_path(client, requester), headers=_bearer(TOKEN))
 
     assert response.status_code == 409
     assert response.json()["detail"] == NO_PENDING_REQUEST_DETAIL
     assert [call[0] for call in service.calls] == ["accept_friend_request"]
-    assert audit.entries == []
+    assert audit.outcomes == [(ACTION_FRIEND_ADDED, OUTCOME_FAILED)]
 
 
 def test_chat_write_consent_does_not_authorize_a_friend_write():
     client, service, _ = _build(allow_chat_writes=True, allow_friend_writes=False)
+    group_body = CreateGroupRequest(online_ids=[new_online_id()]).model_dump()
 
-    response = client.post("/me/chat/groups", json={"online_ids": [new_online_id()]}, headers=_bearer("valid-token"))
+    response = client.post(_groups_path(client), json=group_body, headers=_bearer(TOKEN))
     assert response.status_code == 200
 
-    response = client.delete(f"/me/friends/{new_online_id()}", headers=_bearer("valid-token"))
+    response = client.delete(_unfriend_path(client, new_online_id()), headers=_bearer(TOKEN))
     assert response.status_code == 403
+    assert response.json()["detail"] == preference_disabled_detail(FRIEND_WRITES)
     assert [call[0] for call in service.calls] == ["create_group"]
 
 
 def test_guard_refusal_inside_the_service_is_403():
-    refusing = FakeMutationService(raises=MutationNotAllowedError("Daily PSN change limit reached (50 in 24 hours)."))
+    refusal = lowercase_token()
+    refusing = FakeMutationService(raises=MutationNotAllowedError(refusal))
     client, _, audit = _build(service=refusing, allow_friend_writes=True)
 
-    response = client.put(f"/me/friends/{new_online_id()}", headers=_bearer("valid-token"))
+    response = client.put(_friend_path(client, new_online_id()), headers=_bearer(TOKEN))
 
     assert response.status_code == 403
-    assert "Daily PSN change limit" in response.json()["detail"]
-    assert audit.entries == []
+    assert response.json()["detail"] == refusal
+    assert audit.outcomes == [(ACTION_FRIEND_ADDED, OUTCOME_FAILED)]
 
 
 def test_expired_psn_token_is_401():
-    client, _, audit = _build(service=FakeMutationService(raises=PsnAuthError("token dead")), allow_friend_writes=True)
+    client, _, audit = _build(
+        service=FakeMutationService(raises=PsnAuthError(new_opaque_token())), allow_friend_writes=True
+    )
 
-    response = client.put(f"/me/friends/{new_online_id()}", headers=_bearer("valid-token"))
+    response = client.put(_friend_path(client, new_online_id()), headers=_bearer(TOKEN))
 
     assert response.status_code == 401
-    assert audit.entries == []
+    assert audit.outcomes == [(ACTION_FRIEND_ADDED, OUTCOME_FAILED)]
 
 
 def test_factory_reporting_no_link_is_404():
     client, _, _ = _build(unlinked_factory=True, allow_friend_writes=True)
 
-    response = client.put(f"/me/friends/{new_online_id()}", headers=_bearer("valid-token"))
+    response = client.put(_friend_path(client, new_online_id()), headers=_bearer(TOKEN))
 
     assert response.status_code == 404
+    assert response.json()["detail"] == PREFERENCE_NOT_LINKED_DETAIL
 
 
 def test_accepting_a_pending_request_logs_a_friend_added():
     requester = new_online_id()
     client, service, audit = _build(allow_friend_writes=True)
 
-    response = client.put(f"/me/friends/{requester}", headers=_bearer("valid-token"))
+    response = client.put(_friend_path(client, requester), headers=_bearer(TOKEN))
 
     assert response.status_code == 204
     assert service.calls == [("accept_friend_request", (), {"online_id": requester})]
-    assert audit.entries == [(SUB, "friend_added", requester)]
+    assert audit.entries == [(SUB, ACTION_FRIEND_ADDED, requester)]
 
 
 def test_sending_a_friend_request_logs_its_own_action():
     target = new_online_id()
     client, service, audit = _build(allow_friend_writes=True)
 
-    response = client.post(f"/me/friend-requests/{target}", headers=_bearer("valid-token"))
+    response = client.post(_friend_request_path(client, target), headers=_bearer(TOKEN))
 
     assert response.status_code == 204
     assert service.calls == [("send_friend_request", (), {"online_id": target})]
-    assert audit.entries == [(SUB, "friend_request_sent", target)]
+    assert audit.entries == [(SUB, ACTION_FRIEND_REQUEST_SENT, target)]
 
 
 def test_removing_a_friend_twice_writes_to_psn_once_and_answers_204_both_times():
@@ -233,35 +310,42 @@ def test_removing_a_friend_twice_writes_to_psn_once_and_answers_204_both_times()
     service = FakeMutationService(friends=[friend])
     client, _, audit = _build(service=service, allow_friend_writes=True)
 
-    first = client.delete(f"/me/friends/{friend}", headers=_bearer("valid-token"))
-    second = client.delete(f"/me/friends/{friend}", headers=_bearer("valid-token"))
+    first = client.delete(_unfriend_path(client, friend), headers=_bearer(TOKEN))
+    second = client.delete(_unfriend_path(client, friend), headers=_bearer(TOKEN))
 
     assert (first.status_code, second.status_code) == (204, 204)
-    assert audit.entries == [(SUB, "friend_removed", friend)], "only the write that changed PSN is logged"
+    assert audit.entries == [
+        (SUB, ACTION_FRIEND_REMOVED, friend),
+        (SUB, ACTION_FRIEND_REMOVED, nothing_sent_detail(friend)),
+    ], "both attempts used the token, and the second says it sent nothing"
 
 
 def test_listing_friend_requests_needs_identity_harvesting():
     client, _, _ = _build(social_client=FakeSocialClient(), harvest_identity=False)
 
-    response = client.get("/me/friend-requests", headers=_bearer("valid-token"))
+    response = client.get(_friend_requests_path(client), headers=_bearer(TOKEN))
 
     assert response.status_code == 403
+    assert response.json()["detail"] == preference_disabled_detail(HARVEST_IDENTITY)
 
 
 def test_listing_friend_requests_is_a_live_proxy():
     requester = SocialUser(account_id=new_account_id(), online_id=new_online_id())
     client, _, _ = _build(social_client=FakeSocialClient([requester]), harvest_identity=True)
 
-    response = client.get("/me/friend-requests", headers=_bearer("valid-token"))
+    response = client.get(_friend_requests_path(client), headers=_bearer(TOKEN))
 
     assert response.status_code == 200
-    assert response.json() == {"requests": [{"online_id": requester.online_id, "account_id": requester.account_id}]}
+    assert FriendRequestsResponse.model_validate(response.json()) == FriendRequestsResponse(
+        requests=[FriendRequestResponse(online_id=requester.online_id, account_id=requester.account_id)]
+    )
 
 
 def test_listing_friend_requests_with_a_rejected_token_is_401():
-    client, _, _ = _build(social_client=FakeSocialClient(raises=PsnAuthError("dead")), harvest_identity=True)
+    rejecting = FakeSocialClient(raises=PsnAuthError(new_opaque_token()))
+    client, _, _ = _build(social_client=rejecting, harvest_identity=True)
 
-    assert client.get("/me/friend-requests", headers=_bearer("valid-token")).status_code == 401
+    assert client.get(_friend_requests_path(client), headers=_bearer(TOKEN)).status_code == 401
 
 
 def test_create_chat_group_returns_and_logs_the_group_id():
@@ -270,30 +354,39 @@ def test_create_chat_group_returns_and_logs_the_group_id():
     client, _, audit = _build(service=service, allow_chat_writes=True)
 
     response = client.post(
-        "/me/chat/groups", json={"online_ids": [peer], "account_ids": [account]}, headers=_bearer("valid-token")
+        _groups_path(client),
+        json=CreateGroupRequest(online_ids=[peer], account_ids=[account]).model_dump(),
+        headers=_bearer(TOKEN),
     )
 
     assert response.status_code == 200
-    group_id = response.json()["group_id"]
+    group_id = CreateGroupResponse.model_validate(response.json()).group_id
     assert service.calls == [("create_group", (), {"online_ids": [peer], "account_ids": [account]})]
-    assert audit.entries == [(SUB, "chat_group_created", group_id)]
+    assert audit.entries == [(SUB, ACTION_CHAT_GROUP_CREATED, group_id)]
 
 
 def test_renaming_a_chat_group_logs_its_own_action():
     group_id = new_group_id()
+    new_name = lowercase_token()
     client, service, audit = _build(allow_chat_writes=True)
 
-    response = client.patch(f"/me/chat/groups/{group_id}", json={"name": "Raid night"}, headers=_bearer("valid-token"))
+    response = client.patch(
+        _group_path(client, group_id), json=RenameGroupRequest(name=new_name).model_dump(), headers=_bearer(TOKEN)
+    )
 
     assert response.status_code == 204
-    assert service.calls == [("rename_group", (group_id, "Raid night"), {})]
-    assert audit.entries == [(SUB, "chat_group_renamed", group_id)]
+    assert service.calls == [("rename_group", (group_id, new_name), {})]
+    assert audit.entries == [(SUB, ACTION_CHAT_GROUP_RENAMED, group_id)]
 
 
 def test_renaming_a_chat_group_to_a_blank_name_is_422():
     client, service, _ = _build(allow_chat_writes=True)
 
-    response = client.patch(f"/me/chat/groups/{new_group_id()}", json={"name": ""}, headers=_bearer("valid-token"))
+    response = client.patch(
+        _group_path(client, new_group_id()),
+        json=RenameGroupRequest.model_construct(name="").model_dump(),
+        headers=_bearer(TOKEN),
+    )
 
     assert response.status_code == 422
     assert service.calls == []
@@ -307,13 +400,15 @@ def test_inviting_to_a_chat_group_reports_where_psn_put_the_invitee_and_logs_tha
     client, service, audit = _build(service=service, allow_chat_writes=True)
 
     response = client.post(
-        f"/me/chat/groups/{group_id}/invitees", json={"online_ids": [peer]}, headers=_bearer("valid-token")
+        _invitees_path(client, group_id),
+        json=InviteToGroupRequest(online_ids=[peer]).model_dump(),
+        headers=_bearer(TOKEN),
     )
 
     assert response.status_code == 200
-    assert response.json() == {"group_id": resulting_group_id}
+    assert InviteToGroupResponse.model_validate(response.json()) == InviteToGroupResponse(group_id=resulting_group_id)
     assert service.calls == [("invite_to_group", (group_id,), {"online_ids": [peer], "account_ids": []})]
-    assert audit.entries == [(SUB, "chat_membership_changed", f"{resulting_group_id} invited 1")]
+    assert audit.entries == [(SUB, ACTION_CHAT_MEMBERSHIP_CHANGED, invited_detail(resulting_group_id, 1))]
 
 
 def test_leave_chat_group_logs_a_membership_change():
@@ -321,11 +416,11 @@ def test_leave_chat_group_logs_a_membership_change():
     service = FakeMutationService(groups=[group_id])
     client, _, audit = _build(service=service, allow_chat_writes=True)
 
-    response = client.delete(f"/me/chat/groups/{group_id}/members/me", headers=_bearer("valid-token"))
+    response = client.delete(_membership_path(client, group_id), headers=_bearer(TOKEN))
 
     assert response.status_code == 204
     assert service.calls == [("leave_group", (group_id,), {})]
-    assert audit.entries == [(SUB, "chat_membership_changed", f"{group_id} left")]
+    assert audit.entries == [(SUB, ACTION_CHAT_MEMBERSHIP_CHANGED, left_detail(group_id))]
 
 
 def test_leaving_a_group_twice_writes_to_psn_once():
@@ -333,40 +428,64 @@ def test_leaving_a_group_twice_writes_to_psn_once():
     service = FakeMutationService(groups=[group_id])
     client, _, audit = _build(service=service, allow_chat_writes=True)
 
-    client.delete(f"/me/chat/groups/{group_id}/members/me", headers=_bearer("valid-token"))
-    second = client.delete(f"/me/chat/groups/{group_id}/members/me", headers=_bearer("valid-token"))
+    client.delete(_membership_path(client, group_id), headers=_bearer(TOKEN))
+    second = client.delete(_membership_path(client, group_id), headers=_bearer(TOKEN))
 
     assert second.status_code == 204
-    assert len(audit.entries) == 1
+    assert audit.entries == [
+        (SUB, ACTION_CHAT_MEMBERSHIP_CHANGED, left_detail(group_id)),
+        (SUB, ACTION_CHAT_MEMBERSHIP_CHANGED, nothing_sent_detail(group_id)),
+    ]
 
 
-def test_a_failed_audit_write_does_not_fail_the_mutation():
+def test_the_history_row_is_started_before_the_mutation_reaches_psn():
+    requester = new_online_id()
+    client, service, audit = _build(allow_friend_writes=True)
+
+    client.put(_friend_path(client, requester), headers=_bearer(TOKEN))
+
+    assert service.history_at_call == [[(ACTION_FRIEND_ADDED, OUTCOME_STARTED)]]
+    assert audit.outcomes == [(ACTION_FRIEND_ADDED, OUTCOME_COMPLETED)]
+
+
+def test_a_history_row_that_cannot_be_written_stops_the_mutation_before_psn():
     group_id = new_group_id()
-    client, _, audit = _build(service=FakeMutationService(groups=[group_id]), allow_chat_writes=True)
+    client, service, audit = _build(service=FakeMutationService(groups=[group_id]), allow_chat_writes=True)
+    audit.begin_error = RuntimeError(new_group_id())
 
-    async def failing_log(identity_sub, action, detail=None):
-        raise RuntimeError("audit table unreachable")
+    with pytest.raises(RuntimeError):
+        client.delete(_membership_path(client, group_id), headers=_bearer(TOKEN))
 
-    audit.log = failing_log
+    assert service.calls == []
+    assert audit.rows == []
 
-    response = client.delete(f"/me/chat/groups/{group_id}/members/me", headers=_bearer("valid-token"))
 
-    assert response.status_code == 204
+def test_an_outcome_that_cannot_be_written_fails_the_request_and_leaves_the_attempt_recorded():
+    group_id = new_group_id()
+    client, service, audit = _build(service=FakeMutationService(groups=[group_id]), allow_chat_writes=True)
+    audit.finish_error = RuntimeError(new_group_id())
+
+    with pytest.raises(RuntimeError):
+        client.delete(_membership_path(client, group_id), headers=_bearer(TOKEN))
+
+    assert [call[0] for call in service.calls] == ["leave_group"]
+    assert audit.outcomes == [(ACTION_CHAT_MEMBERSHIP_CHANGED, OUTCOME_STARTED)]
 
 
 def test_social_routes_require_a_bearer_token():
     group_id = new_group_id()
+    online_id = new_online_id()
     client, service, _ = _build(allow_friend_writes=True, allow_chat_writes=True)
 
     for response in (
-        client.put("/me/friends/x"),
-        client.delete("/me/friends/x"),
-        client.post("/me/friend-requests/x"),
-        client.get("/me/friend-requests"),
-        client.post("/me/chat/groups", json={}),
-        client.patch(f"/me/chat/groups/{group_id}", json={"name": "x"}),
-        client.post(f"/me/chat/groups/{group_id}/invitees", json={}),
-        client.delete(f"/me/chat/groups/{group_id}/members/me"),
+        client.put(_friend_path(client, online_id)),
+        client.delete(_unfriend_path(client, online_id)),
+        client.post(_friend_request_path(client, online_id)),
+        client.get(_friend_requests_path(client)),
+        client.post(_groups_path(client), json=CreateGroupRequest().model_dump()),
+        client.patch(_group_path(client, group_id), json=RenameGroupRequest(name=lowercase_token()).model_dump()),
+        client.post(_invitees_path(client, group_id), json=InviteToGroupRequest().model_dump()),
+        client.delete(_membership_path(client, group_id)),
     ):
         assert response.status_code == 401
 

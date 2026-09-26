@@ -9,13 +9,14 @@ from collections.abc import AsyncIterator, Iterable, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any, Literal
+from typing import Any, Final, Literal
 
 from psycopg import AsyncCursor
 from psycopg.types.json import Jsonb
 from psycopg_pool import AsyncConnectionPool
 
 from curator.psn._media import cover_image_url
+from curator.psn._product_node import MEDIA_KEY
 from curator.psn.store_client import StoreProduct
 
 PS_PLUS_WALK_ADVISORY_LOCK_CLASS = 4
@@ -26,6 +27,9 @@ PS_PLUS_REWARD_MEMBERSHIP_TYPE = "PS_PLUS"
 
 PsPlusTier = Literal["extra", "premium"]
 """``ps_plus_catalog_categories.tier``'s CHECK constraint (``0058``) as a type."""
+
+PS_PLUS_EXTRA: Final[PsPlusTier] = "extra"
+PS_PLUS_PREMIUM: Final[PsPlusTier] = "premium"
 
 WalkStoppedReason = Literal[
     "query_rotated",
@@ -423,7 +427,7 @@ def _to_title(row: Sequence[Any]) -> PsPlusTitle:
         title=row[6] if row[6] is not None else (name if isinstance(name, str) and name.strip() else None),
         tier=row[1],
         platforms=tuple(str(platform) for platform in platforms) if isinstance(platforms, list) else (),
-        cover_image_url=cover_image_url(raw.get("media")),
+        cover_image_url=cover_image_url(raw.get(MEDIA_KEY)),
         store_product_id=row[2],
         since_at=row[4],
     )

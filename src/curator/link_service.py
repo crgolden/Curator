@@ -22,12 +22,17 @@ from curator.persistence.repository import Repository
 from curator.psn.errors import PsnAuthError
 from curator.psn.npsso import NpssoError, parse_npsso
 
+LINK_ERROR_INVALID_NPSSO = "invalid_npsso"
+LINK_ERROR_AUTH_FAILED = "auth_failed"
+LINK_ERROR_MISMATCH = "mismatch"
+LINK_ERROR_UNVERIFIED = "unverified"
+
 
 class LinkError(Exception):
     """Raised when linking a PSN account cannot proceed, carrying which case it was.
 
-    :param kind: One of ``"invalid_npsso"``, ``"mismatch"``, ``"unverified"``, ``"auth_failed"`` — the
-        route layer maps each to its own HTTP status/detail.
+    :param kind: One of the ``LINK_ERROR_*`` constants -- the route layer maps each to its own HTTP
+        status/detail, and Librarian branches on it.
     :param message: A human-readable explanation (never includes the npsso or an email address).
     """
 
@@ -139,7 +144,7 @@ async def link(
     try:
         parse_npsso(npsso)
     except NpssoError as exc:
-        raise LinkError("invalid_npsso", str(exc)) from exc
+        raise LinkError(LINK_ERROR_INVALID_NPSSO, str(exc)) from exc
 
     agent = await agent_factory(sub, npsso=npsso)
 
@@ -148,19 +153,19 @@ async def link(
         email_info = await agent.account_email_verified()
     except PsnAuthError as exc:
         await DbTokenStore(sub, repository, token_crypto, redis).clear()
-        raise LinkError("auth_failed", "PSN authentication failed.") from exc
+        raise LinkError(LINK_ERROR_AUTH_FAILED, "PSN authentication failed.") from exc
 
     if email_info is None:
         await DbTokenStore(sub, repository, token_crypto, redis).clear()
-        raise LinkError("unverified", "PSN email is not verified.")
+        raise LinkError(LINK_ERROR_UNVERIFIED, "PSN email is not verified.")
 
     psn_email, psn_verified = email_info
     if not psn_verified:
         await DbTokenStore(sub, repository, token_crypto, redis).clear()
-        raise LinkError("unverified", "PSN email is not verified.")
+        raise LinkError(LINK_ERROR_UNVERIFIED, "PSN email is not verified.")
     if normalize_email(identity_email) != normalize_email(psn_email):
         await DbTokenStore(sub, repository, token_crypto, redis).clear()
-        raise LinkError("mismatch", "emails do not match")
+        raise LinkError(LINK_ERROR_MISMATCH, "emails do not match")
 
     await repository.set_link_account(sub, account.account_id)
     await repository.touch_link_verified(sub)

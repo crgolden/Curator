@@ -5,8 +5,16 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 
+from curator.audit.recorded import recorded, request_recorder
+from curator.audit.repository import ACTION_DEVICES_FETCH
 from curator.collections.repository import CollectionsRepository
-from curator.deps import require_bearer, require_preference
+from curator.deps import (
+    HARVEST_DEVICES,
+    PREFERENCE_NOT_LINKED_DETAIL,
+    PSN_AUTH_FAILED_DETAIL,
+    require_bearer,
+    require_preference,
+)
 from curator.psn.device_registrations import collapse_by_device_id
 from curator.psn.errors import PsnAuthError
 from curator.psn.models import AccountDevice
@@ -14,9 +22,6 @@ from curator.psn.social_client import SocialClient, SocialClientFactory
 from curator.token_validation import TokenClaims
 
 router = APIRouter(tags=["devices"])
-
-_NO_LINK_DETAIL = "PSN account not linked."
-_AUTH_FAILED_DETAIL = "PSN authentication failed; re-link your account."
 
 
 class AccountDeviceResponse(BaseModel):
@@ -44,18 +49,19 @@ async def get_devices(request: Request, claims: Annotated[TokenClaims, Depends(r
     :raises fastapi.HTTPException: 404, if the caller has no PSN link; 403, if ``harvest_devices`` is not
         enabled for this user; 401, if PSN rejects the stored token.
     """
-    await require_preference(request, claims.sub, "harvest_devices")
+    await require_preference(request, claims.sub, HARVEST_DEVICES)
 
     social_client_factory: SocialClientFactory = request.app.state.social_client_factory
-    try:
-        client: SocialClient = await social_client_factory(claims.sub)
-    except RuntimeError as exc:
-        raise HTTPException(status_code=404, detail=_NO_LINK_DETAIL) from exc
+    async with recorded(request_recorder(request), claims.sub, ACTION_DEVICES_FETCH):
+        try:
+            client: SocialClient = await social_client_factory(claims.sub)
+        except RuntimeError as exc:
+            raise HTTPException(status_code=404, detail=PREFERENCE_NOT_LINKED_DETAIL) from exc
 
-    try:
-        devices = await client.devices()
-    except PsnAuthError as exc:
-        raise HTTPException(status_code=401, detail=_AUTH_FAILED_DETAIL) from exc
+        try:
+            devices = await client.devices()
+        except PsnAuthError as exc:
+            raise HTTPException(status_code=401, detail=PSN_AUTH_FAILED_DETAIL) from exc
 
     collections_repository: CollectionsRepository = request.app.state.collections_repository
     console_id_by_device = await collections_repository.list_console_device_links(claims.sub)

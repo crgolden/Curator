@@ -8,24 +8,44 @@ now").
 from __future__ import annotations
 
 from collections.abc import Callable, Coroutine
-from typing import Any
+from typing import Any, Final
 
 from curator.psn import _identity
+from curator.psn._identity import ACCOUNT_ID_KEY
 from curator.psn.models import Presence
 from curator.psn.session import PsnSession
 
-_PROFILE_URI_V2 = "https://m.np.playstation.com/api/userProfile/v2/internal/users"
+PROFILE_URI_V2: Final = "https://m.np.playstation.com/api/userProfile/v2/internal/users"
+
+BASIC_PRESENCE_KEY: Final = "basicPresence"
+BASIC_PRESENCES_KEY: Final = "basicPresences"
+PRIMARY_PLATFORM_INFO_KEY: Final = "primaryPlatformInfo"
+GAME_TITLE_INFO_LIST_KEY: Final = "gameTitleInfoList"
+AVAILABILITY_KEY: Final = "availability"
+ONLINE_STATUS_KEY: Final = "onlineStatus"
+PLATFORM_KEY: Final = "platform"
+LAST_ONLINE_DATE_KEY: Final = "lastOnlineDate"
+TITLE_NAME_KEY: Final = "titleName"
+ACCOUNT_IDS_PARAM: Final = "accountIds"
+
+
+def basic_presences_url(account_id: str) -> str:
+    return f"{PROFILE_URI_V2}/{account_id}/{BASIC_PRESENCES_KEY}"
+
+
+def batch_basic_presences_url() -> str:
+    return f"{PROFILE_URI_V2}/{BASIC_PRESENCES_KEY}"
 
 
 def _presence_from_basic(basic: dict[str, Any]) -> Presence:
     """Build a :class:`~curator.psn.models.Presence` from a PSN ``basicPresence`` object."""
-    platform_info = basic.get("primaryPlatformInfo") or {}
-    games = basic.get("gameTitleInfoList") or []
+    platform_info = basic.get(PRIMARY_PLATFORM_INFO_KEY) or {}
+    games = basic.get(GAME_TITLE_INFO_LIST_KEY) or []
     return Presence(
-        online_status=basic.get("availability") or platform_info.get("onlineStatus"),
-        platform=platform_info.get("platform"),
-        last_online_date=platform_info.get("lastOnlineDate"),
-        game_title=games[0].get("titleName") if games else None,
+        online_status=basic.get(AVAILABILITY_KEY) or platform_info.get(ONLINE_STATUS_KEY),
+        platform=platform_info.get(PLATFORM_KEY),
+        last_online_date=platform_info.get(LAST_ONLINE_DATE_KEY),
+        game_title=games[0].get(TITLE_NAME_KEY) if games else None,
     )
 
 
@@ -51,11 +71,11 @@ class PresenceClient:
         target_account_id = await _identity.account_id_for(self._session, online_id, account_id)
         data = (
             await self._session.get(
-                f"{_PROFILE_URI_V2}/{target_account_id}/basicPresences",
+                basic_presences_url(target_account_id),
                 params={"type": "primary", "platforms": "PS4,PS5,MOBILE_APP,PSPC", "withOwnGameTitleInfo": "true"},
             )
         ).json()
-        basic = data.get("basicPresence", data) if isinstance(data, dict) else {}
+        basic = data.get(BASIC_PRESENCE_KEY, data) if isinstance(data, dict) else {}
         return _presence_from_basic(basic)
 
     async def presence_batch(self, account_ids: list[str]) -> dict[str, Presence]:
@@ -71,20 +91,20 @@ class PresenceClient:
     async def _presence_batch(self, account_ids: list[str]) -> dict[str, Presence]:
         data = (
             await self._session.get(
-                f"{_PROFILE_URI_V2}/basicPresences",
+                batch_basic_presences_url(),
                 params={
                     "type": "primary",
-                    "accountIds": ",".join(account_ids),
+                    ACCOUNT_IDS_PARAM: ",".join(account_ids),
                     "platforms": "PS4,PS5,MOBILE_APP,PSPC",
                     "withOwnGameTitleInfo": "true",
                 },
             )
         ).json()
-        basic_presences = data.get("basicPresences") or [] if isinstance(data, dict) else []
+        basic_presences = data.get(BASIC_PRESENCES_KEY) or [] if isinstance(data, dict) else []
         return {
-            entry.get("accountId"): _presence_from_basic(entry)
+            entry.get(ACCOUNT_ID_KEY): _presence_from_basic(entry)
             for entry in basic_presences
-            if entry.get("accountId") is not None
+            if entry.get(ACCOUNT_ID_KEY) is not None
         }
 
 

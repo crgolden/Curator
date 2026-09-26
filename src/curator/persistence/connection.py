@@ -20,8 +20,15 @@ from psycopg.conninfo import conninfo_to_dict, make_conninfo
 
 from curator.persistence.config import ConfigError, resolve_setting
 
-DEFAULT_ENV_NAMES: tuple[str, ...] = ("CURATOR_DATABASE_URL", "DATABASE_URL")
-CERTIFICATE_VERIFYING_SSL_MODES: frozenset[str] = frozenset({"verify-ca", "verify-full"})
+CURATOR_DATABASE_URL_ENV = "CURATOR_DATABASE_URL"
+DATABASE_URL_ENV = "DATABASE_URL"
+DEFAULT_ENV_NAMES: tuple[str, ...] = (CURATOR_DATABASE_URL_ENV, DATABASE_URL_ENV)
+
+SSLMODE_PARAM = "sslmode"
+SSLROOTCERT_PARAM = "sslrootcert"
+VERIFY_CA_SSL_MODE = "verify-ca"
+VERIFY_FULL_SSL_MODE = "verify-full"
+CERTIFICATE_VERIFYING_SSL_MODES: frozenset[str] = frozenset({VERIFY_CA_SSL_MODE, VERIFY_FULL_SSL_MODE})
 
 
 def resolve_database_url(
@@ -55,7 +62,7 @@ def with_root_certificate(url: str) -> str:
     :returns: ``url`` unchanged, or an equivalent conninfo string carrying ``sslrootcert``.
     """
     parameters = conninfo_to_dict(url)
-    if parameters.get("sslmode") not in CERTIFICATE_VERIFYING_SSL_MODES or parameters.get("sslrootcert"):
+    if parameters.get(SSLMODE_PARAM) not in CERTIFICATE_VERIFYING_SSL_MODES or parameters.get(SSLROOTCERT_PARAM):
         return url
 
-    return make_conninfo(url, sslrootcert=certifi.where())
+    return make_conninfo(url, **{SSLROOTCERT_PARAM: certifi.where()})

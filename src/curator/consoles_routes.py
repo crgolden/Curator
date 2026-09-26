@@ -5,12 +5,14 @@ only applies to attached swappable storage; see ``curator.storage_devices_routes
 
 from __future__ import annotations
 
-from typing import Annotated, Literal
+from typing import Annotated, Final, Literal
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 
+from curator.audit.recorded import recorded, request_recorder
+from curator.audit.repository import ACTION_DEVICE_LINK_CHECK, OUTCOME_FAILED
 from curator.collections.console_model_defaults import default_capacity_gb
 from curator.collections.repository import CollectionsRepository, UserConsole
 from curator.deps import require_bearer
@@ -26,6 +28,11 @@ router = APIRouter(prefix="/consoles", tags=["consoles"])
 ConsoleDeviceLinkState = Literal["linked", "device_deactivated", "device_missing", "not_checked"]
 """What PSN says about a console's linked device. ``not_checked`` is the explicit state when
 ``harvest_devices`` is off or PSN could not be asked; it is never an omitted field."""
+
+DEVICE_LINK_LINKED: Final[Literal["linked"]] = "linked"
+DEVICE_LINK_DEACTIVATED: Final[Literal["device_deactivated"]] = "device_deactivated"
+DEVICE_LINK_MISSING: Final[Literal["device_missing"]] = "device_missing"
+DEVICE_LINK_NOT_CHECKED: Final[Literal["not_checked"]] = "not_checked"
 
 
 class ConsoleDeviceLinkResponse(BaseModel):
@@ -159,7 +166,7 @@ async def _device_link_states(
 
     def unchecked() -> dict[str, ConsoleDeviceLinkResponse]:
         return {
-            console_id: ConsoleDeviceLinkResponse(device_id=device_id, state="not_checked")
+            console_id: ConsoleDeviceLinkResponse(device_id=device_id, state=DEVICE_LINK_NOT_CHECKED)
             for console_id, device_id in device_id_by_console.items()
         }
 
@@ -169,11 +176,14 @@ async def _device_link_states(
         return unchecked()
 
     social_client_factory: SocialClientFactory = request.app.state.social_client_factory
-    try:
-        client = await social_client_factory(sub)
-        devices = collapse_by_device_id(await client.devices())
-    except (RuntimeError, PsnAuthError, httpx.HTTPError):
-        return unchecked()
+    async with recorded(request_recorder(request), sub, ACTION_DEVICE_LINK_CHECK) as entry:
+        try:
+            client = await social_client_factory(sub)
+            devices = collapse_by_device_id(await client.devices())
+        except (RuntimeError, PsnAuthError, httpx.HTTPError) as exc:
+            entry.outcome = OUTCOME_FAILED
+            entry.detail = type(exc).__name__
+            return unchecked()
 
     listed = {device.device_id: device for device in devices if device.device_id}
     states: dict[str, ConsoleDeviceLinkResponse] = {}
@@ -181,11 +191,11 @@ async def _device_link_states(
         device = listed.get(device_id)
         state: ConsoleDeviceLinkState
         if device is None:
-            state = "device_missing"
+            state = DEVICE_LINK_MISSING
         elif device.deactivation_date:
-            state = "device_deactivated"
+            state = DEVICE_LINK_DEACTIVATED
         else:
-            state = "linked"
+            state = DEVICE_LINK_LINKED
         states[console_id] = ConsoleDeviceLinkResponse(device_id=device_id, state=state)
     return states
 

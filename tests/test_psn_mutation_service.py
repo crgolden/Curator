@@ -7,9 +7,50 @@ from __future__ import annotations
 
 import pytest
 
+from curator.psn._identity import (
+    ACCOUNT_ID_KEY,
+    MY_ACCOUNT_URL,
+    ONLINE_ID_KEY,
+    PROFILE_KEY,
+    SELF_PATH_ID,
+    legacy_profile_url,
+    profiles_url,
+)
 from curator.psn.errors import MutationNotAllowedError, NoPendingFriendRequestError
-from curator.psn.mutation_service import NO_FRIEND_RELATION, MutationService
-from curator.psn.safety import MutationGuard
+from curator.psn.mutation_service import (
+    CREATED_TIMESTAMP_KEY,
+    GROUP_NAME_KEY,
+    INVITEES_KEY,
+    MESSAGE_UID_KEY,
+    NO_FRIEND_RELATION,
+    VALUE_KEY,
+    MutationService,
+    group_invitees_url,
+    group_member_url,
+    group_url,
+    groups_url,
+)
+from curator.psn.safety import CHAT_WRITES, FRIEND_WRITES, MutationGuard
+from curator.psn.social_client import (
+    FRIEND_RELATION_KEY,
+    GROUP_ID_KEY,
+    GROUPS_KEY,
+    RECEIVED_REQUESTS_KEY,
+    friend_url,
+    friendship_summary_url,
+    my_chat_groups_url,
+    received_requests_url,
+)
+from test_values import (
+    lowercase_token,
+    new_account_id,
+    new_game_title,
+    new_group_id,
+    new_identity_sub,
+    new_online_id,
+    new_opaque_token,
+    new_utc_instant,
+)
 
 
 class FakeResponse:
@@ -21,66 +62,58 @@ class FakeResponse:
 
 
 class FakeSession:
-    """``responses`` maps a URL fragment to the body PSN answers with; the group list and friend summary
-    default to "a member of every group" and "a friend", so a destructive call proceeds unless a test says
-    otherwise."""
+    """Answers by exact URL. The caller's own account resolves through ``whoami``'s three reads, and every
+    online id in ``account_ids_by_online_id`` resolves to its account id through the legacy profile."""
 
-    def __init__(self, *, own_account_id="pinned-acct", responses=None):
-        self._own_account_id = own_account_id
-        self._responses = dict(responses or {})
+    def __init__(self, *, own_account_id=None, account_ids_by_online_id=None, routes=None):
+        self.own_account_id = own_account_id or new_account_id()
+        own_online_id = new_online_id()
+        account_ids = {own_online_id: self.own_account_id, **(account_ids_by_online_id or {})}
+        legacy_profiles = {
+            legacy_profile_url(online_id): {PROFILE_KEY: {ACCOUNT_ID_KEY: account_id}}
+            for online_id, account_id in account_ids.items()
+        }
+        self._routes = {
+            MY_ACCOUNT_URL: {ACCOUNT_ID_KEY: self.own_account_id},
+            profiles_url(self.own_account_id): {ONLINE_ID_KEY: own_online_id},
+            **legacy_profiles,
+            **(routes or {}),
+        }
+        self.post_response: dict = {}
         self.post_calls: list[tuple[str, dict]] = []
         self.patch_calls: list[tuple[str, dict]] = []
         self.delete_calls: list[str] = []
         self.put_calls: list[str] = []
-        self.get_calls: list[str] = []
-        self._post_response: dict = {}
 
     async def get(self, url, params=None, headers=None):
-        self.get_calls.append(url)
-        if "devices/accounts/me" in url:
-            return FakeResponse({"accountId": self._own_account_id})
-        if url.endswith("/profiles"):
-            return FakeResponse({"onlineId": "someone"})
-        if "/profile2" in url:
-            return FakeResponse({"profile": {"accountId": "resolved-acct"}})
-        for fragment, body in self._responses.items():
-            if fragment in url:
-                return FakeResponse(body)
-        if "/members/me/groups" in url:
-            return FakeResponse({"groups": [{"groupId": "g1"}]})
-        if url.endswith("/summary"):
-            return FakeResponse({"friendRelation": "friend"})
-        return FakeResponse({})
+        return FakeResponse(self._routes[url])
 
     async def post(self, url, json=None, data=None, params=None, headers=None):
         self.post_calls.append((url, json or {}))
-        return FakeResponse(self._post_response)
+        return FakeResponse(self.post_response)
 
     async def patch(self, url, json=None, headers=None):
         self.patch_calls.append((url, json or {}))
-        return FakeResponse({})
+        return FakeResponse()
 
     async def put(self, url, headers=None):
         self.put_calls.append(url)
-        return FakeResponse({})
+        return FakeResponse()
 
     async def delete(self, url, headers=None):
         self.delete_calls.append(url)
-        return FakeResponse({})
+        return FakeResponse()
 
     async def run_with_reauth(self, operation):
         return await operation()
 
 
 class FakePinnedAccountRepository:
-    def __init__(self, pinned_account_id=None):
-        self.pinned = pinned_account_id
-
     async def get_pinned_account_id(self, identity_sub):
-        return self.pinned
+        return None
 
     async def pin(self, identity_sub, psn_account_id):
-        self.pinned = psn_account_id
+        raise AssertionError("mutations never pin a test account")
 
 
 class FakeLink:
@@ -98,232 +131,228 @@ class FakeLinkReader:
         return self.link
 
 
-def _service(session, *, linked="pinned-acct", allow_friend_writes=True, allow_chat_writes=True):
-    link = (
-        None
-        if linked is None
-        else FakeLink(linked, allow_friend_writes=allow_friend_writes, allow_chat_writes=allow_chat_writes)
+def _service(session, *, linked_account_id=None, allow_friend_writes=True, allow_chat_writes=True):
+    link = FakeLink(
+        linked_account_id or session.own_account_id,
+        allow_friend_writes=allow_friend_writes,
+        allow_chat_writes=allow_chat_writes,
     )
-    guard = MutationGuard("sub-1", FakePinnedAccountRepository(), links=FakeLinkReader(link))
+    return _guarded(session, link)
+
+
+def _guarded(session, link):
+    guard = MutationGuard(new_identity_sub(), FakePinnedAccountRepository(), links=FakeLinkReader(link))
     return MutationService(session, guard)
 
 
+def _member_of(group_id):
+    return {my_chat_groups_url(): {GROUPS_KEY: [{GROUP_ID_KEY: group_id}]}}
+
+
+def _standing(account_id, relation):
+    return {friendship_summary_url(account_id): {FRIEND_RELATION_KEY: relation}}
+
+
 async def test_create_group_rejected_when_not_the_linked_account():
-    session = FakeSession(own_account_id="some-other-account")
-    service = _service(session, linked="pinned-acct")
+    session = FakeSession()
+    service = _service(session, linked_account_id=new_account_id())
 
     with pytest.raises(MutationNotAllowedError):
-        await service.create_group(account_ids=["999"])
+        await service.create_group(account_ids=[new_account_id()])
 
     assert session.post_calls == []
 
 
 async def test_create_group_rejected_when_chat_writes_not_consented():
-    session = FakeSession(own_account_id="pinned-acct")
+    session = FakeSession()
     service = _service(session, allow_chat_writes=False)
 
-    with pytest.raises(MutationNotAllowedError, match="allow_chat_writes"):
-        await service.create_group(account_ids=["999"])
+    with pytest.raises(MutationNotAllowedError, match=CHAT_WRITES):
+        await service.create_group(account_ids=[new_account_id()])
 
     assert session.post_calls == []
 
 
 async def test_friend_mutation_rejected_when_only_chat_writes_consented():
-    session = FakeSession(own_account_id="pinned-acct")
+    session = FakeSession()
     service = _service(session, allow_friend_writes=False, allow_chat_writes=True)
 
-    with pytest.raises(MutationNotAllowedError, match="allow_friend_writes"):
-        await service.accept_friend(account_id="999")
+    with pytest.raises(MutationNotAllowedError, match=FRIEND_WRITES):
+        await service.accept_friend(account_id=new_account_id())
 
     assert session.put_calls == []
 
 
 async def test_mutation_rejected_when_no_psn_account_is_linked():
-    session = FakeSession(own_account_id="pinned-acct")
-    service = _service(session, linked=None)
+    session = FakeSession()
+    service = _guarded(session, None)
 
     with pytest.raises(MutationNotAllowedError, match="No PSN account is linked"):
-        await service.create_group(account_ids=["999"])
+        await service.create_group(account_ids=[new_account_id()])
 
     assert session.post_calls == []
 
 
-async def test_create_group_succeeds_for_linked_and_consented_account():
-    session = FakeSession(own_account_id="pinned-acct")
-    session._post_response = {"groupId": "new-group"}
-    service = _service(session)
+async def test_create_group_posts_the_invitees_to_the_collection_so_psn_allocates_a_new_group():
+    member_account_id, allocated_group_id = new_account_id(), new_group_id()
+    session = FakeSession()
+    session.post_response = {GROUP_ID_KEY: allocated_group_id}
 
-    group_id = await service.create_group(account_ids=["999"])
+    group_id = await _service(session).create_group(account_ids=[member_account_id])
 
-    assert group_id == "new-group"
-    assert session.post_calls[0][1] == {"invitees": [{"accountId": "999"}]}
+    assert group_id == allocated_group_id
+    assert session.post_calls == [(groups_url(), {INVITEES_KEY: [{ACCOUNT_ID_KEY: member_account_id}]})]
 
 
 async def test_rename_group_sends_patch():
+    group_id, name = new_group_id(), new_game_title()
     session = FakeSession()
-    service = _service(session)
 
-    await service.rename_group("g1", "New Name")
+    await _service(session).rename_group(group_id, name)
 
-    assert session.patch_calls == [
-        ("https://m.np.playstation.com/api/gamingLoungeGroups/v1/groups/g1", {"groupName": {"value": "New Name"}})
-    ]
+    assert session.patch_calls == [(group_url(group_id), {GROUP_NAME_KEY: {VALUE_KEY: name}})]
 
 
 async def test_send_message_maps_response():
+    message_uid = new_opaque_token()
+    created_at = new_utc_instant().replace(microsecond=0)
     session = FakeSession()
-    session._post_response = {"messageUid": "m1", "createdTimestamp": 1704067200000}
-    service = _service(session)
+    session.post_response = {MESSAGE_UID_KEY: message_uid, CREATED_TIMESTAMP_KEY: int(created_at.timestamp()) * 1000}
 
-    sent = await service.send_message("g1", "hi there")
+    sent = await _service(session).send_message(new_group_id(), lowercase_token())
 
-    assert sent.message_uid == "m1"
-    assert sent.created_at == "2024-01-01T00:00:00+00:00"
-
-
-async def test_invite_to_group_resolves_online_ids_to_account_ids():
-    session = FakeSession()
-    service = _service(session)
-
-    await service.invite_to_group("g1", online_ids=["SomeOnlineId"])
-
-    invitee_account_ids = [i["accountId"] for i in session.post_calls[0][1]["invitees"]]
-    assert invitee_account_ids
+    assert sent.message_uid == message_uid
+    assert sent.created_at == created_at.isoformat()
 
 
-async def test_invite_to_group_posts_to_the_named_group_not_the_create_group_endpoint():
-    session = FakeSession()
-    service = _service(session)
+async def test_invite_to_group_posts_the_resolved_account_ids_to_the_named_group():
+    group_id, invitee_online_id, invitee_account_id = new_group_id(), new_online_id(), new_account_id()
+    session = FakeSession(account_ids_by_online_id={invitee_online_id: invitee_account_id})
 
-    await service.invite_to_group("g1", account_ids=["999"])
+    await _service(session).invite_to_group(group_id, online_ids=[invitee_online_id])
 
-    assert session.post_calls[0][0].endswith("/groups/g1/invitees")
+    expected_body = {INVITEES_KEY: [{ACCOUNT_ID_KEY: invitee_account_id}]}
+    assert session.post_calls == [(group_invitees_url(group_id), expected_body)]
 
 
 async def test_invite_to_group_returns_the_group_psn_put_the_invitee_in():
     """Recorded live: inviting into a DM answered with a different, newly allocated groupId."""
+    allocated_group_id = new_group_id()
     session = FakeSession()
-    session._post_response = {"groupId": "allocated-group", "hasAllAccountInvited": True}
-    service = _service(session)
+    session.post_response = {GROUP_ID_KEY: allocated_group_id}
 
-    resulting_group_id = await service.invite_to_group("dm-group", account_ids=["999"])
+    resulting_group_id = await _service(session).invite_to_group(new_group_id(), account_ids=[new_account_id()])
 
-    assert resulting_group_id == "allocated-group"
-
-
-async def test_create_group_posts_to_the_collection_so_psn_allocates_a_new_group():
-    session = FakeSession()
-    service = _service(session)
-
-    await service.create_group(account_ids=["999"])
-
-    assert session.post_calls[0][0].endswith("/groups")
+    assert resulting_group_id == allocated_group_id
 
 
 async def test_kick_from_group_sends_delete():
+    group_id, member_account_id = new_group_id(), new_account_id()
     session = FakeSession()
-    service = _service(session)
 
-    await service.kick_from_group("g1", account_id="999")
+    await _service(session).kick_from_group(group_id, account_id=member_account_id)
 
-    assert session.delete_calls == ["https://m.np.playstation.com/api/gamingLoungeGroups/v1/groups/g1/members/999"]
+    assert session.delete_calls == [group_member_url(group_id, member_account_id)]
 
 
 async def test_leave_group_sends_delete_for_me():
-    session = FakeSession()
-    service = _service(session)
+    group_id = new_group_id()
+    session = FakeSession(routes=_member_of(group_id))
 
-    left = await service.leave_group("g1")
+    left = await _service(session).leave_group(group_id)
 
     assert left is True
-    assert session.delete_calls == ["https://m.np.playstation.com/api/gamingLoungeGroups/v1/groups/g1/members/me"]
+    assert session.delete_calls == [group_member_url(group_id, SELF_PATH_ID)]
 
 
 async def test_leaving_a_group_the_caller_is_not_in_sends_nothing():
-    session = FakeSession(responses={"/members/me/groups": {"groups": [{"groupId": "some-other-group"}]}})
-    service = _service(session)
+    session = FakeSession(routes=_member_of(new_group_id()))
 
-    left = await service.leave_group("g1")
+    left = await _service(session).leave_group(new_group_id())
 
     assert left is False
     assert session.delete_calls == []
 
 
-async def test_accepting_a_pending_request_puts_the_requesters_account_id():
-    session = FakeSession(responses={"receivedRequests": {"receivedRequests": [{"accountId": "777"}]}})
-    service = _service(session)
+async def test_accepting_a_pending_request_matches_the_online_id_case_insensitively():
+    requester_account_id, requester_online_id = new_account_id(), new_online_id()
+    session = FakeSession(
+        routes={
+            received_requests_url(): {RECEIVED_REQUESTS_KEY: [{ACCOUNT_ID_KEY: requester_account_id}]},
+            profiles_url(requester_account_id): {ONLINE_ID_KEY: requester_online_id},
+        }
+    )
 
-    await service.accept_friend_request("SOMEONE")
+    await _service(session).accept_friend_request(requester_online_id.upper())
 
-    assert session.put_calls == ["https://m.np.playstation.com/api/userProfile/v1/internal/users/me/friends/777"]
+    assert session.put_calls == [friend_url(requester_account_id)]
 
 
 async def test_accepting_with_no_pending_request_raises_and_puts_nothing():
-    session = FakeSession(responses={"receivedRequests": {"receivedRequests": []}})
-    service = _service(session)
+    session = FakeSession(routes={received_requests_url(): {RECEIVED_REQUESTS_KEY: []}})
 
     with pytest.raises(NoPendingFriendRequestError):
-        await service.accept_friend_request("someone")
+        await _service(session).accept_friend_request(new_online_id())
 
     assert session.put_calls == []
 
 
 async def test_removing_a_friend_that_is_not_one_sends_nothing():
-    session = FakeSession(responses={"/summary": {"friendRelation": NO_FRIEND_RELATION}})
-    service = _service(session)
+    account_id = new_account_id()
+    session = FakeSession(routes=_standing(account_id, NO_FRIEND_RELATION))
 
-    removed = await service.remove_friend(account_id="999")
+    removed = await _service(session).remove_friend(account_id=account_id)
 
     assert removed is False
     assert session.delete_calls == []
 
 
-async def test_send_friend_request_puts_like_accept():
-    session = FakeSession()
-    service = _service(session)
+async def test_send_friend_request_puts_the_resolved_account_like_accept():
+    target_online_id, target_account_id = new_online_id(), new_account_id()
+    session = FakeSession(account_ids_by_online_id={target_online_id: target_account_id})
 
-    await service.send_friend_request("someone")
+    await _service(session).send_friend_request(target_online_id)
 
-    assert len(session.put_calls) == 1
+    assert session.put_calls == [friend_url(target_account_id)]
 
 
 async def test_accept_friend_sends_put():
+    account_id = new_account_id()
     session = FakeSession()
-    service = _service(session)
 
-    await service.accept_friend(account_id="999")
+    await _service(session).accept_friend(account_id=account_id)
 
-    assert session.put_calls == ["https://m.np.playstation.com/api/userProfile/v1/internal/users/me/friends/999"]
+    assert session.put_calls == [friend_url(account_id)]
 
 
 async def test_remove_friend_sends_delete():
-    session = FakeSession()
-    service = _service(session)
+    account_id = new_account_id()
+    session = FakeSession(routes=_standing(account_id, lowercase_token()))
 
-    removed = await service.remove_friend(account_id="999")
+    removed = await _service(session).remove_friend(account_id=account_id)
 
     assert removed is True
-    assert session.delete_calls == ["https://m.np.playstation.com/api/userProfile/v1/internal/users/me/friends/999"]
+    assert session.delete_calls == [friend_url(account_id)]
 
 
-async def test_every_mutation_checks_the_live_account_before_acting():
-    session = FakeSession(own_account_id="wrong-account")
-    service = _service(session, linked="pinned-acct")
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        lambda service: service.rename_group(new_group_id(), new_game_title()),
+        lambda service: service.send_message(new_group_id(), lowercase_token()),
+        lambda service: service.kick_from_group(new_group_id(), account_id=new_account_id()),
+        lambda service: service.leave_group(new_group_id()),
+        lambda service: service.accept_friend(account_id=new_account_id()),
+        lambda service: service.accept_friend_request(new_online_id()),
+        lambda service: service.send_friend_request(new_online_id()),
+        lambda service: service.remove_friend(account_id=new_account_id()),
+    ],
+)
+async def test_every_mutation_checks_the_live_account_before_acting(mutation):
+    session = FakeSession()
+    service = _service(session, linked_account_id=new_account_id())
 
-    for coro in (
-        service.rename_group("g1", "x"),
-        service.send_message("g1", "x"),
-        service.kick_from_group("g1", account_id="1"),
-        service.leave_group("g1"),
-        service.accept_friend(account_id="1"),
-        service.accept_friend_request("someone"),
-        service.send_friend_request("someone"),
-        service.remove_friend(account_id="1"),
-    ):
-        with pytest.raises(MutationNotAllowedError):
-            await coro
+    with pytest.raises(MutationNotAllowedError):
+        await mutation(service)
 
-    assert session.post_calls == []
-    assert session.patch_calls == []
-    assert session.delete_calls == []
-    assert session.put_calls == []
+    assert (session.post_calls, session.patch_calls, session.delete_calls, session.put_calls) == ([], [], [], [])

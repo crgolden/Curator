@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import random
+from typing import get_args
+
 import pytest
 
-from curator.collections.repository import CollectionsRepository
+from curator.collections.repository import _ITEM_SORT_COLUMNS, CollectionItemSortField, CollectionsRepository
 
 
 class FakeCursor:
@@ -122,24 +125,19 @@ async def test_defaults_to_rank_order_so_the_unpaged_route_is_unchanged():
     assert "ORDER BY cdi.rank ASC" in page_sql
 
 
-@pytest.mark.parametrize(
-    ("sort", "expected_column"),
-    [
-        ("rank", "cdi.rank"),
-        ("title", "g.canonical_title"),
-        ("critical_score", "ge.critical_score"),
-        ("oc_score", "ge.oc_score"),
-        ("psn_rating", "ge.psn_rating"),
-    ],
-)
-async def test_every_sort_field_resolves_to_its_allow_listed_column(sort, expected_column):
+def test_the_sort_allow_list_covers_exactly_the_declared_sort_fields():
+    assert set(_ITEM_SORT_COLUMNS) == set(get_args(CollectionItemSortField))
+
+
+@pytest.mark.parametrize("sort", get_args(CollectionItemSortField))
+async def test_every_sort_field_resolves_to_its_allow_listed_column(sort):
     pool = _pool_returning([], total=0)
     repository = CollectionsRepository(pool)
 
     await repository.list_definition_items_page("def-1", sort=sort)
 
     page_sql, _ = pool.connections[0].executed[1]
-    assert f"ORDER BY {expected_column} ASC" in page_sql
+    assert f"ORDER BY {_ITEM_SORT_COLUMNS[sort]} ASC" in page_sql
 
 
 async def test_unknown_sort_field_raises_rather_than_reaching_the_sql():
@@ -157,7 +155,9 @@ async def test_unresolved_scores_sort_last_in_both_directions():
         pool = _pool_returning([], total=0)
         repository = CollectionsRepository(pool)
 
-        await repository.list_definition_items_page("def-1", sort="oc_score", sort_dir=direction)
+        await repository.list_definition_items_page(
+            "def-1", sort=random.choice(get_args(CollectionItemSortField)), sort_dir=direction
+        )
 
         page_sql, _ = pool.connections[0].executed[1]
         assert "NULLS LAST" in page_sql

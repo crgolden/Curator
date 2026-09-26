@@ -17,8 +17,31 @@ from collections.abc import Callable, Coroutine
 from typing import Any, Final, Literal
 
 from curator.psn import _identity
-from curator.psn._graphql import run_persisted_query
+from curator.psn._graphql import DATA_KEY, run_persisted_query
+from curator.psn._identity import (
+    ACCOUNT_ID_KEY,
+    MY_ACCOUNT_URL,
+    ONLINE_ID_KEY,
+    PROFILE_KEY,
+    PROFILE_URI,
+    SELF_PATH_ID,
+    legacy_profile_url,
+)
 from curator.psn._media import cover_image_url
+from curator.psn._product_node import (
+    BASE_PRICE_KEY,
+    CLASSIFICATION_KEY,
+    DEFAULT_PRODUCT_KEY,
+    DISCOUNTED_PRICE_KEY,
+    ID_KEY,
+    INVARIANT_NAME_KEY,
+    IS_FREE_KEY,
+    MEDIA_KEY,
+    NAME_KEY,
+    PLATFORMS_KEY,
+    PRICE_KEY,
+    TYPENAME_KEY,
+)
 from curator.psn.models import (
     AccountDevice,
     Friendship,
@@ -30,14 +53,59 @@ from curator.psn.models import (
 )
 from curator.psn.session import PsnSession
 
-_PROFILE_URI = "https://m.np.playstation.com/api/userProfile/v1/internal/users"
-_GAMING_LOUNGE_URI = "https://m.np.playstation.com/api/gamingLoungeGroups/v1"
-_LEGACY_PROFILE_URI = "https://us-prof.np.community.playstation.net/userProfile/v1/users"
+GAMING_LOUNGE_URI: Final = "https://m.np.playstation.com/api/gamingLoungeGroups/v1"
+CPSS_URI: Final = "https://m.np.playstation.com/api/cpss"
 
 MAX_CHAT_GROUPS: Final = 200
 """The most chat groups one membership read returns; the bound is quota, not recursion."""
-_MY_ACCOUNT_URL = "https://dms.api.playstation.com/api/v1/devices/accounts/me"
-_CPSS_URI = "https://m.np.playstation.com/api/cpss"
+
+FRIENDS_KEY: Final = "friends"
+BLOCK_LIST_KEY: Final = "blockList"
+SETTINGS_KEY: Final = "settings"
+RECEIVED_REQUESTS_KEY: Final = "receivedRequests"
+FRIEND_RELATION_KEY: Final = "friendRelation"
+PERSONAL_DETAIL_SHARING_KEY: Final = "personalDetailSharing"
+FRIENDS_COUNT_KEY: Final = "friendsCount"
+MUTUAL_FRIENDS_COUNT_KEY: Final = "mutualFriendsCount"
+GROUPS_KEY: Final = "groups"
+GROUP_ID_KEY: Final = "groupId"
+LIMIT_PARAM: Final = "limit"
+
+ABOUT_ME_KEY: Final = "aboutMe"
+AVATAR_URLS_KEY: Final = "avatarUrls"
+AVATAR_URL_KEY: Final = "avatarUrl"
+LANGUAGES_USED_KEY: Final = "languagesUsed"
+IS_OFFICIALLY_VERIFIED_KEY: Final = "isOfficiallyVerified"
+
+ACCOUNT_DEVICES_KEY: Final = "accountDevices"
+DEVICE_ID_KEY: Final = "deviceId"
+DEVICE_TYPE_KEY: Final = "deviceType"
+DEVICE_NAME_KEY: Final = "deviceName"
+ACTIVATION_TYPE_KEY: Final = "activationType"
+ACTIVATION_DATE_KEY: Final = "activationDate"
+DEACTIVATION_DATE_KEY: Final = "deactivationDate"
+INCLUDE_FIELDS_PARAM: Final = "includeFields"
+
+SHARE_URL_KEY: Final = "shareUrl"
+SHARE_IMAGE_URL_KEY: Final = "shareImageUrl"
+SHARE_IMAGE_URL_DESTINATION_KEY: Final = "shareImageUrlDestination"
+
+UNIVERSAL_CONTEXT_SEARCH_KEY: Final = "universalContextSearch"
+UNIVERSAL_DOMAIN_SEARCH_KEY: Final = "universalDomainSearch"
+RESULTS_KEY: Final = "results"
+SEARCH_RESULTS_KEY: Final = "searchResults"
+NEXT_KEY: Final = "next"
+DOMAIN_KEY: Final = "domain"
+RESULT_KEY: Final = "result"
+IS_PS_PLUS_KEY: Final = "isPsPlus"
+RELATIONSHIP_STATE_KEY: Final = "relationshipState"
+
+SEARCH_TERM_VARIABLE: Final = "searchTerm"
+SEARCH_CONTEXT_VARIABLE: Final = "searchContext"
+SEARCH_DOMAIN_VARIABLE: Final = "searchDomain"
+PAGE_SIZE_VARIABLE: Final = "pageSize"
+PAGE_OFFSET_VARIABLE: Final = "pageOffset"
+NEXT_CURSOR_VARIABLE: Final = "nextCursor"
 
 _SEARCH_COMMON_HEADERS = {
     "accept": "application/json",
@@ -45,22 +113,19 @@ _SEARCH_COMMON_HEADERS = {
     "apollographql-client-name": "PlayStationApp-Android",
     "apollographql-client-version": "25.4.0",
 }
-_OP_CONTEXT_SEARCH_SOCIAL = (
-    "metGetContextSearchResults",
-    "ac5fb2b82c4d086ca0d272fba34418ab327a7762dd2cd620e63f175bbc5aff10",
-)
-_OP_DOMAIN_SEARCH_SOCIAL = (
-    "metGetDomainSearchResults",
-    "23ece284bf8bdc50bfa30a4d97fd4d733e723beb7a42dff8c1ee883f8461a2e1",
-)
-_OP_CONTEXT_SEARCH_GAME = (
-    "metGetContextSearchResults",
-    "a2fbc15433b37ca7bfcd7112f741735e13268f5e9ebd5ffce51b85acc126f41d",
-)
-_OP_DOMAIN_SEARCH_GAME = (
-    "metGetDomainSearchResults",
-    "b51624299bd17b3799f77c9f097cc8887a04d3873f0329095976a841595bc902",
-)
+
+CONTEXT_SEARCH_OPERATION: Final = "metGetContextSearchResults"
+DOMAIN_SEARCH_OPERATION: Final = "metGetDomainSearchResults"
+
+SOCIAL_CONTEXT_SEARCH_HASH: Final = "ac5fb2b82c4d086ca0d272fba34418ab327a7762dd2cd620e63f175bbc5aff10"
+SOCIAL_DOMAIN_SEARCH_HASH: Final = "23ece284bf8bdc50bfa30a4d97fd4d733e723beb7a42dff8c1ee883f8461a2e1"
+GAME_CONTEXT_SEARCH_HASH: Final = "a2fbc15433b37ca7bfcd7112f741735e13268f5e9ebd5ffce51b85acc126f41d"
+GAME_DOMAIN_SEARCH_HASH: Final = "b51624299bd17b3799f77c9f097cc8887a04d3873f0329095976a841595bc902"
+
+_OP_CONTEXT_SEARCH_SOCIAL = (CONTEXT_SEARCH_OPERATION, SOCIAL_CONTEXT_SEARCH_HASH)
+_OP_DOMAIN_SEARCH_SOCIAL = (DOMAIN_SEARCH_OPERATION, SOCIAL_DOMAIN_SEARCH_HASH)
+_OP_CONTEXT_SEARCH_GAME = (CONTEXT_SEARCH_OPERATION, GAME_CONTEXT_SEARCH_HASH)
+_OP_DOMAIN_SEARCH_GAME = (DOMAIN_SEARCH_OPERATION, GAME_DOMAIN_SEARCH_HASH)
 
 SOCIAL_SEARCH_CONTEXT: Final = "MobileUniversalSearchSocial"
 GAME_SEARCH_CONTEXT: Final = "MobileUniversalSearchGame"
@@ -84,35 +149,69 @@ returned 48 on other terms, where one extra page is already more than enough.
 """
 
 
+def friends_url(path_id: str) -> str:
+    return f"{PROFILE_URI}/{path_id}/{FRIENDS_KEY}"
+
+
+def friend_url(account_id: str) -> str:
+    return f"{friends_url(SELF_PATH_ID)}/{account_id}"
+
+
+def friendship_summary_url(account_id: str) -> str:
+    return f"{friend_url(account_id)}/summary"
+
+
+def blocks_url() -> str:
+    return f"{PROFILE_URI}/{SELF_PATH_ID}/blocks"
+
+
+def available_to_play_url() -> str:
+    return f"{friends_url(SELF_PATH_ID)}/subscribing/availableToPlay"
+
+
+def received_requests_url() -> str:
+    return f"{friends_url(SELF_PATH_ID)}/{RECEIVED_REQUESTS_KEY}"
+
+
+def my_chat_groups_url() -> str:
+    return f"{GAMING_LOUNGE_URI}/members/{SELF_PATH_ID}/{GROUPS_KEY}"
+
+
+def share_profile_url(account_id: str) -> str:
+    return f"{CPSS_URI}/v1/share/profile/{account_id}"
+
+
 def _profile(data: dict[str, Any]) -> Profile:
     """Map a legacy community-profile response to our :class:`~curator.psn.models.Profile`.
 
     ``personal_detail`` is deliberately left ``None`` regardless of what the response contains -- see the
     privacy-by-design note above :class:`~curator.psn.models.AccountDetails` in ``models.py``.
     """
-    raw_profile = data.get("profile")
+    raw_profile = data.get(PROFILE_KEY)
     profile: dict[str, Any] = raw_profile if isinstance(raw_profile, dict) else {}
-    avatars = profile.get("avatarUrls") or []
+    avatars = profile.get(AVATAR_URLS_KEY) or []
     return Profile(
-        about_me=profile.get("aboutMe"),
+        about_me=profile.get(ABOUT_ME_KEY),
         avatars=tuple(
-            str(avatar.get("avatarUrl")) for avatar in avatars if isinstance(avatar, dict) and avatar.get("avatarUrl")
+            str(avatar.get(AVATAR_URL_KEY))
+            for avatar in avatars
+            if isinstance(avatar, dict) and avatar.get(AVATAR_URL_KEY)
         ),
-        languages=tuple(profile.get("languagesUsed") or ()),
-        is_officially_verified=bool(profile.get("isOfficiallyVerified", False)),
+        languages=tuple(profile.get(LANGUAGES_USED_KEY) or ()),
+        is_officially_verified=bool(profile.get(IS_OFFICIALLY_VERIFIED_KEY, False)),
         personal_detail=None,
     )
 
 
 def _player_search_result(item: dict[str, Any]) -> PlayerSearchResult:
     """Map a raw PSN universal-search user item to our :class:`~curator.psn.models.PlayerSearchResult`."""
-    player = item.get("result") or {}
+    player = item.get(RESULT_KEY) or {}
     return PlayerSearchResult(
-        account_id=player.get("accountId"),
-        online_id=player.get("onlineId"),
-        avatar_url=player.get("avatarUrl"),
-        is_ps_plus=player.get("isPsPlus"),
-        relationship=player.get("relationshipState"),
+        account_id=player.get(ACCOUNT_ID_KEY),
+        online_id=player.get(ONLINE_ID_KEY),
+        avatar_url=player.get(AVATAR_URL_KEY),
+        is_ps_plus=player.get(IS_PS_PLUS_KEY),
+        relationship=player.get(RELATIONSHIP_STATE_KEY),
     )
 
 
@@ -125,20 +224,20 @@ def _game_search_result(item: dict[str, Any]) -> GameSearchResult:
     which only a concept has, so one mapper covers both; ``invariantName`` is the fallback title, being
     the untranslated form PSN sends when the locale has no ``name``.
     """
-    result = item.get("result") or {}
-    price = result.get("price") or {}
-    default_product = result.get("defaultProduct") or {}
+    result = item.get(RESULT_KEY) or {}
+    price = result.get(PRICE_KEY) or {}
+    default_product = result.get(DEFAULT_PRODUCT_KEY) or {}
     return GameSearchResult(
-        id=result.get("id"),
-        kind=result.get("__typename"),
-        default_product_id=default_product.get("id"),
-        name=result.get("name") or result.get("invariantName"),
-        platforms=tuple(str(platform) for platform in (result.get("platforms") or ())),
-        cover_image_url=cover_image_url(result.get("media")),
-        classification=result.get("localizedStoreDisplayClassification"),
-        price=price.get("basePrice"),
-        discounted_price=price.get("discountedPrice"),
-        is_free=price.get("isFree"),
+        id=result.get(ID_KEY),
+        kind=result.get(TYPENAME_KEY),
+        default_product_id=default_product.get(ID_KEY),
+        name=result.get(NAME_KEY) or result.get(INVARIANT_NAME_KEY),
+        platforms=tuple(str(platform) for platform in (result.get(PLATFORMS_KEY) or ())),
+        cover_image_url=cover_image_url(result.get(MEDIA_KEY)),
+        classification=result.get(CLASSIFICATION_KEY),
+        price=price.get(BASE_PRICE_KEY),
+        discounted_price=price.get(DISCOUNTED_PRICE_KEY),
+        is_free=price.get(IS_FREE_KEY),
     )
 
 
@@ -151,9 +250,18 @@ def _domain_container(results_by_domain: list[Any], domain: GameSearchDomain) ->
     the label costs nothing and degrades to an empty result instead.
     """
     for entry in results_by_domain:
-        if isinstance(entry, dict) and entry.get("domain") == domain:
+        if isinstance(entry, dict) and entry.get(DOMAIN_KEY) == domain:
             return entry
     return {}
+
+
+def _context_results(response: dict[str, Any]) -> list[Any]:
+    return list(((response.get(DATA_KEY) or {}).get(UNIVERSAL_CONTEXT_SEARCH_KEY) or {}).get(RESULTS_KEY) or [])
+
+
+def _domain_page(response: dict[str, Any]) -> dict[str, Any]:
+    page: dict[str, Any] = (response.get(DATA_KEY) or {}).get(UNIVERSAL_DOMAIN_SEARCH_KEY) or {}
+    return page
 
 
 class SocialClient:
@@ -184,15 +292,9 @@ class SocialClient:
         return await self._session.run_with_reauth(lambda: self._friends(online_id, account_id, limit))
 
     async def _friends(self, online_id: str | None, account_id: str | None, limit: int) -> list[SocialUser]:
-        path_id = (
-            "me"
-            if online_id is None and account_id is None
-            else await _identity.account_id_for(self._session, online_id, account_id)
-        )
-        response = (
-            await self._session.get(f"{_PROFILE_URI}/{path_id}/friends", params={"limit": min(1000, limit)})
-        ).json()
-        friend_ids = response.get("friends") or []
+        path_id = await _identity.path_account_id(self._session, online_id, account_id)
+        response = (await self._session.get(friends_url(path_id), params={LIMIT_PARAM: min(1000, limit)})).json()
+        friend_ids = response.get(FRIENDS_KEY) or []
         return [
             SocialUser(account_id=fid, online_id=await _identity.online_id_for(self._session, fid))
             for fid in friend_ids
@@ -206,8 +308,8 @@ class SocialClient:
         return await self._session.run_with_reauth(self._blocked)
 
     async def _blocked(self) -> list[SocialUser]:
-        response = (await self._session.get(f"{_PROFILE_URI}/me/blocks")).json()
-        block_ids = response.get("blockList") or []
+        response = (await self._session.get(blocks_url())).json()
+        block_ids = response.get(BLOCK_LIST_KEY) or []
         return [
             SocialUser(account_id=bid, online_id=await _identity.online_id_for(self._session, bid)) for bid in block_ids
         ]
@@ -220,12 +322,12 @@ class SocialClient:
         return await self._session.run_with_reauth(self._available_to_play)
 
     async def _available_to_play(self) -> list[SocialUser]:
-        response = (await self._session.get(f"{_PROFILE_URI}/me/friends/subscribing/availableToPlay")).json()
-        entries = response.get("settings") or []
+        response = (await self._session.get(available_to_play_url())).json()
+        entries = response.get(SETTINGS_KEY) or []
         return [
             SocialUser(
-                account_id=entry["accountId"],
-                online_id=await _identity.online_id_for(self._session, entry["accountId"]),
+                account_id=entry[ACCOUNT_ID_KEY],
+                online_id=await _identity.online_id_for(self._session, entry[ACCOUNT_ID_KEY]),
             )
             for entry in entries
         ]
@@ -238,12 +340,12 @@ class SocialClient:
         return await self._session.run_with_reauth(self._friend_requests)
 
     async def _friend_requests(self) -> list[SocialUser]:
-        response = (await self._session.get(f"{_PROFILE_URI}/me/friends/receivedRequests")).json()
-        requests = response.get("receivedRequests") or []
+        response = (await self._session.get(received_requests_url())).json()
+        requests = response.get(RECEIVED_REQUESTS_KEY) or []
         return [
             SocialUser(
-                account_id=entry["accountId"],
-                online_id=await _identity.online_id_for(self._session, entry["accountId"]),
+                account_id=entry[ACCOUNT_ID_KEY],
+                online_id=await _identity.online_id_for(self._session, entry[ACCOUNT_ID_KEY]),
             )
             for entry in requests
         ]
@@ -264,12 +366,12 @@ class SocialClient:
 
     async def _friendship(self, online_id: str | None, account_id: str | None) -> Friendship:
         target_account_id = await _identity.account_id_for(self._session, online_id, account_id)
-        data = (await self._session.get(f"{_PROFILE_URI}/me/friends/{target_account_id}/summary")).json()
+        data = (await self._session.get(friendship_summary_url(target_account_id))).json()
         return Friendship(
-            relation=data.get("friendRelation"),
-            personal_detail_sharing=data.get("personalDetailSharing"),
-            friends_count=data.get("friendsCount"),
-            mutual_friends_count=data.get("mutualFriendsCount"),
+            relation=data.get(FRIEND_RELATION_KEY),
+            personal_detail_sharing=data.get(PERSONAL_DETAIL_SHARING_KEY),
+            friends_count=data.get(FRIENDS_COUNT_KEY),
+            mutual_friends_count=data.get(MUTUAL_FRIENDS_COUNT_KEY),
         )
 
     async def chat_group_ids(self) -> list[str]:
@@ -282,11 +384,11 @@ class SocialClient:
     async def _chat_group_ids(self) -> list[str]:
         response = (
             await self._session.get(
-                f"{_GAMING_LOUNGE_URI}/members/me/groups",
-                params={"includeFields": "members", "limit": MAX_CHAT_GROUPS, "offset": 0},
+                my_chat_groups_url(),
+                params={INCLUDE_FIELDS_PARAM: "members", LIMIT_PARAM: MAX_CHAT_GROUPS, "offset": 0},
             )
         ).json()
-        return [str(group["groupId"]) for group in (response.get("groups") or []) if group.get("groupId")]
+        return [str(group[GROUP_ID_KEY]) for group in (response.get(GROUPS_KEY) or []) if group.get(GROUP_ID_KEY)]
 
     async def profile(self, online_id: str | None = None, account_id: str | None = None) -> Profile:
         """Get a user's legacy public profile: about-me text, avatar URLs, languages, verification status.
@@ -305,9 +407,9 @@ class SocialClient:
         resolved_online_id = await _identity.target_online_id(self._session, online_id, account_id)
         data = (
             await self._session.get(
-                f"{_LEGACY_PROFILE_URI}/{resolved_online_id}/profile2",
+                legacy_profile_url(resolved_online_id),
                 params={
-                    "fields": "npId,onlineId,accountId,avatarUrls,plus,aboutMe,languagesUsed,"
+                    _identity.FIELDS_PARAM: "npId,onlineId,accountId,avatarUrls,plus,aboutMe,languagesUsed,"
                     "isOfficiallyVerified,personalDetail(@default,profilePictureUrls),"
                     "personalDetailSharing",
                 },
@@ -329,8 +431,8 @@ class SocialClient:
 
     async def _is_blocked(self, online_id: str | None, account_id: str | None) -> bool:
         target_account_id = await _identity.account_id_for(self._session, online_id, account_id)
-        response = (await self._session.get(f"{_PROFILE_URI}/me/blocks")).json()
-        return target_account_id in (response.get("blockList") or [])
+        response = (await self._session.get(blocks_url())).json()
+        return target_account_id in (response.get(BLOCK_LIST_KEY) or [])
 
     async def universal_search_players(self, query: str, limit: int = 20) -> list[PlayerSearchResult]:
         """Run PSN's universal context search, scoped to the social domain.
@@ -345,36 +447,40 @@ class SocialClient:
         response = await run_persisted_query(
             self._session,
             _OP_CONTEXT_SEARCH_SOCIAL,
-            {"searchTerm": query, "searchContext": SOCIAL_SEARCH_CONTEXT, "displayTitleLocale": "en-US"},
+            {
+                SEARCH_TERM_VARIABLE: query,
+                SEARCH_CONTEXT_VARIABLE: SOCIAL_SEARCH_CONTEXT,
+                "displayTitleLocale": "en-US",
+            },
             headers=_SEARCH_COMMON_HEADERS,
             check_errors=False,
         )
-        results_by_domain = ((response.get("data") or {}).get("universalContextSearch") or {}).get("results") or []
+        results_by_domain = _context_results(response)
         container = results_by_domain[0] if results_by_domain else {}
-        items = list(container.get("searchResults") or [])
-        next_cursor = container.get("next") or ""
+        items = list(container.get(SEARCH_RESULTS_KEY) or [])
+        next_cursor = container.get(NEXT_KEY) or ""
 
         while len(items) < limit and next_cursor:
             response = await run_persisted_query(
                 self._session,
                 _OP_DOMAIN_SEARCH_SOCIAL,
                 {
-                    "searchTerm": query,
-                    "searchDomain": "SocialAllAccounts",
+                    SEARCH_TERM_VARIABLE: query,
+                    SEARCH_DOMAIN_VARIABLE: "SocialAllAccounts",
                     "displayTitleLocale": "en-US",
-                    "pageSize": min(20, limit - len(items)),
-                    "pageOffset": len(items),
-                    "nextCursor": next_cursor,
+                    PAGE_SIZE_VARIABLE: min(20, limit - len(items)),
+                    PAGE_OFFSET_VARIABLE: len(items),
+                    NEXT_CURSOR_VARIABLE: next_cursor,
                 },
                 headers=_SEARCH_COMMON_HEADERS,
                 check_errors=False,
             )
-            container = (response.get("data") or {}).get("universalDomainSearch") or {}
-            page_items = container.get("searchResults") or []
+            container = _domain_page(response)
+            page_items = container.get(SEARCH_RESULTS_KEY) or []
             if not page_items:
                 break
             items.extend(page_items)
-            next_cursor = container.get("next") or ""
+            next_cursor = container.get(NEXT_KEY) or ""
 
         return [_player_search_result(item) for item in items[:limit]]
 
@@ -389,7 +495,7 @@ class SocialClient:
         PSN token.
 
         Pages beyond the first through ``metGetDomainSearchResults`` under
-        :data:`_OP_DOMAIN_SEARCH_GAME`, which is a *different* persisted hash from the one
+        :data:`GAME_DOMAIN_SEARCH_HASH`, which is a *different* persisted hash from the one
         :meth:`universal_search_players` pages with -- the operation is shared, the registered document
         per domain is not. The first page carries far fewer hits than the domain's total (``"GTA"``: 15
         of 32 games), so without this a ``limit`` above the page size would silently under-answer. At
@@ -409,14 +515,13 @@ class SocialClient:
         response = await run_persisted_query(
             self._session,
             _OP_CONTEXT_SEARCH_GAME,
-            {"searchTerm": query, "searchContext": GAME_SEARCH_CONTEXT, "displayTitleLocale": "en-US"},
+            {SEARCH_TERM_VARIABLE: query, SEARCH_CONTEXT_VARIABLE: GAME_SEARCH_CONTEXT, "displayTitleLocale": "en-US"},
             headers=_SEARCH_COMMON_HEADERS,
             check_errors=False,
         )
-        results_by_domain = ((response.get("data") or {}).get("universalContextSearch") or {}).get("results") or []
-        container = _domain_container(results_by_domain, domain)
-        items = list(container.get("searchResults") or [])
-        next_cursor = container.get("next") or ""
+        container = _domain_container(_context_results(response), domain)
+        items = list(container.get(SEARCH_RESULTS_KEY) or [])
+        next_cursor = container.get(NEXT_KEY) or ""
 
         for _page in range(MAX_GAME_SEARCH_PAGES):
             if len(items) >= limit or not next_cursor:
@@ -425,21 +530,21 @@ class SocialClient:
                 self._session,
                 _OP_DOMAIN_SEARCH_GAME,
                 {
-                    "searchTerm": query,
-                    "searchDomain": domain,
-                    "pageSize": limit - len(items),
-                    "pageOffset": len(items),
-                    "nextCursor": next_cursor,
+                    SEARCH_TERM_VARIABLE: query,
+                    SEARCH_DOMAIN_VARIABLE: domain,
+                    PAGE_SIZE_VARIABLE: limit - len(items),
+                    PAGE_OFFSET_VARIABLE: len(items),
+                    NEXT_CURSOR_VARIABLE: next_cursor,
                 },
                 headers=_SEARCH_COMMON_HEADERS,
                 check_errors=False,
             )
-            container = (response.get("data") or {}).get("universalDomainSearch") or {}
-            page_items = container.get("searchResults") or []
+            container = _domain_page(response)
+            page_items = container.get(SEARCH_RESULTS_KEY) or []
             if not page_items:
                 break
             items.extend(page_items)
-            next_cursor = container.get("next") or ""
+            next_cursor = container.get(NEXT_KEY) or ""
 
         return [_game_search_result(item) for item in items[:limit]]
 
@@ -456,20 +561,20 @@ class SocialClient:
     async def _devices(self) -> list[AccountDevice]:
         response = (
             await self._session.get(
-                _MY_ACCOUNT_URL,
-                params={"includeFields": "device,systemData", "platform": "PS5,PS4,PS3,PSVita"},
+                MY_ACCOUNT_URL,
+                params={INCLUDE_FIELDS_PARAM: "device,systemData", "platform": "PS5,PS4,PS3,PSVita"},
             )
         ).json()
         devices: list[AccountDevice] = []
-        for entry in response.get("accountDevices") or []:
+        for entry in response.get(ACCOUNT_DEVICES_KEY) or []:
             devices.append(
                 AccountDevice(
-                    device_id=entry.get("deviceId"),
-                    device_type=entry.get("deviceType"),
-                    device_name=entry.get("deviceName"),
-                    activation_type=entry.get("activationType"),
-                    activation_date=entry.get("activationDate"),
-                    deactivation_date=entry.get("deactivationDate"),
+                    device_id=entry.get(DEVICE_ID_KEY),
+                    device_type=entry.get(DEVICE_TYPE_KEY),
+                    device_name=entry.get(DEVICE_NAME_KEY),
+                    activation_type=entry.get(ACTIVATION_TYPE_KEY),
+                    activation_date=entry.get(ACTIVATION_DATE_KEY),
+                    deactivation_date=entry.get(DEACTIVATION_DATE_KEY),
                 )
             )
         return devices
@@ -500,11 +605,11 @@ class SocialClient:
 
     async def _share_link(self) -> ProfileShareLink:
         account_id = await _identity.own_account_id(self._session)
-        data = (await self._session.get(f"{_CPSS_URI}/v1/share/profile/{account_id}")).json()
+        data = (await self._session.get(share_profile_url(account_id))).json()
         return ProfileShareLink(
-            share_url=data.get("shareUrl"),
-            share_image_url=data.get("shareImageUrl"),
-            share_image_url_destination=data.get("shareImageUrlDestination"),
+            share_url=data.get(SHARE_URL_KEY),
+            share_image_url=data.get(SHARE_IMAGE_URL_KEY),
+            share_image_url_destination=data.get(SHARE_IMAGE_URL_DESTINATION_KEY),
         )
 
 

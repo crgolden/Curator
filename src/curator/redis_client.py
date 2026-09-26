@@ -3,9 +3,9 @@ PSN rate limiter (curator.psn.rate_limiter).
 
 A single ``redis.asyncio.Redis`` connection pool is shared by both -- they write to disjoint key
 namespaces (``curator:psn:trophy:*`` vs. ``curator:psn:ratelimit``), so there is no reason to open two
-pools. Constructing the client never connects (redis-py is lazy: the first command opens the connection),
-so this is safe to call even when Redis is unreachable -- a bad host only ever surfaces as an error on the
-first actual cache/rate-limit call, never at startup.
+pools. Constructing the client never connects (redis-py is lazy: the first command opens the connection), so
+``create_app``'s lifespan pings it before the app serves anything: an unreachable Redis stops startup rather
+than surfacing on the first cache or rate-limit call.
 """
 
 from __future__ import annotations
@@ -18,7 +18,8 @@ from redis.backoff import ExponentialBackoff
 from redis.exceptions import ConnectionError as RedisConnectionError
 from redis.exceptions import TimeoutError as RedisTimeoutError
 
-from curator.settings import Settings
+from curator.persistence.config import ConfigError
+from curator.settings import REDIS_HOST, REDIS_PORT, REDIS_SSL, Settings
 
 _HEALTH_CHECK_INTERVAL_SECONDS = 30
 _RETRY_BACKOFF_BASE_SECONDS = 0.1
@@ -30,10 +31,14 @@ def build_redis_client(settings: Settings) -> Redis | None:
     """Build the shared Redis client from ``settings``, or ``None`` if Redis is not configured.
 
     :param settings: The resolved application settings.
-    :returns: A ``redis.asyncio.Redis`` client, or ``None`` when ``settings.redis_host`` is unset.
+    :returns: A ``redis.asyncio.Redis`` client, or ``None`` when ``settings.redis_host`` is unset, which only a
+        directly constructed :class:`~curator.settings.Settings` allows.
+    :raises ConfigError: If a host is set without its port or TLS flag.
     """
     if not settings.redis_host:
         return None
+    if settings.redis_port is None or settings.redis_ssl is None:
+        raise ConfigError(f"{REDIS_HOST} is set without {REDIS_PORT} and {REDIS_SSL}.", REDIS_PORT)
     return Redis(
         host=settings.redis_host,
         port=settings.redis_port,

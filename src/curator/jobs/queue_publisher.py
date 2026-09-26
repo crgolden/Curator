@@ -18,10 +18,14 @@ from typing import Any, Protocol
 from azure.servicebus import ServiceBusMessage
 from opentelemetry.propagate import inject
 
-from curator.jobs.repository import JobRunsRepository
+from curator.jobs.repository import JOB_KIND_ENRICHMENT, JOB_KIND_LIBRARY_REFRESH, JobRunsRepository
 
 _DIAGNOSTIC_ID_PROPERTY = "Diagnostic-Id"
 _TRACE_PARENT_KEY = "traceparent"
+
+RUN_ID_FIELD = "run_id"
+IDENTITY_SUB_FIELD = "identity_sub"
+SCHEDULED_FOR_FIELD = "scheduled_for"
 
 
 def _message_carrying_trace_context(body: str) -> ServiceBusMessage:
@@ -94,8 +98,8 @@ class QueuePublisher:
         :returns: The new run id.
         """
         run_id = str(uuid.uuid4())
-        await self._job_runs_repository.create(run_id, "library_refresh", identity_sub)
-        body = json.dumps({"run_id": run_id, "identity_sub": identity_sub})
+        await self._job_runs_repository.create(run_id, JOB_KIND_LIBRARY_REFRESH, identity_sub)
+        body = json.dumps({RUN_ID_FIELD: run_id, IDENTITY_SUB_FIELD: identity_sub})
         await self._library_refresh_sender.send_messages(_message_carrying_trace_context(body))
         return run_id
 
@@ -126,7 +130,7 @@ class QueuePublisher:
         """
         if self._scheduled_refresh_sender is None:
             raise RuntimeError("No scheduled-refresh queue is configured.")
-        body = json.dumps({"identity_sub": identity_sub, "scheduled_for": scheduled_for.isoformat()})
+        body = json.dumps({IDENTITY_SUB_FIELD: identity_sub, SCHEDULED_FOR_FIELD: scheduled_for.isoformat()})
         await self._scheduled_refresh_sender.schedule_messages(ServiceBusMessage(body), scheduled_for)
 
     async def publish_enrichment_run(self) -> str:
@@ -135,7 +139,7 @@ class QueuePublisher:
         :returns: The new run id.
         """
         run_id = str(uuid.uuid4())
-        await self._job_runs_repository.create(run_id, "enrichment")
-        body = json.dumps({"run_id": run_id})
+        await self._job_runs_repository.create(run_id, JOB_KIND_ENRICHMENT)
+        body = json.dumps({RUN_ID_FIELD: run_id})
         await self._enrichment_sender.send_messages(_message_carrying_trace_context(body))
         return run_id

@@ -5,13 +5,38 @@ reading/writing another user's console.
 
 from __future__ import annotations
 
+import random
+
 import pytest
 from fastapi.testclient import TestClient
+from pydantic import TypeAdapter
 
+from audit_fakes import RecordingAuditRepository
+from curator import consoles_routes
 from curator.app import create_app
+from curator.audit.repository import ACTION_DEVICE_LINK_CHECK, OUTCOME_COMPLETED
+from curator.collections.console_model_defaults import (
+    MODEL_CAPACITY_GB,
+    PLATFORM_FALLBACK_GB,
+    UNKNOWN_PLATFORM_FALLBACK_GB,
+)
 from curator.collections.repository import UserConsole
+from curator.consoles_routes import (
+    DEVICE_LINK_DEACTIVATED,
+    DEVICE_LINK_LINKED,
+    DEVICE_LINK_MISSING,
+    DEVICE_LINK_NOT_CHECKED,
+    ConsoleDeviceLinkResponse,
+    ConsoleInstallRequest,
+    ConsoleInstallResponse,
+    ConsoleInstallsResponse,
+    ConsoleRequest,
+    ConsoleResponse,
+    ConsoleUpdateRequest,
+)
 from curator.persistence.crypto import TokenCrypto
 from curator.psn.models import AccountDevice
+from curator.psn.title_platform import PS1, PS2, PS3, PS5, PSP, PSVITA
 from test_routes import (
     FakeAgentFactory,
     FakeRepository,
@@ -19,9 +44,22 @@ from test_routes import (
     _bearer,
     _claims,
     _make_settings,
+    _path,
     _seed_link,
 )
-from test_values import new_device_id, new_game_title
+from test_values import (
+    lowercase_token,
+    new_console_id,
+    new_device_id,
+    new_game_id,
+    new_game_title,
+    new_identity_sub,
+    new_opaque_token,
+    new_size_gb,
+    new_utc_instant,
+)
+
+_CONSOLE_LIST = TypeAdapter(list[ConsoleResponse])
 
 
 class FakeCollectionsRepository:
@@ -32,11 +70,10 @@ class FakeCollectionsRepository:
 
     def __init__(self, consoles=None, owners=None):
         self._consoles: dict[str, UserConsole] = {c.console_id: c for c in (consoles or [])}
-        self._owners: dict[str, str] = dict(owners or {c.console_id: "sub-a" for c in (consoles or [])})
+        self._owners: dict[str, str] = dict(owners or {})
         self._installs: dict[str, dict[str, bool]] = {}
         self.set_install_calls = []
         self.device_links: dict[str, str] = {}
-        self._next_id = 1
 
     async def get_console(self, identity_sub, console_id):
         if self._owners.get(console_id) != identity_sub:
@@ -60,8 +97,7 @@ class FakeCollectionsRepository:
         fill_order=0,
         model=None,
     ):
-        console_id = f"c{self._next_id}"
-        self._next_id += 1
+        console_id = new_console_id()
         console = UserConsole(
             console_id=console_id,
             name=name,
@@ -139,21 +175,27 @@ class FakeDevicesClientFactory:
         return self._client
 
 
+class _Caller:
+    def __init__(self) -> None:
+        self.sub = new_identity_sub()
+        self.token = new_opaque_token()
+
+
 def _device(device_id, *, deactivation_date=None):
     return AccountDevice(
         device_id=device_id,
-        device_type="PS5",
+        device_type=PS5,
         device_name=new_game_title(),
-        activation_type="PRIMARY",
-        activation_date="2026-01-01T00:00:00Z",
+        activation_type=lowercase_token().upper(),
+        activation_date=new_utc_instant().isoformat(),
         deactivation_date=deactivation_date,
     )
 
 
-def _build_with_devices(repo, devices, *, harvest_devices):
+def _build_with_devices(repo, devices, caller: _Caller, *, harvest_devices):
     repository = FakeRepository()
     token_crypto = TokenCrypto(TokenCrypto.generate_key())
-    _seed_link(repository, token_crypto, "sub-a", harvest_devices=harvest_devices)
+    _seed_link(repository, token_crypto, caller.sub, harvest_devices=harvest_devices)
     validator = FakeTokenValidator()
     devices_client = FakeDevicesClient(devices)
     app = create_app(
@@ -164,24 +206,36 @@ def _build_with_devices(repo, devices, *, harvest_devices):
         token_validator=validator,
         collections_repository=repo,
         social_client_factory=FakeDevicesClientFactory(devices_client),
+        audit_repository=RecordingAuditRepository(),
     )
-    validator.register("token-a", _claims(sub="sub-a"))
+    validator.register(caller.token, _claims(sub=caller.sub))
     return TestClient(app), devices_client
 
 
-def _console(console_id="c1"):
+def _console(console_id):
     return UserConsole(
         console_id=console_id,
-        name="My PS5",
-        platform="PS5",
-        raw_capacity_gb=100.0,
+        name=lowercase_token(),
+        platform=PS5,
+        raw_capacity_gb=new_size_gb(),
         update_buffer_gb=0.0,
         routing_genres=(),
         fill_order=0,
     )
 
 
-def _build(collections_repository=None):
+def _owned_console_repository(owner_sub: str) -> tuple[FakeCollectionsRepository, str]:
+    console_id = new_console_id()
+    return FakeCollectionsRepository(consoles=[_console(console_id)], owners={console_id: owner_sub}), console_id
+
+
+def _linked_console_repository(owner_sub: str, device_id: str) -> FakeCollectionsRepository:
+    repo, console_id = _owned_console_repository(owner_sub)
+    repo.device_links = {device_id: console_id}
+    return repo
+
+
+def _build(caller: _Caller, collections_repository=None):
     repository = FakeRepository()
     token_crypto = TokenCrypto(TokenCrypto.generate_key())
     validator = FakeTokenValidator()
@@ -192,288 +246,355 @@ def _build(collections_repository=None):
         agent_factory=FakeAgentFactory(repository, token_crypto),
         token_validator=validator,
         collections_repository=collections_repository or FakeCollectionsRepository(),
+        audit_repository=RecordingAuditRepository(),
     )
-    return TestClient(app), validator
+    validator.register(caller.token, _claims(sub=caller.sub))
+    return TestClient(app)
+
+
+def _consoles_path(client: TestClient) -> str:
+    return _path(client, consoles_routes.list_consoles)
+
+
+def _console_path(client: TestClient, console_id: str) -> str:
+    return _path(client, consoles_routes.get_console, console_id=console_id)
+
+
+def _install_path(client: TestClient, console_id: str, game_id: str) -> str:
+    return _path(client, consoles_routes.set_console_install, console_id=console_id, game_id=game_id)
+
+
+def _installs_path(client: TestClient, console_id: str) -> str:
+    return _path(client, consoles_routes.get_console_installs, console_id=console_id)
+
+
+def _installed(installed: bool) -> dict[str, object]:
+    return ConsoleInstallRequest(installed=installed).model_dump()
+
+
+def _listed_device_link(client: TestClient, caller: _Caller) -> ConsoleDeviceLinkResponse | None:
+    listed = _CONSOLE_LIST.validate_python(client.get(_consoles_path(client), headers=_bearer(caller.token)).json())
+    return listed[0].device_link
 
 
 def test_requires_bearer_token():
-    client, _validator = _build()
+    client = _build(_Caller())
 
-    response = client.put("/consoles/c1/installs/g1", json={"installed": True})
+    response = client.put(_install_path(client, new_console_id(), new_game_id()), json=_installed(True))
 
     assert response.status_code == 401
 
 
 def test_creates_a_console():
-    client, validator = _build()
-    validator.register("token-a", _claims(sub="sub-a"))
+    caller = _Caller()
+    client = _build(caller)
+    requested = ConsoleRequest(name=lowercase_token(), platform=PS5, raw_capacity_gb=new_size_gb())
 
     response = client.post(
-        "/consoles",
-        json={"name": "Living room PS5", "platform": "PS5", "raw_capacity_gb": 825.0},
-        headers=_bearer("token-a"),
+        _path(client, consoles_routes.create_console), json=requested.model_dump(), headers=_bearer(caller.token)
     )
 
     assert response.status_code == 201
-    body = response.json()
-    assert body["name"] == "Living room PS5"
-    assert body["platform"] == "PS5"
-    assert body["effective_capacity_gb"] == 825.0
+    created = ConsoleResponse.model_validate(response.json())
+    assert created.name == requested.name
+    assert created.platform == PS5
+    assert created.effective_capacity_gb == requested.raw_capacity_gb
 
 
 def test_creates_a_console_with_no_capacity_using_a_known_model_default():
-    client, validator = _build()
-    validator.register("token-a", _claims(sub="sub-a"))
+    caller = _Caller()
+    client = _build(caller)
+    model = random.choice(list(MODEL_CAPACITY_GB))
+    requested = ConsoleRequest(name=lowercase_token(), platform=PS5, model=model)
 
     response = client.post(
-        "/consoles",
-        json={"name": "Living room PS5", "platform": "PS5", "model": "PS5 Digital Edition"},
-        headers=_bearer("token-a"),
+        _path(client, consoles_routes.create_console), json=requested.model_dump(), headers=_bearer(caller.token)
     )
 
     assert response.status_code == 201
-    body = response.json()
-    assert body["raw_capacity_gb"] == 667.0
-    assert body["capacity_is_default"] is True
+    created = ConsoleResponse.model_validate(response.json())
+    assert created.raw_capacity_gb == MODEL_CAPACITY_GB[model]
+    assert created.capacity_is_default is True
 
 
 def test_creates_a_console_with_no_capacity_and_no_model_using_the_platform_fallback():
-    client, validator = _build()
-    validator.register("token-a", _claims(sub="sub-a"))
+    caller = _Caller()
+    client = _build(caller)
+    requested = ConsoleRequest(name=lowercase_token(), platform=PS5)
 
-    response = client.post("/consoles", json={"name": "Mystery PS5", "platform": "PS5"}, headers=_bearer("token-a"))
+    response = client.post(
+        _path(client, consoles_routes.create_console), json=requested.model_dump(), headers=_bearer(caller.token)
+    )
 
     assert response.status_code == 201
-    body = response.json()
-    assert body["raw_capacity_gb"] == 667.0
-    assert body["capacity_is_default"] is True
-    assert body["model"] is None
+    created = ConsoleResponse.model_validate(response.json())
+    assert created.raw_capacity_gb == PLATFORM_FALLBACK_GB[PS5]
+    assert created.capacity_is_default is True
+    assert created.model is None
 
 
 def test_creates_a_console_with_explicit_capacity_is_never_flagged_as_default():
-    client, validator = _build()
-    validator.register("token-a", _claims(sub="sub-a"))
+    caller = _Caller()
+    client = _build(caller)
+    requested = ConsoleRequest(name=lowercase_token(), platform=PS5, raw_capacity_gb=new_size_gb())
 
     response = client.post(
-        "/consoles",
-        json={"name": "Measured PS5", "platform": "PS5", "raw_capacity_gb": 700.0},
-        headers=_bearer("token-a"),
+        _path(client, consoles_routes.create_console), json=requested.model_dump(), headers=_bearer(caller.token)
     )
 
     assert response.status_code == 201
-    body = response.json()
-    assert body["raw_capacity_gb"] == 700.0
-    assert body["capacity_is_default"] is False
+    created = ConsoleResponse.model_validate(response.json())
+    assert created.raw_capacity_gb == requested.raw_capacity_gb
+    assert created.capacity_is_default is False
 
 
 def test_a_linked_device_psn_lists_as_deactivated_reports_device_deactivated():
+    caller = _Caller()
     device_id = new_device_id()
-    repo = FakeCollectionsRepository(consoles=[_console("c1")], owners={"c1": "sub-a"})
-    repo.device_links = {device_id: "c1"}
+    repo = _linked_console_repository(caller.sub, device_id)
     client, _devices = _build_with_devices(
-        repo, [_device(device_id, deactivation_date="2026-06-01T00:00:00Z")], harvest_devices=True
+        repo, [_device(device_id, deactivation_date=new_utc_instant().isoformat())], caller, harvest_devices=True
     )
 
-    body = client.get("/consoles", headers=_bearer("token-a")).json()
+    device_link = _listed_device_link(client, caller)
 
-    assert body[0]["device_link"] == {"device_id": device_id, "state": "device_deactivated"}
+    assert device_link == ConsoleDeviceLinkResponse(device_id=device_id, state=DEVICE_LINK_DEACTIVATED)
 
 
 def test_a_linked_device_psn_no_longer_lists_reports_device_missing_and_keeps_the_link():
+    caller = _Caller()
     device_id = new_device_id()
-    repo = FakeCollectionsRepository(consoles=[_console("c1")], owners={"c1": "sub-a"})
-    repo.device_links = {device_id: "c1"}
-    client, _devices = _build_with_devices(repo, [_device(new_device_id())], harvest_devices=True)
+    repo = _linked_console_repository(caller.sub, device_id)
+    links_before = dict(repo.device_links)
+    client, _devices = _build_with_devices(repo, [_device(new_device_id())], caller, harvest_devices=True)
 
-    body = client.get("/consoles", headers=_bearer("token-a")).json()
+    device_link = _listed_device_link(client, caller)
 
-    assert body[0]["device_link"] == {"device_id": device_id, "state": "device_missing"}
-    assert repo.device_links == {device_id: "c1"}, "the server never deletes the mapping"
+    assert device_link == ConsoleDeviceLinkResponse(device_id=device_id, state=DEVICE_LINK_MISSING)
+    assert repo.device_links == links_before, "the server never deletes the mapping"
 
 
 def test_a_linked_device_psn_still_lists_reports_linked():
+    caller = _Caller()
     device_id = new_device_id()
-    repo = FakeCollectionsRepository(consoles=[_console("c1")], owners={"c1": "sub-a"})
-    repo.device_links = {device_id: "c1"}
-    client, _devices = _build_with_devices(repo, [_device(device_id)], harvest_devices=True)
+    repo = _linked_console_repository(caller.sub, device_id)
+    client, _devices = _build_with_devices(repo, [_device(device_id)], caller, harvest_devices=True)
 
-    body = client.get("/consoles", headers=_bearer("token-a")).json()
+    device_link = _listed_device_link(client, caller)
 
-    assert body[0]["device_link"] == {"device_id": device_id, "state": "linked"}
+    assert device_link == ConsoleDeviceLinkResponse(device_id=device_id, state=DEVICE_LINK_LINKED)
+    assert client.app.state.audit_repository.outcomes == [(ACTION_DEVICE_LINK_CHECK, OUTCOME_COMPLETED)]
+
+
+def test_a_device_link_check_is_not_sent_when_its_history_row_cannot_be_written():
+    caller = _Caller()
+    device_id = new_device_id()
+    repo = _linked_console_repository(caller.sub, device_id)
+    client, devices = _build_with_devices(repo, [_device(device_id)], caller, harvest_devices=True)
+    client.app.state.audit_repository.begin_error = RuntimeError(device_id)
+
+    with pytest.raises(RuntimeError):
+        client.get(_consoles_path(client), headers=_bearer(caller.token))
+
+    assert devices.calls == 0
 
 
 def test_harvest_devices_off_reports_not_checked_and_makes_no_psn_call():
+    caller = _Caller()
     device_id = new_device_id()
-    repo = FakeCollectionsRepository(consoles=[_console("c1")], owners={"c1": "sub-a"})
-    repo.device_links = {device_id: "c1"}
-    client, devices = _build_with_devices(repo, [_device(device_id)], harvest_devices=False)
+    repo = _linked_console_repository(caller.sub, device_id)
+    client, devices = _build_with_devices(repo, [_device(device_id)], caller, harvest_devices=False)
 
-    body = client.get("/consoles", headers=_bearer("token-a")).json()
+    device_link = _listed_device_link(client, caller)
 
-    assert body[0]["device_link"] == {"device_id": device_id, "state": "not_checked"}
+    assert device_link == ConsoleDeviceLinkResponse(device_id=device_id, state=DEVICE_LINK_NOT_CHECKED)
     assert devices.calls == 0
 
 
 def test_an_unlinked_console_carries_no_device_link_and_costs_no_psn_call():
-    repo = FakeCollectionsRepository(consoles=[_console("c1")], owners={"c1": "sub-a"})
-    client, devices = _build_with_devices(repo, [_device(new_device_id())], harvest_devices=True)
+    caller = _Caller()
+    repo, _console_id = _owned_console_repository(caller.sub)
+    client, devices = _build_with_devices(repo, [_device(new_device_id())], caller, harvest_devices=True)
 
-    body = client.get("/consoles", headers=_bearer("token-a")).json()
+    device_link = _listed_device_link(client, caller)
 
-    assert body[0]["device_link"] is None
+    assert device_link is None
     assert devices.calls == 0
 
 
 def test_get_console_never_reports_capacity_as_default_even_if_it_was_originally():
-    repo = FakeCollectionsRepository(consoles=[_console("c1")], owners={"c1": "sub-a"})
-    client, validator = _build(repo)
-    validator.register("token-a", _claims(sub="sub-a"))
+    caller = _Caller()
+    repo, console_id = _owned_console_repository(caller.sub)
+    client = _build(caller, repo)
 
-    response = client.get("/consoles/c1", headers=_bearer("token-a"))
+    response = client.get(_console_path(client, console_id), headers=_bearer(caller.token))
 
-    assert response.json()["capacity_is_default"] is False
+    assert ConsoleResponse.model_validate(response.json()).capacity_is_default is False
 
 
 def test_create_console_rejects_unknown_platform():
-    client, validator = _build()
-    validator.register("token-a", _claims(sub="sub-a"))
+    caller = _Caller()
+    client = _build(caller)
+    requested = ConsoleRequest(name=lowercase_token(), platform=lowercase_token(), raw_capacity_gb=new_size_gb())
 
     response = client.post(
-        "/consoles",
-        json={"name": "Odd console", "platform": "Switch", "raw_capacity_gb": 32.0},
-        headers=_bearer("token-a"),
+        _path(client, consoles_routes.create_console), json=requested.model_dump(), headers=_bearer(caller.token)
     )
 
     assert response.status_code == 400
 
 
-@pytest.mark.parametrize("platform", ["PS3", "PSVITA", "PSP", "PS2", "PS1"])
+@pytest.mark.parametrize("platform", [PS3, PSVITA, PSP, PS2, PS1])
 def test_create_console_accepts_every_platform_the_platforms_table_carries(platform):
     """user_consoles.platform stopped being a two-value CHECK in 0032 and became a foreign key to a
     seven-row reference table. The route kept rejecting five of them."""
-    client, validator = _build()
-    validator.register("token-a", _claims(sub="sub-a"))
+    caller = _Caller()
+    client = _build(caller)
+    requested = ConsoleRequest(name=lowercase_token(), platform=platform, raw_capacity_gb=new_size_gb())
 
     response = client.post(
-        "/consoles",
-        json={"name": f"Old {platform}", "platform": platform, "raw_capacity_gb": 320.0},
-        headers=_bearer("token-a"),
+        _path(client, consoles_routes.create_console), json=requested.model_dump(), headers=_bearer(caller.token)
     )
 
     assert response.status_code == 201
-    assert response.json()["platform"] == platform
+    assert ConsoleResponse.model_validate(response.json()).platform == platform
 
 
 def test_a_console_on_a_platform_with_no_published_capacity_is_flagged_rather_than_refused():
     """default_capacity_gb has published usable-storage figures for PS5 and PS4 models only. WP3's rule is
     'never refuse the edit, flag loudly' -- capacity_is_default is that flag."""
-    client, validator = _build()
-    validator.register("token-a", _claims(sub="sub-a"))
+    caller = _Caller()
+    client = _build(caller)
+    requested = ConsoleRequest(name=lowercase_token(), platform=PS3)
 
-    response = client.post("/consoles", json={"name": "Old PS3", "platform": "PS3"}, headers=_bearer("token-a"))
+    response = client.post(
+        _path(client, consoles_routes.create_console), json=requested.model_dump(), headers=_bearer(caller.token)
+    )
 
     assert response.status_code == 201
-    assert response.json()["capacity_is_default"] is True
+    created = ConsoleResponse.model_validate(response.json())
+    assert created.capacity_is_default is True
+    assert created.raw_capacity_gb == UNKNOWN_PLATFORM_FALLBACK_GB
 
 
 def test_gets_one_owned_console():
-    repo = FakeCollectionsRepository(consoles=[_console("c1")], owners={"c1": "sub-a"})
-    client, validator = _build(repo)
-    validator.register("token-a", _claims(sub="sub-a"))
+    caller = _Caller()
+    repo, console_id = _owned_console_repository(caller.sub)
+    client = _build(caller, repo)
 
-    response = client.get("/consoles/c1", headers=_bearer("token-a"))
+    response = client.get(_console_path(client, console_id), headers=_bearer(caller.token))
 
     assert response.status_code == 200
-    assert response.json()["console_id"] == "c1"
+    assert ConsoleResponse.model_validate(response.json()).console_id == console_id
 
 
 def test_get_console_404s_for_another_users_console():
-    repo = FakeCollectionsRepository(consoles=[_console("c1")], owners={"c1": "sub-b"})
-    client, validator = _build(repo)
-    validator.register("token-a", _claims(sub="sub-a"))
+    caller = _Caller()
+    repo, console_id = _owned_console_repository(new_identity_sub())
+    client = _build(caller, repo)
 
-    response = client.get("/consoles/c1", headers=_bearer("token-a"))
+    response = client.get(_console_path(client, console_id), headers=_bearer(caller.token))
 
     assert response.status_code == 404
 
 
 def test_patches_a_console():
-    repo = FakeCollectionsRepository(consoles=[_console("c1")], owners={"c1": "sub-a"})
-    client, validator = _build(repo)
-    validator.register("token-a", _claims(sub="sub-a"))
+    caller = _Caller()
+    repo, console_id = _owned_console_repository(caller.sub)
+    client = _build(caller, repo)
+    new_name = lowercase_token()
 
-    response = client.patch("/consoles/c1", json={"name": "Renamed"}, headers=_bearer("token-a"))
+    response = client.patch(
+        _path(client, consoles_routes.update_console, console_id=console_id),
+        json=ConsoleUpdateRequest(name=new_name).model_dump(exclude_unset=True),
+        headers=_bearer(caller.token),
+    )
 
     assert response.status_code == 200
-    body = response.json()
-    assert body["name"] == "Renamed"
-    assert body["platform"] == "PS5"
+    patched = ConsoleResponse.model_validate(response.json())
+    assert patched.name == new_name
+    assert patched.platform == PS5
 
 
 def test_patch_console_404s_for_another_users_console():
-    repo = FakeCollectionsRepository(consoles=[_console("c1")], owners={"c1": "sub-b"})
-    client, validator = _build(repo)
-    validator.register("token-a", _claims(sub="sub-a"))
+    caller = _Caller()
+    repo, console_id = _owned_console_repository(new_identity_sub())
+    client = _build(caller, repo)
 
-    response = client.patch("/consoles/c1", json={"name": "Renamed"}, headers=_bearer("token-a"))
+    response = client.patch(
+        _path(client, consoles_routes.update_console, console_id=console_id),
+        json=ConsoleUpdateRequest(name=lowercase_token()).model_dump(exclude_unset=True),
+        headers=_bearer(caller.token),
+    )
 
     assert response.status_code == 404
 
 
 def test_deletes_a_console():
-    repo = FakeCollectionsRepository(consoles=[_console("c1")], owners={"c1": "sub-a"})
-    client, validator = _build(repo)
-    validator.register("token-a", _claims(sub="sub-a"))
+    caller = _Caller()
+    repo, console_id = _owned_console_repository(caller.sub)
+    client = _build(caller, repo)
 
-    response = client.delete("/consoles/c1", headers=_bearer("token-a"))
+    response = client.delete(
+        _path(client, consoles_routes.delete_console, console_id=console_id), headers=_bearer(caller.token)
+    )
 
     assert response.status_code == 204
-    assert "c1" not in repo._consoles
+    assert console_id not in repo._consoles
 
 
 def test_delete_console_404s_for_another_users_console():
-    repo = FakeCollectionsRepository(consoles=[_console("c1")], owners={"c1": "sub-b"})
-    client, validator = _build(repo)
-    validator.register("token-a", _claims(sub="sub-a"))
+    caller = _Caller()
+    repo, console_id = _owned_console_repository(new_identity_sub())
+    client = _build(caller, repo)
 
-    response = client.delete("/consoles/c1", headers=_bearer("token-a"))
+    response = client.delete(
+        _path(client, consoles_routes.delete_console, console_id=console_id), headers=_bearer(caller.token)
+    )
 
     assert response.status_code == 404
-    assert "c1" in repo._consoles
+    assert console_id in repo._consoles
 
 
 def test_sets_install_state_for_owned_console():
-    repo = FakeCollectionsRepository(consoles=[_console("c1")], owners={"c1": "sub-a"})
-    client, validator = _build(repo)
-    validator.register("token-a", _claims(sub="sub-a"))
+    caller = _Caller()
+    repo, console_id = _owned_console_repository(caller.sub)
+    client = _build(caller, repo)
+    game_id = new_game_id()
 
-    response = client.put("/consoles/c1/installs/g1", json={"installed": True}, headers=_bearer("token-a"))
+    response = client.put(
+        _install_path(client, console_id, game_id), json=_installed(True), headers=_bearer(caller.token)
+    )
 
     assert response.status_code == 200
-    assert response.json() == {"console_id": "c1", "game_id": "g1", "installed": True}
-    assert repo.set_install_calls == [("c1", "g1", True)]
+    assert ConsoleInstallResponse.model_validate(response.json()) == ConsoleInstallResponse(
+        console_id=console_id, game_id=game_id, installed=True
+    )
+    assert repo.set_install_calls == [(console_id, game_id, True)]
 
 
 def test_unknown_console_is_404():
+    caller = _Caller()
     repo = FakeCollectionsRepository(consoles=[])
-    client, validator = _build(repo)
-    validator.register("token-a", _claims())
+    client = _build(caller, repo)
 
-    response = client.put("/consoles/c1/installs/g1", json={"installed": True}, headers=_bearer("token-a"))
+    response = client.put(
+        _install_path(client, new_console_id(), new_game_id()), json=_installed(True), headers=_bearer(caller.token)
+    )
 
     assert response.status_code == 404
     assert repo.set_install_calls == []
 
 
 def test_cannot_set_install_state_on_another_users_console():
-    repo = FakeCollectionsRepository(
-        consoles=[_console("other-users-console")], owners={"other-users-console": "sub-b"}
-    )
-    client, validator = _build(repo)
-    validator.register("token-a", _claims(sub="sub-a"))
+    caller = _Caller()
+    repo, other_users_console_id = _owned_console_repository(new_identity_sub())
+    client = _build(caller, repo)
 
     response = client.put(
-        "/consoles/other-users-console/installs/g1", json={"installed": True}, headers=_bearer("token-a")
+        _install_path(client, other_users_console_id, new_game_id()),
+        json=_installed(True),
+        headers=_bearer(caller.token),
     )
 
     assert response.status_code == 404
@@ -481,24 +602,29 @@ def test_cannot_set_install_state_on_another_users_console():
 
 
 def test_gets_installed_game_ids_hydrating_from_the_server():
-    repo = FakeCollectionsRepository(consoles=[_console("c1")], owners={"c1": "sub-a"})
-    client, validator = _build(repo)
-    validator.register("token-a", _claims(sub="sub-a"))
-    client.put("/consoles/c1/installs/g1", json={"installed": True}, headers=_bearer("token-a"))
-    client.put("/consoles/c1/installs/g2", json={"installed": True}, headers=_bearer("token-a"))
-    client.put("/consoles/c1/installs/g3", json={"installed": False}, headers=_bearer("token-a"))
+    caller = _Caller()
+    repo, console_id = _owned_console_repository(caller.sub)
+    client = _build(caller, repo)
+    first_installed_game_id = new_game_id()
+    second_installed_game_id = new_game_id()
+    headers = _bearer(caller.token)
+    client.put(_install_path(client, console_id, first_installed_game_id), json=_installed(True), headers=headers)
+    client.put(_install_path(client, console_id, second_installed_game_id), json=_installed(True), headers=headers)
+    client.put(_install_path(client, console_id, new_game_id()), json=_installed(False), headers=headers)
 
-    response = client.get("/consoles/c1/installs", headers=_bearer("token-a"))
+    response = client.get(_installs_path(client, console_id), headers=headers)
 
     assert response.status_code == 200
-    assert sorted(response.json()["game_ids"]) == ["g1", "g2"]
+    assert ConsoleInstallsResponse.model_validate(response.json()) == ConsoleInstallsResponse(
+        game_ids=sorted([first_installed_game_id, second_installed_game_id])
+    )
 
 
 def test_get_installs_404s_for_another_users_console():
-    repo = FakeCollectionsRepository(consoles=[_console("c1")], owners={"c1": "sub-b"})
-    client, validator = _build(repo)
-    validator.register("token-a", _claims(sub="sub-a"))
+    caller = _Caller()
+    repo, console_id = _owned_console_repository(new_identity_sub())
+    client = _build(caller, repo)
 
-    response = client.get("/consoles/c1/installs", headers=_bearer("token-a"))
+    response = client.get(_installs_path(client, console_id), headers=_bearer(caller.token))
 
     assert response.status_code == 404

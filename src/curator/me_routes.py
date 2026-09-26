@@ -6,6 +6,7 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, Request, Response
 from pydantic import BaseModel
 
+from curator.audit.recorded import ActionRecorder, recorded
 from curator.audit.repository import ACTION_ACCOUNT_DELETED, AccountActionLogEntry, AccountActionLogRepository
 from curator.deps import require_verified_caller
 from curator.link_service import AgentFactory
@@ -41,6 +42,7 @@ class AccountActionResponse(BaseModel):
     action: str
     detail: str | None
     occurred_at: str
+    outcome: str
 
 
 class AccountActionsResponse(BaseModel):
@@ -60,9 +62,15 @@ async def me(request: Request, claims: Annotated[TokenClaims, Depends(require_ve
     token_crypto: TokenCrypto = request.app.state.token_crypto
     agent_factory: AgentFactory = request.app.state.agent_factory
     redis_adapter = request.app.state.redis_adapter
+    recorder: ActionRecorder = request.app.state.audit_repository
 
     await reverify_link(
-        claims, repository=repository, token_crypto=token_crypto, agent_factory=agent_factory, redis=redis_adapter
+        claims,
+        repository=repository,
+        token_crypto=token_crypto,
+        agent_factory=agent_factory,
+        recorder=recorder,
+        redis=redis_adapter,
     )
 
     link = await repository.get_link(claims.sub)
@@ -98,11 +106,11 @@ async def delete_me(request: Request, claims: Annotated[TokenClaims, Depends(req
     """
     repository: Repository = request.app.state.repository
     redis_adapter = request.app.state.redis_adapter
-    audit_repository: AccountActionLogRepository = request.app.state.audit_repository
-    await audit_repository.log(claims.sub, ACTION_ACCOUNT_DELETED)
-    await repository.delete_user(claims.sub)
-    if redis_adapter is not None:
-        await redis_adapter.delete(access_token_cache_key(claims.sub))
+    recorder: ActionRecorder = request.app.state.audit_repository
+    async with recorded(recorder, claims.sub, ACTION_ACCOUNT_DELETED):
+        await repository.delete_user(claims.sub)
+        if redis_adapter is not None:
+            await redis_adapter.delete(access_token_cache_key(claims.sub))
     return Response(status_code=204)
 
 
@@ -122,7 +130,12 @@ async def get_my_actions(
     entries: list[AccountActionLogEntry] = await audit_repository.list_for_user(claims.sub)
     return AccountActionsResponse(
         actions=[
-            AccountActionResponse(action=entry.action, detail=entry.detail, occurred_at=entry.occurred_at.isoformat())
+            AccountActionResponse(
+                action=entry.action,
+                detail=entry.detail,
+                occurred_at=entry.occurred_at.isoformat(),
+                outcome=entry.outcome,
+            )
             for entry in entries
         ]
     )

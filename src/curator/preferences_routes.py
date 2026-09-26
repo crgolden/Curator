@@ -5,14 +5,12 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 
-from curator.deps import require_bearer
+from curator.deps import PREFERENCE_NOT_LINKED_DETAIL, require_bearer
 from curator.library.repository import LibraryRepository
 from curator.persistence.repository import LinkRecord, Repository
 from curator.token_validation import TokenClaims
 
 router = APIRouter(tags=["preferences"])
-
-_NO_LINK_DETAIL = "PSN account not linked."
 
 
 class PsnPreferences(BaseModel):
@@ -41,7 +39,7 @@ async def get_psn_preferences(
     repository: Repository = request.app.state.repository
     link = await repository.get_link(claims.sub)
     if link is None:
-        raise HTTPException(status_code=404, detail=_NO_LINK_DETAIL)
+        raise HTTPException(status_code=404, detail=PREFERENCE_NOT_LINKED_DETAIL)
     return _response(link)
 
 
@@ -58,7 +56,7 @@ async def set_psn_preferences(
     repository: Repository = request.app.state.repository
     link = await repository.get_link(claims.sub)
     if link is None:
-        raise HTTPException(status_code=404, detail=_NO_LINK_DETAIL)
+        raise HTTPException(status_code=404, detail=PREFERENCE_NOT_LINKED_DETAIL)
 
     await repository.set_psn_preferences(
         claims.sub,

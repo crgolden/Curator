@@ -4,18 +4,20 @@ from __future__ import annotations
 
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
+from typing import get_args
 
-from curator.catalog.ps_plus_repository import PsPlusCategory
-from curator.catalog.ps_plus_walk_service import (
-    CATEGORY_RENAMED,
-    NO_PRODUCTS,
-    PAGE_BUDGET_EXHAUSTED,
-    QUERY_ROTATED,
-    PsPlusWalkService,
+from curator.catalog.ps_plus_repository import PsPlusCategory, PsPlusTier
+from curator.catalog.ps_plus_walk_service import CATEGORY_RENAMED, PsPlusWalkService
+from curator.catalog.store_backfill_service import NO_PRODUCTS, PAGE_BUDGET_EXHAUSTED, QUERY_ROTATED
+from curator.psn.store_client import (
+    FULL_GAME_CLASSIFICATION,
+    StoreCategoryPage,
+    StoreProduct,
+    StoreQueryRotatedError,
 )
-from curator.psn.store_client import StoreCategoryPage, StoreProduct, StoreQueryRotatedError
 from test_values import (
     new_category_id,
+    new_facet_key,
     new_game_title,
     new_ps4_title_id,
     new_reporting_name,
@@ -23,10 +25,12 @@ from test_values import (
     new_walk_id,
 )
 
-_PREFIX = "SPAR_GMA_PSGC"
+_PREFIX = new_facet_key()
+_OTHER_PREFIX = new_facet_key()
+_TIER, _OTHER_TIER = get_args(PsPlusTier)
 
 
-def category(prefix=_PREFIX, tier="extra"):
+def category(prefix=_PREFIX, tier=_TIER):
     return PsPlusCategory(category_id=new_category_id(), tier=tier, locale="en-US", reporting_name_prefix=prefix)
 
 
@@ -38,7 +42,7 @@ def product(title_id=None, *, raw=None):
         platforms=("PS4",),
         np_title_id=title_id,
         cover_image_url=None,
-        classification="Full Game",
+        classification=FULL_GAME_CLASSIFICATION,
         raw=raw if raw is not None else {"price": {"upsellText": None}},
     )
 
@@ -109,6 +113,15 @@ class FakePsPlusRepository:
         yield writer
 
 
+class FakeCatalog:
+    def __init__(self):
+        self.admitted: list[list[StoreProduct]] = []
+
+    async def backfill_store_products(self, products):
+        self.admitted.append(list(products))
+        return len(products), 0
+
+
 class FixedClock:
     def __init__(self):
         self.now = datetime(2026, 9, 1, tzinfo=timezone.utc)
@@ -118,8 +131,8 @@ class FixedClock:
         return self.now
 
 
-def _service(client, repository):
-    return PsPlusWalkService(client, repository, page_delay_seconds=0, clock=FixedClock())
+def _service(client, repository, catalog=None):
+    return PsPlusWalkService(client, repository, catalog or FakeCatalog(), page_delay_seconds=0, clock=FixedClock())
 
 
 async def test_a_walk_interrupted_on_page_two_marks_no_departure():
@@ -187,6 +200,49 @@ async def test_a_product_with_no_upsell_text_is_still_recorded():
     assert repository.writers[0].recorded == [[member]]
 
 
+async def test_a_full_game_member_is_admitted_to_the_shared_catalog():
+    walked = category()
+    member = product()
+    catalog = FakeCatalog()
+    client = FakeStoreClient([page([member], is_last=True)])
+    repository = FakePsPlusRepository([walked])
+
+    await _service(client, repository, catalog).walk_category(walked)
+
+    assert catalog.admitted == [[member]]
+
+
+async def test_a_bundle_member_is_recorded_but_never_admitted():
+    walked = category()
+    bundle = StoreProduct(
+        product_id=new_store_product_id(),
+        name=new_game_title(),
+        platforms=("PS5",),
+        np_title_id=new_ps4_title_id(),
+        cover_image_url=None,
+        classification="Game Bundle",
+    )
+    catalog = FakeCatalog()
+    client = FakeStoreClient([page([bundle], is_last=True)])
+    repository = FakePsPlusRepository([walked])
+
+    await _service(client, repository, catalog).walk_category(walked)
+
+    assert repository.writers[0].recorded == [[bundle]]
+    assert catalog.admitted == [], "a bundle is a catalog member and never a game of its own"
+
+
+async def test_a_renamed_category_admits_nothing():
+    walked = category(prefix=_PREFIX)
+    catalog = FakeCatalog()
+    client = FakeStoreClient([page([product()], is_last=True, reporting_name="WM_EU_ALL_PS4_GAMES")])
+    repository = FakePsPlusRepository([walked])
+
+    await _service(client, repository, catalog).walk_category(walked)
+
+    assert catalog.admitted == []
+
+
 async def test_a_bundle_is_a_member_too():
     walked = category()
     bundle = StoreProduct(
@@ -239,20 +295,18 @@ async def test_a_page_budget_stops_short_and_marks_no_departure():
 
 
 async def test_walk_all_takes_each_category_under_its_own_lock():
-    extra, premium = category(tier="extra"), category(tier="premium", prefix="SPAR_GMA_PSPLUS_CC")
-    client = FakeStoreClient(
-        [page([product()], is_last=True), page([product()], is_last=True, prefix="SPAR_GMA_PSPLUS_CC")]
-    )
+    extra, premium = category(tier=_TIER), category(tier=_OTHER_TIER, prefix=_OTHER_PREFIX)
+    client = FakeStoreClient([page([product()], is_last=True), page([product()], is_last=True, prefix=_OTHER_PREFIX)])
     repository = FakePsPlusRepository([extra, premium])
 
     results = await _service(client, repository).walk_all()
 
-    assert [progress.tier for progress in results] == ["extra", "premium"]
+    assert [progress.tier for progress in results] == [_TIER, _OTHER_TIER]
     assert repository.locked == [extra.category_id, premium.category_id]
 
 
 async def test_walk_all_stops_at_the_first_rotated_query():
-    extra, premium = category(tier="extra"), category(tier="premium", prefix="SPAR_GMA_PSPLUS_CC")
+    extra, premium = category(tier=_TIER), category(tier=_OTHER_TIER, prefix=_OTHER_PREFIX)
     client = FakeStoreClient([], raise_on_page=1)
     repository = FakePsPlusRepository([extra, premium])
 

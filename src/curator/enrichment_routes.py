@@ -15,13 +15,14 @@ from pydantic import BaseModel
 
 from curator.deps import require_admin
 from curator.jobs.queue_publisher import QueuePublisher
-from curator.jobs.repository import JobRunsRepository
+from curator.jobs.repository import JOB_KIND_ENRICHMENT, JobRunsRepository
 from curator.jobs.staleness import abandoned_run_reason
 from curator.token_validation import TokenClaims
 
 router = APIRouter(prefix="/enrichment", tags=["enrichment"])
 
 CANCELLED_BY_ADMIN = "An administrator cancelled this enrichment run before it finished."
+ENRICHMENT_RUN_NOUN = "enrichment run"
 
 
 class EnrichmentRunResponse(BaseModel):
@@ -52,9 +53,9 @@ async def start_enrichment_run(
     :raises fastapi.HTTPException: 503, if the job queue isn't configured on this deployment.
     """
     job_runs_repository: JobRunsRepository = request.app.state.job_runs_repository
-    active_run = await job_runs_repository.find_active_global_run("enrichment")
+    active_run = await job_runs_repository.find_active_global_run(JOB_KIND_ENRICHMENT)
     if active_run is not None:
-        reason = abandoned_run_reason(active_run, datetime.now(timezone.utc), noun="enrichment run")
+        reason = abandoned_run_reason(active_run, datetime.now(timezone.utc), noun=ENRICHMENT_RUN_NOUN)
         if reason is None:
             return EnrichmentRunResponse(run_id=active_run.run_id)
         await job_runs_repository.mark_failed(active_run.run_id, reason)
@@ -83,7 +84,7 @@ async def cancel_enrichment_run(
     """
     job_runs_repository: JobRunsRepository = request.app.state.job_runs_repository
     run = await job_runs_repository.get(run_id)
-    if run is None or run.kind != "enrichment":
+    if run is None or run.kind != JOB_KIND_ENRICHMENT:
         raise HTTPException(status_code=404, detail="Enrichment run not found.")
 
     if not await job_runs_repository.cancel(run_id, CANCELLED_BY_ADMIN):
@@ -113,7 +114,7 @@ async def get_latest_enrichment_run(
     :raises fastapi.HTTPException: 404, if no enrichment run has ever been queued.
     """
     job_runs_repository: JobRunsRepository = request.app.state.job_runs_repository
-    run = await job_runs_repository.get_latest_by_kind("enrichment")
+    run = await job_runs_repository.get_latest_by_kind(JOB_KIND_ENRICHMENT)
     if run is None:
         raise HTTPException(status_code=404, detail="No enrichment run has been queued yet.")
     return EnrichmentRunStatusResponse(
@@ -135,7 +136,7 @@ async def get_enrichment_run_status(
     """
     job_runs_repository: JobRunsRepository = request.app.state.job_runs_repository
     run = await job_runs_repository.get(run_id)
-    if run is None or run.kind != "enrichment":
+    if run is None or run.kind != JOB_KIND_ENRICHMENT:
         raise HTTPException(status_code=404, detail="Enrichment run not found.")
     return EnrichmentRunStatusResponse(
         run_id=run.run_id, status=run.status, error=run.error, result_summary=run.result_summary
