@@ -149,9 +149,11 @@ async def test_reverify_never_asks_psn_when_the_history_row_cannot_be_written():
         asked.append(sub_arg)
         return FakeAgent(sub_arg, npsso, email_info=(EMAIL, True))
 
+    claims = _stale_verification_claims(sub)
+
     with pytest.raises(RuntimeError):
         await reverify_link(
-            _stale_verification_claims(sub),
+            claims,
             repository=repo,
             token_crypto=crypto,
             agent_factory=agent_factory,

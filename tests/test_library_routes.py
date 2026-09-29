@@ -502,9 +502,11 @@ def test_a_refresh_is_not_queued_when_its_history_row_cannot_be_written():
     client, validator, publisher = _build()
     validator.register("token-a", _claims(sub="sub-a"))
     client.app.state.audit_repository.begin_error = RuntimeError("sub-a")
+    refresh_path = _path(client, library_routes.refresh_library)
+    headers = _bearer("token-a")
 
     with pytest.raises(RuntimeError):
-        client.post(_path(client, library_routes.refresh_library), headers=_bearer("token-a"))
+        client.post(refresh_path, headers=headers)
 
     assert publisher.library_refresh_calls == []
 

@@ -190,37 +190,17 @@ class StoreBackfillService:
 
             offset = self._next_offset(page, offset)
             if page.is_last or not page.products:
-                walked_the_whole_category_and_found_nothing = products_seen == 0 and start_offset == 0
-                progress = self._progress(
+                return self._finish(
                     category_id,
                     next_offset=offset,
-                    completed=not walked_the_whole_category_and_found_nothing,
                     pages_read=pages_read,
                     products_seen=products_seen,
                     games_created=games_created,
                     covers_cached=covers_cached,
-                    stopped_reason=NO_PRODUCTS if walked_the_whole_category_and_found_nothing else None,
                     seen_product_ids=seen_product_ids,
                     reported_total=reported_total,
                     start_offset=start_offset,
                 )
-                if walked_the_whole_category_and_found_nothing:
-                    logger.warning(
-                        "Store backfill of category %s read a first page containing no products at all. "
-                        "The storefront answered, so this is not a transport failure -- the id is most "
-                        "likely not a category, or is one that publishes nothing.",
-                        category_id,
-                    )
-                if progress.coverage_shortfall:
-                    logger.warning(
-                        "Store backfill of category %s saw %d of %d products; %d were missed because the "
-                        "category changed mid-walk. Re-run to pick them up.",
-                        category_id,
-                        progress.distinct_products,
-                        progress.reported_total,
-                        progress.coverage_shortfall,
-                    )
-                return progress
 
             if self._page_delay_seconds:
                 await asyncio.sleep(self._page_delay_seconds)
@@ -266,6 +246,51 @@ class StoreBackfillService:
     @staticmethod
     def _next_offset(page: StoreCategoryPage, requested_offset: int) -> int:
         return next_page_offset(page, requested_offset)
+
+    @staticmethod
+    def _finish(
+        category_id: str,
+        *,
+        next_offset: int,
+        pages_read: int,
+        products_seen: int,
+        games_created: int,
+        covers_cached: int,
+        seen_product_ids: set[str],
+        reported_total: int | None,
+        start_offset: int,
+    ) -> BackfillProgress:
+        walked_the_whole_category_and_found_nothing = products_seen == 0 and start_offset == 0
+        progress = StoreBackfillService._progress(
+            category_id,
+            next_offset=next_offset,
+            completed=not walked_the_whole_category_and_found_nothing,
+            pages_read=pages_read,
+            products_seen=products_seen,
+            games_created=games_created,
+            covers_cached=covers_cached,
+            stopped_reason=NO_PRODUCTS if walked_the_whole_category_and_found_nothing else None,
+            seen_product_ids=seen_product_ids,
+            reported_total=reported_total,
+            start_offset=start_offset,
+        )
+        if walked_the_whole_category_and_found_nothing:
+            logger.warning(
+                "Store backfill of category %s read a first page containing no products at all. "
+                "The storefront answered, so this is not a transport failure -- the id is most "
+                "likely not a category, or is one that publishes nothing.",
+                category_id,
+            )
+        if progress.coverage_shortfall:
+            logger.warning(
+                "Store backfill of category %s saw %d of %d products; %d were missed because the "
+                "category changed mid-walk. Re-run to pick them up.",
+                category_id,
+                progress.distinct_products,
+                progress.reported_total,
+                progress.coverage_shortfall,
+            )
+        return progress
 
     @staticmethod
     def _progress(

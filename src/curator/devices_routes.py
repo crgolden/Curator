@@ -15,6 +15,7 @@ from curator.deps import (
     require_bearer,
     require_preference,
 )
+from curator.openapi_responses import BEARER_ERROR_RESPONSES, NOT_FOUND_RESPONSE, UNAUTHORIZED_RESPONSE
 from curator.psn.device_registrations import collapse_by_device_id
 from curator.psn.errors import PsnAuthError
 from curator.psn.models import AccountDevice
@@ -42,7 +43,7 @@ class DevicesResponse(BaseModel):
     devices: list[AccountDeviceResponse]
 
 
-@router.get("/devices")
+@router.get("/devices", responses={**BEARER_ERROR_RESPONSES, 401: UNAUTHORIZED_RESPONSE, 404: NOT_FOUND_RESPONSE})
 async def get_devices(request: Request, claims: Annotated[TokenClaims, Depends(require_bearer)]) -> DevicesResponse:
     """Return the consoles/devices registered to the caller's own PSN account.
 

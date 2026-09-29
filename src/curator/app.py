@@ -16,9 +16,10 @@ cookie.
 from __future__ import annotations
 
 import logging
-from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
-from typing import Any, cast
+from collections.abc import AsyncIterator, Callable
+from contextlib import AbstractAsyncContextManager, asynccontextmanager
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any, TypedDict, TypeVar, cast
 
 import httpx
 from azure.identity import DefaultAzureCredential as SyncDefaultAzureCredential
@@ -95,6 +96,9 @@ from curator.telemetry import configure_telemetry, shutdown_telemetry
 from curator.token_validation import JwtValidator, TokenValidatorLike
 from curator.trophy_routes import router as trophy_router
 
+if TYPE_CHECKING:
+    from typing_extensions import Unpack
+
 CURATOR_LOGGER_NAME = "curator"
 HEALTH_PATH = "/health"
 HEALTHY_BODY = "Healthy"
@@ -103,33 +107,140 @@ INTERNAL_SERVER_ERROR_BODY = "Internal Server Error"
 logger = logging.getLogger(CURATOR_LOGGER_NAME)
 
 
-def create_app(
-    settings: Settings | None = None,
-    *,
-    repository: Repository | None = None,
-    token_crypto: TokenCrypto | None = None,
-    agent_factory: AgentFactory | None = None,
-    token_validator: TokenValidatorLike | None = None,
-    pool: AsyncConnectionPool | None = None,
-    catalog_repository: CatalogRepository | None = None,
-    library_repository: LibraryRepository | None = None,
-    collections_repository: CollectionsRepository | None = None,
-    job_runs_repository: JobRunsRepository | None = None,
-    audit_repository: AccountActionLogRepository | None = None,
-    enrichment_keys_repository: EnrichmentKeysRepository | None = None,
-    profile_repository: ProfileRepository | None = None,
-    profile_link_repository: ProfileLinkRepository | None = None,
-    follow_repository: FollowRepository | None = None,
-    refresh_schedules_repository: RefreshSchedulesRepository | None = None,
-    ps_plus_repository: PsPlusRepository | None = None,
-    redis_client: Redis | None = None,
-    trophy_client_factory: TrophyClientFactory | None = None,
-    identity_client_factory: AccountClientFactory | None = None,
-    presence_client_factory: PresenceClientFactory | None = None,
-    social_client_factory: SocialClientFactory | None = None,
-    mutation_service_factory: MutationServiceFactory | None = None,
-    http_client: httpx.AsyncClient | None = None,
-) -> FastAPI:
+_T = TypeVar("_T")
+
+
+class AppCollaborators(TypedDict, total=False):
+    repository: Repository | None
+    token_crypto: TokenCrypto | None
+    agent_factory: AgentFactory | None
+    token_validator: TokenValidatorLike | None
+    pool: AsyncConnectionPool | None
+    catalog_repository: CatalogRepository | None
+    library_repository: LibraryRepository | None
+    collections_repository: CollectionsRepository | None
+    job_runs_repository: JobRunsRepository | None
+    audit_repository: AccountActionLogRepository | None
+    enrichment_keys_repository: EnrichmentKeysRepository | None
+    profile_repository: ProfileRepository | None
+    profile_link_repository: ProfileLinkRepository | None
+    follow_repository: FollowRepository | None
+    refresh_schedules_repository: RefreshSchedulesRepository | None
+    ps_plus_repository: PsPlusRepository | None
+    redis_client: Redis | None
+    trophy_client_factory: TrophyClientFactory | None
+    identity_client_factory: AccountClientFactory | None
+    presence_client_factory: PresenceClientFactory | None
+    social_client_factory: SocialClientFactory | None
+    mutation_service_factory: MutationServiceFactory | None
+    http_client: httpx.AsyncClient | None
+
+
+@dataclass(frozen=True)
+class _ServiceBus:
+    client: ServiceBusClient | None
+    credential: DefaultAzureCredential | None
+    admin_credential: SyncDefaultAzureCredential | None
+    queue_depth_monitor: QueueDepthMonitor | None
+    queue_publisher: QueuePublisher | None
+
+
+@dataclass(frozen=True)
+class _OwnedResources:
+    pool: AsyncConnectionPool | None
+    redis_client: Redis | None
+    http_client: httpx.AsyncClient | None
+    service_bus: _ServiceBus
+    ps_plus_walk_scheduler: PsPlusWalkScheduler
+
+
+def _given(value: _T | None, build: Callable[[], _T]) -> _T:
+    return value or build()
+
+
+def _service_bus(settings: Settings, job_runs_repository: JobRunsRepository) -> _ServiceBus:
+    client: ServiceBusClient | None
+    credential: DefaultAzureCredential | None = None
+    admin_credential: SyncDefaultAzureCredential | None = None
+    queue_depth_monitor: QueueDepthMonitor | None = None
+    if settings.service_bus_namespace:
+        credential = DefaultAzureCredential()
+        client = ServiceBusClient(
+            fully_qualified_namespace=settings.service_bus_namespace,
+            credential=credential,
+        )
+        admin_credential = SyncDefaultAzureCredential()
+        queue_depth_monitor = QueueDepthMonitor(
+            admin_client=ServiceBusAdministrationClient(
+                fully_qualified_namespace=settings.service_bus_namespace,
+                credential=admin_credential,
+            ),
+            queue_names=[LIBRARY_REFRESH_QUEUE, LIBRARY_REFRESH_CONTINUATION_QUEUE, ENRICHMENT_QUEUE],
+        )
+    elif settings.service_bus_connection_string:
+        client = ServiceBusClient.from_connection_string(settings.service_bus_connection_string)
+    else:
+        client = None
+    queue_publisher: QueuePublisher | None = None
+    if client is not None:
+        queue_publisher = QueuePublisher(
+            library_refresh_sender=client.get_queue_sender(LIBRARY_REFRESH_QUEUE),
+            enrichment_sender=client.get_queue_sender(ENRICHMENT_QUEUE),
+            scheduled_refresh_sender=client.get_queue_sender(SCHEDULED_REFRESH_QUEUE),
+            job_runs_repository=job_runs_repository,
+        )
+    return _ServiceBus(
+        client=client,
+        credential=credential,
+        admin_credential=admin_credential,
+        queue_depth_monitor=queue_depth_monitor,
+        queue_publisher=queue_publisher,
+    )
+
+
+def _lifespan(owned: _OwnedResources) -> Callable[[FastAPI], AbstractAsyncContextManager[None]]:
+    @asynccontextmanager
+    async def lifespan(_: FastAPI) -> AsyncIterator[None]:
+        await _start_owned_resources(owned)
+        try:
+            yield
+        finally:
+            await _stop_owned_resources(owned)
+
+    return lifespan
+
+
+async def _start_owned_resources(owned: _OwnedResources) -> None:
+    if owned.pool is not None:
+        await owned.pool.open(wait=True)
+    if owned.redis_client is not None:
+        await owned.redis_client.ping()
+    if owned.service_bus.queue_depth_monitor is not None:
+        owned.service_bus.queue_depth_monitor.start()
+    owned.ps_plus_walk_scheduler.start()
+
+
+async def _stop_owned_resources(owned: _OwnedResources) -> None:
+    service_bus = owned.service_bus
+    await owned.ps_plus_walk_scheduler.stop()
+    if service_bus.queue_depth_monitor is not None:
+        await service_bus.queue_depth_monitor.stop()
+    if service_bus.client is not None:
+        await service_bus.client.close()
+    if service_bus.credential is not None:
+        await service_bus.credential.close()
+    if service_bus.admin_credential is not None:
+        service_bus.admin_credential.close()
+    if owned.http_client is not None:
+        await owned.http_client.aclose()
+    if owned.redis_client is not None:
+        await owned.redis_client.aclose()
+    if owned.pool is not None:
+        await owned.pool.close()
+    shutdown_telemetry()
+
+
+def create_app(settings: Settings | None = None, **collaborators: Unpack[AppCollaborators]) -> FastAPI:
     """Build a configured Curator :class:`~fastapi.FastAPI` app.
 
     Every collaborator defaults to a real implementation built from ``settings``; tests inject
@@ -202,119 +313,91 @@ def create_app(
     :returns: The configured :class:`~fastapi.FastAPI` app.
     """
     settings = settings or Settings.from_config()
-    owns_pool = repository is None and pool is None
-    pool = pool or (AsyncConnectionPool(settings.database_url, open=False) if repository is None else None)
+    given_repository = collaborators.get("repository")
+    given_pool = collaborators.get("pool")
+    owns_pool = given_repository is None and given_pool is None
+    pool = given_pool or (AsyncConnectionPool(settings.database_url, open=False) if given_repository is None else None)
     shared_pool = cast(AsyncConnectionPool, pool)
 
-    owns_redis = redis_client is None
-    redis_client = redis_client or build_redis_client(settings)
+    given_redis_client = collaborators.get("redis_client")
+    owns_redis = given_redis_client is None
+    redis_client = given_redis_client or build_redis_client(settings)
     redis_adapter = RedisAdapter(redis_client) if redis_client is not None else None
     rate_limiter: RateLimiter | None = RedisRateLimiter(redis_adapter) if redis_adapter is not None else None
 
-    repository = repository or Repository(shared_pool)
-    token_crypto = token_crypto or TokenCrypto.from_config(settings.token_key)
-    agent_factory = agent_factory or _default_agent_factory(repository, token_crypto, rate_limiter, redis_adapter)
-    trophy_client_factory = trophy_client_factory or _default_trophy_client_factory(
-        repository, token_crypto, rate_limiter, redis_adapter
+    repository = _given(given_repository, lambda: Repository(shared_pool))
+    token_crypto = _given(collaborators.get("token_crypto"), lambda: TokenCrypto.from_config(settings.token_key))
+    agent_factory = _given(
+        collaborators.get("agent_factory"),
+        lambda: _default_agent_factory(repository, token_crypto, rate_limiter, redis_adapter),
     )
-    identity_client_factory = identity_client_factory or _default_identity_client_factory(
-        repository, token_crypto, rate_limiter, redis_adapter
+    trophy_client_factory = _given(
+        collaborators.get("trophy_client_factory"),
+        lambda: _default_trophy_client_factory(repository, token_crypto, rate_limiter, redis_adapter),
     )
-    presence_client_factory = presence_client_factory or _default_presence_client_factory(
-        repository, token_crypto, rate_limiter, redis_adapter
+    identity_client_factory = _given(
+        collaborators.get("identity_client_factory"),
+        lambda: _default_identity_client_factory(repository, token_crypto, rate_limiter, redis_adapter),
     )
-    social_client_factory = social_client_factory or _default_social_client_factory(
-        repository, token_crypto, rate_limiter, redis_adapter
+    presence_client_factory = _given(
+        collaborators.get("presence_client_factory"),
+        lambda: _default_presence_client_factory(repository, token_crypto, rate_limiter, redis_adapter),
     )
-    token_validator = token_validator or JwtValidator(settings.oidc_authority)
-    catalog_repository = catalog_repository or CatalogRepository(shared_pool)
-    library_repository = library_repository or LibraryRepository(shared_pool)
-    collections_repository = collections_repository or CollectionsRepository(shared_pool)
+    social_client_factory = _given(
+        collaborators.get("social_client_factory"),
+        lambda: _default_social_client_factory(repository, token_crypto, rate_limiter, redis_adapter),
+    )
+    token_validator = _given(collaborators.get("token_validator"), lambda: JwtValidator(settings.oidc_authority))
+    catalog_repository = _given(collaborators.get("catalog_repository"), lambda: CatalogRepository(shared_pool))
+    library_repository = _given(collaborators.get("library_repository"), lambda: LibraryRepository(shared_pool))
+    collections_repository = _given(
+        collaborators.get("collections_repository"), lambda: CollectionsRepository(shared_pool)
+    )
     collection_orchestrator = CollectionOrchestrator(collections_repository)
     store_catalog_client = StoreCatalogClient(
         httpx.AsyncClient(timeout=45.0, verify=shared_ssl_context()),
         query_hashes=(*settings.store_query_hashes, *CATEGORY_GRID_RETRIEVE_HASHES),
     )
     store_backfill_service = StoreBackfillService(store_catalog_client, catalog_repository)
-    ps_plus_repository = ps_plus_repository or PsPlusRepository(shared_pool)
+    ps_plus_repository = _given(collaborators.get("ps_plus_repository"), lambda: PsPlusRepository(shared_pool))
     ps_plus_walk_service = PsPlusWalkService(store_catalog_client, ps_plus_repository, catalog_repository)
     ps_plus_walk_scheduler = PsPlusWalkScheduler(ps_plus_walk_service, ps_plus_repository)
-    job_runs_repository = job_runs_repository or JobRunsRepository(shared_pool)
-    audit_repository = audit_repository or AccountActionLogRepository(shared_pool)
-    enrichment_keys_repository = enrichment_keys_repository or EnrichmentKeysRepository(shared_pool)
-    profile_repository = profile_repository or ProfileRepository(shared_pool)
-    profile_link_repository = profile_link_repository or ProfileLinkRepository(shared_pool)
-    follow_repository = follow_repository or FollowRepository(shared_pool)
-    refresh_schedules_repository = refresh_schedules_repository or RefreshSchedulesRepository(shared_pool)
-    mutation_service_factory = mutation_service_factory or _default_mutation_service_factory(
-        repository, token_crypto, rate_limiter, redis_adapter, shared_pool, audit_repository
+    job_runs_repository = _given(collaborators.get("job_runs_repository"), lambda: JobRunsRepository(shared_pool))
+    audit_repository = _given(collaborators.get("audit_repository"), lambda: AccountActionLogRepository(shared_pool))
+    enrichment_keys_repository = _given(
+        collaborators.get("enrichment_keys_repository"), lambda: EnrichmentKeysRepository(shared_pool)
+    )
+    profile_repository = _given(collaborators.get("profile_repository"), lambda: ProfileRepository(shared_pool))
+    profile_link_repository = _given(
+        collaborators.get("profile_link_repository"), lambda: ProfileLinkRepository(shared_pool)
+    )
+    follow_repository = _given(collaborators.get("follow_repository"), lambda: FollowRepository(shared_pool))
+    refresh_schedules_repository = _given(
+        collaborators.get("refresh_schedules_repository"), lambda: RefreshSchedulesRepository(shared_pool)
+    )
+    mutation_service_factory = _given(
+        collaborators.get("mutation_service_factory"),
+        lambda: _default_mutation_service_factory(
+            repository, token_crypto, rate_limiter, redis_adapter, shared_pool, audit_repository
+        ),
     )
 
-    owns_http_client = http_client is None
-    http_client = http_client or httpx.AsyncClient(
-        timeout=httpx.Timeout(10.0, connect=5.0), verify=shared_ssl_context()
+    given_http_client = collaborators.get("http_client")
+    http_client = _given(
+        given_http_client,
+        lambda: httpx.AsyncClient(timeout=httpx.Timeout(10.0, connect=5.0), verify=shared_ssl_context()),
     )
 
-    service_bus_credential: DefaultAzureCredential | None = None
-    service_bus_admin_credential: SyncDefaultAzureCredential | None = None
-    queue_depth_monitor: QueueDepthMonitor | None = None
-    if settings.service_bus_namespace:
-        service_bus_credential = DefaultAzureCredential()
-        service_bus_client = ServiceBusClient(
-            fully_qualified_namespace=settings.service_bus_namespace,
-            credential=service_bus_credential,
-        )
-        service_bus_admin_credential = SyncDefaultAzureCredential()
-        queue_depth_monitor = QueueDepthMonitor(
-            admin_client=ServiceBusAdministrationClient(
-                fully_qualified_namespace=settings.service_bus_namespace,
-                credential=service_bus_admin_credential,
-            ),
-            queue_names=[LIBRARY_REFRESH_QUEUE, LIBRARY_REFRESH_CONTINUATION_QUEUE, ENRICHMENT_QUEUE],
-        )
-    elif settings.service_bus_connection_string:
-        service_bus_client = ServiceBusClient.from_connection_string(settings.service_bus_connection_string)
-    else:
-        service_bus_client = None
-    queue_publisher: QueuePublisher | None = None
-    if service_bus_client is not None:
-        queue_publisher = QueuePublisher(
-            library_refresh_sender=service_bus_client.get_queue_sender(LIBRARY_REFRESH_QUEUE),
-            enrichment_sender=service_bus_client.get_queue_sender(ENRICHMENT_QUEUE),
-            scheduled_refresh_sender=service_bus_client.get_queue_sender(SCHEDULED_REFRESH_QUEUE),
-            job_runs_repository=job_runs_repository,
-        )
+    service_bus = _service_bus(settings, job_runs_repository)
+    owned = _OwnedResources(
+        pool=pool if owns_pool else None,
+        redis_client=redis_client if owns_redis else None,
+        http_client=http_client if given_http_client is None else None,
+        service_bus=service_bus,
+        ps_plus_walk_scheduler=ps_plus_walk_scheduler,
+    )
 
-    @asynccontextmanager
-    async def lifespan(_: FastAPI) -> AsyncIterator[None]:
-        if owns_pool and pool is not None:
-            await pool.open(wait=True)
-        if owns_redis and redis_client is not None:
-            await redis_client.ping()
-        if queue_depth_monitor is not None:
-            queue_depth_monitor.start()
-        ps_plus_walk_scheduler.start()
-        try:
-            yield
-        finally:
-            await ps_plus_walk_scheduler.stop()
-            if queue_depth_monitor is not None:
-                await queue_depth_monitor.stop()
-            if service_bus_client is not None:
-                await service_bus_client.close()
-            if service_bus_credential is not None:
-                await service_bus_credential.close()
-            if service_bus_admin_credential is not None:
-                service_bus_admin_credential.close()
-            if owns_http_client:
-                await http_client.aclose()
-            if owns_redis and redis_client is not None:
-                await redis_client.aclose()
-            if owns_pool and pool is not None:
-                await pool.close()
-            shutdown_telemetry()
-
-    app = FastAPI(title="Curator", lifespan=lifespan)
+    app = FastAPI(title="Curator", lifespan=_lifespan(owned))
 
     app.state.settings = settings
     app.state.http_client = http_client
@@ -345,8 +428,8 @@ def create_app(
     app.state.follow_repository = follow_repository
     app.state.refresh_schedules_repository = refresh_schedules_repository
     app.state.mutation_service_factory = mutation_service_factory
-    app.state.queue_publisher = queue_publisher
-    app.state.queue_depth_monitor = queue_depth_monitor
+    app.state.queue_publisher = service_bus.queue_publisher
+    app.state.queue_depth_monitor = service_bus.queue_depth_monitor
 
     app.include_router(me_router)
     app.include_router(psn_router)

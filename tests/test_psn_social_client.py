@@ -232,8 +232,10 @@ async def test_friendship_maps_fields():
 
 
 async def test_friendship_requires_a_target():
+    client = SocialClient(FakeSession())
+
     with pytest.raises(ValueError, match="requires a target"):
-        await SocialClient(FakeSession()).friendship()
+        await client.friendship()
 
 
 async def test_profile_never_hydrates_personal_detail():
@@ -268,8 +270,10 @@ async def test_is_blocked_false_for_an_unlisted_account():
 
 
 async def test_is_blocked_requires_a_target():
+    client = SocialClient(FakeSession())
+
     with pytest.raises(ValueError, match="requires a target"):
-        await SocialClient(FakeSession()).is_blocked()
+        await client.is_blocked()
 
 
 async def test_devices_maps_fields():

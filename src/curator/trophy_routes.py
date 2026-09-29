@@ -15,6 +15,12 @@ from curator.deps import (
     require_bearer,
     require_preference,
 )
+from curator.openapi_responses import (
+    BEARER_ERROR_RESPONSES,
+    NOT_FOUND_RESPONSE,
+    UNAUTHORIZED_RESPONSE,
+    UNPROCESSABLE_RESPONSE,
+)
 from curator.psn.errors import PsnAuthError
 from curator.psn.identifiers import (
     InvalidPsnIdentifierError,
@@ -127,7 +133,7 @@ class TrophyGroupsResponse(BaseModel):
     last_updated: str | None
 
 
-@router.get("/summary")
+@router.get("/summary", responses={**BEARER_ERROR_RESPONSES, 401: UNAUTHORIZED_RESPONSE, 404: NOT_FOUND_RESPONSE})
 async def get_trophy_summary(
     request: Request, claims: Annotated[TokenClaims, Depends(require_bearer)]
 ) -> TrophySummaryResponse:
@@ -143,11 +149,11 @@ async def get_trophy_summary(
     return _summary_response(summary)
 
 
-@router.get("/titles")
+@router.get("/titles", responses={**BEARER_ERROR_RESPONSES, 401: UNAUTHORIZED_RESPONSE, 404: NOT_FOUND_RESPONSE})
 async def get_trophy_titles(
     request: Request,
     claims: Annotated[TokenClaims, Depends(require_bearer)],
-    limit: int = Query(default=100, ge=1, le=500, alias=LIMIT_PARAM),
+    limit: Annotated[int, Query(ge=1, le=500, alias=LIMIT_PARAM)] = 100,
 ) -> TrophyTitlesResponse:
     """List the caller's games that have trophies, with per-game progress.
 
@@ -161,13 +167,21 @@ async def get_trophy_titles(
     return TrophyTitlesResponse(titles=[_title_response(title) for title in titles])
 
 
-@router.get("/titles/{np_communication_id}")
+@router.get(
+    "/titles/{np_communication_id}",
+    responses={
+        **BEARER_ERROR_RESPONSES,
+        401: UNAUTHORIZED_RESPONSE,
+        404: NOT_FOUND_RESPONSE,
+        422: UNPROCESSABLE_RESPONSE,
+    },
+)
 async def get_title_trophies(
     request: Request,
     np_communication_id: str,
     claims: Annotated[TokenClaims, Depends(require_bearer)],
-    platform: str = Query(..., alias=PLATFORM_PARAM),
-    group: str = Query(default=ALL_TROPHY_GROUPS, alias=GROUP_PARAM),
+    platform: Annotated[str, Query(alias=PLATFORM_PARAM)],
+    group: Annotated[str, Query(alias=GROUP_PARAM)] = ALL_TROPHY_GROUPS,
 ) -> TitleTrophiesResponse:
     """List every trophy in a title, merged with the caller's earned progress and rarity.
 
@@ -186,12 +200,20 @@ async def get_title_trophies(
     return TitleTrophiesResponse(trophies=[_detail_response(trophy) for trophy in trophies])
 
 
-@router.get("/titles/{np_communication_id}/groups")
+@router.get(
+    "/titles/{np_communication_id}/groups",
+    responses={
+        **BEARER_ERROR_RESPONSES,
+        401: UNAUTHORIZED_RESPONSE,
+        404: NOT_FOUND_RESPONSE,
+        422: UNPROCESSABLE_RESPONSE,
+    },
+)
 async def get_trophy_groups(
     request: Request,
     np_communication_id: str,
     claims: Annotated[TokenClaims, Depends(require_bearer)],
-    platform: str = Query(..., alias=PLATFORM_PARAM),
+    platform: Annotated[str, Query(alias=PLATFORM_PARAM)],
 ) -> TrophyGroupsResponse:
     """Get a title's trophy-group breakdown (base game + each DLC), with the caller's earned progress.
 

@@ -18,6 +18,7 @@ from pydantic import BaseModel
 
 from curator.catalog.ps_plus_repository import PsPlusRepository, PsPlusTier, PsPlusTitle
 from curator.deps import PREFERENCE_NOT_LINKED_DETAIL, require_bearer
+from curator.openapi_responses import BEARER_ERROR_RESPONSES, NOT_FOUND_RESPONSE
 from curator.persistence.repository import Repository
 from curator.token_validation import TokenClaims
 
@@ -74,7 +75,7 @@ class PsPlusRotationSummaryResponse(BaseModel):
     leaving: int
 
 
-@router.get("/me/ps-plus-rotation")
+@router.get("/me/ps-plus-rotation", responses={**BEARER_ERROR_RESPONSES, 404: NOT_FOUND_RESPONSE})
 async def get_ps_plus_rotation(
     request: Request, claims: Annotated[TokenClaims, Depends(require_bearer)]
 ) -> PsPlusRotationResponse:
@@ -99,7 +100,7 @@ async def get_ps_plus_rotation(
     )
 
 
-@router.get("/me/ps-plus-rotation/summary")
+@router.get("/me/ps-plus-rotation/summary", responses={**BEARER_ERROR_RESPONSES, 404: NOT_FOUND_RESPONSE})
 async def get_ps_plus_rotation_summary(
     request: Request, claims: Annotated[TokenClaims, Depends(require_bearer)]
 ) -> PsPlusRotationSummaryResponse:

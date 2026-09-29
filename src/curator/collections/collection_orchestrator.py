@@ -10,7 +10,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from dataclasses import dataclass
 
-from curator.collections.capacity_fill_strategy import StorageBin, fill_capacity_multi_bin
+from curator.collections.capacity_fill_strategy import MultiBinFillResult, StorageBin, fill_capacity_multi_bin
 from curator.collections.collection_spec import CAPACITY_FILL_KIND, CollectionSpec
 from curator.collections.filter_list_strategy import apply_filter_list, filter_candidates
 from curator.collections.game_candidate import (
@@ -22,7 +22,7 @@ from curator.collections.game_candidate import (
     GameCandidate,
     SizeSource,
 )
-from curator.collections.repository import STORAGE_KIND_USB, CollectionsRepository, RawCandidateRow
+from curator.collections.repository import STORAGE_KIND_USB, CollectionsRepository, RawCandidateRow, UserConsole
 from curator.psn.title_platform import PS4, PS5, ConsolePlatform
 from curator.scoring.scoring_service import composite_score, rank_score
 from curator.scoring.size_estimation_service import SizeEstimate, estimate_install_size_gb
@@ -150,31 +150,10 @@ class CollectionOrchestrator:
 
         if spec.exclude_installed_on:
             assert consoles is not None
-            owned_console_ids = {console.console_id for console in consoles}
-            unknown = [cid for cid in spec.exclude_installed_on if cid not in owned_console_ids]
-            if unknown:
-                raise ValueError(f"Unknown console_id(s) for this user in exclude_installed_on: {unknown!r}")
+            _require_owned_consoles(spec.exclude_installed_on, consoles)
 
         if spec.kind == CAPACITY_FILL_KIND:
-            if spec.console_id is None:
-                raise ValueError("capacity_fill requires a console_id")
-            assert consoles is not None
-            console = next((c for c in consoles if c.console_id == spec.console_id), None)
-            if console is None:
-                raise ValueError(f"Unknown console_id {spec.console_id!r} for this user")
-            platform = console.platform
-            routing_genres = console.routing_genres
-
-            bins = [StorageBin(bin_id=console.console_id, capacity_gb=console.effective_capacity_gb)]
-            attached_devices = [
-                device
-                for device in await self._repository.list_storage_devices(identity_sub)
-                if device.console_id == spec.console_id and (platform != PS5 or device.kind != STORAGE_KIND_USB)
-            ]
-            bins.extend(
-                StorageBin(bin_id=device.device_id, capacity_gb=device.effective_capacity_gb)
-                for device in attached_devices
-            )
+            platform, routing_genres, bins = await self._capacity_target(identity_sub, spec, consoles)
 
         include_non_games = spec.kind == CAPACITY_FILL_KIND
         raw_rows = await self._repository.list_candidates(
@@ -185,21 +164,9 @@ class CollectionOrchestrator:
             exclude_installed_on=spec.exclude_installed_on,
             include_non_games=include_non_games,
         )
-        ignored_filters: tuple[IgnoredFilter, ...] = ()
-        excluded_for_missing_trophy_data = 0
-        if spec.min_percent_completed is not None:
-            if await self._repository.user_has_trophy_data(identity_sub):
-                excluded_for_missing_trophy_data = await self._repository.count_candidates_missing_trophy_data(
-                    identity_sub,
-                    platform=platform,
-                    include_inactive=spec.include_inactive,
-                    exclude_installed_on=spec.exclude_installed_on,
-                    include_non_games=include_non_games,
-                )
-            else:
-                ignored_filters = (
-                    IgnoredFilter(IGNORED_FILTER_MIN_PERCENT_COMPLETED, IGNORED_FILTER_REASON_NO_TROPHY_DATA),
-                )
+        ignored_filters, excluded_for_missing_trophy_data = await self._completion_floor(
+            identity_sub, spec, platform=platform, include_non_games=include_non_games
+        )
         media_ceiling_gb = (
             (await self._repository.list_platform_media_ceilings()).get(platform) if platform is not None else None
         )
@@ -217,25 +184,8 @@ class CollectionOrchestrator:
 
         if spec.kind == CAPACITY_FILL_KIND:
             matched = filter_candidates(candidates, spec, completion_available=completion_available)
-            matched_ids = {candidate.game_id for candidate in matched}
-            by_id = {candidate.game_id: candidate for candidate in candidates}
-            chained_ids_set = frozenset(chained_candidate_ids) if chained_candidate_ids else frozenset()
-            chained: list[GameCandidate] = []
-            seen_chained_ids: set[str] = set()
-            for game_id in chained_candidate_ids or ():
-                if game_id in matched_ids or game_id in seen_chained_ids:
-                    continue
-                candidate = by_id.get(game_id)
-                if candidate is not None:
-                    chained.append(candidate)
-                    seen_chained_ids.add(game_id)
-            unmatched = tuple(
-                candidate
-                for candidate in candidates
-                if candidate.game_id not in matched_ids and candidate.game_id not in chained_ids_set
-            )
-            fill_result = fill_capacity_multi_bin(
-                matched + chained, bins, routing_genres=routing_genres, sort_order=spec.sort_order
+            fill_result, unmatched = _pack(
+                candidates, matched, chained_candidate_ids, bins, routing_genres=routing_genres, spec=spec
             )
             included = tuple(
                 candidate for storage_bin in bins for candidate in fill_result.installed_by_bin[storage_bin.bin_id]
@@ -260,6 +210,49 @@ class CollectionOrchestrator:
             ignored_filters=ignored_filters,
             excluded_for_missing_trophy_data=excluded_for_missing_trophy_data,
         )
+
+    async def _capacity_target(
+        self, identity_sub: str, spec: CollectionSpec, consoles: Sequence[UserConsole] | None
+    ) -> tuple[ConsolePlatform, tuple[str, ...], list[StorageBin]]:
+        if spec.console_id is None:
+            raise ValueError("capacity_fill requires a console_id")
+        assert consoles is not None
+        console = next((c for c in consoles if c.console_id == spec.console_id), None)
+        if console is None:
+            raise ValueError(f"Unknown console_id {spec.console_id!r} for this user")
+        platform = console.platform
+
+        bins = [StorageBin(bin_id=console.console_id, capacity_gb=console.effective_capacity_gb)]
+        attached_devices = [
+            device
+            for device in await self._repository.list_storage_devices(identity_sub)
+            if device.console_id == spec.console_id and (platform != PS5 or device.kind != STORAGE_KIND_USB)
+        ]
+        bins.extend(
+            StorageBin(bin_id=device.device_id, capacity_gb=device.effective_capacity_gb) for device in attached_devices
+        )
+        return platform, console.routing_genres, bins
+
+    async def _completion_floor(
+        self,
+        identity_sub: str,
+        spec: CollectionSpec,
+        *,
+        platform: ConsolePlatform | None,
+        include_non_games: bool,
+    ) -> tuple[tuple[IgnoredFilter, ...], int]:
+        if spec.min_percent_completed is None:
+            return (), 0
+        if await self._repository.user_has_trophy_data(identity_sub):
+            excluded_for_missing_trophy_data = await self._repository.count_candidates_missing_trophy_data(
+                identity_sub,
+                platform=platform,
+                include_inactive=spec.include_inactive,
+                exclude_installed_on=spec.exclude_installed_on,
+                include_non_games=include_non_games,
+            )
+            return (), excluded_for_missing_trophy_data
+        return (IgnoredFilter(IGNORED_FILTER_MIN_PERCENT_COMPLETED, IGNORED_FILTER_REASON_NO_TROPHY_DATA),), 0
 
     @staticmethod
     def _score(
@@ -327,3 +320,42 @@ class CollectionOrchestrator:
             return media_ceiling_gb, CAPPED_DEFAULT_SIZE
 
         return _DEFAULT_SIZE_GB, DEFAULT_SIZE
+
+
+def _require_owned_consoles(console_ids: Sequence[str], consoles: Sequence[UserConsole]) -> None:
+    owned_console_ids = {console.console_id for console in consoles}
+    unknown = [cid for cid in console_ids if cid not in owned_console_ids]
+    if unknown:
+        raise ValueError(f"Unknown console_id(s) for this user in exclude_installed_on: {unknown!r}")
+
+
+def _pack(
+    candidates: list[GameCandidate],
+    matched: list[GameCandidate],
+    chained_candidate_ids: Sequence[str] | None,
+    bins: list[StorageBin],
+    *,
+    routing_genres: tuple[str, ...],
+    spec: CollectionSpec,
+) -> tuple[MultiBinFillResult, tuple[GameCandidate, ...]]:
+    matched_ids = {candidate.game_id for candidate in matched}
+    by_id = {candidate.game_id: candidate for candidate in candidates}
+    chained_ids_set = frozenset(chained_candidate_ids) if chained_candidate_ids else frozenset()
+    chained: list[GameCandidate] = []
+    seen_chained_ids: set[str] = set()
+    for game_id in chained_candidate_ids or ():
+        if game_id in matched_ids or game_id in seen_chained_ids:
+            continue
+        candidate = by_id.get(game_id)
+        if candidate is not None:
+            chained.append(candidate)
+            seen_chained_ids.add(game_id)
+    unmatched = tuple(
+        candidate
+        for candidate in candidates
+        if candidate.game_id not in matched_ids and candidate.game_id not in chained_ids_set
+    )
+    fill_result = fill_capacity_multi_bin(
+        matched + chained, bins, routing_genres=routing_genres, sort_order=spec.sort_order
+    )
+    return fill_result, unmatched

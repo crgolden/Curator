@@ -7,6 +7,7 @@ from pydantic import BaseModel
 
 from curator.deps import PREFERENCE_NOT_LINKED_DETAIL, require_bearer
 from curator.library.repository import LibraryRepository
+from curator.openapi_responses import BEARER_ERROR_RESPONSES, NOT_FOUND_RESPONSE
 from curator.persistence.repository import LinkRecord, Repository
 from curator.token_validation import TokenClaims
 
@@ -28,7 +29,7 @@ class PsnPreferences(BaseModel):
     allow_chat_writes: bool = False
 
 
-@router.get("/me/psn-preferences")
+@router.get("/me/psn-preferences", responses={**BEARER_ERROR_RESPONSES, 404: NOT_FOUND_RESPONSE})
 async def get_psn_preferences(
     request: Request, claims: Annotated[TokenClaims, Depends(require_bearer)]
 ) -> PsnPreferences:
@@ -43,7 +44,7 @@ async def get_psn_preferences(
     return _response(link)
 
 
-@router.put("/me/psn-preferences")
+@router.put("/me/psn-preferences", responses={**BEARER_ERROR_RESPONSES, 404: NOT_FOUND_RESPONSE})
 async def set_psn_preferences(
     body: PsnPreferences,
     request: Request,

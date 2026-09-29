@@ -178,10 +178,11 @@ def test_two_games_cannot_share_a_normalized_title(db_connection, seeded_user_an
     with db_connection.cursor() as cur:
         cur.execute("SELECT normalized_title FROM games WHERE game_id = %s", (game_id,))
         (taken_key,) = cur.fetchone()
+    differently_cased_title = taken_key.upper()
     with pytest.raises(psycopg_errors.UniqueViolation), db_connection.cursor() as cur:
         cur.execute(
             "INSERT INTO games (game_id, canonical_title, normalized_title) VALUES (%s, %s, %s)",
-            (str(uuid.uuid4()), taken_key.upper(), taken_key),
+            (str(uuid.uuid4()), differently_cased_title, taken_key),
         )
 
 
@@ -855,15 +856,20 @@ def test_a_name_override_names_one_product_under_a_concept_and_needs_no_linked_c
         cur.execute("SELECT count(*) FROM game_name_overrides WHERE concept_id = %s", (concept_id,))
         (overrides,) = cur.fetchone()
     assert overrides == len(product_ids)
+    second_override_name = new_game_title()
+    second_reason = new_game_title()
     with pytest.raises(psycopg_errors.UniqueViolation), db_connection.cursor() as cur:
-        cur.execute(INSERT_PRODUCT_NAME_OVERRIDE_SQL, (concept_id, product_ids[0], new_game_title(), new_game_title()))
+        cur.execute(INSERT_PRODUCT_NAME_OVERRIDE_SQL, (concept_id, product_ids[0], second_override_name, second_reason))
 
 
 def test_a_name_override_must_name_a_product(db_connection):
+    concept_id = new_concept_id()
+    override_name = new_game_title()
+    reason = new_game_title()
     with pytest.raises(psycopg_errors.NotNullViolation), db_connection.cursor() as cur:
         cur.execute(
             "INSERT INTO game_name_overrides (concept_id, override_name, reason) VALUES (%s, %s, %s)",
-            (new_concept_id(), new_game_title(), new_game_title()),
+            (concept_id, override_name, reason),
         )
 
 

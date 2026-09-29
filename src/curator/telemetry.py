@@ -37,16 +37,17 @@ from elasticsearch import Elasticsearch
 from fastapi import FastAPI
 from opentelemetry import metrics as metrics
 from opentelemetry import trace as trace
+from opentelemetry.context import Context
 from opentelemetry.exporter.otlp.proto.grpc.metric_exporter import OTLPMetricExporter
 from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExporter
 from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
-from opentelemetry.instrumentation.httpx import HTTPXClientInstrumentor, RequestInfo
+from opentelemetry.instrumentation.httpx import HTTPXClientInstrumentor
 from opentelemetry.instrumentation.psycopg import PsycopgInstrumentor
 from opentelemetry.metrics import CallbackOptions, Observation
 from opentelemetry.sdk.metrics import MeterProvider
 from opentelemetry.sdk.metrics.export import PeriodicExportingMetricReader
 from opentelemetry.sdk.resources import SERVICE_NAME, Resource
-from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace import SpanProcessor, TracerProvider
 from opentelemetry.sdk.trace.export import BatchSpanProcessor
 from opentelemetry.trace import Span
 
@@ -70,19 +71,32 @@ _REDACT_QUERY_PARAM_NAME = RAWG_KEY_PARAM
 _URL_SPAN_ATTRIBUTE_KEYS = ("http.url", "url.full")
 
 
-async def _redact_rawg_key_from_span(span: Span, request_info: RequestInfo) -> None:
-    """Strip the RAWG ``key`` query parameter from a span's URL attribute right after the httpx
-    instrumentor sets it, so a user's own RAWG API key never lands in a Tempo trace.
-    """
-    if not span.is_recording() or request_info.url.host not in _REDACT_QUERY_PARAM_HOSTS:
-        return
-    sanitized = request_info.url.copy_with(
-        params={key: value for key, value in request_info.url.params.items() if key != _REDACT_QUERY_PARAM_NAME}
+def _without_rawg_key(url: str) -> str | None:
+    """The URL with RAWG's ``key`` query parameter removed, or ``None`` when there is nothing to remove."""
+    parsed = httpx.URL(url)
+    if parsed.host not in _REDACT_QUERY_PARAM_HOSTS or _REDACT_QUERY_PARAM_NAME not in parsed.params:
+        return None
+    return str(
+        parsed.copy_with(params={key: value for key, value in parsed.params.items() if key != _REDACT_QUERY_PARAM_NAME})
     )
-    existing_attributes = getattr(span, "attributes", None) or {}
-    for attribute_key in _URL_SPAN_ATTRIBUTE_KEYS:
-        if attribute_key in existing_attributes:
-            span.set_attribute(attribute_key, str(sanitized))
+
+
+class RawgKeyRedactingSpanProcessor(SpanProcessor):
+    """Strip the RAWG ``key`` query parameter from a span's URL attributes as the span starts, so a
+    user's own RAWG API key never lands in a Tempo trace.
+
+    The httpx instrumentor passes the URL attributes to ``start_as_current_span``, and the SDK calls
+    ``on_start`` after the span holds them and before anything can export it. A processor needs no
+    hook on the instrumentor, whose async request hook is kept only when it is a coroutine function.
+    """
+
+    def on_start(self, span: Span, parent_context: Context | None = None) -> None:
+        attributes = getattr(span, "attributes", None) or {}
+        for attribute_key in _URL_SPAN_ATTRIBUTE_KEYS:
+            value = attributes.get(attribute_key)
+            sanitized = _without_rawg_key(value) if isinstance(value, str) else None
+            if sanitized is not None:
+                span.set_attribute(attribute_key, sanitized)
 
 
 _ES_DATA_STREAM = "logs-app-curator"
@@ -183,6 +197,7 @@ def _register_otlp_providers(alloy_endpoint: str) -> None:
         resource = Resource.create({SERVICE_NAME: SERVICE_NAME_VALUE})
 
         tracer_provider = TracerProvider(resource=resource)
+        tracer_provider.add_span_processor(RawgKeyRedactingSpanProcessor())
         tracer_provider.add_span_processor(
             BatchSpanProcessor(OTLPSpanExporter(endpoint=alloy_endpoint, timeout=_EXPORT_TIMEOUT_SECONDS))
         )
@@ -205,7 +220,7 @@ def _register_otlp_providers(alloy_endpoint: str) -> None:
 
         httpx_instrumentor = HTTPXClientInstrumentor()
         if not httpx_instrumentor.is_instrumented_by_opentelemetry:
-            httpx_instrumentor.instrument(async_request_hook=_redact_rawg_key_from_span)
+            httpx_instrumentor.instrument()
 
         _otel_configured = True
 

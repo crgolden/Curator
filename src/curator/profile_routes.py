@@ -18,6 +18,12 @@ from curator.collections.repository import VISIBILITY_PUBLIC, CollectionsReposit
 from curator.deps import require_bearer
 from curator.library.repository import LibraryRepository, LibrarySortField
 from curator.library_routes import LibraryGenresResponse
+from curator.openapi_responses import (
+    BAD_REQUEST_RESPONSE,
+    BEARER_ERROR_RESPONSES,
+    FORBIDDEN_RESPONSE,
+    NOT_FOUND_RESPONSE,
+)
 from curator.persistence.follow_repository import FollowEdge, FollowRepository
 from curator.persistence.profile_link_repository import ProfileLink, ProfileLinkRepository, profile_link_url
 from curator.persistence.profile_repository import ProfileRepository, ProfileSettings
@@ -194,7 +200,7 @@ class ProfileDefinitionResponse(BaseModel):
     item_count: int
 
 
-@router.get("/me/profile-settings")
+@router.get("/me/profile-settings", responses={**BEARER_ERROR_RESPONSES})
 async def get_my_profile_settings(
     request: Request, claims: Annotated[TokenClaims, Depends(require_bearer)]
 ) -> ProfileSettingsResponse:
@@ -207,7 +213,7 @@ async def get_my_profile_settings(
     return _settings_response(settings)
 
 
-@router.put("/me/profile-settings")
+@router.put("/me/profile-settings", responses={**BEARER_ERROR_RESPONSES})
 async def set_my_profile_settings(
     body: ProfileSettingsRequest, request: Request, claims: Annotated[TokenClaims, Depends(require_bearer)]
 ) -> ProfileSettingsResponse:
@@ -233,7 +239,7 @@ async def set_my_profile_settings(
     )
 
 
-@router.get("/me/profile-link-sites")
+@router.get("/me/profile-link-sites", responses={**BEARER_ERROR_RESPONSES})
 async def list_profile_link_sites(
     request: Request, claims: Annotated[TokenClaims, Depends(require_bearer)]
 ) -> list[ProfileLinkSiteResponse]:
@@ -246,7 +252,7 @@ async def list_profile_link_sites(
     return [ProfileLinkSiteResponse(site_key=site.site_key, display_name=site.display_name) for site in sites]
 
 
-@router.get("/me/profile-links")
+@router.get("/me/profile-links", responses={**BEARER_ERROR_RESPONSES})
 async def get_my_profile_links(
     request: Request, claims: Annotated[TokenClaims, Depends(require_bearer)]
 ) -> list[ProfileLinkResponse]:
@@ -255,7 +261,7 @@ async def get_my_profile_links(
     return [_link_response(link) for link in await repository.list_for_user(claims.sub)]
 
 
-@router.put("/me/profile-links/{site_key}")
+@router.put("/me/profile-links/{site_key}", responses={**BEARER_ERROR_RESPONSES, 400: BAD_REQUEST_RESPONSE})
 async def set_my_profile_link(
     site_key: str, body: ProfileLinkRequest, request: Request, claims: Annotated[TokenClaims, Depends(require_bearer)]
 ) -> ProfileLinkResponse:
@@ -285,7 +291,7 @@ async def set_my_profile_link(
     )
 
 
-@router.delete("/me/profile-links/{site_key}", status_code=204)
+@router.delete("/me/profile-links/{site_key}", status_code=204, responses={**BEARER_ERROR_RESPONSES})
 async def delete_my_profile_link(
     site_key: str, request: Request, claims: Annotated[TokenClaims, Depends(require_bearer)]
 ) -> Response:
@@ -295,7 +301,7 @@ async def delete_my_profile_link(
     return Response(status_code=204)
 
 
-@router.get("/users/{sub}/profile")
+@router.get("/users/{sub}/profile", responses={**BEARER_ERROR_RESPONSES, 404: NOT_FOUND_RESPONSE})
 async def get_user_profile(
     sub: str, request: Request, claims: Annotated[TokenClaims, Depends(require_bearer)]
 ) -> PublicProfileResponse:
@@ -465,7 +471,11 @@ async def _cross_user_identity(
     return ProfileIdentityResponse(online_id=online_id)
 
 
-@router.post("/users/{sub}/follow", status_code=204)
+@router.post(
+    "/users/{sub}/follow",
+    status_code=204,
+    responses={**BEARER_ERROR_RESPONSES, 400: BAD_REQUEST_RESPONSE, 404: NOT_FOUND_RESPONSE},
+)
 async def follow_user(sub: str, request: Request, claims: Annotated[TokenClaims, Depends(require_bearer)]) -> Response:
     """Follow ``sub``.
 
@@ -488,7 +498,7 @@ async def follow_user(sub: str, request: Request, claims: Annotated[TokenClaims,
     return Response(status_code=204)
 
 
-@router.delete("/users/{sub}/follow", status_code=204)
+@router.delete("/users/{sub}/follow", status_code=204, responses={**BEARER_ERROR_RESPONSES})
 async def unfollow_user(
     sub: str, request: Request, claims: Annotated[TokenClaims, Depends(require_bearer)]
 ) -> Response:
@@ -505,13 +515,13 @@ async def unfollow_user(
     return Response(status_code=204)
 
 
-@router.get("/users/{sub}/followers")
+@router.get("/users/{sub}/followers", responses={**BEARER_ERROR_RESPONSES, 404: NOT_FOUND_RESPONSE})
 async def get_followers(
     sub: str,
     request: Request,
     claims: Annotated[TokenClaims, Depends(require_bearer)],
-    limit: int = Query(default=50, ge=1, le=200),
-    offset: int = Query(default=0, ge=0),
+    limit: Annotated[int, Query(ge=1, le=200)] = 50,
+    offset: Annotated[int, Query(ge=0)] = 0,
 ) -> FollowListResponse:
     """List the users following ``sub``, newest first. Not gated by ``is_public`` (see the module docstring).
 
@@ -528,13 +538,13 @@ async def get_followers(
     return FollowListResponse(entries=entries, total=total)
 
 
-@router.get("/users/{sub}/following")
+@router.get("/users/{sub}/following", responses={**BEARER_ERROR_RESPONSES, 404: NOT_FOUND_RESPONSE})
 async def get_following(
     sub: str,
     request: Request,
     claims: Annotated[TokenClaims, Depends(require_bearer)],
-    limit: int = Query(default=50, ge=1, le=200),
-    offset: int = Query(default=0, ge=0),
+    limit: Annotated[int, Query(ge=1, le=200)] = 50,
+    offset: Annotated[int, Query(ge=0)] = 0,
 ) -> FollowListResponse:
     """List the users ``sub`` follows, newest first. Not gated by ``is_public`` (see the module docstring).
 
@@ -569,7 +579,10 @@ async def _follow_entry(request: Request, edge: FollowEdge) -> FollowListEntryRe
     )
 
 
-@router.get("/users/{sub}/library/genres")
+@router.get(
+    "/users/{sub}/library/genres",
+    responses={**BEARER_ERROR_RESPONSES, 403: FORBIDDEN_RESPONSE, 404: NOT_FOUND_RESPONSE},
+)
 async def get_user_library_genres(
     sub: str, request: Request, claims: Annotated[TokenClaims, Depends(require_bearer)]
 ) -> LibraryGenresResponse:
@@ -586,17 +599,19 @@ async def get_user_library_genres(
     return LibraryGenresResponse(genres=genres)
 
 
-@router.get("/users/{sub}/library")
+@router.get(
+    "/users/{sub}/library", responses={**BEARER_ERROR_RESPONSES, 403: FORBIDDEN_RESPONSE, 404: NOT_FOUND_RESPONSE}
+)
 async def get_user_library(
     sub: str,
     request: Request,
     claims: Annotated[TokenClaims, Depends(require_bearer)],
-    q: str | None = Query(default=None),
-    genre: str | None = Query(default=None),
-    sort: LibrarySortField = Query(default="title"),
-    sort_dir: Literal["asc", "desc"] = Query(default="asc", alias=SORT_DIR_PARAM),
-    limit: int = Query(default=20, ge=1, le=100),
-    offset: int = Query(default=0, ge=0),
+    q: Annotated[str | None, Query()] = None,
+    genre: Annotated[str | None, Query()] = None,
+    sort: Annotated[LibrarySortField, Query()] = "title",
+    sort_dir: Annotated[Literal["asc", "desc"], Query(alias=SORT_DIR_PARAM)] = "asc",
+    limit: Annotated[int, Query(ge=1, le=100)] = 20,
+    offset: Annotated[int, Query(ge=0)] = 0,
 ) -> ProfileLibraryPageResponse:
     """Return one page of ``sub``'s library, read-only -- same search/filter/sort/paging support as
     the caller's-own ``GET /library``.
@@ -634,7 +649,9 @@ async def get_user_library(
     )
 
 
-@router.get("/users/{sub}/collections")
+@router.get(
+    "/users/{sub}/collections", responses={**BEARER_ERROR_RESPONSES, 403: FORBIDDEN_RESPONSE, 404: NOT_FOUND_RESPONSE}
+)
 async def get_user_collections(
     sub: str, request: Request, claims: Annotated[TokenClaims, Depends(require_bearer)]
 ) -> list[ProfileDefinitionResponse]:

@@ -392,9 +392,11 @@ def test_a_device_link_check_is_not_sent_when_its_history_row_cannot_be_written(
     repo = _linked_console_repository(caller.sub, device_id)
     client, devices = _build_with_devices(repo, [_device(device_id)], caller, harvest_devices=True)
     client.app.state.audit_repository.begin_error = RuntimeError(device_id)
+    consoles_path = _consoles_path(client)
+    headers = _bearer(caller.token)
 
     with pytest.raises(RuntimeError):
-        client.get(_consoles_path(client), headers=_bearer(caller.token))
+        client.get(consoles_path, headers=headers)
 
     assert devices.calls == 0
 

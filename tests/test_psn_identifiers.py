@@ -23,6 +23,7 @@ _TRAVERSAL_PAYLOADS = (
     "a%2f..%2fb",
     "a\\..\\b",
 )
+_NON_ASCII_DIGIT = "\N{ARABIC-INDIC DIGIT ONE}"
 
 
 @pytest.mark.parametrize("value", ["0", "1234567890123456789", "8214019822170343784"[:20]])
@@ -30,7 +31,7 @@ def test_account_id_accepts_digits_up_to_twenty(value):
     assert validate_account_id(value) == value
 
 
-@pytest.mark.parametrize("value", ["", "12a", "-1", "1.2", *_TRAVERSAL_PAYLOADS])
+@pytest.mark.parametrize("value", ["", "12a", "-1", "1.2", _NON_ASCII_DIGIT, *_TRAVERSAL_PAYLOADS])
 def test_account_id_rejects_anything_that_is_not_digits(value):
     with pytest.raises(InvalidPsnIdentifierError):
         validate_account_id(value)
@@ -52,7 +53,9 @@ def test_np_communication_id_accepts_the_npwr_shape(value):
     assert validate_np_communication_id(value) == value
 
 
-@pytest.mark.parametrize("value", ["", "NPWR_00", "npwr15509_00", "NPWR15509", *_TRAVERSAL_PAYLOADS])
+@pytest.mark.parametrize(
+    "value", ["", "NPWR_00", "npwr15509_00", "NPWR15509", "NPWR15509_" + _NON_ASCII_DIGIT * 2, *_TRAVERSAL_PAYLOADS]
+)
 def test_np_communication_id_rejects_everything_else(value):
     with pytest.raises(InvalidPsnIdentifierError):
         validate_np_communication_id(value)
@@ -90,6 +93,7 @@ def test_group_id_accepts_a_server_allocated_multi_member_id():
         "~300A4EB95AD46BAD.7DEFC8FC0BA52FC",
         "ba08b67ca0b044b7688a29abdc884f37b5dd47cd",
         "ba08b67ca0b044b7688a29abdc884f37b5dd47cd-",
+        "ba08b67ca0b044b7688a29abdc884f37b5dd47cd-" + _NON_ASCII_DIGIT,
         *_TRAVERSAL_PAYLOADS,
     ],
 )

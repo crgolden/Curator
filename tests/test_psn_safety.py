@@ -114,18 +114,21 @@ async def test_register_pins_matching_account(monkeypatch):
 async def test_register_rejects_non_matching_account(monkeypatch):
     monkeypatch.setenv(TEST_ONLINE_ID_ENV_NAME, new_online_id())
     repo = FakePinnedAccountRepository()
+    guard = MutationGuard(new_identity_sub(), repo)
+    live_account = _account()
 
     with pytest.raises(MutationNotAllowedError, match="not the expected test account"):
-        await MutationGuard(new_identity_sub(), repo).register(_account())
+        await guard.register(live_account)
 
     assert repo.pin_calls == []
 
 
 async def test_require_pinned_raises_when_nothing_pinned():
     guard = MutationGuard(new_identity_sub(), FakePinnedAccountRepository())
+    live_account = _account()
 
     with pytest.raises(MutationNotAllowedError, match="No test account is registered"):
-        await guard.require_pinned(_account())
+        await guard.require_pinned(live_account)
 
 
 async def test_require_pinned_raises_when_live_account_differs():
@@ -133,9 +136,10 @@ async def test_require_pinned_raises_when_live_account_differs():
     repo = FakePinnedAccountRepository()
     repo.pinned[identity_sub] = new_account_id()
     guard = MutationGuard(identity_sub, repo)
+    live_account = _account()
 
     with pytest.raises(MutationNotAllowedError, match="Refusing to perform a mutating action"):
-        await guard.require_pinned(_account())
+        await guard.require_pinned(live_account)
 
 
 async def test_require_pinned_succeeds_when_live_account_matches():
@@ -154,30 +158,34 @@ async def test_pinned_state_is_per_user():
     repo.pinned[pinning_sub] = pinned_account.account_id
 
     await MutationGuard(pinning_sub, repo).require_pinned(pinned_account)
+    other_guard = MutationGuard(other_sub, repo)
 
     with pytest.raises(MutationNotAllowedError):
-        await MutationGuard(other_sub, repo).require_pinned(pinned_account)
+        await other_guard.require_pinned(pinned_account)
 
 
 async def test_require_allowed_raises_when_no_link_store_is_configured():
     guard = MutationGuard(new_identity_sub(), FakePinnedAccountRepository())
+    live_account = _account()
 
     with pytest.raises(MutationNotAllowedError, match="No PSN link store is configured"):
-        await guard.require_allowed(_account(), FRIEND_WRITES)
+        await guard.require_allowed(live_account, FRIEND_WRITES)
 
 
 async def test_require_allowed_raises_when_user_has_no_link():
     guard = MutationGuard(new_identity_sub(), FakePinnedAccountRepository(), links=FakeLinkReader(None))
+    live_account = _account()
 
     with pytest.raises(MutationNotAllowedError, match="No PSN account is linked"):
-        await guard.require_allowed(_account(), FRIEND_WRITES)
+        await guard.require_allowed(live_account, FRIEND_WRITES)
 
 
 async def test_require_allowed_raises_when_live_account_is_not_the_linked_one():
     guard, _ = _consenting_guard(_account(), allow_friend_writes=True)
+    unlinked_account = _account()
 
     with pytest.raises(MutationNotAllowedError, match=r"not the .*linked"):
-        await guard.require_allowed(_account(), FRIEND_WRITES)
+        await guard.require_allowed(unlinked_account, FRIEND_WRITES)
 
 
 async def test_require_allowed_raises_when_capability_is_not_consented():
@@ -246,6 +254,7 @@ async def test_require_allowed_skips_the_cap_when_no_counter_is_configured():
 async def test_require_allowed_rejects_an_unknown_capability():
     linked_account = _account()
     guard, _ = _consenting_guard(linked_account, allow_chat_writes=True)
+    unknown_capability = lowercase_token()
 
     with pytest.raises(AssertionError):
-        await guard.require_allowed(linked_account, lowercase_token())
+        await guard.require_allowed(linked_account, unknown_capability)

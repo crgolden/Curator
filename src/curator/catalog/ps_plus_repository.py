@@ -424,10 +424,16 @@ def _to_title(row: Sequence[Any]) -> PsPlusTitle:
     return PsPlusTitle(
         title_id=str(row[0]),
         game_id=str(row[5]) if row[5] is not None else None,
-        title=row[6] if row[6] is not None else (name if isinstance(name, str) and name.strip() else None),
+        title=row[6] if row[6] is not None else _named(name),
         tier=row[1],
         platforms=tuple(str(platform) for platform in platforms) if isinstance(platforms, list) else (),
         cover_image_url=cover_image_url(raw.get(MEDIA_KEY)),
         store_product_id=row[2],
         since_at=row[4],
     )
+
+
+def _named(name: Any) -> str | None:
+    if isinstance(name, str) and name.strip():
+        return name
+    return None

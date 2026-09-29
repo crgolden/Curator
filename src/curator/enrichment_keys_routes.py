@@ -12,6 +12,7 @@ from curator.audit.repository import ACTION_ENRICHMENT_KEY_ADDED, ACTION_ENRICHM
 from curator.deps import require_bearer
 from curator.enrichment.opencritic_client import OpenCriticApiError, OpenCriticClient
 from curator.enrichment.rawg_client import RawgApiError, RawgClient
+from curator.openapi_responses import BAD_REQUEST_RESPONSE, BEARER_ERROR_RESPONSES, SERVICE_UNAVAILABLE_RESPONSE
 from curator.persistence.crypto import TokenCrypto
 from curator.persistence.enrichment_keys_repository import EnrichmentKeysRepository
 from curator.token_validation import TokenClaims
@@ -50,7 +51,7 @@ class SetEnrichmentKeyRequest(BaseModel):
     api_key: str
 
 
-@router.get("/me/enrichment-keys")
+@router.get("/me/enrichment-keys", responses={**BEARER_ERROR_RESPONSES})
 async def get_enrichment_key_status(
     request: Request, claims: Annotated[TokenClaims, Depends(require_bearer)]
 ) -> EnrichmentKeyStatusResponse:
@@ -74,7 +75,11 @@ async def get_enrichment_key_status(
     )
 
 
-@router.put("/me/enrichment-keys/{provider}", status_code=204)
+@router.put(
+    "/me/enrichment-keys/{provider}",
+    status_code=204,
+    responses={**BEARER_ERROR_RESPONSES, 400: BAD_REQUEST_RESPONSE, 503: SERVICE_UNAVAILABLE_RESPONSE},
+)
 async def set_enrichment_key(
     provider: Provider,
     body: SetEnrichmentKeyRequest,
@@ -105,7 +110,7 @@ async def set_enrichment_key(
     return Response(status_code=204)
 
 
-@router.delete("/me/enrichment-keys/{provider}", status_code=204)
+@router.delete("/me/enrichment-keys/{provider}", status_code=204, responses={**BEARER_ERROR_RESPONSES})
 async def delete_enrichment_key(
     provider: Provider, request: Request, claims: Annotated[TokenClaims, Depends(require_bearer)]
 ) -> Response:

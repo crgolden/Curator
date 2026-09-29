@@ -14,6 +14,7 @@ from curator.collections.repository import (
     storage_device_kind,
 )
 from curator.deps import require_bearer
+from curator.openapi_responses import BAD_REQUEST_RESPONSE, BEARER_ERROR_RESPONSES, NOT_FOUND_RESPONSE
 from curator.token_validation import TokenClaims
 
 router = APIRouter(prefix="/storage-devices", tags=["storage-devices"])
@@ -107,7 +108,7 @@ async def _require_owned_console(repository: CollectionsRepository, identity_sub
         raise HTTPException(status_code=400, detail=unknown_console_detail(console_id))
 
 
-@router.post("", status_code=201)
+@router.post("", status_code=201, responses={**BEARER_ERROR_RESPONSES, 400: BAD_REQUEST_RESPONSE})
 async def create_storage_device(
     request: Request, body: StorageDeviceRequest, claims: Annotated[TokenClaims, Depends(require_bearer)]
 ) -> StorageDeviceResponse:
@@ -131,7 +132,7 @@ async def create_storage_device(
     return _to_response(device)
 
 
-@router.get("")
+@router.get("", responses={**BEARER_ERROR_RESPONSES})
 async def list_storage_devices(
     request: Request, claims: Annotated[TokenClaims, Depends(require_bearer)]
 ) -> list[StorageDeviceResponse]:
@@ -141,7 +142,7 @@ async def list_storage_devices(
     return [_to_response(device) for device in devices]
 
 
-@router.get("/{device_id}")
+@router.get("/{device_id}", responses={**BEARER_ERROR_RESPONSES, 404: NOT_FOUND_RESPONSE})
 async def get_storage_device(
     request: Request, device_id: str, claims: Annotated[TokenClaims, Depends(require_bearer)]
 ) -> StorageDeviceResponse:
@@ -156,7 +157,7 @@ async def get_storage_device(
     return _to_response(device)
 
 
-@router.patch("/{device_id}")
+@router.patch("/{device_id}", responses={**BEARER_ERROR_RESPONSES, 404: NOT_FOUND_RESPONSE})
 async def update_storage_device(
     request: Request,
     device_id: str,
@@ -176,7 +177,7 @@ async def update_storage_device(
     return _to_response(device)
 
 
-@router.delete("/{device_id}", status_code=204)
+@router.delete("/{device_id}", status_code=204, responses={**BEARER_ERROR_RESPONSES, 404: NOT_FOUND_RESPONSE})
 async def delete_storage_device(
     request: Request, device_id: str, claims: Annotated[TokenClaims, Depends(require_bearer)]
 ) -> None:
@@ -190,7 +191,10 @@ async def delete_storage_device(
         raise HTTPException(status_code=404, detail=STORAGE_DEVICE_NOT_FOUND_DETAIL)
 
 
-@router.put("/{device_id}/attach/{console_id}")
+@router.put(
+    "/{device_id}/attach/{console_id}",
+    responses={**BEARER_ERROR_RESPONSES, 400: BAD_REQUEST_RESPONSE, 404: NOT_FOUND_RESPONSE},
+)
 async def attach_storage_device(
     request: Request, device_id: str, console_id: str, claims: Annotated[TokenClaims, Depends(require_bearer)]
 ) -> StorageDeviceResponse:
@@ -209,7 +213,7 @@ async def attach_storage_device(
     return _to_response(device)
 
 
-@router.delete("/{device_id}/attach")
+@router.delete("/{device_id}/attach", responses={**BEARER_ERROR_RESPONSES, 404: NOT_FOUND_RESPONSE})
 async def detach_storage_device(
     request: Request, device_id: str, claims: Annotated[TokenClaims, Depends(require_bearer)]
 ) -> StorageDeviceResponse:
@@ -227,7 +231,7 @@ async def detach_storage_device(
     return _to_response(device)
 
 
-@router.get("/{device_id}/installs")
+@router.get("/{device_id}/installs", responses={**BEARER_ERROR_RESPONSES, 404: NOT_FOUND_RESPONSE})
 async def get_storage_device_installs(
     request: Request, device_id: str, claims: Annotated[TokenClaims, Depends(require_bearer)]
 ) -> StorageDeviceInstallsResponse:
@@ -242,7 +246,7 @@ async def get_storage_device_installs(
     return StorageDeviceInstallsResponse(game_ids=sorted(game_ids))
 
 
-@router.put("/{device_id}/installs/{game_id}")
+@router.put("/{device_id}/installs/{game_id}", responses={**BEARER_ERROR_RESPONSES, 404: NOT_FOUND_RESPONSE})
 async def set_storage_device_install(
     request: Request,
     device_id: str,

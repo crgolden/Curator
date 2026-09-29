@@ -17,12 +17,19 @@ from curator.deps import require_admin
 from curator.jobs.queue_publisher import QueuePublisher
 from curator.jobs.repository import JOB_KIND_ENRICHMENT, JobRunsRepository
 from curator.jobs.staleness import abandoned_run_reason
+from curator.openapi_responses import (
+    BEARER_ERROR_RESPONSES,
+    CONFLICT_RESPONSE,
+    NOT_FOUND_RESPONSE,
+    SERVICE_UNAVAILABLE_RESPONSE,
+)
 from curator.token_validation import TokenClaims
 
 router = APIRouter(prefix="/enrichment", tags=["enrichment"])
 
 CANCELLED_BY_ADMIN = "An administrator cancelled this enrichment run before it finished."
 ENRICHMENT_RUN_NOUN = "enrichment run"
+ENRICHMENT_RUN_NOT_FOUND_DETAIL = "Enrichment run not found."
 
 
 class EnrichmentRunResponse(BaseModel):
@@ -41,7 +48,7 @@ class EnrichmentRunStatusResponse(BaseModel):
     result_summary: dict[str, Any] | None
 
 
-@router.post("/runs", status_code=202)
+@router.post("/runs", status_code=202, responses={**BEARER_ERROR_RESPONSES, 503: SERVICE_UNAVAILABLE_RESPONSE})
 async def start_enrichment_run(
     request: Request, _claims: Annotated[TokenClaims, Depends(require_admin)]
 ) -> EnrichmentRunResponse:
@@ -68,7 +75,9 @@ async def start_enrichment_run(
     return EnrichmentRunResponse(run_id=run_id)
 
 
-@router.post("/runs/{run_id}/cancel")
+@router.post(
+    "/runs/{run_id}/cancel", responses={**BEARER_ERROR_RESPONSES, 404: NOT_FOUND_RESPONSE, 409: CONFLICT_RESPONSE}
+)
 async def cancel_enrichment_run(
     request: Request, run_id: str, _claims: Annotated[TokenClaims, Depends(require_admin)]
 ) -> EnrichmentRunStatusResponse:
@@ -85,14 +94,14 @@ async def cancel_enrichment_run(
     job_runs_repository: JobRunsRepository = request.app.state.job_runs_repository
     run = await job_runs_repository.get(run_id)
     if run is None or run.kind != JOB_KIND_ENRICHMENT:
-        raise HTTPException(status_code=404, detail="Enrichment run not found.")
+        raise HTTPException(status_code=404, detail=ENRICHMENT_RUN_NOT_FOUND_DETAIL)
 
     if not await job_runs_repository.cancel(run_id, CANCELLED_BY_ADMIN):
         raise HTTPException(status_code=409, detail="This enrichment run has already finished.")
 
     cancelled = await job_runs_repository.get(run_id)
     if cancelled is None:
-        raise HTTPException(status_code=404, detail="Enrichment run not found.")
+        raise HTTPException(status_code=404, detail=ENRICHMENT_RUN_NOT_FOUND_DETAIL)
     return EnrichmentRunStatusResponse(
         run_id=cancelled.run_id,
         status=cancelled.status,
@@ -101,7 +110,7 @@ async def cancel_enrichment_run(
     )
 
 
-@router.get("/runs/latest")
+@router.get("/runs/latest", responses={**BEARER_ERROR_RESPONSES, 404: NOT_FOUND_RESPONSE})
 async def get_latest_enrichment_run(
     request: Request, _claims: Annotated[TokenClaims, Depends(require_admin)]
 ) -> EnrichmentRunStatusResponse:
@@ -122,7 +131,7 @@ async def get_latest_enrichment_run(
     )
 
 
-@router.get("/runs/{run_id}")
+@router.get("/runs/{run_id}", responses={**BEARER_ERROR_RESPONSES, 404: NOT_FOUND_RESPONSE})
 async def get_enrichment_run_status(
     request: Request, run_id: str, _claims: Annotated[TokenClaims, Depends(require_admin)]
 ) -> EnrichmentRunStatusResponse:
@@ -137,7 +146,7 @@ async def get_enrichment_run_status(
     job_runs_repository: JobRunsRepository = request.app.state.job_runs_repository
     run = await job_runs_repository.get(run_id)
     if run is None or run.kind != JOB_KIND_ENRICHMENT:
-        raise HTTPException(status_code=404, detail="Enrichment run not found.")
+        raise HTTPException(status_code=404, detail=ENRICHMENT_RUN_NOT_FOUND_DETAIL)
     return EnrichmentRunStatusResponse(
         run_id=run.run_id, status=run.status, error=run.error, result_summary=run.result_summary
     )

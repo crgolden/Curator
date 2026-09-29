@@ -238,8 +238,10 @@ async def test_expired_cached_token_triggers_refresh_and_persists_it():
 
 
 async def test_restore_requires_npsso_or_cached_token():
+    empty_store = FakeTokenStore(saved=None)
+
     with pytest.raises(ValueError, match="No cached token and no npsso"):
-        await PsnSession.restore(None, FakeTokenStore(saved=None))
+        await PsnSession.restore(None, empty_store)
 
 
 async def test_get_attaches_bearer_and_ensures_fresh_token():
@@ -261,9 +263,11 @@ async def test_get_attaches_bearer_and_ensures_fresh_token():
 async def test_post_raises_psn_auth_error_on_401():
     recorder = RequestRecorder([httpx.Response(401)])
     session = await _authenticated(recorder)
+    psn_url = _psn_url()
+    payload = {lowercase_token(): lowercase_token()}
 
     with pytest.raises(PsnAuthError, match="401"):
-        await session.post(_psn_url(), json={lowercase_token(): lowercase_token()})
+        await session.post(psn_url, json=payload)
 
 
 async def test_patch_put_delete_attach_bearer():
@@ -285,9 +289,10 @@ async def test_patch_put_delete_attach_bearer():
 async def test_get_raises_for_other_http_errors(no_retry_backoff):
     recorder = RequestRecorder([httpx.Response(500)] * READ_ATTEMPTS)
     session = await _authenticated(recorder)
+    psn_url = _psn_url()
 
     with pytest.raises(httpx.HTTPStatusError):
-        await session.get(_psn_url())
+        await session.get(psn_url)
 
 
 def _foreign_host_url():
@@ -306,9 +311,10 @@ def _plain_http_psn_url():
 async def test_a_request_to_anything_but_a_psn_host_over_https_is_refused(make_url):
     recorder = RequestRecorder([httpx.Response(200)])
     session = await _authenticated(recorder)
+    refused_url = make_url()
 
     with pytest.raises(ValueError, match="non-PSN URL"):
-        await session.get(make_url())
+        await session.get(refused_url)
 
     assert recorder.requests == []
 
@@ -316,9 +322,10 @@ async def test_a_request_to_anything_but_a_psn_host_over_https_is_refused(make_u
 async def test_a_path_that_escapes_its_endpoint_is_refused():
     recorder = RequestRecorder([httpx.Response(200)])
     session = await _authenticated(recorder)
+    escaping_url = f"{GAMING_LOUNGE_URI}/../../{lowercase_token()}"
 
     with pytest.raises(ValueError, match="traversal segment"):
-        await session.get(f"{GAMING_LOUNGE_URI}/../../{lowercase_token()}")
+        await session.get(escaping_url)
 
     assert recorder.requests == []
 
@@ -415,18 +422,20 @@ async def test_run_with_reauth_reraises_when_there_is_neither_a_refresh_token_no
 
 async def test_a_transient_token_endpoint_failure_is_not_an_auth_failure():
     session = _session(RequestRecorder([httpx.Response(503)]), npsso=new_opaque_token())
+    refresh_token = new_opaque_token()
 
     with pytest.raises(httpx.HTTPStatusError):
-        await session._exchange(grant_type=REFRESH_TOKEN_GRANT, refresh_token=new_opaque_token())
+        await session._exchange(grant_type=REFRESH_TOKEN_GRANT, refresh_token=refresh_token)
 
 
 async def test_a_token_response_without_expires_in_is_an_auth_failure():
     issued = _token_response()
     del issued[EXPIRES_IN_KEY]
     session = _session(RequestRecorder([httpx.Response(200, json=issued)]), npsso=new_opaque_token())
+    refresh_token = new_opaque_token()
 
     with pytest.raises(PsnAuthError, match=EXPIRES_IN_KEY):
-        await session._exchange(grant_type=REFRESH_TOKEN_GRANT, refresh_token=new_opaque_token())
+        await session._exchange(grant_type=REFRESH_TOKEN_GRANT, refresh_token=refresh_token)
 
 
 async def test_run_with_reauth_reraises_the_original_error_when_the_refresh_grant_is_refused():
@@ -455,9 +464,10 @@ async def test_a_read_retries_a_5xx_and_returns_the_eventual_success(no_retry_ba
 async def test_a_read_gives_up_after_the_attempt_budget(no_retry_backoff):
     recorder = RequestRecorder([httpx.Response(503)] * READ_ATTEMPTS)
     session = await _authenticated(recorder)
+    psn_url = _psn_url()
 
     with pytest.raises(httpx.HTTPStatusError):
-        await session.get(_psn_url())
+        await session.get(psn_url)
 
     assert len(recorder.requests) == READ_ATTEMPTS
 
@@ -483,9 +493,11 @@ async def test_a_read_retries_a_transport_failure(no_retry_backoff):
 async def test_a_write_is_never_retried_because_it_could_apply_twice(no_retry_backoff):
     recorder = RequestRecorder([httpx.Response(503)])
     session = await _authenticated(recorder)
+    psn_url = _psn_url()
+    payload = {lowercase_token(): lowercase_token()}
 
     with pytest.raises(httpx.HTTPStatusError):
-        await session.post(_psn_url(), json={lowercase_token(): lowercase_token()})
+        await session.post(psn_url, json=payload)
 
     assert len(recorder.requests) == 1
 
@@ -493,9 +505,10 @@ async def test_a_write_is_never_retried_because_it_could_apply_twice(no_retry_ba
 async def test_a_read_does_not_retry_a_deliberate_4xx(no_retry_backoff):
     recorder = RequestRecorder([httpx.Response(404)])
     session = await _authenticated(recorder)
+    psn_url = _psn_url()
 
     with pytest.raises(httpx.HTTPStatusError):
-        await session.get(_psn_url())
+        await session.get(psn_url)
 
     assert len(recorder.requests) == 1
 
@@ -503,9 +516,10 @@ async def test_a_read_does_not_retry_a_deliberate_4xx(no_retry_backoff):
 async def test_a_read_does_not_retry_an_auth_rejection(no_retry_backoff):
     recorder = RequestRecorder([httpx.Response(401)])
     session = await _authenticated(recorder)
+    psn_url = _psn_url()
 
     with pytest.raises(PsnAuthError):
-        await session.get(_psn_url())
+        await session.get(psn_url)
 
     assert len(recorder.requests) == 1
 

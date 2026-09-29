@@ -22,7 +22,6 @@ from uuid import uuid4
 import httpx
 import pytest
 from fastapi.testclient import TestClient
-from opentelemetry.instrumentation.httpx import RequestInfo
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
@@ -63,10 +62,12 @@ class _FakeSpanProcessor:
 
 class _FakeTracerProvider:
     instances = 0
+    last_processors: ClassVar[list[Any]] = []
 
     def __init__(self, **kwargs):
         type(self).instances += 1
-        self.processors = []
+        self.processors: list[Any] = []
+        type(self).last_processors = self.processors
 
     def add_span_processor(self, processor):
         self.processors.append(processor)
@@ -356,7 +357,7 @@ def test_configure_tracing_and_metrics_does_not_select_a_semconv_when_telemetry_
 
 def test_instrument_app_excludes_health_from_tracing(monkeypatch):
     monkeypatch.setattr(telemetry, "FastAPIInstrumentor", _FakeFastAPIInstrumentor)
-    _FakeFastAPIInstrumentor.calls = []
+    monkeypatch.setattr(_FakeFastAPIInstrumentor, "calls", [])
     app = object()
 
     telemetry._instrument_app(app)
@@ -697,51 +698,34 @@ def _rawg_base() -> str:
     return f"https://{telemetry._REDACT_QUERY_PARAM_HOSTS[0]}/{lowercase_token()}"
 
 
-def _traced_span(url, url_attribute_keys=telemetry._URL_SPAN_ATTRIBUTE_KEYS):
-    """Start and immediately end a real recording span with URL attributes pre-set, mimicking what
-    HTTPXClientInstrumentor does before invoking the async_request_hook -- returns (span, exporter)."""
+def _exported_url_attributes(url):
+    """Start and end a real span carrying ``url`` in every URL attribute, as HTTPXClientInstrumentor starts
+    one, through a provider running the redacting processor ahead of the exporter; returns the exported
+    attribute values."""
     exporter = InMemorySpanExporter()
     provider = TracerProvider()
+    provider.add_span_processor(telemetry.RawgKeyRedactingSpanProcessor())
     provider.add_span_processor(SimpleSpanProcessor(exporter))
-    tracer = provider.get_tracer(__name__)
-    attributes = {key: url for key in url_attribute_keys}
-    span = tracer.start_span("test-span", attributes=attributes)
-    return span, exporter
+    attributes = {key: url for key in telemetry._URL_SPAN_ATTRIBUTE_KEYS}
+    provider.get_tracer(__name__).start_span("test-span", attributes=attributes).end()
+    (recorded,) = exporter.get_finished_spans()
+    recorded_attributes = recorded.attributes
+    assert recorded_attributes is not None
+    return [recorded_attributes[key] for key in telemetry._URL_SPAN_ATTRIBUTE_KEYS]
 
 
-def _ended_span(attributes):
-    """A span that has already ended, so ``is_recording()`` is False -- returns (span, exporter)."""
-    exporter = InMemorySpanExporter()
-    provider = TracerProvider()
-    provider.add_span_processor(SimpleSpanProcessor(exporter))
-    span = provider.get_tracer(__name__).start_span("test-span", attributes=attributes)
-    span.end()
-    return span, exporter
-
-
-def _request_info(url):
-    return RequestInfo(method=b"GET", url=httpx.URL(url), headers=None, stream=None, extensions=None)
-
-
-async def test_redact_rawg_key_from_span_strips_key_param_for_rawg_host():
+def test_redacting_processor_strips_the_key_param_for_the_rawg_host():
     base = _rawg_base()
     kept_param, kept_value = lowercase_token(), lowercase_token()
     url = str(httpx.URL(base, params={telemetry._REDACT_QUERY_PARAM_NAME: new_opaque_token(), kept_param: kept_value}))
-    span, exporter = _traced_span(url)
 
-    await telemetry._redact_rawg_key_from_span(span, _request_info(url))
-    span.end()
+    exported = _exported_url_attributes(url)
 
-    (recorded,) = exporter.get_finished_spans()
     sanitized = str(httpx.URL(base, params={kept_param: kept_value}))
-    assert [recorded.attributes[key] for key in telemetry._URL_SPAN_ATTRIBUTE_KEYS] == [
-        sanitized for _ in telemetry._URL_SPAN_ATTRIBUTE_KEYS
-    ]
+    assert exported == [sanitized for _ in telemetry._URL_SPAN_ATTRIBUTE_KEYS]
 
 
-async def test_redact_rawg_key_from_span_leaves_non_rawg_hosts_untouched():
-    rawg_url = str(httpx.URL(_rawg_base(), params={telemetry._REDACT_QUERY_PARAM_NAME: new_opaque_token()}))
-    span, exporter = _traced_span(rawg_url)
+def test_redacting_processor_leaves_another_hosts_key_param_untouched():
     other_host_url = str(
         httpx.URL(
             f"https://{lowercase_token()}.example.test/{lowercase_token()}",
@@ -749,19 +733,23 @@ async def test_redact_rawg_key_from_span_leaves_non_rawg_hosts_untouched():
         )
     )
 
-    await telemetry._redact_rawg_key_from_span(span, _request_info(other_host_url))
-    span.end()
+    exported = _exported_url_attributes(other_host_url)
 
-    (recorded,) = exporter.get_finished_spans()
-    assert recorded.attributes[telemetry._URL_SPAN_ATTRIBUTE_KEYS[0]] == rawg_url
+    assert exported == [other_host_url for _ in telemetry._URL_SPAN_ATTRIBUTE_KEYS]
 
 
-async def test_redact_rawg_key_from_span_noop_when_span_not_recording():
-    url = str(httpx.URL(_rawg_base(), params={telemetry._REDACT_QUERY_PARAM_NAME: new_opaque_token()}))
-    span, exporter = _ended_span(attributes={telemetry._URL_SPAN_ATTRIBUTE_KEYS[0]: url})
-    assert not span.is_recording()
+def test_redacting_processor_leaves_a_rawg_url_without_a_key_untouched():
+    url = str(httpx.URL(_rawg_base(), params={lowercase_token(): lowercase_token()}))
 
-    await telemetry._redact_rawg_key_from_span(span, _request_info(url))
+    exported = _exported_url_attributes(url)
 
-    (recorded,) = exporter.get_finished_spans()
-    assert recorded.attributes[telemetry._URL_SPAN_ATTRIBUTE_KEYS[0]] == url
+    assert exported == [url for _ in telemetry._URL_SPAN_ATTRIBUTE_KEYS]
+
+
+def test_register_otlp_providers_adds_the_redacting_processor_to_the_tracer_provider(monkeypatch):
+    _patch_otlp_collaborators(monkeypatch)
+
+    telemetry._register_otlp_providers("https://alloy.example.test:4317")
+
+    processor_types = [type(processor) for processor in _FakeTracerProvider.last_processors]
+    assert processor_types.count(telemetry.RawgKeyRedactingSpanProcessor) == 1

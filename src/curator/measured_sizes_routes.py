@@ -7,6 +7,7 @@ from pydantic import BaseModel
 
 from curator.collections.repository import CollectionsRepository, MeasuredSize
 from curator.deps import require_bearer
+from curator.openapi_responses import BAD_REQUEST_RESPONSE, BEARER_ERROR_RESPONSES
 from curator.psn.title_platform import ConsolePlatform, console_platform, platform_vocabulary_message
 from curator.token_validation import TokenClaims
 
@@ -46,7 +47,7 @@ def _to_response(measured_size: MeasuredSize) -> MeasuredSizeResponse:
     )
 
 
-@router.get("")
+@router.get("", responses={**BEARER_ERROR_RESPONSES})
 async def list_measured_sizes(
     request: Request, game_id: str, _claims: Annotated[TokenClaims, Depends(require_bearer)]
 ) -> list[MeasuredSizeResponse]:
@@ -56,7 +57,7 @@ async def list_measured_sizes(
     return [_to_response(size) for size in sizes]
 
 
-@router.put("/{platform}")
+@router.put("/{platform}", responses={**BEARER_ERROR_RESPONSES, 400: BAD_REQUEST_RESPONSE})
 async def set_measured_size(
     request: Request,
     game_id: str,

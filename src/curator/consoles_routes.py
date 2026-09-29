@@ -16,6 +16,7 @@ from curator.audit.repository import ACTION_DEVICE_LINK_CHECK, OUTCOME_FAILED
 from curator.collections.console_model_defaults import default_capacity_gb
 from curator.collections.repository import CollectionsRepository, UserConsole
 from curator.deps import require_bearer
+from curator.openapi_responses import BAD_REQUEST_RESPONSE, BEARER_ERROR_RESPONSES, NOT_FOUND_RESPONSE
 from curator.persistence.repository import Repository
 from curator.psn.device_registrations import collapse_by_device_id
 from curator.psn.errors import PsnAuthError
@@ -24,6 +25,8 @@ from curator.psn.title_platform import ConsolePlatform, console_platform, platfo
 from curator.token_validation import TokenClaims
 
 router = APIRouter(prefix="/consoles", tags=["consoles"])
+
+CONSOLE_NOT_FOUND_DETAIL = "Console not found."
 
 ConsoleDeviceLinkState = Literal["linked", "device_deactivated", "device_missing", "not_checked"]
 """What PSN says about a console's linked device. ``not_checked`` is the explicit state when
@@ -200,7 +203,7 @@ async def _device_link_states(
     return states
 
 
-@router.post("", status_code=201)
+@router.post("", status_code=201, responses={**BEARER_ERROR_RESPONSES, 400: BAD_REQUEST_RESPONSE})
 async def create_console(
     request: Request, body: ConsoleRequest, claims: Annotated[TokenClaims, Depends(require_bearer)]
 ) -> ConsoleResponse:
@@ -237,7 +240,7 @@ async def create_console(
     return _to_response(console, capacity_is_default=capacity_is_default)
 
 
-@router.get("")
+@router.get("", responses={**BEARER_ERROR_RESPONSES})
 async def list_consoles(
     request: Request, claims: Annotated[TokenClaims, Depends(require_bearer)]
 ) -> list[ConsoleResponse]:
@@ -254,7 +257,7 @@ async def list_consoles(
     return [_to_response(console, device_link=states.get(console.console_id)) for console in consoles]
 
 
-@router.get("/{console_id}")
+@router.get("/{console_id}", responses={**BEARER_ERROR_RESPONSES, 404: NOT_FOUND_RESPONSE})
 async def get_console(
     request: Request, console_id: str, claims: Annotated[TokenClaims, Depends(require_bearer)]
 ) -> ConsoleResponse:
@@ -265,11 +268,11 @@ async def get_console(
     repository: CollectionsRepository = request.app.state.collections_repository
     console = await repository.get_console(claims.sub, console_id)
     if console is None:
-        raise HTTPException(status_code=404, detail="Console not found.")
+        raise HTTPException(status_code=404, detail=CONSOLE_NOT_FOUND_DETAIL)
     return _to_response(console)
 
 
-@router.patch("/{console_id}")
+@router.patch("/{console_id}", responses={**BEARER_ERROR_RESPONSES, 404: NOT_FOUND_RESPONSE})
 async def update_console(
     request: Request,
     console_id: str,
@@ -291,11 +294,11 @@ async def update_console(
         fill_order=body.fill_order,
     )
     if console is None:
-        raise HTTPException(status_code=404, detail="Console not found.")
+        raise HTTPException(status_code=404, detail=CONSOLE_NOT_FOUND_DETAIL)
     return _to_response(console)
 
 
-@router.delete("/{console_id}", status_code=204)
+@router.delete("/{console_id}", status_code=204, responses={**BEARER_ERROR_RESPONSES, 404: NOT_FOUND_RESPONSE})
 async def delete_console(
     request: Request, console_id: str, claims: Annotated[TokenClaims, Depends(require_bearer)]
 ) -> None:
@@ -307,7 +310,7 @@ async def delete_console(
     repository: CollectionsRepository = request.app.state.collections_repository
     deleted = await repository.delete_console(claims.sub, console_id)
     if not deleted:
-        raise HTTPException(status_code=404, detail="Console not found.")
+        raise HTTPException(status_code=404, detail=CONSOLE_NOT_FOUND_DETAIL)
 
 
 class DeviceLinkRequest(BaseModel):
@@ -316,7 +319,7 @@ class DeviceLinkRequest(BaseModel):
     device_id: str
 
 
-@router.put("/{console_id}/device-link", status_code=204)
+@router.put("/{console_id}/device-link", status_code=204, responses={**BEARER_ERROR_RESPONSES, 404: NOT_FOUND_RESPONSE})
 async def link_console_device(
     request: Request, console_id: str, body: DeviceLinkRequest, claims: Annotated[TokenClaims, Depends(require_bearer)]
 ) -> None:
@@ -328,11 +331,13 @@ async def link_console_device(
     """
     repository: CollectionsRepository = request.app.state.collections_repository
     if await repository.get_console(claims.sub, console_id) is None:
-        raise HTTPException(status_code=404, detail="Console not found.")
+        raise HTTPException(status_code=404, detail=CONSOLE_NOT_FOUND_DETAIL)
     await repository.link_console_device(claims.sub, console_id, body.device_id)
 
 
-@router.delete("/{console_id}/device-link", status_code=204)
+@router.delete(
+    "/{console_id}/device-link", status_code=204, responses={**BEARER_ERROR_RESPONSES, 404: NOT_FOUND_RESPONSE}
+)
 async def unlink_console_device(
     request: Request, console_id: str, claims: Annotated[TokenClaims, Depends(require_bearer)]
 ) -> None:
@@ -342,12 +347,12 @@ async def unlink_console_device(
     """
     repository: CollectionsRepository = request.app.state.collections_repository
     if await repository.get_console(claims.sub, console_id) is None:
-        raise HTTPException(status_code=404, detail="Console not found.")
+        raise HTTPException(status_code=404, detail=CONSOLE_NOT_FOUND_DETAIL)
     if not await repository.unlink_console_device(claims.sub, console_id):
         raise HTTPException(status_code=404, detail="Console is not linked to a device.")
 
 
-@router.get("/{console_id}/installs")
+@router.get("/{console_id}/installs", responses={**BEARER_ERROR_RESPONSES, 404: NOT_FOUND_RESPONSE})
 async def get_console_installs(
     request: Request, console_id: str, claims: Annotated[TokenClaims, Depends(require_bearer)]
 ) -> ConsoleInstallsResponse:
@@ -357,12 +362,12 @@ async def get_console_installs(
     """
     repository: CollectionsRepository = request.app.state.collections_repository
     if await repository.get_console(claims.sub, console_id) is None:
-        raise HTTPException(status_code=404, detail="Console not found.")
+        raise HTTPException(status_code=404, detail=CONSOLE_NOT_FOUND_DETAIL)
     game_ids = await repository.list_installed_game_ids(console_id)
     return ConsoleInstallsResponse(game_ids=sorted(game_ids))
 
 
-@router.put("/{console_id}/installs/{game_id}")
+@router.put("/{console_id}/installs/{game_id}", responses={**BEARER_ERROR_RESPONSES, 404: NOT_FOUND_RESPONSE})
 async def set_console_install(
     request: Request,
     console_id: str,
@@ -379,7 +384,7 @@ async def set_console_install(
     """
     repository: CollectionsRepository = request.app.state.collections_repository
     if await repository.get_console(claims.sub, console_id) is None:
-        raise HTTPException(status_code=404, detail="Console not found.")
+        raise HTTPException(status_code=404, detail=CONSOLE_NOT_FOUND_DETAIL)
 
     await repository.set_console_install(console_id, game_id, body.installed)
     return ConsoleInstallResponse(console_id=console_id, game_id=game_id, installed=body.installed)

@@ -27,6 +27,12 @@ from curator.collections.repository import (
     CollectionsRepository,
 )
 from curator.deps import require_bearer
+from curator.openapi_responses import (
+    BAD_REQUEST_RESPONSE,
+    BEARER_ERROR_RESPONSES,
+    CONFLICT_RESPONSE,
+    NOT_FOUND_RESPONSE,
+)
 from curator.query_params import SORT_DIR_PARAM
 from curator.token_validation import TokenClaims
 
@@ -36,6 +42,7 @@ INVALID_KIND_DETAIL = f"kind must be '{CAPACITY_FILL_KIND}' or '{FILTER_LIST_KIN
 INVALID_VISIBILITY_DETAIL = (
     f'visibility must be "{VISIBILITY_PRIVATE}", "{VISIBILITY_UNLISTED}", or "{VISIBILITY_PUBLIC}".'
 )
+DEFINITION_NOT_FOUND_DETAIL = "Collection definition not found."
 
 
 def unknown_console_detail(console_id: str) -> str:
@@ -139,13 +146,13 @@ class CollectionPreviewResponse(BaseModel):
     excluded_for_missing_trophy_data: int = 0
 
 
-@router.post("/preview")
+@router.post("/preview", responses={**BEARER_ERROR_RESPONSES, 400: BAD_REQUEST_RESPONSE})
 async def preview_collection(
     request: Request,
     spec: CollectionSpecRequest,
     claims: Annotated[TokenClaims, Depends(require_bearer)],
-    limit: int = Query(default=50, ge=1, le=100),
-    offset: int = Query(default=0, ge=0),
+    limit: Annotated[int, Query(ge=1, le=100)] = 50,
+    offset: Annotated[int, Query(ge=0)] = 0,
 ) -> CollectionPreviewResponse:
     """Generate a collection from an inline spec for the caller's own library, without persisting it.
 
@@ -349,7 +356,9 @@ class CollectionRunResponse(BaseModel):
     excluded_for_missing_trophy_data: int = 0
 
 
-@router.post("", status_code=201)
+@router.post(
+    "", status_code=201, responses={**BEARER_ERROR_RESPONSES, 400: BAD_REQUEST_RESPONSE, 409: CONFLICT_RESPONSE}
+)
 async def save_definition(
     request: Request, body: SaveDefinitionRequest, claims: Annotated[TokenClaims, Depends(require_bearer)]
 ) -> DefinitionResponse:
@@ -446,7 +455,7 @@ async def _reject_unknown_games(collections_repository: CollectionsRepository, g
         raise HTTPException(status_code=400, detail=f"Unknown game_ids: {', '.join(sorted(set(unknown)))}.")
 
 
-@router.get("")
+@router.get("", responses={**BEARER_ERROR_RESPONSES})
 async def list_definitions(
     request: Request, claims: Annotated[TokenClaims, Depends(require_bearer)]
 ) -> list[DefinitionResponse]:
@@ -459,7 +468,7 @@ async def list_definitions(
     return [_definition_to_response(definition) for definition in definitions]
 
 
-@router.get("/followed")
+@router.get("/followed", responses={**BEARER_ERROR_RESPONSES})
 async def list_followed_collections(
     request: Request, claims: Annotated[TokenClaims, Depends(require_bearer)]
 ) -> list[DefinitionResponse]:
@@ -475,7 +484,7 @@ async def list_followed_collections(
     return [_definition_to_response(definition) for definition in definitions]
 
 
-@router.get("/{definition_id}")
+@router.get("/{definition_id}", responses={**BEARER_ERROR_RESPONSES, 404: NOT_FOUND_RESPONSE})
 async def get_definition(
     request: Request, definition_id: str, claims: Annotated[TokenClaims, Depends(require_bearer)]
 ) -> DefinitionDetailResponse:
@@ -489,7 +498,7 @@ async def get_definition(
     collections_repository: CollectionsRepository = request.app.state.collections_repository
     definition = await collections_repository.get_definition(claims.sub, definition_id)
     if definition is None:
-        raise HTTPException(status_code=404, detail="Collection definition not found.")
+        raise HTTPException(status_code=404, detail=DEFINITION_NOT_FOUND_DETAIL)
 
     items, _ = await collections_repository.list_definition_items_page(definition_id, limit=DETAIL_PAGE_SIZE)
     return DefinitionDetailResponse(
@@ -498,17 +507,17 @@ async def get_definition(
     )
 
 
-@router.get("/{definition_id}/items")
+@router.get("/{definition_id}/items", responses={**BEARER_ERROR_RESPONSES, 404: NOT_FOUND_RESPONSE})
 async def get_definition_items(
     request: Request,
     definition_id: str,
     claims: Annotated[TokenClaims, Depends(require_bearer)],
-    q: str | None = Query(default=None),
-    genre: str | None = Query(default=None),
-    sort: CollectionItemSortField = Query(default="rank"),
-    sort_dir: Literal["asc", "desc"] = Query(default="asc", alias=SORT_DIR_PARAM),
-    limit: int = Query(default=50, ge=1, le=100),
-    offset: int = Query(default=0, ge=0),
+    q: Annotated[str | None, Query()] = None,
+    genre: Annotated[str | None, Query()] = None,
+    sort: Annotated[CollectionItemSortField, Query()] = "rank",
+    sort_dir: Annotated[Literal["asc", "desc"], Query(alias=SORT_DIR_PARAM)] = "asc",
+    limit: Annotated[int, Query(ge=1, le=100)] = 50,
+    offset: Annotated[int, Query(ge=0)] = 0,
 ) -> CollectionItemsPageResponse:
     """Return one filtered, sorted page of a collection's membership.
 
@@ -525,7 +534,7 @@ async def get_definition_items(
     collections_repository: CollectionsRepository = request.app.state.collections_repository
     definition = await collections_repository.get_definition(claims.sub, definition_id)
     if definition is None:
-        raise HTTPException(status_code=404, detail="Collection definition not found.")
+        raise HTTPException(status_code=404, detail=DEFINITION_NOT_FOUND_DETAIL)
 
     items, total = await collections_repository.list_definition_items_page(
         definition_id, search=q, genre=genre, sort=sort, sort_dir=sort_dir, limit=limit, offset=offset
@@ -533,7 +542,9 @@ async def get_definition_items(
     return CollectionItemsPageResponse(items=[_to_item_response(item) for item in items], total=total)
 
 
-@router.delete("/{definition_id}/items/{game_id}", status_code=204)
+@router.delete(
+    "/{definition_id}/items/{game_id}", status_code=204, responses={**BEARER_ERROR_RESPONSES, 404: NOT_FOUND_RESPONSE}
+)
 async def remove_definition_item(
     request: Request, definition_id: str, game_id: str, claims: Annotated[TokenClaims, Depends(require_bearer)]
 ) -> Response:
@@ -545,14 +556,17 @@ async def remove_definition_item(
     collections_repository: CollectionsRepository = request.app.state.collections_repository
     definition = await collections_repository.get_definition(claims.sub, definition_id)
     if definition is None:
-        raise HTTPException(status_code=404, detail="Collection definition not found.")
+        raise HTTPException(status_code=404, detail=DEFINITION_NOT_FOUND_DETAIL)
 
     if not await collections_repository.remove_definition_item(definition_id, game_id):
         raise HTTPException(status_code=404, detail="That title is not in this collection.")
     return Response(status_code=204)
 
 
-@router.patch("/{definition_id}")
+@router.patch(
+    "/{definition_id}",
+    responses={**BEARER_ERROR_RESPONSES, 400: BAD_REQUEST_RESPONSE, 404: NOT_FOUND_RESPONSE, 409: CONFLICT_RESPONSE},
+)
 async def update_definition(
     request: Request,
     definition_id: str,
@@ -572,7 +586,7 @@ async def update_definition(
     collections_repository: CollectionsRepository = request.app.state.collections_repository
     definition = await collections_repository.get_definition(claims.sub, definition_id)
     if definition is None:
-        raise HTTPException(status_code=404, detail="Collection definition not found.")
+        raise HTTPException(status_code=404, detail=DEFINITION_NOT_FOUND_DETAIL)
 
     supplied = body.model_fields_set
     name = body.name if "name" in supplied and body.name is not None else definition.name
@@ -611,7 +625,10 @@ async def update_definition(
     )
 
 
-@router.put("/{definition_id}/visibility")
+@router.put(
+    "/{definition_id}/visibility",
+    responses={**BEARER_ERROR_RESPONSES, 400: BAD_REQUEST_RESPONSE, 404: NOT_FOUND_RESPONSE},
+)
 async def set_visibility(
     request: Request,
     definition_id: str,
@@ -631,11 +648,11 @@ async def set_visibility(
     collections_repository: CollectionsRepository = request.app.state.collections_repository
     updated = await collections_repository.set_definition_visibility(claims.sub, definition_id, body.visibility)
     if updated is None:
-        raise HTTPException(status_code=404, detail="Collection definition not found.")
+        raise HTTPException(status_code=404, detail=DEFINITION_NOT_FOUND_DETAIL)
     return _definition_to_response(updated)
 
 
-@router.delete("/{definition_id}", status_code=204)
+@router.delete("/{definition_id}", status_code=204, responses={**BEARER_ERROR_RESPONSES, 404: NOT_FOUND_RESPONSE})
 async def delete_definition(
     request: Request, definition_id: str, claims: Annotated[TokenClaims, Depends(require_bearer)]
 ) -> Response:
@@ -646,11 +663,15 @@ async def delete_definition(
     """
     collections_repository: CollectionsRepository = request.app.state.collections_repository
     if not await collections_repository.delete_definition(claims.sub, definition_id):
-        raise HTTPException(status_code=404, detail="Collection definition not found.")
+        raise HTTPException(status_code=404, detail=DEFINITION_NOT_FOUND_DETAIL)
     return Response(status_code=204)
 
 
-@router.post("/{definition_id}/follow", status_code=204)
+@router.post(
+    "/{definition_id}/follow",
+    status_code=204,
+    responses={**BEARER_ERROR_RESPONSES, 400: BAD_REQUEST_RESPONSE, 404: NOT_FOUND_RESPONSE},
+)
 async def follow_definition(
     request: Request, definition_id: str, claims: Annotated[TokenClaims, Depends(require_bearer)]
 ) -> Response:
@@ -664,7 +685,7 @@ async def follow_definition(
     collections_repository: CollectionsRepository = request.app.state.collections_repository
     definition = await collections_repository.get_definition_any_owner(definition_id)
     if definition is None or definition.visibility == VISIBILITY_PRIVATE:
-        raise HTTPException(status_code=404, detail="Collection definition not found.")
+        raise HTTPException(status_code=404, detail=DEFINITION_NOT_FOUND_DETAIL)
     if definition.identity_sub == claims.sub:
         raise HTTPException(status_code=400, detail="Cannot follow your own collection.")
 
@@ -672,7 +693,7 @@ async def follow_definition(
     return Response(status_code=204)
 
 
-@router.delete("/{definition_id}/follow", status_code=204)
+@router.delete("/{definition_id}/follow", status_code=204, responses={**BEARER_ERROR_RESPONSES})
 async def unfollow_definition(
     request: Request, definition_id: str, claims: Annotated[TokenClaims, Depends(require_bearer)]
 ) -> Response:
@@ -683,13 +704,17 @@ async def unfollow_definition(
     return Response(status_code=204)
 
 
-@router.post("/{definition_id}/runs", status_code=201)
+@router.post(
+    "/{definition_id}/runs",
+    status_code=201,
+    responses={**BEARER_ERROR_RESPONSES, 400: BAD_REQUEST_RESPONSE, 404: NOT_FOUND_RESPONSE},
+)
 async def run_definition(
     request: Request,
     definition_id: str,
     claims: Annotated[TokenClaims, Depends(require_bearer)],
-    limit: int = Query(default=50, ge=1, le=100),
-    offset: int = Query(default=0, ge=0),
+    limit: Annotated[int, Query(ge=1, le=100)] = 50,
+    offset: Annotated[int, Query(ge=0)] = 0,
 ) -> CollectionRunResponse:
     """Generate and persist a run against one of the caller's saved definitions.
 
@@ -704,7 +729,7 @@ async def run_definition(
     collections_repository: CollectionsRepository = request.app.state.collections_repository
     definition = await collections_repository.get_definition(claims.sub, definition_id)
     if definition is None:
-        raise HTTPException(status_code=404, detail="Collection definition not found.")
+        raise HTTPException(status_code=404, detail=DEFINITION_NOT_FOUND_DETAIL)
 
     orchestrator: CollectionOrchestrator = request.app.state.collection_orchestrator
     catalog_repository: CatalogRepository = request.app.state.catalog_repository

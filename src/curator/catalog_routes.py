@@ -12,6 +12,13 @@ from curator.catalog.ps_plus_walk_service import PsPlusWalkService
 from curator.catalog.repository import CatalogPrice, CatalogRepository, CatalogSortField, GameSummary
 from curator.catalog.store_backfill_service import NO_PRODUCTS, BackfillStoppedReason, StoreBackfillService
 from curator.deps import optional_bearer, require_admin
+from curator.openapi_responses import (
+    BAD_GATEWAY_RESPONSE,
+    BEARER_ERROR_RESPONSES,
+    NOT_FOUND_RESPONSE,
+    SERVICE_UNAVAILABLE_RESPONSE,
+    UNPROCESSABLE_RESPONSE,
+)
 from curator.persistence.repository import Repository
 from curator.psn.store_client import PRODUCT_GENRES_FACET, PS4_GAMES_CATEGORY_ID, StoreCatalogClient
 from curator.query_params import (
@@ -236,20 +243,20 @@ class PsPlusWalkResponse(BaseModel):
     categories: list[PsPlusCategoryWalkResult]
 
 
-@router.get("/games")
+@router.get("/games", responses={**BEARER_ERROR_RESPONSES})
 async def list_games(
     request: Request,
     claims: Annotated[TokenClaims | None, Depends(optional_bearer)],
-    q: str | None = Query(default=None),
-    franchise: str | None = Query(default=None, alias=FRANCHISE_PARAM),
-    genre: str | None = Query(default=None, alias=GENRE_PARAM),
-    aaa_tier: str | None = Query(default=None, alias=AAA_TIER_PARAM),
-    exclude_owned: bool = Query(default=False, alias=EXCLUDE_OWNED_PARAM),
-    kind: CatalogKindQuery = Query(default=GAME_KIND),
-    sort: CatalogSortField = Query(default="title", alias=SORT_PARAM),
-    sort_dir: Literal["asc", "desc"] = Query(default="asc", alias=SORT_DIR_PARAM),
-    limit: int = Query(default=DEFAULT_GAMES_LIMIT, ge=1, le=MAX_GAMES_LIMIT, alias=LIMIT_PARAM),
-    offset: int = Query(default=0, ge=0, alias=OFFSET_PARAM),
+    q: Annotated[str | None, Query()] = None,
+    franchise: Annotated[str | None, Query(alias=FRANCHISE_PARAM)] = None,
+    genre: Annotated[str | None, Query(alias=GENRE_PARAM)] = None,
+    aaa_tier: Annotated[str | None, Query(alias=AAA_TIER_PARAM)] = None,
+    exclude_owned: Annotated[bool, Query(alias=EXCLUDE_OWNED_PARAM)] = False,
+    kind: Annotated[CatalogKindQuery, Query()] = GAME_KIND,
+    sort: Annotated[CatalogSortField, Query(alias=SORT_PARAM)] = "title",
+    sort_dir: Annotated[Literal["asc", "desc"], Query(alias=SORT_DIR_PARAM)] = "asc",
+    limit: Annotated[int, Query(ge=1, le=MAX_GAMES_LIMIT, alias=LIMIT_PARAM)] = DEFAULT_GAMES_LIMIT,
+    offset: Annotated[int, Query(ge=0, alias=OFFSET_PARAM)] = 0,
 ) -> CatalogGamesResponse:
     """Browse the shared game catalog, optionally filtered by title, franchise, genre, or publisher tier.
 
@@ -293,7 +300,7 @@ async def list_games(
     )
 
 
-@router.get("/games/{game_id}")
+@router.get("/games/{game_id}", responses={**BEARER_ERROR_RESPONSES, 404: NOT_FOUND_RESPONSE})
 async def get_game(
     request: Request, game_id: str, claims: Annotated[TokenClaims | None, Depends(optional_bearer)]
 ) -> GameSummaryResponse:
@@ -355,11 +362,13 @@ async def list_genres(request: Request) -> CatalogGenresResponse:
     return CatalogGenresResponse(genres=await repository.list_genres())
 
 
-@router.get("/genres/drift")
+@router.get(
+    "/genres/drift", responses={**BEARER_ERROR_RESPONSES, 502: BAD_GATEWAY_RESPONSE, 503: SERVICE_UNAVAILABLE_RESPONSE}
+)
 async def genre_vocabulary_drift(
     request: Request,
     _claims: Annotated[TokenClaims, Depends(require_admin)],
-    category_id: str = Query(default=PS4_GAMES_CATEGORY_ID, alias=CATEGORY_ID_PARAM),
+    category_id: Annotated[str, Query(alias=CATEGORY_ID_PARAM)] = PS4_GAMES_CATEGORY_ID,
 ) -> CatalogGenreDriftResponse:
     """Report where the ``genres`` reference table and the storefront's live ``productGenres`` facet
     disagree. Admin-scoped.
@@ -408,7 +417,9 @@ async def genre_vocabulary_drift(
     )
 
 
-@router.post("/backfill")
+@router.post(
+    "/backfill", responses={**BEARER_ERROR_RESPONSES, 422: UNPROCESSABLE_RESPONSE, 503: SERVICE_UNAVAILABLE_RESPONSE}
+)
 async def backfill_catalog(
     request: Request, body: CatalogBackfillRequest, _claims: Annotated[TokenClaims, Depends(require_admin)]
 ) -> CatalogBackfillResponse:
@@ -462,7 +473,7 @@ async def backfill_catalog(
     )
 
 
-@router.post("/ps-plus/walk")
+@router.post("/ps-plus/walk", responses={**BEARER_ERROR_RESPONSES, 503: SERVICE_UNAVAILABLE_RESPONSE})
 async def walk_ps_plus_catalog(
     request: Request, body: PsPlusWalkRequest, _claims: Annotated[TokenClaims, Depends(require_admin)]
 ) -> PsPlusWalkResponse:

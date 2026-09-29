@@ -11,6 +11,7 @@ from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
 from curator.collections.repository import CollectionItem, CollectionsRepository
+from curator.openapi_responses import NOT_FOUND_RESPONSE
 
 router = APIRouter(prefix="/public/collections", tags=["public-collections"])
 
@@ -67,7 +68,7 @@ class PublicCollectionResponse(BaseModel):
     items: list[CollectionItemResponse]
 
 
-@router.get("/{share_slug}")
+@router.get("/{share_slug}", responses={404: NOT_FOUND_RESPONSE})
 async def get_public_collection(request: Request, share_slug: str) -> PublicCollectionResponse:
     """Return a shared collection by its public link -- no ``Authorization`` header, no caller identity.
 

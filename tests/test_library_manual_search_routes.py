@@ -496,9 +496,12 @@ def test_a_store_search_is_not_sent_when_its_history_row_cannot_be_written():
     search = FakeSearchClient()
     client, caller, _search = _build(search)
     client.app.state.audit_repository.begin_error = RuntimeError(caller.sub)
+    search_path = _search_path(client)
+    params = {SEARCH_TERM_PARAM: new_opaque_token()}
+    headers = _bearer(caller.token)
 
     with pytest.raises(RuntimeError):
-        client.get(_search_path(client), params={SEARCH_TERM_PARAM: new_opaque_token()}, headers=_bearer(caller.token))
+        client.get(search_path, params=params, headers=headers)
 
     assert search.calls == []
 

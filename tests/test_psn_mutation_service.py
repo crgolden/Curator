@@ -156,9 +156,10 @@ def _standing(account_id, relation):
 async def test_create_group_rejected_when_not_the_linked_account():
     session = FakeSession()
     service = _service(session, linked_account_id=new_account_id())
+    invitee_account_id = new_account_id()
 
     with pytest.raises(MutationNotAllowedError):
-        await service.create_group(account_ids=[new_account_id()])
+        await service.create_group(account_ids=[invitee_account_id])
 
     assert session.post_calls == []
 
@@ -166,9 +167,10 @@ async def test_create_group_rejected_when_not_the_linked_account():
 async def test_create_group_rejected_when_chat_writes_not_consented():
     session = FakeSession()
     service = _service(session, allow_chat_writes=False)
+    invitee_account_id = new_account_id()
 
     with pytest.raises(MutationNotAllowedError, match=CHAT_WRITES):
-        await service.create_group(account_ids=[new_account_id()])
+        await service.create_group(account_ids=[invitee_account_id])
 
     assert session.post_calls == []
 
@@ -176,9 +178,10 @@ async def test_create_group_rejected_when_chat_writes_not_consented():
 async def test_friend_mutation_rejected_when_only_chat_writes_consented():
     session = FakeSession()
     service = _service(session, allow_friend_writes=False, allow_chat_writes=True)
+    friend_account_id = new_account_id()
 
     with pytest.raises(MutationNotAllowedError, match=FRIEND_WRITES):
-        await service.accept_friend(account_id=new_account_id())
+        await service.accept_friend(account_id=friend_account_id)
 
     assert session.put_calls == []
 
@@ -186,9 +189,10 @@ async def test_friend_mutation_rejected_when_only_chat_writes_consented():
 async def test_mutation_rejected_when_no_psn_account_is_linked():
     session = FakeSession()
     service = _guarded(session, None)
+    invitee_account_id = new_account_id()
 
     with pytest.raises(MutationNotAllowedError, match="No PSN account is linked"):
-        await service.create_group(account_ids=[new_account_id()])
+        await service.create_group(account_ids=[invitee_account_id])
 
     assert session.post_calls == []
 
@@ -290,9 +294,11 @@ async def test_accepting_a_pending_request_matches_the_online_id_case_insensitiv
 
 async def test_accepting_with_no_pending_request_raises_and_puts_nothing():
     session = FakeSession(routes={received_requests_url(): {RECEIVED_REQUESTS_KEY: []}})
+    service = _service(session)
+    requester_online_id = new_online_id()
 
     with pytest.raises(NoPendingFriendRequestError):
-        await _service(session).accept_friend_request(new_online_id())
+        await service.accept_friend_request(requester_online_id)
 
     assert session.put_calls == []
 

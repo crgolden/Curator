@@ -190,6 +190,10 @@ def _unlisted_bearer_routes(app) -> list[str]:
     ]
 
 
+def _route_for(app, handler):
+    return next(route for route in _effective_routes(app) if getattr(route, "endpoint", None) is handler)
+
+
 def _request_line_for(app, handler) -> tuple[str, str]:
     """The one method ``handler`` answers, and its path with every parameter filled by a generated value.
 
@@ -197,7 +201,7 @@ def _request_line_for(app, handler) -> tuple[str, str]:
     never restates the URL; the generated parameters are never judged, because every listed route refuses
     the request before its body runs.
     """
-    route = next(route for route in _effective_routes(app) if getattr(route, "endpoint", None) is handler)
+    route = _route_for(app, handler)
     (method,) = route.methods
     parameters = {name: uuid.uuid4().hex for name in route.param_convertors}
     return method, app.url_path_for(handler.__name__, **parameters)
@@ -309,6 +313,16 @@ def test_bearer_required_routes_reject_garbage_token(handler):
 
     assert response.status_code == 401
     assert response.headers.get(WWW_AUTHENTICATE_HEADER) == BEARER_SCHEME
+
+
+@pytest.mark.parametrize("handler", _BEARER_REQUIRED_HANDLERS, ids=lambda handler: handler.__name__)
+def test_bearer_required_routes_document_the_bearer_refusals(handler):
+    client, *_ = _build()
+    route = _route_for(client.app, handler)
+
+    documented = set(route.responses)
+
+    assert {401, 403, 503} <= documented
 
 
 class UnreachableAuthorityValidator:

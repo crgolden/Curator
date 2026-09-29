@@ -25,7 +25,12 @@ from curator.catalog.store_backfill_service import (
     CatalogBackfillWriter,
     next_page_offset,
 )
-from curator.psn.store_client import StoreCatalogClient, StoreFilterIgnoredError, StoreQueryRotatedError
+from curator.psn.store_client import (
+    StoreCatalogClient,
+    StoreCategoryPage,
+    StoreFilterIgnoredError,
+    StoreQueryRotatedError,
+)
 
 CATEGORY_RENAMED: WalkStoppedReason = "category_renamed"
 
@@ -161,38 +166,11 @@ class PsPlusWalkService:
             pages_read += 1
             reported_total = page.total_count
             seen_product_ids.update(product.product_id for product in page.products)
-            if page.products:
-                await writer.record_products(walk_id, page.products, self._clock())
-                full_games = [product for product in page.products if product.is_full_game]
-                if full_games:
-                    await self._catalog.backfill_store_products(full_games)
+            await self._record_page(writer, walk_id, page)
 
             offset = next_page_offset(page, offset)
             if page.is_last or not page.products:
-                if not seen_product_ids:
-                    await writer.stop(walk_id, NO_PRODUCTS, reported_total, 0)
-                    return self._progress(
-                        category,
-                        walk_id,
-                        pages_read=pages_read,
-                        seen_product_ids=seen_product_ids,
-                        reported_total=reported_total,
-                        stopped_reason=NO_PRODUCTS,
-                    )
-                completed_at = self._clock()
-                await writer.complete(walk_id, completed_at, reported_total, len(seen_product_ids))
-                progress = self._progress(
-                    category,
-                    walk_id,
-                    pages_read=pages_read,
-                    seen_product_ids=seen_product_ids,
-                    reported_total=reported_total,
-                    stopped_reason=None,
-                    completed=True,
-                )
-                if progress.coverage_shortfall == 0:
-                    await writer.mark_departures(walk_id, completed_at)
-                return progress
+                return await self._finish(category, writer, walk_id, pages_read, seen_product_ids, reported_total)
 
             if self._page_delay_seconds:
                 await asyncio.sleep(self._page_delay_seconds)
@@ -206,6 +184,48 @@ class PsPlusWalkService:
             reported_total=reported_total,
             stopped_reason=PAGE_BUDGET_EXHAUSTED,
         )
+
+    async def _record_page(self, writer: PsPlusWalkWriter, walk_id: str, page: StoreCategoryPage) -> None:
+        if not page.products:
+            return
+        await writer.record_products(walk_id, page.products, self._clock())
+        full_games = [product for product in page.products if product.is_full_game]
+        if full_games:
+            await self._catalog.backfill_store_products(full_games)
+
+    async def _finish(
+        self,
+        category: PsPlusCategory,
+        writer: PsPlusWalkWriter,
+        walk_id: str,
+        pages_read: int,
+        seen_product_ids: set[str],
+        reported_total: int,
+    ) -> PsPlusWalkProgress:
+        if not seen_product_ids:
+            await writer.stop(walk_id, NO_PRODUCTS, reported_total, 0)
+            return self._progress(
+                category,
+                walk_id,
+                pages_read=pages_read,
+                seen_product_ids=seen_product_ids,
+                reported_total=reported_total,
+                stopped_reason=NO_PRODUCTS,
+            )
+        completed_at = self._clock()
+        await writer.complete(walk_id, completed_at, reported_total, len(seen_product_ids))
+        progress = self._progress(
+            category,
+            walk_id,
+            pages_read=pages_read,
+            seen_product_ids=seen_product_ids,
+            reported_total=reported_total,
+            stopped_reason=None,
+            completed=True,
+        )
+        if progress.coverage_shortfall == 0:
+            await writer.mark_departures(walk_id, completed_at)
+        return progress
 
     @staticmethod
     def _progress(

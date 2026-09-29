@@ -38,8 +38,10 @@ def test_build_redis_client_builds_real_client_when_host_set():
 
 
 def test_build_redis_client_refuses_a_host_without_its_port_and_tls_flag():
+    settings = _settings(redis_host="redis.example.test")
+
     with pytest.raises(ConfigError):
-        build_redis_client(_settings(redis_host="redis.example.test"))
+        build_redis_client(settings)
 
 
 def test_build_redis_client_configures_connection_resilience():

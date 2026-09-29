@@ -23,6 +23,14 @@ from curator.deps import (
     require_bearer,
     require_preference,
 )
+from curator.openapi_responses import (
+    BEARER_ERROR_RESPONSES,
+    CONFLICT_RESPONSE,
+    FORBIDDEN_RESPONSE,
+    NOT_FOUND_RESPONSE,
+    UNAUTHORIZED_RESPONSE,
+    UNPROCESSABLE_RESPONSE,
+)
 from curator.psn.errors import MutationNotAllowedError, NoPendingFriendRequestError, PsnAuthError
 from curator.psn.identifiers import (
     InvalidPsnIdentifierError,
@@ -116,7 +124,9 @@ class FriendRequestsResponse(BaseModel):
     requests: list[FriendRequestResponse]
 
 
-@router.get("/me/friend-requests")
+@router.get(
+    "/me/friend-requests", responses={**BEARER_ERROR_RESPONSES, 401: UNAUTHORIZED_RESPONSE, 404: NOT_FOUND_RESPONSE}
+)
 async def list_friend_requests(
     request: Request, claims: Annotated[TokenClaims, Depends(require_bearer)]
 ) -> FriendRequestsResponse:
@@ -140,7 +150,17 @@ async def list_friend_requests(
     )
 
 
-@router.post("/me/friend-requests/{online_id}", status_code=204)
+@router.post(
+    "/me/friend-requests/{online_id}",
+    status_code=204,
+    responses={
+        **BEARER_ERROR_RESPONSES,
+        401: UNAUTHORIZED_RESPONSE,
+        403: FORBIDDEN_RESPONSE,
+        404: NOT_FOUND_RESPONSE,
+        422: UNPROCESSABLE_RESPONSE,
+    },
+)
 async def send_friend_request(
     online_id: str, request: Request, claims: Annotated[TokenClaims, Depends(require_bearer)]
 ) -> Response:
@@ -158,7 +178,18 @@ async def send_friend_request(
     return Response(status_code=204)
 
 
-@router.put("/me/friends/{online_id}", status_code=204)
+@router.put(
+    "/me/friends/{online_id}",
+    status_code=204,
+    responses={
+        **BEARER_ERROR_RESPONSES,
+        401: UNAUTHORIZED_RESPONSE,
+        403: FORBIDDEN_RESPONSE,
+        404: NOT_FOUND_RESPONSE,
+        409: CONFLICT_RESPONSE,
+        422: UNPROCESSABLE_RESPONSE,
+    },
+)
 async def accept_friend(
     online_id: str, request: Request, claims: Annotated[TokenClaims, Depends(require_bearer)]
 ) -> Response:
@@ -179,7 +210,17 @@ async def accept_friend(
     return Response(status_code=204)
 
 
-@router.delete("/me/friends/{online_id}", status_code=204)
+@router.delete(
+    "/me/friends/{online_id}",
+    status_code=204,
+    responses={
+        **BEARER_ERROR_RESPONSES,
+        401: UNAUTHORIZED_RESPONSE,
+        403: FORBIDDEN_RESPONSE,
+        404: NOT_FOUND_RESPONSE,
+        422: UNPROCESSABLE_RESPONSE,
+    },
+)
 async def remove_friend(
     online_id: str, request: Request, claims: Annotated[TokenClaims, Depends(require_bearer)]
 ) -> Response:
@@ -201,7 +242,16 @@ async def remove_friend(
     return Response(status_code=204)
 
 
-@router.post("/me/chat/groups")
+@router.post(
+    "/me/chat/groups",
+    responses={
+        **BEARER_ERROR_RESPONSES,
+        401: UNAUTHORIZED_RESPONSE,
+        403: FORBIDDEN_RESPONSE,
+        404: NOT_FOUND_RESPONSE,
+        422: UNPROCESSABLE_RESPONSE,
+    },
+)
 async def create_chat_group(
     body: CreateGroupRequest, request: Request, claims: Annotated[TokenClaims, Depends(require_bearer)]
 ) -> CreateGroupResponse:
@@ -221,7 +271,17 @@ async def create_chat_group(
     return CreateGroupResponse(group_id=group_id)
 
 
-@router.patch("/me/chat/groups/{group_id}", status_code=204)
+@router.patch(
+    "/me/chat/groups/{group_id}",
+    status_code=204,
+    responses={
+        **BEARER_ERROR_RESPONSES,
+        401: UNAUTHORIZED_RESPONSE,
+        403: FORBIDDEN_RESPONSE,
+        404: NOT_FOUND_RESPONSE,
+        422: UNPROCESSABLE_RESPONSE,
+    },
+)
 async def rename_chat_group(
     group_id: str,
     body: RenameGroupRequest,
@@ -242,7 +302,16 @@ async def rename_chat_group(
     return Response(status_code=204)
 
 
-@router.post("/me/chat/groups/{group_id}/invitees")
+@router.post(
+    "/me/chat/groups/{group_id}/invitees",
+    responses={
+        **BEARER_ERROR_RESPONSES,
+        401: UNAUTHORIZED_RESPONSE,
+        403: FORBIDDEN_RESPONSE,
+        404: NOT_FOUND_RESPONSE,
+        422: UNPROCESSABLE_RESPONSE,
+    },
+)
 async def invite_to_chat_group(
     group_id: str,
     body: InviteToGroupRequest,
@@ -275,7 +344,17 @@ async def invite_to_chat_group(
     return InviteToGroupResponse(group_id=resulting_group_id)
 
 
-@router.delete("/me/chat/groups/{group_id}/members/me", status_code=204)
+@router.delete(
+    "/me/chat/groups/{group_id}/members/me",
+    status_code=204,
+    responses={
+        **BEARER_ERROR_RESPONSES,
+        401: UNAUTHORIZED_RESPONSE,
+        403: FORBIDDEN_RESPONSE,
+        404: NOT_FOUND_RESPONSE,
+        422: UNPROCESSABLE_RESPONSE,
+    },
+)
 async def leave_chat_group(
     group_id: str, request: Request, claims: Annotated[TokenClaims, Depends(require_bearer)]
 ) -> Response:

@@ -18,6 +18,7 @@ from pydantic import BaseModel
 
 from curator.deps import PREFERENCE_NOT_LINKED_DETAIL, require_bearer
 from curator.jobs.queue_publisher import QueuePublisher
+from curator.openapi_responses import BEARER_ERROR_RESPONSES, NOT_FOUND_RESPONSE, SERVICE_UNAVAILABLE_RESPONSE
 from curator.persistence.refresh_schedules_repository import (
     Cadence,
     RefreshSchedule,
@@ -58,7 +59,7 @@ class RefreshScheduleResponse(BaseModel):
     paused_reason: str | None
 
 
-@router.get("/me/refresh-schedule")
+@router.get("/me/refresh-schedule", responses={**BEARER_ERROR_RESPONSES, 404: NOT_FOUND_RESPONSE})
 async def get_refresh_schedule(
     request: Request, claims: Annotated[TokenClaims, Depends(require_bearer)]
 ) -> RefreshScheduleResponse:
@@ -74,7 +75,10 @@ async def get_refresh_schedule(
     return _response(schedule)
 
 
-@router.put("/me/refresh-schedule")
+@router.put(
+    "/me/refresh-schedule",
+    responses={**BEARER_ERROR_RESPONSES, 404: NOT_FOUND_RESPONSE, 503: SERVICE_UNAVAILABLE_RESPONSE},
+)
 async def set_refresh_schedule(
     body: RefreshScheduleRequest,
     request: Request,
@@ -109,7 +113,7 @@ async def set_refresh_schedule(
     return _response(schedule)
 
 
-@router.delete("/me/refresh-schedule", status_code=204)
+@router.delete("/me/refresh-schedule", status_code=204, responses={**BEARER_ERROR_RESPONSES})
 async def delete_refresh_schedule(
     request: Request, claims: Annotated[TokenClaims, Depends(require_bearer)]
 ) -> Response:

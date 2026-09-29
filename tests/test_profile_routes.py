@@ -867,9 +867,11 @@ def test_a_cross_user_lookup_is_not_made_when_its_history_row_cannot_be_written(
         trophy_client_factory=trophy_factory,
         audit_repository=audit,
     )
+    profile_path = _path(client, profile_routes.get_user_profile, sub=SUB_A)
+    headers = _bearer(TOKEN_B)
 
     with pytest.raises(RuntimeError):
-        client.get(_path(client, profile_routes.get_user_profile, sub=SUB_A), headers=_bearer(TOKEN_B))
+        client.get(profile_path, headers=headers)
 
     assert trophy_factory.calls == []
 

@@ -16,6 +16,7 @@ from curator.deps import (
     require_bearer,
     require_preference,
 )
+from curator.openapi_responses import BEARER_ERROR_RESPONSES, NOT_FOUND_RESPONSE, UNAUTHORIZED_RESPONSE
 from curator.psn.errors import PsnAuthError
 from curator.psn.models import Presence
 from curator.psn.presence_client import PresenceClient, PresenceClientFactory
@@ -33,7 +34,7 @@ class PresenceResponse(BaseModel):
     game_title: str | None
 
 
-@router.get("/presence")
+@router.get("/presence", responses={**BEARER_ERROR_RESPONSES, 401: UNAUTHORIZED_RESPONSE, 404: NOT_FOUND_RESPONSE})
 async def get_presence(request: Request, claims: Annotated[TokenClaims, Depends(require_bearer)]) -> PresenceResponse:
     """Return the caller's own current PSN online presence.
 

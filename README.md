@@ -159,9 +159,9 @@ owner opts in.
   independent points, all required together: (1) `curator.enrichment.rawg_client.RawgApiError` re-raises
   `from None` so a sanitized message (`"RAWG request failed with status {code}"`) is the only thing a
   downstream `logger.exception(...)` can render — the original `httpx.HTTPStatusError`'s message, which
-  embeds the full URL, is fully suppressed from the exception chain; (2) `curator.telemetry`'s httpx
-  instrumentation `async_request_hook` strips the `key` query param from the OTel span attribute after the
-  instrumentor sets it (OTel's own built-in query-param redaction only covers a fixed, unrelated allowlist —
+  embeds the full URL, is fully suppressed from the exception chain; (2) `curator.telemetry`'s
+  `RawgKeyRedactingSpanProcessor` strips the `key` query param from the OTel span's URL attributes as the
+  httpx span starts (OTel's own built-in query-param redaction only covers a fixed, unrelated allowlist —
   `AWSAccessKeyId`/`Signature`/`sig`/`X-Goog-Signature` — not `key`); (3) the process that writes
   `job_runs.error` maps every caught job exception to short, category-based, safe text first, so even a
   future exception type nobody thought to sanitize can't leak anything through what

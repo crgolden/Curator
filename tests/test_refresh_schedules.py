@@ -382,6 +382,8 @@ async def test_publish_scheduled_library_refresh_without_a_configured_queue_rais
         enrichment_sender=FakeSender(),
         job_runs_repository=FakeJobRunsRepository(),
     )
+    identity_sub = new_identity_sub()
+    scheduled_for = new_utc_instant()
 
     with pytest.raises(RuntimeError):
-        await publisher.publish_scheduled_library_refresh(new_identity_sub(), new_utc_instant())
+        await publisher.publish_scheduled_library_refresh(identity_sub, scheduled_for)

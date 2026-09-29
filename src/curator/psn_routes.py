@@ -21,6 +21,7 @@ from curator.link_service import (
 from curator.link_service import link as link_account
 from curator.link_service import unlink as unlink_account
 from curator.me_routes import PsnSummary
+from curator.openapi_responses import BAD_REQUEST_RESPONSE, BEARER_ERROR_RESPONSES, CONFLICT_RESPONSE
 from curator.persistence.crypto import TokenCrypto
 from curator.persistence.refresh_schedules_repository import RefreshSchedulesRepository
 from curator.persistence.repository import Repository
@@ -62,7 +63,7 @@ class LinkResponse(BaseModel):
     psn: PsnSummary
 
 
-@router.post("/psn/link")
+@router.post("/psn/link", responses={**BEARER_ERROR_RESPONSES, 400: BAD_REQUEST_RESPONSE, 409: CONFLICT_RESPONSE})
 async def psn_link(
     body: LinkRequest,
     request: Request,
@@ -110,7 +111,7 @@ async def psn_link(
     )
 
 
-@router.delete("/psn/link", status_code=204)
+@router.delete("/psn/link", status_code=204, responses={**BEARER_ERROR_RESPONSES})
 async def psn_unlink(
     request: Request,
     claims: Annotated[TokenClaims, Depends(require_verified_caller)],

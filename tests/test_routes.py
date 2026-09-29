@@ -911,9 +911,11 @@ def test_delete_me_logs_account_deleted_before_removing_the_user():
 def test_delete_me_deletes_nothing_when_the_history_row_cannot_be_written():
     client, repo, _crypto, _agent_factory, _validator, audit = _build_with_valid_token()
     audit.begin_error = RuntimeError(EMAIL)
+    delete_me_path = _path(client, me_routes.delete_me)
+    headers = _bearer("valid-token")
 
     with pytest.raises(RuntimeError):
-        client.delete(_path(client, me_routes.delete_me), headers=_bearer("valid-token"))
+        client.delete(delete_me_path, headers=headers)
 
     assert repo.delete_user_calls == []
 
@@ -947,9 +949,12 @@ def test_psn_link_mismatch_records_a_failed_link_request_with_the_reason():
 def test_psn_link_never_uses_the_npsso_when_the_history_row_cannot_be_written():
     client, _repo, _crypto, agent_factory, _validator, audit = _build_with_valid_token()
     audit.begin_error = RuntimeError(EMAIL)
+    link_path = _path(client, psn_routes.psn_link)
+    link_body = _link_body("the-npsso")
+    headers = _bearer("valid-token")
 
     with pytest.raises(RuntimeError):
-        client.post(_path(client, psn_routes.psn_link), json=_link_body("the-npsso"), headers=_bearer("valid-token"))
+        client.post(link_path, json=link_body, headers=headers)
 
     assert agent_factory.calls == []
 

@@ -14,6 +14,7 @@ from curator.deps import (
     require_bearer,
     require_preference,
 )
+from curator.openapi_responses import BEARER_ERROR_RESPONSES, NOT_FOUND_RESPONSE, UNAUTHORIZED_RESPONSE
 from curator.psn.account_client import Account, AccountClient, AccountClientFactory
 from curator.psn.errors import PsnAuthError
 from curator.token_validation import TokenClaims
@@ -29,7 +30,7 @@ class IdentityResponse(BaseModel):
     region: str | None
 
 
-@router.get("/identity")
+@router.get("/identity", responses={**BEARER_ERROR_RESPONSES, 401: UNAUTHORIZED_RESPONSE, 404: NOT_FOUND_RESPONSE})
 async def get_identity(request: Request, claims: Annotated[TokenClaims, Depends(require_bearer)]) -> IdentityResponse:
     """Return the caller's own PSN account identity.
 

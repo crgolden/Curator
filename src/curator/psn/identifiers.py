@@ -4,12 +4,12 @@ from __future__ import annotations
 
 import re
 
-_ACCOUNT_ID = re.compile(r"^[0-9]{1,20}$")
+_ACCOUNT_ID = re.compile(r"^\d{1,20}$", re.ASCII)
 _ONLINE_ID = re.compile(r"^[A-Za-z0-9_-]{3,16}$")
-_NP_COMMUNICATION_ID = re.compile(r"^NPWR[0-9]{4,7}_[0-9]{2}$")
+_NP_COMMUNICATION_ID = re.compile(r"^NPWR\d{4,7}_\d{2}$", re.ASCII)
 _TROPHY_GROUP = re.compile(r"^[A-Za-z0-9]{1,16}$")
 _DIRECT_MESSAGE_GROUP_ID = re.compile(r"^~[0-9A-Fa-f]{16}\.[0-9A-Fa-f]{16}$")
-_ALLOCATED_GROUP_ID = re.compile(r"^[0-9A-Fa-f]{40}-[0-9]{1,10}$")
+_ALLOCATED_GROUP_ID = re.compile(r"^[0-9A-Fa-f]{40}-\d{1,10}$", re.ASCII)
 
 
 class InvalidPsnIdentifierError(ValueError):

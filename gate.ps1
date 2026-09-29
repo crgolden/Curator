@@ -11,12 +11,14 @@ $gateOutput = Join-Path ([IO.Path]::GetTempPath()) "crgolden-gates\$(Split-Path 
 New-Item -ItemType Directory -Force -Path $gateOutput | Out-Null
 
 Register-GateSteps @('Schema test database configuration', 'poetry check --lock', 'ruff check', 'ruff format --check', 'mypy',
-    'Bearer-list control', 'Run tests with coverage', 'SonarCloud analysis', 'Verify deployment package boots')
+    'Bearer-list control', 'Run tests with coverage', 'SonarCloud analysis', 'Fail on open Sonar issues',
+    'Verify deployment package boots')
 $repo = $PSScriptRoot
 $pytestLog = Join-Path $gateOutput 'pytest.txt'
 $sonarBranch = "branch-local-$($env:COMPUTERNAME.ToLowerInvariant())"
 $pytestStep = 'Run tests with coverage (pytest -x --cov)'
 $sonarStep = "SonarCloud analysis (sonar-scanner, branch $sonarBranch, quality gate waited)"
+$sonarIssues = 'Fail on open Sonar issues'
 $env:TZ = 'UTC'
 if ($env:TZ -ne 'UTC') { Write-Host 'GATE: FAILED (TZ pin)'; exit 1 }
 Set-Location $repo
@@ -83,11 +85,16 @@ if (-not (Test-StepCarried $pytestStep)) {
     Write-Row $pytestStep 'PASS' $detail
 }
 
-if (-not (Test-StepCarried $sonarStep)) {
+if (Test-StepCarried $sonarIssues) {
+    $null = Test-StepCarried $sonarStep
+}
+else {
+    $sonarStartedAt = [DateTimeOffset]::UtcNow
     $env:JAVA_HOME = "$env:SystemDrive\sonar-scanner-8.0.1.6346-windows-x64\jre"
     $global:LASTEXITCODE = $null
     sonar-scanner -D"sonar.projectKey=crgolden_Curator" -D"sonar.organization=crgolden" -D"sonar.host.url=https://sonarcloud.io" -D"sonar.sources=src" -D"sonar.tests=tests" -D"sonar.python.coverage.reportPaths=coverage.xml" -D"sonar.python.version=3.10,3.11,3.12,3.13,3.14" -D"sonar.exclusions=**/__pycache__/**,**/*.pyc,.venv/**" -D"sonar.qualitygate.wait=true" -D"sonar.scanner.skipJreProvisioning=true" -D"sonar.branch.name=$sonarBranch"
     $null = Test-Exit $sonarStep
+    Test-SonarIssues $sonarIssues 'crgolden_Curator' $sonarBranch $sonarStartedAt
 }
 
 $bootStep = "Verify deployment package boots (the workflow step's exports, no .env)"

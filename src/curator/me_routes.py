@@ -10,6 +10,7 @@ from curator.audit.recorded import ActionRecorder, recorded
 from curator.audit.repository import ACTION_ACCOUNT_DELETED, AccountActionLogEntry, AccountActionLogRepository
 from curator.deps import require_verified_caller
 from curator.link_service import AgentFactory
+from curator.openapi_responses import BEARER_ERROR_RESPONSES
 from curator.persistence.crypto import TokenCrypto
 from curator.persistence.db_token_store import access_token_cache_key
 from curator.persistence.repository import LinkRecord, Repository
@@ -51,7 +52,7 @@ class AccountActionsResponse(BaseModel):
     actions: list[AccountActionResponse]
 
 
-@router.get("/me")
+@router.get("/me", responses={**BEARER_ERROR_RESPONSES})
 async def me(request: Request, claims: Annotated[TokenClaims, Depends(require_verified_caller)]) -> MeResponse:
     """Return the caller's identity plus their PSN link status.
 
@@ -83,7 +84,7 @@ async def me(request: Request, claims: Annotated[TokenClaims, Depends(require_ve
     )
 
 
-@router.delete("/me", status_code=204)
+@router.delete("/me", status_code=204, responses={**BEARER_ERROR_RESPONSES})
 async def delete_me(request: Request, claims: Annotated[TokenClaims, Depends(require_verified_caller)]) -> Response:
     """Delete the caller's account and every trace of data Curator has stored about them.
 
@@ -114,7 +115,7 @@ async def delete_me(request: Request, claims: Annotated[TokenClaims, Depends(req
     return Response(status_code=204)
 
 
-@router.get("/me/actions")
+@router.get("/me/actions", responses={**BEARER_ERROR_RESPONSES})
 async def get_my_actions(
     request: Request, claims: Annotated[TokenClaims, Depends(require_verified_caller)]
 ) -> AccountActionsResponse:

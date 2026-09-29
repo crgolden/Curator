@@ -10,13 +10,14 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Literal
 
+from psycopg import AsyncCursor
 from psycopg.types.json import Jsonb
 from psycopg_pool import AsyncConnectionPool
 
 from curator.catalog.content_kind import BROWSABLE_KIND_SQL, CONTENT_KINDS, EVERY_KIND, GAME_KIND, ContentKind
 from curator.catalog.cover_art import SQUARE_COVER_ART_SQL
 from curator.catalog.title_normalization import edition_family, normalize_name, normalized_title
-from curator.psn.store_client import StoreProduct
+from curator.psn.store_client import StorePrice, StoreProduct
 from curator.scoring.size_estimation_service import SizeEstimate
 
 CatalogSortField = Literal["title", "price"]
@@ -204,6 +205,92 @@ FILL_STORE_COVER_SQL = (
     "UPDATE games SET store_cover_image_url = %s WHERE game_id = %s AND store_cover_image_url IS NULL"
 )
 """Parameters: ``(cover_image_url, game_id)``."""
+
+
+async def _admit_store_product(
+    cur: AsyncCursor[Any], product: StoreProduct, canonical_title: str, key: str
+) -> tuple[str, bool]:
+    await cur.execute(
+        "SELECT pg_advisory_xact_lock(%s, hashtext(%s))",
+        (GAME_UPSERT_ADVISORY_LOCK_CLASS, key),
+    )
+    await cur.execute("SELECT game_id FROM games WHERE normalized_title = %s", (key,))
+    row = await cur.fetchone()
+    created = row is None
+    if row is None:
+        await cur.execute(
+            """
+            INSERT INTO games (canonical_title, normalized_title, content_kind, store_cover_image_url)
+            VALUES (%s, %s, %s, %s)
+            RETURNING game_id
+            """,
+            (canonical_title, key, GAME_KIND, product.cover_image_url),
+        )
+        row = await cur.fetchone()
+        assert row is not None
+    game_id = str(row[0])
+
+    if product.cover_image_url is not None:
+        await cur.execute(FILL_STORE_COVER_SQL, (product.cover_image_url, game_id))
+    await cur.execute(
+        "INSERT INTO game_enrichment (game_id) VALUES (%s) ON CONFLICT (game_id) DO NOTHING",
+        (game_id,),
+    )
+    return game_id, created
+
+
+async def _cache_store_product(cur: AsyncCursor[Any], product: StoreProduct, game_id: str) -> None:
+    await cur.execute(
+        """
+        INSERT INTO psn_catalog_cache
+            (title_id, game_id, store_product_id, cover_image_url, raw, fetched_at,
+             price_is_free, price_tied_to_subscription, price_base_cents,
+             price_discounted_cents, price_discount_text, price_fetched_at)
+        VALUES (%s, %s, %s, %s, %s, now(), %s, %s, %s, %s, %s,
+                CASE WHEN %s THEN now() END)
+        ON CONFLICT (title_id) DO UPDATE SET
+            game_id = EXCLUDED.game_id,
+            store_product_id = EXCLUDED.store_product_id,
+            cover_image_url = COALESCE(EXCLUDED.cover_image_url, psn_catalog_cache.cover_image_url),
+            raw = CASE WHEN EXCLUDED.raw = '{}'::jsonb THEN psn_catalog_cache.raw ELSE EXCLUDED.raw END,
+            fetched_at = now(),
+            price_is_free = COALESCE(EXCLUDED.price_is_free, psn_catalog_cache.price_is_free),
+            price_tied_to_subscription = COALESCE(
+                EXCLUDED.price_tied_to_subscription, psn_catalog_cache.price_tied_to_subscription
+            ),
+            price_base_cents = CASE WHEN EXCLUDED.price_fetched_at IS NOT NULL
+                THEN EXCLUDED.price_base_cents ELSE psn_catalog_cache.price_base_cents END,
+            price_discounted_cents = CASE WHEN EXCLUDED.price_fetched_at IS NOT NULL
+                THEN EXCLUDED.price_discounted_cents ELSE psn_catalog_cache.price_discounted_cents END,
+            price_discount_text = CASE WHEN EXCLUDED.price_fetched_at IS NOT NULL
+                THEN EXCLUDED.price_discount_text ELSE psn_catalog_cache.price_discount_text END,
+            price_fetched_at = COALESCE(EXCLUDED.price_fetched_at, psn_catalog_cache.price_fetched_at)
+        """,
+        (
+            product.np_title_id,
+            game_id,
+            product.product_id,
+            product.cover_image_url,
+            Jsonb(dict(product.raw)),
+            *_price_parameters(product.price),
+        ),
+    )
+
+
+_PriceParameters = tuple[bool | None, bool | None, int | None, int | None, str | None, bool]
+
+
+def _price_parameters(price: StorePrice | None) -> _PriceParameters:
+    if price is None:
+        return None, None, None, None, None, False
+    return (
+        price.is_free,
+        price.tied_to_subscription,
+        price.base_cents,
+        price.discounted_cents,
+        price.discount_text,
+        True,
+    )
 
 
 class CatalogRepository:
@@ -495,75 +582,11 @@ class CatalogRepository:
 
                 key = normalized_title(canonical_title)
                 async with conn.transaction():
-                    await cur.execute(
-                        "SELECT pg_advisory_xact_lock(%s, hashtext(%s))",
-                        (GAME_UPSERT_ADVISORY_LOCK_CLASS, key),
-                    )
-                    await cur.execute("SELECT game_id FROM games WHERE normalized_title = %s", (key,))
-                    row = await cur.fetchone()
-                    if row is None:
-                        await cur.execute(
-                            """
-                            INSERT INTO games (canonical_title, normalized_title, content_kind, store_cover_image_url)
-                            VALUES (%s, %s, %s, %s)
-                            RETURNING game_id
-                            """,
-                            (canonical_title, key, GAME_KIND, product.cover_image_url),
-                        )
-                        row = await cur.fetchone()
-                        assert row is not None
-                        games_created += 1
-                    game_id = str(row[0])
-
-                    if product.cover_image_url is not None:
-                        await cur.execute(FILL_STORE_COVER_SQL, (product.cover_image_url, game_id))
-                    await cur.execute(
-                        "INSERT INTO game_enrichment (game_id) VALUES (%s) ON CONFLICT (game_id) DO NOTHING",
-                        (game_id,),
-                    )
+                    game_id, created = await _admit_store_product(cur, product, canonical_title, key)
+                games_created += int(created)
 
                 if product.np_title_id:
-                    price = product.price
-                    await cur.execute(
-                        """
-                        INSERT INTO psn_catalog_cache
-                            (title_id, game_id, store_product_id, cover_image_url, raw, fetched_at,
-                             price_is_free, price_tied_to_subscription, price_base_cents,
-                             price_discounted_cents, price_discount_text, price_fetched_at)
-                        VALUES (%s, %s, %s, %s, %s, now(), %s, %s, %s, %s, %s,
-                                CASE WHEN %s THEN now() END)
-                        ON CONFLICT (title_id) DO UPDATE SET
-                            game_id = EXCLUDED.game_id,
-                            store_product_id = EXCLUDED.store_product_id,
-                            cover_image_url = COALESCE(EXCLUDED.cover_image_url, psn_catalog_cache.cover_image_url),
-                            raw = CASE WHEN EXCLUDED.raw = '{}'::jsonb THEN psn_catalog_cache.raw ELSE EXCLUDED.raw END,
-                            fetched_at = now(),
-                            price_is_free = COALESCE(EXCLUDED.price_is_free, psn_catalog_cache.price_is_free),
-                            price_tied_to_subscription = COALESCE(
-                                EXCLUDED.price_tied_to_subscription, psn_catalog_cache.price_tied_to_subscription
-                            ),
-                            price_base_cents = CASE WHEN EXCLUDED.price_fetched_at IS NOT NULL
-                                THEN EXCLUDED.price_base_cents ELSE psn_catalog_cache.price_base_cents END,
-                            price_discounted_cents = CASE WHEN EXCLUDED.price_fetched_at IS NOT NULL
-                                THEN EXCLUDED.price_discounted_cents ELSE psn_catalog_cache.price_discounted_cents END,
-                            price_discount_text = CASE WHEN EXCLUDED.price_fetched_at IS NOT NULL
-                                THEN EXCLUDED.price_discount_text ELSE psn_catalog_cache.price_discount_text END,
-                            price_fetched_at = COALESCE(EXCLUDED.price_fetched_at, psn_catalog_cache.price_fetched_at)
-                        """,
-                        (
-                            product.np_title_id,
-                            game_id,
-                            product.product_id,
-                            product.cover_image_url,
-                            Jsonb(dict(product.raw)),
-                            price.is_free if price else None,
-                            price.tied_to_subscription if price else None,
-                            price.base_cents if price else None,
-                            price.discounted_cents if price else None,
-                            price.discount_text if price else None,
-                            price is not None,
-                        ),
-                    )
+                    await _cache_store_product(cur, product, game_id)
                     if product.cover_image_url:
                         covers_cached += 1
         return games_created, covers_cached

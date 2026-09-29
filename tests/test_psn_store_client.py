@@ -361,9 +361,10 @@ async def test_paging_arguments_reach_the_gateway():
 
 async def test_a_rotated_persisted_query_hash_is_its_own_error():
     client = _client(_answering(_rotated_body(), 400))
+    category_id = new_category_id()
 
     with pytest.raises(StoreQueryRotatedError) as excinfo:
-        await client.category_page(new_category_id())
+        await client.category_page(category_id)
 
     assert "refresh it" in str(excinfo.value), "the message must point at the fix, not just report failure"
 
@@ -386,9 +387,10 @@ async def test_a_rotated_hash_falls_through_to_the_next_candidate():
 
 async def test_the_rotated_error_only_surfaces_once_every_candidate_is_exhausted():
     client = _client(_answering(_rotated_body(), 400), query_hashes=(new_sha256_hash(), new_sha256_hash()))
+    category_id = new_category_id()
 
     with pytest.raises(StoreQueryRotatedError):
-        await client.category_page(new_category_id())
+        await client.category_page(category_id)
 
 
 async def test_facet_census_returns_every_published_key_with_its_count():
@@ -469,9 +471,10 @@ async def test_a_silently_ignored_filter_is_rejected_rather_than_trusted():
     unfiltered_total = full_games + new_positive_count()
     body = _grid([_product()], unfiltered_total, facets=_classification_facets(full_games))
     client = _client(_answering(body))
+    category_id = new_category_id()
 
     with pytest.raises(StoreFilterIgnoredError) as excinfo:
-        await client.category_page(new_category_id(), filter_by=(FULL_GAME_FILTER,))
+        await client.category_page(category_id, filter_by=(FULL_GAME_FILTER,))
 
     message = str(excinfo.value)
     assert str(full_games) in message, "the message must name what the category says the facet holds"
@@ -482,9 +485,10 @@ async def test_a_filter_matching_nothing_is_rejected_rather_than_ending_the_walk
     unpublished_key = new_facet_key()
     body = _grid([], 0, is_last=True, facets=_classification_facets(new_positive_count()))
     client = _client(_answering(body))
+    category_id = new_category_id()
 
     with pytest.raises(StoreFilterIgnoredError) as excinfo:
-        await client.category_page(new_category_id(), filter_by=(f"{CLASSIFICATION_FACET}:{unpublished_key}",))
+        await client.category_page(category_id, filter_by=(f"{CLASSIFICATION_FACET}:{unpublished_key}",))
 
     assert unpublished_key in str(excinfo.value)
 
@@ -492,9 +496,10 @@ async def test_a_filter_matching_nothing_is_rejected_rather_than_ending_the_walk
 async def test_a_zero_result_on_a_published_key_is_rejected_too():
     body = _grid([], 0, is_last=True, facets=_classification_facets(new_positive_count()))
     client = _client(_answering(body))
+    category_id = new_category_id()
 
     with pytest.raises(StoreFilterIgnoredError):
-        await client.category_page(new_category_id(), filter_by=(FULL_GAME_FILTER,))
+        await client.category_page(category_id, filter_by=(FULL_GAME_FILTER,))
 
 
 async def test_an_unfiltered_page_is_never_checked_against_facets():
@@ -528,9 +533,10 @@ async def test_a_response_without_any_facets_cannot_disprove_the_filter_so_is_al
 
 async def test_other_graphql_errors_are_not_reported_as_a_rotated_hash():
     client = _client(_answering({ERRORS_KEY: [{MESSAGE_KEY: lowercase_token()}]}))
+    category_id = new_category_id()
 
     with pytest.raises(StoreCatalogError) as excinfo:
-        await client.category_page(new_category_id())
+        await client.category_page(category_id)
 
     assert not isinstance(excinfo.value, StoreQueryRotatedError)
 
@@ -539,15 +545,19 @@ async def test_a_server_error_is_surfaced_without_parsing_the_body():
     def handler(request):
         return httpx.Response(503, text=lowercase_token())
 
+    client = _client(handler)
+    category_id = new_category_id()
+
     with pytest.raises(StoreCatalogError):
-        await _client(handler).category_page(new_category_id())
+        await client.category_page(category_id)
 
 
 async def test_a_csrf_rejection_is_not_mistaken_for_a_rotated_hash():
     client = _client(_answering({ERRORS_KEY: [{MESSAGE_KEY: new_game_title()}]}, 400))
+    category_id = new_category_id()
 
     with pytest.raises(StoreCatalogError) as excinfo:
-        await client.category_page(new_category_id())
+        await client.category_page(category_id)
 
     assert not isinstance(excinfo.value, StoreQueryRotatedError)
 

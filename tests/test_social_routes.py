@@ -452,9 +452,11 @@ def test_a_history_row_that_cannot_be_written_stops_the_mutation_before_psn():
     group_id = new_group_id()
     client, service, audit = _build(service=FakeMutationService(groups=[group_id]), allow_chat_writes=True)
     audit.begin_error = RuntimeError(new_group_id())
+    membership_path = _membership_path(client, group_id)
+    headers = _bearer(TOKEN)
 
     with pytest.raises(RuntimeError):
-        client.delete(_membership_path(client, group_id), headers=_bearer(TOKEN))
+        client.delete(membership_path, headers=headers)
 
     assert service.calls == []
     assert audit.rows == []
@@ -464,9 +466,11 @@ def test_an_outcome_that_cannot_be_written_fails_the_request_and_leaves_the_atte
     group_id = new_group_id()
     client, service, audit = _build(service=FakeMutationService(groups=[group_id]), allow_chat_writes=True)
     audit.finish_error = RuntimeError(new_group_id())
+    membership_path = _membership_path(client, group_id)
+    headers = _bearer(TOKEN)
 
     with pytest.raises(RuntimeError):
-        client.delete(_membership_path(client, group_id), headers=_bearer(TOKEN))
+        client.delete(membership_path, headers=headers)
 
     assert [call[0] for call in service.calls] == ["leave_group"]
     assert audit.outcomes == [(ACTION_CHAT_MEMBERSHIP_CHANGED, OUTCOME_STARTED)]

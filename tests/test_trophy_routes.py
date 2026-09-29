@@ -259,9 +259,11 @@ def test_trophy_summary_never_uses_the_token_when_the_history_row_cannot_be_writ
     factory = _linked_factory(caller, FakeTrophyClient())
     client, _ = _build_linked(caller, factory)
     client.app.state.audit_repository.begin_error = RuntimeError(caller.sub)
+    summary_path = _summary_path(client)
+    headers = _bearer(caller.token)
 
     with pytest.raises(RuntimeError):
-        client.get(_summary_path(client), headers=_bearer(caller.token))
+        client.get(summary_path, headers=headers)
 
     assert factory.calls == []
 

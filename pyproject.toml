@@ -66,9 +66,7 @@ line-length = 120
 src = ["src", "tests"]
 
 [tool.ruff.lint]
-select = ["E", "W", "F", "I", "UP", "B", "SIM", "RUF", "PT", "ERA"]
-# B008: FastAPI's Query/Path/Body parameter defaults -- see AGENTS/REPOS/Curator.md "Dependency injection style".
-ignore = ["B008"]
+select = ["E", "W", "F", "I", "UP", "B", "SIM", "RUF", "PT", "ERA", "FAST"]
 
 [tool.ruff.lint.isort]
 known-first-party = ["curator"]

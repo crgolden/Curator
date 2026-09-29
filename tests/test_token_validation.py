@@ -260,8 +260,10 @@ def _validate_a_token_that_would_otherwise_be_valid(fetch_json) -> None:
     ],
 )
 def test_a_failed_discovery_fetch_is_an_authority_outage_not_a_bad_token(shape, failure):
+    fetcher = FailingFetcher(failure)
+
     with pytest.raises(AuthorityUnavailableError):
-        _validate_a_token_that_would_otherwise_be_valid(FailingFetcher(failure))
+        _validate_a_token_that_would_otherwise_be_valid(fetcher)
 
 
 def test_a_discovery_document_carrying_no_jwks_uri_is_an_authority_outage():

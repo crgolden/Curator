@@ -37,6 +37,14 @@ from curator.library.repository import (
     LibrarySortField,
     TrophyMatch,
 )
+from curator.openapi_responses import (
+    BAD_REQUEST_RESPONSE,
+    BEARER_ERROR_RESPONSES,
+    CONFLICT_RESPONSE,
+    NOT_FOUND_RESPONSE,
+    SERVICE_UNAVAILABLE_RESPONSE,
+    UNAUTHORIZED_RESPONSE,
+)
 from curator.persistence.repository import Repository
 from curator.psn.errors import PsnAuthError
 from curator.psn.models import GameSearchResult
@@ -295,13 +303,15 @@ class ManualCandidatesResponse(BaseModel):
     store_unavailable: StoreUnavailableReason | None = None
 
 
-@router.get("/manual/candidates")
+@router.get(
+    "/manual/candidates", responses={**BEARER_ERROR_RESPONSES, 401: UNAUTHORIZED_RESPONSE, 404: NOT_FOUND_RESPONSE}
+)
 async def manual_add_candidates(
     request: Request,
     claims: Annotated[TokenClaims, Depends(require_bearer)],
-    q: str = Query(min_length=1, alias=SEARCH_TERM_PARAM),
-    include_store: bool = Query(default=False, alias=INCLUDE_STORE_PARAM),
-    limit: int = Query(default=10, ge=1, le=MAX_STORE_SEARCH_LIMIT, alias=SEARCH_LIMIT_PARAM),
+    q: Annotated[str, Query(min_length=1, alias=SEARCH_TERM_PARAM)],
+    include_store: Annotated[bool, Query(alias=INCLUDE_STORE_PARAM)] = False,
+    limit: Annotated[int, Query(ge=1, le=MAX_STORE_SEARCH_LIMIT, alias=SEARCH_LIMIT_PARAM)] = 10,
 ) -> ManualCandidatesResponse:
     """Answer "what can I still add by hand for this name?" in one call.
 
@@ -350,13 +360,13 @@ async def manual_add_candidates(
     )
 
 
-@router.get("/manual/search")
+@router.get("/manual/search", responses={**BEARER_ERROR_RESPONSES, 401: UNAUTHORIZED_RESPONSE, 404: NOT_FOUND_RESPONSE})
 async def search_store_for_manual_add(
     request: Request,
     claims: Annotated[TokenClaims, Depends(require_bearer)],
-    q: str = Query(min_length=1, alias=SEARCH_TERM_PARAM),
-    domain: GameSearchDomain = Query(default=FULL_GAMES_DOMAIN, alias=SEARCH_DOMAIN_PARAM),
-    limit: int = Query(default=20, ge=1, le=MAX_STORE_SEARCH_LIMIT, alias=SEARCH_LIMIT_PARAM),
+    q: Annotated[str, Query(min_length=1, alias=SEARCH_TERM_PARAM)],
+    domain: Annotated[GameSearchDomain, Query(alias=SEARCH_DOMAIN_PARAM)] = FULL_GAMES_DOMAIN,
+    limit: Annotated[int, Query(ge=1, le=MAX_STORE_SEARCH_LIMIT, alias=SEARCH_LIMIT_PARAM)] = 20,
 ) -> StoreSearchResponse:
     """Search the PlayStation Store by name, so a manual add can be checked against a real store entry.
 
@@ -427,7 +437,17 @@ async def _search_the_store(
             raise HTTPException(status_code=401, detail=PSN_AUTH_FAILED_DETAIL) from exc
 
 
-@router.post("/manual", status_code=204)
+@router.post(
+    "/manual",
+    status_code=204,
+    responses={
+        **BEARER_ERROR_RESPONSES,
+        400: BAD_REQUEST_RESPONSE,
+        401: UNAUTHORIZED_RESPONSE,
+        404: NOT_FOUND_RESPONSE,
+        409: CONFLICT_RESPONSE,
+    },
+)
 async def add_manual_game(
     request: Request, body: ManualGameRequest, claims: Annotated[TokenClaims, Depends(require_bearer)]
 ) -> Response:
@@ -540,7 +560,7 @@ async def _admit_store_hit(
     return game_id, platforms
 
 
-@router.delete("/manual/{game_id}", status_code=204)
+@router.delete("/manual/{game_id}", status_code=204, responses={**BEARER_ERROR_RESPONSES, 404: NOT_FOUND_RESPONSE})
 async def remove_manual_game(
     request: Request, game_id: str, claims: Annotated[TokenClaims, Depends(require_bearer)]
 ) -> Response:
@@ -554,7 +574,7 @@ async def remove_manual_game(
     return Response(status_code=204)
 
 
-@router.get("/genres")
+@router.get("/genres", responses={**BEARER_ERROR_RESPONSES})
 async def get_library_genres(
     request: Request, claims: Annotated[TokenClaims, Depends(require_bearer)]
 ) -> LibraryGenresResponse:
@@ -565,17 +585,17 @@ async def get_library_genres(
     return LibraryGenresResponse(genres=genres)
 
 
-@router.get("")
+@router.get("", responses={**BEARER_ERROR_RESPONSES})
 async def get_library(
     request: Request,
     claims: Annotated[TokenClaims, Depends(require_bearer)],
-    q: str | None = Query(default=None),
-    genre: str | None = Query(default=None),
-    sort: LibrarySortField = Query(default="title"),
-    sort_dir: Literal["asc", "desc"] = Query(default="asc", alias=SORT_DIR_PARAM),
-    limit: int = Query(default=20, ge=1, le=100),
-    offset: int = Query(default=0, ge=0),
-    hidden: HiddenFilter = Query(default=HIDDEN_EXCLUDE),
+    q: Annotated[str | None, Query()] = None,
+    genre: Annotated[str | None, Query()] = None,
+    sort: Annotated[LibrarySortField, Query()] = "title",
+    sort_dir: Annotated[Literal["asc", "desc"], Query(alias=SORT_DIR_PARAM)] = "asc",
+    limit: Annotated[int, Query(ge=1, le=100)] = 20,
+    offset: Annotated[int, Query(ge=0)] = 0,
+    hidden: Annotated[HiddenFilter, Query()] = HIDDEN_EXCLUDE,
 ) -> LibraryPageResponse:
     """Return one page of the caller's own library, with per-provider (RAWG/OpenCritic) ratings,
     the resolved genre, and PSN's own catalog rating/product id per game.
@@ -639,7 +659,7 @@ async def _trophy_progress(request: Request, sub: str) -> TrophyProgressResponse
     return TrophyProgressResponse(state=TROPHY_PROGRESS_ON, reason=None)
 
 
-@router.put("/{game_id}/hidden", status_code=204)
+@router.put("/{game_id}/hidden", status_code=204, responses={**BEARER_ERROR_RESPONSES, 404: NOT_FOUND_RESPONSE})
 async def hide_game(
     request: Request, game_id: str, claims: Annotated[TokenClaims, Depends(require_bearer)]
 ) -> Response:
@@ -657,7 +677,7 @@ async def hide_game(
     return Response(status_code=204)
 
 
-@router.delete("/{game_id}/hidden", status_code=204)
+@router.delete("/{game_id}/hidden", status_code=204, responses={**BEARER_ERROR_RESPONSES})
 async def unhide_game(
     request: Request, game_id: str, claims: Annotated[TokenClaims, Depends(require_bearer)]
 ) -> Response:
@@ -667,7 +687,7 @@ async def unhide_game(
     return Response(status_code=204)
 
 
-@router.post("/refresh", status_code=202)
+@router.post("/refresh", status_code=202, responses={**BEARER_ERROR_RESPONSES, 503: SERVICE_UNAVAILABLE_RESPONSE})
 async def refresh_library(
     request: Request, claims: Annotated[TokenClaims, Depends(require_bearer)]
 ) -> LibraryRefreshResponse:
@@ -696,7 +716,7 @@ async def refresh_library(
     return LibraryRefreshResponse(run_id=run_id)
 
 
-@router.get("/refresh/{run_id}")
+@router.get("/refresh/{run_id}", responses={**BEARER_ERROR_RESPONSES, 404: NOT_FOUND_RESPONSE})
 async def get_library_refresh_status(
     request: Request, run_id: str, claims: Annotated[TokenClaims, Depends(require_bearer)]
 ) -> LibraryRefreshStatusResponse:
