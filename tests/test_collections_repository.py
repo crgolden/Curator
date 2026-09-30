@@ -15,12 +15,13 @@ from curator.collections.game_candidate import GameCandidate
 from curator.collections.repository import (
     BROWSABLE_CANDIDATE_SQL,
     IS_FREE_TO_PLAY_SQL,
+    STORAGE_DEVICES_INSTALLED_GAME_IDS_SQL,
     VISIBILITY_PRIVATE,
     VISIBILITY_UNLISTED,
     CollectionsRepository,
 )
 from curator.psn.title_platform import CONSOLE_PLATFORM_IDS, PS4, PS5, PSP, PSVITA
-from test_values import new_game_title
+from test_values import new_game_id, new_game_title, new_storage_device_id
 
 CONSOLE_MODEL = new_game_title()
 
@@ -82,6 +83,46 @@ class FakePool:
         )
         self.connections.append(conn)
         return conn
+
+
+async def test_groups_installed_game_ids_under_each_named_device_and_keeps_a_device_with_none():
+    first_device_id, second_device_id, bare_device_id = (
+        new_storage_device_id(),
+        new_storage_device_id(),
+        new_storage_device_id(),
+    )
+    first_game_id, second_game_id, third_game_id = new_game_id(), new_game_id(), new_game_id()
+    pool = FakePool(
+        fetchall_results=[
+            [
+                (first_device_id, first_game_id),
+                (first_device_id, second_game_id),
+                (second_device_id, third_game_id),
+            ]
+        ]
+    )
+
+    installed = await CollectionsRepository(pool).list_installed_game_ids_by_storage_device(
+        [first_device_id, second_device_id, bare_device_id]
+    )
+
+    assert installed == {
+        first_device_id: {first_game_id, second_game_id},
+        second_device_id: {third_game_id},
+        bare_device_id: set(),
+    }
+    assert pool.connections[0].executed == [
+        (STORAGE_DEVICES_INSTALLED_GAME_IDS_SQL, ([first_device_id, second_device_id, bare_device_id],))
+    ]
+
+
+async def test_list_installed_game_ids_by_storage_device_asks_nothing_when_no_device_is_named():
+    pool = FakePool()
+
+    installed = await CollectionsRepository(pool).list_installed_game_ids_by_storage_device([])
+
+    assert installed == {}
+    assert pool.connections == []
 
 
 async def test_list_user_consoles_maps_rows_and_computes_effective_capacity():

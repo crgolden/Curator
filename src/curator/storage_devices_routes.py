@@ -81,7 +81,7 @@ class StorageDeviceInstallsResponse(BaseModel):
     game_ids: list[str]
 
 
-def _to_response(device: StorageDevice) -> StorageDeviceResponse:
+def storage_device_response(device: StorageDevice) -> StorageDeviceResponse:
     return StorageDeviceResponse(
         device_id=device.device_id,
         console_id=device.console_id,
@@ -129,7 +129,7 @@ async def create_storage_device(
         buffer_gb=body.buffer_gb,
         console_id=body.console_id,
     )
-    return _to_response(device)
+    return storage_device_response(device)
 
 
 @router.get("", responses={**BEARER_ERROR_RESPONSES})
@@ -139,7 +139,7 @@ async def list_storage_devices(
     """List every storage device the caller owns, attached or not."""
     repository: CollectionsRepository = request.app.state.collections_repository
     devices = await repository.list_storage_devices(claims.sub)
-    return [_to_response(device) for device in devices]
+    return [storage_device_response(device) for device in devices]
 
 
 @router.get("/{device_id}", responses={**BEARER_ERROR_RESPONSES, 404: NOT_FOUND_RESPONSE})
@@ -154,7 +154,7 @@ async def get_storage_device(
     device = await repository.get_storage_device(claims.sub, device_id)
     if device is None:
         raise HTTPException(status_code=404, detail=STORAGE_DEVICE_NOT_FOUND_DETAIL)
-    return _to_response(device)
+    return storage_device_response(device)
 
 
 @router.patch("/{device_id}", responses={**BEARER_ERROR_RESPONSES, 404: NOT_FOUND_RESPONSE})
@@ -174,7 +174,7 @@ async def update_storage_device(
     )
     if device is None:
         raise HTTPException(status_code=404, detail=STORAGE_DEVICE_NOT_FOUND_DETAIL)
-    return _to_response(device)
+    return storage_device_response(device)
 
 
 @router.delete("/{device_id}", status_code=204, responses={**BEARER_ERROR_RESPONSES, 404: NOT_FOUND_RESPONSE})
@@ -210,7 +210,7 @@ async def attach_storage_device(
     await _require_owned_console(repository, claims.sub, console_id)
     device = await repository.set_storage_device_attachment(claims.sub, device_id, console_id)
     assert device is not None
-    return _to_response(device)
+    return storage_device_response(device)
 
 
 @router.delete("/{device_id}/attach", responses={**BEARER_ERROR_RESPONSES, 404: NOT_FOUND_RESPONSE})
@@ -228,7 +228,7 @@ async def detach_storage_device(
         raise HTTPException(status_code=404, detail=STORAGE_DEVICE_NOT_FOUND_DETAIL)
     device = await repository.set_storage_device_attachment(claims.sub, device_id, None)
     assert device is not None
-    return _to_response(device)
+    return storage_device_response(device)
 
 
 @router.get("/{device_id}/installs", responses={**BEARER_ERROR_RESPONSES, 404: NOT_FOUND_RESPONSE})

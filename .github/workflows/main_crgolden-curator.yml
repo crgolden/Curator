@@ -152,6 +152,8 @@ jobs:
           export RedisHost='boot-check.invalid'
           export RedisPort='6380'
           export RedisSsl='true'
+          export StoreGraphqlEndpoint='https://boot-check.invalid'
+          export StoreQueryHash__0='boot-check'
           /tmp/boot-check-venv/bin/python -c "
           import app
           print('Package boots OK:', app.app)

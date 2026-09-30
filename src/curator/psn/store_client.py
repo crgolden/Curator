@@ -33,15 +33,8 @@ from curator.psn._product_node import (
 
 logger = logging.getLogger("curator")
 
-STORE_GRAPHQL_URL = "https://web.np.playstation.com/api/graphql/v1/op"
-
 CATEGORY_GRID_RETRIEVE_OPERATION = "categoryGridRetrieve"
 """The persisted operation's name, which is also the key its result sits under in ``data``."""
-
-CATEGORY_GRID_RETRIEVE_HASHES = (
-    "9845afc0dbaab4965f6563fffc703f588c8e76792000e8610843b8d3ee9c4c09",
-    "4ce7d410a4db2c8b635a48c1dcec375906ff63b19dadd87e073f8fd0c0481d35",
-)
 
 PAGE_ARGS_VARIABLE: Final = "pageArgs"
 SORT_BY_VARIABLE: Final = "sortBy"
@@ -73,6 +66,11 @@ FACET_VALUE_COUNT_KEY: Final = "count"
 
 NOT_WHITELISTED_MARKER: Final = "not whitelisted"
 """The phrase the gateway's rejection of an unregistered persisted-query hash carries, matched lower-cased."""
+
+EXTENSIONS_KEY: Final = "extensions"
+CODE_KEY: Final = "code"
+PERSISTED_QUERY_NOT_FOUND_CODE: Final = "PERSISTED_QUERY_NOT_FOUND"
+PERSISTED_QUERY_NOT_FOUND_MESSAGE: Final = "PersistedQueryNotFound"
 
 CLASSIFICATION_FACET = "storeDisplayClassification"
 
@@ -195,12 +193,14 @@ class StoreCatalogClient:
         self,
         client: httpx.AsyncClient,
         *,
+        endpoint: str,
+        query_hashes: Sequence[str],
         locale: str = "en-US",
-        query_hashes: Sequence[str] = CATEGORY_GRID_RETRIEVE_HASHES,
     ) -> None:
         self._client = client
+        self._endpoint = endpoint
+        self._query_hashes = tuple(query_hashes)
         self._locale = locale
-        self._query_hashes = tuple(query_hashes) or CATEGORY_GRID_RETRIEVE_HASHES
 
     async def category_page(
         self, category_id: str, *, offset: int = 0, size: int = 100, filter_by: Sequence[str] = ()
@@ -277,7 +277,7 @@ class StoreCatalogClient:
             APOLLO_OPERATION_NAME_HEADER: operation_name,
         }
 
-        response = await self._client.get(STORE_GRAPHQL_URL, params=params, headers=headers)
+        response = await self._client.get(self._endpoint, params=params, headers=headers)
         if response.status_code >= 500:
             raise StoreCatalogError(f"PlayStation Store returned {response.status_code}.")
 
@@ -344,7 +344,20 @@ def _raise_for_store_errors(payload: dict[str, Any], operation_name: str) -> Non
     errors = payload.get(ERRORS_KEY)
     if errors:
         detail = str(errors[0].get(MESSAGE_KEY, "unknown error")).strip()
+        if any(_is_persisted_query_not_found(error) for error in errors):
+            raise StoreQueryRotatedError(
+                f"The PlayStation Store no longer knows the persisted-query hash for '{operation_name}'; refresh "
+                f"it from the store site's own network traffic. Gateway said: {detail}"
+            )
         raise StoreCatalogError(f"PlayStation Store '{operation_name}' failed: {detail}")
+
+
+def _is_persisted_query_not_found(error: Mapping[str, Any]) -> bool:
+    extensions = error.get(EXTENSIONS_KEY) or {}
+    return (
+        extensions.get(CODE_KEY) == PERSISTED_QUERY_NOT_FOUND_CODE
+        or error.get(MESSAGE_KEY) == PERSISTED_QUERY_NOT_FOUND_MESSAGE
+    )
 
 
 def _product_name(raw: dict[str, Any]) -> str | None:

@@ -105,6 +105,7 @@ _BEARER_REQUIRED_HANDLERS = [
     consoles_routes.link_console_device,
     consoles_routes.unlink_console_device,
     consoles_routes.get_console_installs,
+    consoles_routes.get_console_install_map,
     consoles_routes.set_console_install,
     storage_devices_routes.create_storage_device,
     storage_devices_routes.list_storage_devices,

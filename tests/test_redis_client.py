@@ -16,11 +16,16 @@ from redis.exceptions import TimeoutError as RedisTimeoutError
 from curator.persistence.config import ConfigError
 from curator.redis_client import RedisAdapter, build_redis_client
 from curator.settings import Settings
+from test_values import lowercase_token, new_sha256_hash
 
 
 def _settings(**overrides) -> Settings:
     values: dict[str, Any] = dict(
-        oidc_authority="https://identity.example.test", token_key="key", database_url="postgresql://unused"
+        oidc_authority="https://identity.example.test",
+        token_key="key",
+        database_url="postgresql://unused",
+        store_graphql_endpoint=f"https://{lowercase_token()}.example.test",
+        store_query_hashes=(new_sha256_hash(),),
     )
     values.update(overrides)
     return Settings(**values)

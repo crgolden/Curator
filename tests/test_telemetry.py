@@ -31,18 +31,22 @@ from curator.app import HEALTH_PATH, HEALTHY_BODY, create_app
 from curator.persistence.crypto import TokenCrypto
 from curator.settings import Settings
 from test_routes import FakeAgentFactory, FakeRepository, FakeTokenValidator
-from test_values import lowercase_token, new_opaque_token
+from test_values import lowercase_token, new_opaque_token, new_sha256_hash
 
 _SETTINGS_NO_TELEMETRY = Settings(
     oidc_authority="https://identity.example.test",
     token_key="token-key",
     database_url="postgresql://unused",
+    store_graphql_endpoint=f"https://{lowercase_token()}.example.test",
+    store_query_hashes=(new_sha256_hash(),),
 )
 
 _SETTINGS_WITH_TELEMETRY = Settings(
     oidc_authority="https://identity.example.test",
     token_key="token-key",
     database_url="postgresql://unused",
+    store_graphql_endpoint=f"https://{lowercase_token()}.example.test",
+    store_query_hashes=(new_sha256_hash(),),
     alloy_endpoint="https://alloy.example.test:4317",
 )
 
@@ -418,6 +422,8 @@ def _settings_with_es(**overrides):
         "oidc_authority": "https://identity.example.test",
         "token_key": "token-key",
         "database_url": "postgresql://unused",
+        "store_graphql_endpoint": f"https://{lowercase_token()}.example.test",
+        "store_query_hashes": (new_sha256_hash(),),
         "elasticsearch_node": "https://es.example.test:9200",
         "elasticsearch_username": lowercase_token(),
         "elasticsearch_password": new_opaque_token(),

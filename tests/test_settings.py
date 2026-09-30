@@ -26,9 +26,14 @@ from curator.settings import (
     REDIS_SSL,
     SERVICE_BUS_CONNECTION_STRING,
     SERVICE_BUS_NAMESPACE,
+    STORE_GRAPHQL_ENDPOINT,
+    STORE_QUERY_HASH,
     Settings,
 )
-from test_values import new_identity_sub
+from test_values import new_identity_sub, new_sha256_hash
+
+_FIRST_STORE_QUERY_HASH = f"{STORE_QUERY_HASH}__0"
+_SECOND_STORE_QUERY_HASH = f"{STORE_QUERY_HASH}__1"
 
 _TELEMETRY_KEYS = (ALLOY_ENDPOINT, ELASTICSEARCH_NODE, ELASTICSEARCH_USERNAME, ELASTICSEARCH_PASSWORD)
 _TELEMETRY_URL_KEYS = (ALLOY_ENDPOINT, ELASTICSEARCH_NODE)
@@ -60,6 +65,9 @@ def _set_all_required(monkeypatch, **overrides):
         REDIS_PORT: "6379",
         REDIS_SSL: "false",
         SERVICE_BUS_NAMESPACE: "bus.example.test",
+        STORE_GRAPHQL_ENDPOINT: _new_url(),
+        _FIRST_STORE_QUERY_HASH: new_sha256_hash(),
+        _SECOND_STORE_QUERY_HASH: None,
         SERVICE_BUS_CONNECTION_STRING: None,
         REDIS_PASSWORD: None,
         APP_SERVICE_SITE_NAME: None,
@@ -84,6 +92,50 @@ def test_from_config_resolves_all_fields(monkeypatch, tmp_path):
     assert settings.oidc_authority == _AUTHORITY
     assert settings.token_key == _TOKEN_KEY
     assert settings.database_url == _DATABASE_URL
+
+
+def test_from_config_resolves_the_store_endpoint_and_its_query_hashes_in_order(monkeypatch, tmp_path):
+    endpoint, first_hash, second_hash = _new_url(), new_sha256_hash(), new_sha256_hash()
+    _set_all_required(
+        monkeypatch,
+        **{
+            STORE_GRAPHQL_ENDPOINT: endpoint,
+            _FIRST_STORE_QUERY_HASH: first_hash,
+            _SECOND_STORE_QUERY_HASH: second_hash,
+        },
+    )
+
+    settings = Settings.from_config(dotenv_path=tmp_path / "absent.env")
+
+    assert settings.store_graphql_endpoint == endpoint
+    assert settings.store_query_hashes == (first_hash, second_hash)
+
+
+def test_from_config_refuses_to_start_without_a_store_query_hash(monkeypatch, tmp_path):
+    _set_all_required(monkeypatch, **{_FIRST_STORE_QUERY_HASH: None})
+
+    with pytest.raises(ConfigError) as raised:
+        Settings.from_config(dotenv_path=tmp_path / "absent.env")
+
+    assert raised.value.setting == STORE_QUERY_HASH
+
+
+def test_from_config_refuses_to_start_without_the_store_endpoint(monkeypatch, tmp_path):
+    _set_all_required(monkeypatch, **{STORE_GRAPHQL_ENDPOINT: None})
+
+    with pytest.raises(ConfigError) as raised:
+        Settings.from_config(dotenv_path=tmp_path / "absent.env")
+
+    assert raised.value.setting == STORE_GRAPHQL_ENDPOINT
+
+
+def test_from_config_refuses_a_store_endpoint_that_is_not_an_absolute_url(monkeypatch, tmp_path):
+    _set_all_required(monkeypatch, **{STORE_GRAPHQL_ENDPOINT: new_identity_sub()})
+
+    with pytest.raises(ConfigError) as raised:
+        Settings.from_config(dotenv_path=tmp_path / "absent.env")
+
+    assert raised.value.setting == STORE_GRAPHQL_ENDPOINT
 
 
 @pytest.mark.parametrize("missing_key", [REDIS_HOST, REDIS_PORT, REDIS_SSL])

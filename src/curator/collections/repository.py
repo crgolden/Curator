@@ -71,6 +71,10 @@ _ITEM_SELECT_COLUMNS = f"""cdi.game_id, cdi.rank, g.canonical_title, g.franchise
                              AND ci.installed
                        ) END AS installed_on_target"""
 
+STORAGE_DEVICES_INSTALLED_GAME_IDS_SQL: Final = """
+                SELECT device_id, game_id FROM storage_device_installs
+                WHERE device_id = ANY(%s::uuid[]) AND installed = true"""
+
 _ITEM_BASE_FROM = """
                 FROM collection_definition_items cdi
                 JOIN collection_definitions cd ON cd.definition_id = cdi.definition_id
@@ -588,6 +592,17 @@ class CollectionsRepository:
             )
             rows = await cur.fetchall()
         return {str(row[0]) for row in rows}
+
+    async def list_installed_game_ids_by_storage_device(self, device_ids: Sequence[str]) -> dict[str, set[str]]:
+        if not device_ids:
+            return {}
+        installed: dict[str, set[str]] = {device_id: set() for device_id in device_ids}
+        async with self._pool.connection() as conn, conn.cursor() as cur:
+            await cur.execute(STORAGE_DEVICES_INSTALLED_GAME_IDS_SQL, (list(device_ids),))
+            rows = await cur.fetchall()
+        for device_id, game_id in rows:
+            installed[str(device_id)].add(str(game_id))
+        return installed
 
     async def list_storage_device_installed_game_ids(self, device_id: str) -> set[str]:
         """Return the game ids currently marked installed on one storage device."""

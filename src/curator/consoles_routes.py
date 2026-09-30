@@ -22,6 +22,7 @@ from curator.psn.device_registrations import collapse_by_device_id
 from curator.psn.errors import PsnAuthError
 from curator.psn.social_client import SocialClientFactory
 from curator.psn.title_platform import ConsolePlatform, console_platform, platform_vocabulary_message
+from curator.storage_devices_routes import StorageDeviceResponse, storage_device_response
 from curator.token_validation import TokenClaims
 
 router = APIRouter(prefix="/consoles", tags=["consoles"])
@@ -126,6 +127,21 @@ class ConsoleInstallsResponse(BaseModel):
     instead of relying on session-only state."""
 
     game_ids: list[str]
+
+
+class AttachedStorageDeviceInstalls(BaseModel):
+    """One storage device attached to the console, with every game id marked installed on it."""
+
+    device: StorageDeviceResponse
+    game_ids: list[str]
+
+
+class ConsoleInstallMapResponse(BaseModel):
+    """The ``GET /consoles/{console_id}/install-map`` response body -- the game ids installed on the
+    console's own built-in storage, and each storage device attached to it with its own installs."""
+
+    game_ids: list[str]
+    attached_devices: list[AttachedStorageDeviceInstalls]
 
 
 def _console_platform(value: str) -> ConsolePlatform:
@@ -365,6 +381,40 @@ async def get_console_installs(
         raise HTTPException(status_code=404, detail=CONSOLE_NOT_FOUND_DETAIL)
     game_ids = await repository.list_installed_game_ids(console_id)
     return ConsoleInstallsResponse(game_ids=sorted(game_ids))
+
+
+@router.get("/{console_id}/install-map", responses={**BEARER_ERROR_RESPONSES, 404: NOT_FOUND_RESPONSE})
+async def get_console_install_map(
+    request: Request, console_id: str, claims: Annotated[TokenClaims, Depends(require_bearer)]
+) -> ConsoleInstallMapResponse:
+    """Every install a collection's install column reads for one console, in one call: the game ids on
+    the console's own built-in storage, and each storage device attached to it with the game ids on
+    that device. The two are independent; neither is inferred from the other.
+
+    :raises fastapi.HTTPException: 404, if ``console_id`` doesn't belong to the caller.
+    """
+    repository: CollectionsRepository = request.app.state.collections_repository
+    console = await repository.get_console(claims.sub, console_id)
+    if console is None:
+        raise HTTPException(status_code=404, detail=CONSOLE_NOT_FOUND_DETAIL)
+    attached = [
+        device
+        for device in await repository.list_storage_devices(claims.sub)
+        if device.console_id == console.console_id
+    ]
+    console_game_ids = await repository.list_installed_game_ids(console.console_id)
+    device_game_ids = await repository.list_installed_game_ids_by_storage_device(
+        [device.device_id for device in attached]
+    )
+    return ConsoleInstallMapResponse(
+        game_ids=sorted(console_game_ids),
+        attached_devices=[
+            AttachedStorageDeviceInstalls(
+                device=storage_device_response(device), game_ids=sorted(device_game_ids[device.device_id])
+            )
+            for device in attached
+        ],
+    )
 
 
 @router.put("/{console_id}/installs/{game_id}", responses={**BEARER_ERROR_RESPONSES, 404: NOT_FOUND_RESPONSE})

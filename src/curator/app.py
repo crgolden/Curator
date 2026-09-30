@@ -82,7 +82,7 @@ from curator.psn.repository import PinnedAccountRepository
 from curator.psn.safety import MutationGuard
 from curator.psn.session import PsnSession, RateLimiter
 from curator.psn.social_client import SocialClient, SocialClientFactory
-from curator.psn.store_client import CATEGORY_GRID_RETRIEVE_HASHES, StoreCatalogClient
+from curator.psn.store_client import StoreCatalogClient
 from curator.psn.trophy_cache import CachedTrophyClient
 from curator.psn.trophy_client import TrophyClient, TrophyClientFactory
 from curator.psn_routes import router as psn_router
@@ -356,7 +356,8 @@ def create_app(settings: Settings | None = None, **collaborators: Unpack[AppColl
     collection_orchestrator = CollectionOrchestrator(collections_repository)
     store_catalog_client = StoreCatalogClient(
         httpx.AsyncClient(timeout=45.0, verify=shared_ssl_context()),
-        query_hashes=(*settings.store_query_hashes, *CATEGORY_GRID_RETRIEVE_HASHES),
+        endpoint=settings.store_graphql_endpoint,
+        query_hashes=settings.store_query_hashes,
     )
     store_backfill_service = StoreBackfillService(store_catalog_client, catalog_repository)
     ps_plus_repository = _given(collaborators.get("ps_plus_repository"), lambda: PsPlusRepository(shared_pool))

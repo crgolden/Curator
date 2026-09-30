@@ -65,6 +65,7 @@ from curator.collections.filter_predicate import And, GenreIn, Or, TierIn, predi
 from curator.collections.repository import (
     _ITEM_BASE_FROM,
     _ITEM_SELECT_COLUMNS,
+    STORAGE_DEVICES_INSTALLED_GAME_IDS_SQL,
     STORAGE_KIND_USB,
     VISIBILITIES,
     VISIBILITY_PUBLIC,
@@ -78,7 +79,14 @@ from curator.jobs.repository import (
 )
 from curator.psn.title_platform import CONSOLE_PLATFORM_IDS, PS3, PS5, PSP, PSVITA
 from schema_constants import EXPECTED_TABLES
-from test_values import new_concept_id, new_game_title, new_genre_name, new_ps4_title_id, new_store_product_id
+from test_values import (
+    new_concept_id,
+    new_game_title,
+    new_genre_name,
+    new_ps4_title_id,
+    new_size_gb,
+    new_store_product_id,
+)
 
 DATABASE_URL = os.environ.get("CURATOR_TEST_DATABASE_URL")
 
@@ -1101,6 +1109,51 @@ def test_deleting_a_console_detaches_its_storage_device_rather_than_deleting_it(
             "SELECT installed FROM storage_device_installs WHERE device_id = %s AND game_id = %s", (device_id, game_id)
         )
         assert cur.fetchone() is not None
+
+
+def test_storage_devices_installed_game_ids_reads_only_the_named_devices_installed_rows(
+    db_connection, seeded_user_and_game
+):
+    user_sub, game_id = seeded_user_and_game
+    console_id = str(uuid.uuid4())
+    named_device_id = str(uuid.uuid4())
+    unnamed_device_id = str(uuid.uuid4())
+    uninstalled_game_id = str(uuid.uuid4())
+    uninstalled_game_title = new_game_title()
+
+    with db_connection.cursor() as cur:
+        cur.execute(
+            "INSERT INTO games (game_id, canonical_title, normalized_title) VALUES (%s, %s, %s)",
+            (uninstalled_game_id, uninstalled_game_title, uninstalled_game_title.lower()),
+        )
+        cur.execute(
+            "INSERT INTO user_consoles (console_id, identity_sub, name, platform, raw_capacity_gb) "
+            "VALUES (%s, %s, %s, %s, %s)",
+            (console_id, user_sub, new_game_title(), PS5, new_size_gb()),
+        )
+        cur.execute(
+            "INSERT INTO storage_devices (device_id, identity_sub, console_id, name, kind, capacity_gb) "
+            "VALUES (%s, %s, %s, %s, %s, %s), (%s, %s, %s, %s, %s, %s)",
+            (
+                *(named_device_id, user_sub, console_id, new_game_title(), STORAGE_KIND_USB, new_size_gb()),
+                *(unnamed_device_id, user_sub, console_id, new_game_title(), STORAGE_KIND_USB, new_size_gb()),
+            ),
+        )
+        cur.execute(
+            "INSERT INTO storage_device_installs (device_id, game_id, installed) VALUES (%s, %s, true), (%s, %s, true)",
+            (named_device_id, game_id, unnamed_device_id, game_id),
+        )
+        cur.execute(
+            "INSERT INTO storage_device_installs (device_id, game_id, installed) VALUES (%s, %s, false)",
+            (named_device_id, uninstalled_game_id),
+        )
+
+        cur.execute(STORAGE_DEVICES_INSTALLED_GAME_IDS_SQL, ([named_device_id],))
+        rows = cur.fetchall()
+
+    assert [(str(device_id), str(installed_game_id)) for device_id, installed_game_id in rows] == [
+        (named_device_id, game_id)
+    ]
 
 
 def test_library_exclusions_cascade_but_shared_catalog_survives(db_connection, seeded_user_and_game):

@@ -20,13 +20,15 @@ from curator.collections.console_model_defaults import (
     PLATFORM_FALLBACK_GB,
     UNKNOWN_PLATFORM_FALLBACK_GB,
 )
-from curator.collections.repository import UserConsole
+from curator.collections.repository import STORAGE_KIND_M2, STORAGE_KIND_USB, StorageDevice, UserConsole
 from curator.consoles_routes import (
     DEVICE_LINK_DEACTIVATED,
     DEVICE_LINK_LINKED,
     DEVICE_LINK_MISSING,
     DEVICE_LINK_NOT_CHECKED,
+    AttachedStorageDeviceInstalls,
     ConsoleDeviceLinkResponse,
+    ConsoleInstallMapResponse,
     ConsoleInstallRequest,
     ConsoleInstallResponse,
     ConsoleInstallsResponse,
@@ -37,6 +39,7 @@ from curator.consoles_routes import (
 from curator.persistence.crypto import TokenCrypto
 from curator.psn.models import AccountDevice
 from curator.psn.title_platform import PS1, PS2, PS3, PS5, PSP, PSVITA
+from curator.storage_devices_routes import storage_device_response
 from test_routes import (
     FakeAgentFactory,
     FakeRepository,
@@ -56,6 +59,7 @@ from test_values import (
     new_identity_sub,
     new_opaque_token,
     new_size_gb,
+    new_storage_device_id,
     new_utc_instant,
 )
 
@@ -68,12 +72,28 @@ class FakeCollectionsRepository:
     ``console_id -> identity_sub`` alongside ``console_id -> UserConsole`` rather than smuggling an extra
     attribute onto a frozen, slotted dataclass."""
 
-    def __init__(self, consoles=None, owners=None):
+    def __init__(self, consoles=None, owners=None, storage_devices=None):
         self._consoles: dict[str, UserConsole] = {c.console_id: c for c in (consoles or [])}
         self._owners: dict[str, str] = dict(owners or {})
         self._installs: dict[str, dict[str, bool]] = {}
+        self._storage_devices: list[StorageDevice] = list(storage_devices or [])
+        self._storage_device_installs: dict[str, dict[str, bool]] = {}
         self.set_install_calls = []
         self.device_links: dict[str, str] = {}
+
+    def mark_storage_device_install(self, device_id, game_id, installed):
+        self._storage_device_installs.setdefault(device_id, {})[game_id] = installed
+
+    async def list_storage_devices(self, identity_sub):
+        return [device for device in self._storage_devices if device.identity_sub == identity_sub]
+
+    async def list_installed_game_ids_by_storage_device(self, device_ids):
+        return {
+            device_id: {
+                game_id for game_id, installed in self._storage_device_installs.get(device_id, {}).items() if installed
+            }
+            for device_id in device_ids
+        }
 
     async def get_console(self, identity_sub, console_id):
         if self._owners.get(console_id) != identity_sub:
@@ -266,6 +286,22 @@ def _install_path(client: TestClient, console_id: str, game_id: str) -> str:
 
 def _installs_path(client: TestClient, console_id: str) -> str:
     return _path(client, consoles_routes.get_console_installs, console_id=console_id)
+
+
+def _install_map_path(client: TestClient, console_id: str) -> str:
+    return _path(client, consoles_routes.get_console_install_map, console_id=console_id)
+
+
+def _storage_device(owner_sub: str, console_id: str | None, kind=STORAGE_KIND_USB) -> StorageDevice:
+    return StorageDevice(
+        device_id=new_storage_device_id(),
+        identity_sub=owner_sub,
+        console_id=console_id,
+        name=lowercase_token(),
+        kind=kind,
+        capacity_gb=new_size_gb(),
+        buffer_gb=0.0,
+    )
 
 
 def _installed(installed: bool) -> dict[str, object]:
@@ -628,5 +664,71 @@ def test_get_installs_404s_for_another_users_console():
     client = _build(caller, repo)
 
     response = client.get(_installs_path(client, console_id), headers=_bearer(caller.token))
+
+    assert response.status_code == 404
+
+
+def test_install_map_returns_the_console_installs_and_each_attached_device_with_its_own_installs():
+    caller = _Caller()
+    console_id = new_console_id()
+    other_console_id = new_console_id()
+    m2_drive = _storage_device(caller.sub, console_id, kind=STORAGE_KIND_M2)
+    usb_drive = _storage_device(caller.sub, console_id)
+    drive_on_another_console = _storage_device(caller.sub, other_console_id)
+    detached_drive = _storage_device(caller.sub, None)
+    repo = FakeCollectionsRepository(
+        consoles=[_console(console_id), _console(other_console_id)],
+        owners={console_id: caller.sub, other_console_id: caller.sub},
+        storage_devices=[m2_drive, usb_drive, drive_on_another_console, detached_drive],
+    )
+    console_game_id = new_game_id()
+    m2_game_id = new_game_id()
+    usb_game_id = new_game_id()
+    repo.mark_storage_device_install(m2_drive.device_id, m2_game_id, True)
+    repo.mark_storage_device_install(m2_drive.device_id, new_game_id(), False)
+    repo.mark_storage_device_install(usb_drive.device_id, usb_game_id, True)
+    repo.mark_storage_device_install(drive_on_another_console.device_id, new_game_id(), True)
+    repo.mark_storage_device_install(detached_drive.device_id, new_game_id(), True)
+    client = _build(caller, repo)
+    headers = _bearer(caller.token)
+    client.put(_install_path(client, console_id, console_game_id), json=_installed(True), headers=headers)
+
+    response = client.get(_install_map_path(client, console_id), headers=headers)
+
+    assert response.status_code == 200
+    assert ConsoleInstallMapResponse.model_validate(response.json()) == ConsoleInstallMapResponse(
+        game_ids=[console_game_id],
+        attached_devices=[
+            AttachedStorageDeviceInstalls(device=storage_device_response(m2_drive), game_ids=[m2_game_id]),
+            AttachedStorageDeviceInstalls(device=storage_device_response(usb_drive), game_ids=[usb_game_id]),
+        ],
+    )
+
+
+def test_install_map_reports_no_devices_and_no_installs_for_a_bare_console():
+    caller = _Caller()
+    repo, console_id = _owned_console_repository(caller.sub)
+    client = _build(caller, repo)
+
+    response = client.get(_install_map_path(client, console_id), headers=_bearer(caller.token))
+
+    assert response.status_code == 200
+    assert ConsoleInstallMapResponse.model_validate(response.json()) == ConsoleInstallMapResponse(
+        game_ids=[], attached_devices=[]
+    )
+
+
+def test_install_map_404s_for_another_users_console():
+    caller = _Caller()
+    owner_sub = new_identity_sub()
+    console_id = new_console_id()
+    repo = FakeCollectionsRepository(
+        consoles=[_console(console_id)],
+        owners={console_id: owner_sub},
+        storage_devices=[_storage_device(owner_sub, console_id)],
+    )
+    client = _build(caller, repo)
+
+    response = client.get(_install_map_path(client, console_id), headers=_bearer(caller.token))
 
     assert response.status_code == 404

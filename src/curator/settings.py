@@ -36,7 +36,11 @@ _ELASTICSEARCH_USERNAME_ENV_NAMES: tuple[str, ...] = (ELASTICSEARCH_USERNAME,)
 _ELASTICSEARCH_PASSWORD_ENV_NAMES: tuple[str, ...] = (ELASTICSEARCH_PASSWORD,)
 _LOG_LEVEL_ENV_NAMES: tuple[str, ...] = ("LogLevel", "Logging__LogLevel__Default")
 
-_STORE_QUERY_HASH_PREFIX = "StoreQueryHash"
+STORE_QUERY_HASH = "StoreQueryHash"
+STORE_GRAPHQL_ENDPOINT = "StoreGraphqlEndpoint"
+
+_STORE_GRAPHQL_ENDPOINT_ENV_NAMES: tuple[str, ...] = (STORE_GRAPHQL_ENDPOINT,)
+
 SERVICE_BUS_NAMESPACE = "ServiceBusNamespace"
 SERVICE_BUS_CONNECTION_STRING = "ServiceBusConnectionString"
 REDIS_HOST = "RedisHost"
@@ -76,9 +80,6 @@ class Settings:
     :param log_level: Threshold for what reaches Elasticsearch, as a standard level name
         (``DEBUG``/``INFO``/``WARNING``/``ERROR``), from ``LogLevel`` or
         ``Logging__LogLevel__Default``; defaults to ``WARNING``.
-    :param store_query_hashes: Persisted-query hashes for the anonymous PlayStation Store gateway,
-        resolved from ``StoreQueryHash__0``, ``StoreQueryHash__1``, ...; tried before the built-in
-        defaults in ``curator.psn.store_client``. Empty (the normal case) uses the built-ins alone.
     :param service_bus_namespace: The fully-qualified Azure Service Bus namespace (e.g.
         ``crgolden.servicebus.windows.net``) backing the ``curator-library-refresh``/``curator-enrichment``
         job queues, authenticated via ``DefaultAzureCredential`` (managed identity in production). Takes
@@ -97,12 +98,13 @@ class Settings:
     oidc_authority: str
     token_key: str
     database_url: str
+    store_graphql_endpoint: str
+    store_query_hashes: tuple[str, ...]
     alloy_endpoint: str | None = None
     elasticsearch_node: str | None = None
     elasticsearch_username: str | None = None
     elasticsearch_password: str | None = None
     log_level: str = "WARNING"
-    store_query_hashes: tuple[str, ...] = ()
     service_bus_namespace: str | None = None
     service_bus_connection_string: str | None = None
     redis_host: str | None = None
@@ -129,6 +131,14 @@ class Settings:
             dotenv_path,
         )
         database_url = resolve_database_url(dotenv_path=dotenv_path)
+        store_graphql_endpoint = _require_url(STORE_GRAPHQL_ENDPOINT, _STORE_GRAPHQL_ENDPOINT_ENV_NAMES, dotenv_path)
+        store_query_hashes = _resolve_indexed_keys(STORE_QUERY_HASH, dotenv_path)
+        if not store_query_hashes:
+            raise ConfigError(
+                f"No {STORE_QUERY_HASH} found. Set {STORE_QUERY_HASH}__0 (then __1, ... in the order to try them) "
+                "as an environment variable or in a .env file.",
+                STORE_QUERY_HASH,
+            )
 
         hosted = resolve_setting(None, env_names=_APP_SERVICE_SITE_NAME_ENV_NAMES, dotenv_path=dotenv_path)
         if hosted:
@@ -145,7 +155,6 @@ class Settings:
             elasticsearch_username = _require(ELASTICSEARCH_USERNAME, _ELASTICSEARCH_USERNAME_ENV_NAMES, dotenv_path)
             elasticsearch_password = _require(ELASTICSEARCH_PASSWORD, _ELASTICSEARCH_PASSWORD_ENV_NAMES, dotenv_path)
         log_level = resolve_setting(None, env_names=_LOG_LEVEL_ENV_NAMES, dotenv_path=dotenv_path)
-        store_query_hashes = _resolve_indexed_keys(_STORE_QUERY_HASH_PREFIX, dotenv_path)
         service_bus_namespace = resolve_setting(
             None, env_names=_SERVICE_BUS_NAMESPACE_ENV_NAMES, dotenv_path=dotenv_path
         )
@@ -168,12 +177,13 @@ class Settings:
             oidc_authority=oidc_authority,
             token_key=token_key,
             database_url=database_url,
+            store_graphql_endpoint=store_graphql_endpoint,
+            store_query_hashes=store_query_hashes,
             alloy_endpoint=alloy_endpoint,
             elasticsearch_node=elasticsearch_node,
             elasticsearch_username=elasticsearch_username,
             elasticsearch_password=elasticsearch_password,
             log_level=(log_level or "WARNING").upper(),
-            store_query_hashes=store_query_hashes,
             service_bus_namespace=service_bus_namespace,
             service_bus_connection_string=service_bus_connection_string,
             redis_host=redis_host,

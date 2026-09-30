@@ -47,6 +47,7 @@ from curator.psn.errors import PsnAuthError
 from curator.psn_routes import LINK_ERROR_MESSAGES, LinkErrorDetail, LinkRequest, LinkResponse
 from curator.settings import Settings
 from curator.token_validation import TokenClaims, TokenError
+from test_values import lowercase_token, new_sha256_hash
 
 SUB = "sub-1"
 EMAIL = "user@example.com"
@@ -348,6 +349,8 @@ def _make_settings() -> Settings:
         oidc_authority="https://identity.example.test",
         token_key=TokenCrypto.generate_key().decode(),
         database_url="postgresql://unused",
+        store_graphql_endpoint=f"https://{lowercase_token()}.example.test",
+        store_query_hashes=(new_sha256_hash(),),
     )
 
 

@@ -46,7 +46,6 @@ from curator.psn.session import (
     npsso_cookie,
 )
 from curator.psn.social_client import CPSS_URI, GAMING_LOUNGE_URI
-from curator.psn.store_client import STORE_GRAPHQL_URL
 from curator.psn.trophy_client import GAMES_LIST_URI, TROPHIES_URI
 from curator.token_response import (
     ACCESS_TOKEN_EXPIRES_AT_KEY,
@@ -341,7 +340,6 @@ async def test_a_path_that_escapes_its_endpoint_is_refused():
         MY_ACCOUNT_URL,
         ACCOUNT_ME_URL,
         GRAPHQL_URL,
-        STORE_GRAPHQL_URL,
         TROPHIES_URI,
         GAMES_LIST_URI,
         GAMING_LOUNGE_URI,

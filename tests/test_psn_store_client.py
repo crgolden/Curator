@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import random
-from urllib.parse import urlparse
 
 import httpx
 import pytest
@@ -14,7 +13,6 @@ from curator.psn._graphql import (
     DATA_KEY,
     ERRORS_KEY,
     EXTENSIONS_PARAM,
-    GRAPHQL_URL,
     MESSAGE_KEY,
     PERSISTED_QUERY_KEY,
     SHA256_HASH_KEY,
@@ -49,6 +47,8 @@ from curator.psn.store_client import (
     APOLLO_REQUIRE_PREFLIGHT_VALUE,
     CATEGORY_GRID_RETRIEVE_OPERATION,
     CLASSIFICATION_FACET,
+    CODE_KEY,
+    EXTENSIONS_KEY,
     FACET_NAME_KEY,
     FACET_OPTIONS_KEY,
     FACET_VALUE_COUNT_KEY,
@@ -64,13 +64,14 @@ from curator.psn.store_client import (
     OFFSET_KEY,
     PAGE_ARGS_VARIABLE,
     PAGE_INFO_KEY,
+    PERSISTED_QUERY_NOT_FOUND_CODE,
+    PERSISTED_QUERY_NOT_FOUND_MESSAGE,
     PRODUCT_RELEASE_DATE_SORT_FIELD,
     PRODUCTS_KEY,
     REPORTING_NAME_KEY,
     SIZE_KEY,
     SORT_BY_VARIABLE,
     SORT_FIELD_KEY,
-    STORE_GRAPHQL_URL,
     TOTAL_COUNT_KEY,
     StoreCatalogClient,
     StoreCatalogError,
@@ -144,8 +145,15 @@ def _product(*, product_id=None, name=None, platforms=(PS4,), np_title_id=None, 
     }
 
 
-def _client(handler, **options):
-    return StoreCatalogClient(httpx.AsyncClient(transport=httpx.MockTransport(handler)), **options)
+_ENDPOINT = f"https://{lowercase_token()}.example.test/{lowercase_token()}"
+
+
+def _client(handler, *, query_hashes=None):
+    return StoreCatalogClient(
+        httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+        endpoint=_ENDPOINT,
+        query_hashes=query_hashes or (new_sha256_hash(),),
+    )
 
 
 def _answering(body, status_code=200):
@@ -314,16 +322,13 @@ async def test_reports_is_last_so_a_walk_terminates_on_the_gateway_not_on_a_drif
     assert page.offset == offset
 
 
-async def test_calls_the_storefront_gateway_not_the_authenticated_mobile_one():
+async def test_calls_the_configured_storefront_endpoint():
     recorder = Recorder(_grid([], 0))
 
     await _client(recorder).category_page(new_category_id())
 
     assert recorder.request is not None
-    assert str(recorder.request.url).startswith(STORE_GRAPHQL_URL)
-    assert recorder.request.url.host != urlparse(GRAPHQL_URL).hostname, (
-        "the mobile gateway needs a PSN token and cannot enumerate; this client exists to avoid it"
-    )
+    assert str(recorder.request.url).startswith(_ENDPOINT)
 
 
 async def test_sends_no_credential_of_any_kind():
@@ -382,6 +387,29 @@ async def test_a_rotated_hash_falls_through_to_the_next_candidate():
     page = await _client(handler, query_hashes=(dead_hash, live_hash)).category_page(new_category_id())
 
     assert tried == [dead_hash, live_hash], "candidates are tried in order, stopping at the first that works"
+    assert len(page.products) == 1
+
+
+@pytest.mark.parametrize(
+    "unknown_hash_error",
+    [
+        {MESSAGE_KEY: PERSISTED_QUERY_NOT_FOUND_MESSAGE},
+        {EXTENSIONS_KEY: {CODE_KEY: PERSISTED_QUERY_NOT_FOUND_CODE}},
+    ],
+)
+async def test_a_persisted_query_not_found_answer_falls_through_to_the_next_candidate(unknown_hash_error):
+    dead_hash, live_hash = new_sha256_hash(), new_sha256_hash()
+    tried = []
+
+    def handler(request):
+        tried.append(_hash_of(request))
+        if tried[-1] == dead_hash:
+            return httpx.Response(200, json={ERRORS_KEY: [unknown_hash_error]})
+        return httpx.Response(200, json=_grid([_product()], 1, is_last=True))
+
+    page = await _client(handler, query_hashes=(dead_hash, live_hash)).category_page(new_category_id())
+
+    assert tried == [dead_hash, live_hash]
     assert len(page.products) == 1
 
 

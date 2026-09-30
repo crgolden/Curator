@@ -87,7 +87,6 @@ ALLOWED_HOSTS: frozenset[str] = frozenset(
     {
         "ca.account.sony.com",
         "m.np.playstation.com",
-        "web.np.playstation.com",
         "accounts.api.playstation.com",
         "dms.api.playstation.com",
         "us-prof.np.community.playstation.net",

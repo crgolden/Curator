@@ -89,6 +89,7 @@ from test_routes import (
     _seed_link,
 )
 from test_values import (
+    lowercase_token,
     new_category_id,
     new_definition_id,
     new_facet_key,
@@ -103,6 +104,7 @@ from test_values import (
     new_ps_plus_tier,
     new_psn_rating,
     new_review_score,
+    new_sha256_hash,
     new_share_slug,
     new_utc_instant,
     new_walk_id,
@@ -140,7 +142,11 @@ def _store_client(payload):
     def handler(_request):
         return httpx.Response(200, json=payload)
 
-    return StoreCatalogClient(httpx.AsyncClient(transport=httpx.MockTransport(handler)))
+    return StoreCatalogClient(
+        httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+        endpoint=f"https://{lowercase_token()}.example.test",
+        query_hashes=(new_sha256_hash(),),
+    )
 
 
 class FakeCatalogRepository:
