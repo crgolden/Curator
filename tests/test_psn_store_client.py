@@ -188,6 +188,20 @@ def _rotated_body():
     return {MESSAGE_KEY: f"{lowercase_token()} {NOT_WHITELISTED_MARKER}"}
 
 
+class DeadHashThenLive:
+    def __init__(self, dead_hash: str, dead_answer: httpx.Response, live_answer: httpx.Response):
+        self._dead_hash = dead_hash
+        self._dead_answer = dead_answer
+        self._live_answer = live_answer
+        self.tried: list[str] = []
+
+    def __call__(self, request):
+        self.tried.append(_hash_of(request))
+        if self.tried[-1] == self._dead_hash:
+            return self._dead_answer
+        return self._live_answer
+
+
 async def test_reads_a_page_and_the_category_total():
     total = new_positive_count()
     first = _product(platforms=(PS4,), np_title_id=new_ps4_title_id())
@@ -376,17 +390,15 @@ async def test_a_rotated_persisted_query_hash_is_its_own_error():
 
 async def test_a_rotated_hash_falls_through_to_the_next_candidate():
     dead_hash, live_hash = new_sha256_hash(), new_sha256_hash()
-    tried = []
-
-    def handler(request):
-        tried.append(_hash_of(request))
-        if tried[-1] == dead_hash:
-            return httpx.Response(400, json=_rotated_body())
-        return httpx.Response(200, json=_grid([_product()], 1, is_last=True))
+    handler = DeadHashThenLive(
+        dead_hash,
+        httpx.Response(400, json=_rotated_body()),
+        httpx.Response(200, json=_grid([_product()], 1, is_last=True)),
+    )
 
     page = await _client(handler, query_hashes=(dead_hash, live_hash)).category_page(new_category_id())
 
-    assert tried == [dead_hash, live_hash], "candidates are tried in order, stopping at the first that works"
+    assert handler.tried == [dead_hash, live_hash], "candidates are tried in order, stopping at the first that works"
     assert len(page.products) == 1
 
 
@@ -399,17 +411,15 @@ async def test_a_rotated_hash_falls_through_to_the_next_candidate():
 )
 async def test_a_persisted_query_not_found_answer_falls_through_to_the_next_candidate(unknown_hash_error):
     dead_hash, live_hash = new_sha256_hash(), new_sha256_hash()
-    tried = []
-
-    def handler(request):
-        tried.append(_hash_of(request))
-        if tried[-1] == dead_hash:
-            return httpx.Response(200, json={ERRORS_KEY: [unknown_hash_error]})
-        return httpx.Response(200, json=_grid([_product()], 1, is_last=True))
+    handler = DeadHashThenLive(
+        dead_hash,
+        httpx.Response(200, json={ERRORS_KEY: [unknown_hash_error]}),
+        httpx.Response(200, json=_grid([_product()], 1, is_last=True)),
+    )
 
     page = await _client(handler, query_hashes=(dead_hash, live_hash)).category_page(new_category_id())
 
-    assert tried == [dead_hash, live_hash]
+    assert handler.tried == [dead_hash, live_hash]
     assert len(page.products) == 1
 
 
@@ -449,17 +459,15 @@ async def test_facet_census_shares_the_hash_rotation_rather_than_reimplementing_
     dead_hash, live_hash = new_sha256_hash(), new_sha256_hash()
     facet_name = new_facet_key()
     census = {new_facet_key(): new_positive_count()}
-    tried = []
-
-    def handler(request):
-        tried.append(_hash_of(request))
-        if tried[-1] == dead_hash:
-            return httpx.Response(400, json=_rotated_body())
-        return httpx.Response(200, json=_grid([_product()], 1, facets={facet_name: census}))
+    handler = DeadHashThenLive(
+        dead_hash,
+        httpx.Response(400, json=_rotated_body()),
+        httpx.Response(200, json=_grid([_product()], 1, facets={facet_name: census})),
+    )
 
     result = await _client(handler, query_hashes=(dead_hash, live_hash)).facet_census(new_category_id(), facet_name)
 
-    assert tried == [dead_hash, live_hash]
+    assert handler.tried == [dead_hash, live_hash]
     assert result == census
 
 

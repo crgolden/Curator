@@ -3,9 +3,12 @@
 
 from __future__ import annotations
 
+import pytest
+
 from curator.collections.capacity_fill_strategy import StorageBin, fill_capacity_multi_bin
 from curator.collections.game_candidate import GameCandidate
 from curator.collections.sort_order import COMPOSITE_DESC
+from test_values import lowercase_token
 
 
 def _candidate(game_id, size_gb, rank_score=0, composite_score=None, genre=""):
@@ -164,11 +167,12 @@ def test_sort_order_composite_desc_nulls_last():
 
 
 def test_unknown_sort_order_raises():
-    try:
-        fill_capacity_multi_bin([_candidate("a", 10)], _one_bin(100), sort_order="not_a_real_order")
-    except ValueError:
-        return
-    raise AssertionError("expected a ValueError for an unknown sort_order")
+    unknown_sort_order = lowercase_token()
+    candidates = [_candidate("a", 10)]
+    bins = _one_bin(100)
+
+    with pytest.raises(ValueError, match=unknown_sort_order):
+        fill_capacity_multi_bin(candidates, bins, sort_order=unknown_sort_order)
 
 
 def test_a_usb_bin_never_appears_when_the_caller_omits_it_for_ps5_candidates():

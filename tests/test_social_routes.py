@@ -481,7 +481,7 @@ def test_social_routes_require_a_bearer_token():
     online_id = new_online_id()
     client, service, _ = _build(allow_friend_writes=True, allow_chat_writes=True)
 
-    for response in (
+    responses = (
         client.put(_friend_path(client, online_id)),
         client.delete(_unfriend_path(client, online_id)),
         client.post(_friend_request_path(client, online_id)),
@@ -490,7 +490,8 @@ def test_social_routes_require_a_bearer_token():
         client.patch(_group_path(client, group_id), json=RenameGroupRequest(name=lowercase_token()).model_dump()),
         client.post(_invitees_path(client, group_id), json=InviteToGroupRequest().model_dump()),
         client.delete(_membership_path(client, group_id)),
-    ):
-        assert response.status_code == 401
+    )
+
+    assert [response.status_code for response in responses] == [401] * len(responses)
 
     assert service.calls == []

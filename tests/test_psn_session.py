@@ -138,6 +138,18 @@ class RequestRecorder:
         return self._responses.pop(0)
 
 
+class ConnectFailsOnceThenAnswers:
+    def __init__(self, body: dict[str, str]):
+        self._body = body
+        self.requests: list[httpx.Request] = []
+
+    def __call__(self, request: httpx.Request) -> httpx.Response:
+        self.requests.append(request)
+        if len(self.requests) == 1:
+            raise httpx.ConnectError(lowercase_token(), request=request)
+        return httpx.Response(200, json=self._body)
+
+
 def _session(recorder, *, npsso=None, token_store=None, rate_limiter=None) -> PsnSession:
     client = httpx.AsyncClient(transport=httpx.MockTransport(recorder))
     return PsnSession(npsso, token_store=token_store, rate_limiter=rate_limiter or FakeRateLimiter(), client=client)
@@ -472,20 +484,13 @@ async def test_a_read_gives_up_after_the_attempt_budget(no_retry_backoff):
 
 async def test_a_read_retries_a_transport_failure(no_retry_backoff):
     body = {lowercase_token(): lowercase_token()}
-    attempts: list[httpx.Request] = []
-
-    def flaky(request: httpx.Request) -> httpx.Response:
-        attempts.append(request)
-        if len(attempts) == 1:
-            raise httpx.ConnectError(lowercase_token(), request=request)
-        return httpx.Response(200, json=body)
-
-    session = await _restored(flaky, _live_token_response())
+    transport = ConnectFailsOnceThenAnswers(body)
+    session = await _restored(transport, _live_token_response())
 
     response = await session.get(_psn_url())
 
     assert response.json() == body
-    assert len(attempts) == 2
+    assert len(transport.requests) == 2
 
 
 async def test_a_write_is_never_retried_because_it_could_apply_twice(no_retry_backoff):

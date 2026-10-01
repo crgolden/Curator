@@ -13,6 +13,12 @@ New-Item -ItemType Directory -Force -Path $gateOutput | Out-Null
 Register-GateSteps @('Schema test database configuration', 'poetry check --lock', 'ruff check', 'ruff format --check', 'mypy',
     'Bearer-list control', 'Run tests with coverage', 'SonarCloud analysis', 'Fail on open Sonar issues',
     'Verify deployment package boots')
+Register-StepInputs @{
+    'poetry check --lock' = @('pyproject.toml', 'poetry.lock')
+    'ruff check'          = @('*.py', 'pyproject.toml')
+    'ruff format --check' = @('*.py', 'pyproject.toml')
+    'mypy'                = @('*.py', 'pyproject.toml', 'poetry.lock')
+}
 $repo = $PSScriptRoot
 $pytestLog = Join-Path $gateOutput 'pytest.txt'
 $sonarBranch = "branch-local-$($env:COMPUTERNAME.ToLowerInvariant())"

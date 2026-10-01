@@ -952,6 +952,11 @@ def test_followers_not_gated_by_is_public():
     assert body.entries[0].sub == SUB_B
 
 
+async def _follow_all(follow_repository: FakeFollowRepository, followers: list[str], followee: str) -> None:
+    for follower in followers:
+        await follow_repository.follow(follower, followee)
+
+
 def test_followers_pagination():
     repository = FakeRepository()
     followers = [new_identity_sub() for _ in range(3)]
@@ -959,11 +964,7 @@ def test_followers_pagination():
     follow_repository = FakeFollowRepository()
     client, *_ = _build(repository=repository, follow_repository=follow_repository)
 
-    async def _seed():
-        for follower in followers:
-            await follow_repository.follow(follower, SUB_A)
-
-    asyncio.run(_seed())
+    asyncio.run(_follow_all(follow_repository, followers, SUB_A))
 
     response = client.get(
         _path(client, profile_routes.get_followers, sub=SUB_A),

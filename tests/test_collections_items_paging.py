@@ -150,17 +150,17 @@ async def test_unknown_sort_field_raises_rather_than_reaching_the_sql():
     assert pool.connections == [], "the allow-list must reject before a connection is taken"
 
 
-async def test_unresolved_scores_sort_last_in_both_directions():
-    for direction in ("asc", "desc"):
-        pool = _pool_returning([], total=0)
-        repository = CollectionsRepository(pool)
+@pytest.mark.parametrize("direction", ["asc", "desc"])
+async def test_unresolved_scores_sort_last_in_both_directions(direction: str):
+    pool = _pool_returning([], total=0)
+    repository = CollectionsRepository(pool)
 
-        await repository.list_definition_items_page(
-            "def-1", sort=random.choice(get_args(CollectionItemSortField)), sort_dir=direction
-        )
+    await repository.list_definition_items_page(
+        "def-1", sort=random.choice(get_args(CollectionItemSortField)), sort_dir=direction
+    )
 
-        page_sql, _ = pool.connections[0].executed[1]
-        assert "NULLS LAST" in page_sql
+    page_sql, _ = pool.connections[0].executed[1]
+    assert "NULLS LAST" in page_sql
 
 
 async def test_every_sort_carries_a_deterministic_tiebreak():
@@ -220,5 +220,6 @@ async def test_page_query_is_not_scoped_to_a_viewer():
 
     await repository.list_definition_items_page("def-1")
 
-    for sql, _ in pool.connections[0].executed:
-        assert "le.identity_sub = cd.identity_sub" in sql, "access resolves from the owner's sub, never a viewer's"
+    assert [sql for sql, _ in pool.connections[0].executed if "le.identity_sub = cd.identity_sub" not in sql] == [], (
+        "access resolves from the owner's sub, never a viewer's"
+    )

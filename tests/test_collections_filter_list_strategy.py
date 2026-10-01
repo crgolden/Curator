@@ -3,6 +3,8 @@ genre-set classification."""
 
 from __future__ import annotations
 
+import pytest
+
 from curator.collections.collection_spec import FILTER_LIST_KIND, CollectionSpec
 from curator.collections.filter_list_strategy import apply_filter_list, filter_candidates
 from curator.collections.filter_predicate import And, GenreIn, Or, TierIn
@@ -203,13 +205,12 @@ def test_sort_order_composite_desc_is_the_same_key_capacity_fill_uses():
 
 
 def test_unknown_sort_order_raises():
-    spec = CollectionSpec(kind=FILTER_LIST_KIND, sort_order=lowercase_token())
+    unknown_sort_order = lowercase_token()
+    spec = CollectionSpec(kind=FILTER_LIST_KIND, sort_order=unknown_sort_order)
+    candidates = [_candidate("a")]
 
-    try:
-        apply_filter_list([_candidate("a")], spec)
-    except ValueError:
-        return
-    raise AssertionError("expected a ValueError for an unknown sort_order")
+    with pytest.raises(ValueError, match=unknown_sort_order):
+        apply_filter_list(candidates, spec)
 
 
 def test_filter_candidates_is_unsorted_and_shared_by_apply_filter_list():

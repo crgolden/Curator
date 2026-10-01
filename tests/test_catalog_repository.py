@@ -115,9 +115,10 @@ async def test_excluding_owned_games_constrains_the_count_as_well_as_the_page():
     assert owned_params is not None
 
     assert count_sql.strip().startswith("SELECT COUNT(*)")
-    for sql in (count_sql, page_sql):
-        assert "NOT EXISTS" in sql
-        assert "library_entries" in sql
+    assert "NOT EXISTS" in count_sql
+    assert "library_entries" in count_sql
+    assert "NOT EXISTS" in page_sql
+    assert "library_entries" in page_sql
     assert owner_sub in count_params
     assert owner_sub in page_params
 
@@ -146,8 +147,7 @@ async def test_browsing_excludes_proven_non_games_from_the_count_the_page_and_th
 
     await repo.list_games(exclude_owned_by=str(uuid.uuid4()))
 
-    for sql, _params in pool.connections[0].executed:
-        assert BROWSABLE_KIND_SQL in sql
+    assert [sql for sql, _params in pool.connections[0].executed if BROWSABLE_KIND_SQL not in sql] == []
 
 
 async def test_browsing_every_kind_lifts_the_content_kind_predicate():
@@ -156,8 +156,8 @@ async def test_browsing_every_kind_lifts_the_content_kind_predicate():
 
     await repo.list_games(kind=EVERY_KIND)
 
-    for sql, _params in pool.connections[0].executed:
-        assert "content_kind" not in sql.split("SELECT g.game_id")[0]
+    select_lists = [sql.split("SELECT g.game_id")[0] for sql, _params in pool.connections[0].executed]
+    assert [select_list for select_list in select_lists if "content_kind" in select_list] == []
 
 
 async def test_browsing_one_kind_selects_exactly_that_kind():

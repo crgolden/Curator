@@ -226,9 +226,9 @@ def test_register_otlp_providers_gives_both_exporters_a_timeout_longer_than_the_
 
     telemetry._register_otlp_providers("https://alloy.example.test:4317")
 
-    assert len(_FakeExporter.all_kwargs) == 2, "one span exporter and one metric exporter"
-    for kwargs in _FakeExporter.all_kwargs:
-        assert kwargs["timeout"] == telemetry._EXPORT_TIMEOUT_SECONDS
+    assert [kwargs["timeout"] for kwargs in _FakeExporter.all_kwargs] == [telemetry._EXPORT_TIMEOUT_SECONDS] * 2, (
+        "one span exporter and one metric exporter"
+    )
     assert telemetry._EXPORT_TIMEOUT_SECONDS > 10
 
 
@@ -236,23 +236,20 @@ def test_configure_elasticsearch_logging_keeps_otlp_exporter_failures_out_of_ela
     _patch_es_collaborators(monkeypatch)
     settings = _settings_with_es()
     root_logger = logging.getLogger()
-    original_handlers = list(root_logger.handlers)
+    monkeypatch.setattr(root_logger, "handlers", list(root_logger.handlers))
 
-    try:
-        telemetry._configure_elasticsearch_logging(settings)
-        queue_handler = root_logger.handlers[-1]
+    telemetry._configure_elasticsearch_logging(settings)
+    queue_handler = root_logger.handlers[-1]
 
-        exporter_record = logging.LogRecord(
-            telemetry._OTLP_EXPORTER_LOGGER, logging.ERROR, __file__, 1, "Failed to export metrics", None, None
-        )
-        application_record = logging.LogRecord(
-            "curator.jobs.queue_publisher", logging.ERROR, __file__, 1, "a real failure", None, None
-        )
+    exporter_record = logging.LogRecord(
+        telemetry._OTLP_EXPORTER_LOGGER, logging.ERROR, __file__, 1, "Failed to export metrics", None, None
+    )
+    application_record = logging.LogRecord(
+        "curator.jobs.queue_publisher", logging.ERROR, __file__, 1, "a real failure", None, None
+    )
 
-        assert not queue_handler.filter(exporter_record)
-        assert queue_handler.filter(application_record)
-    finally:
-        root_logger.handlers = original_handlers
+    assert not queue_handler.filter(exporter_record)
+    assert queue_handler.filter(application_record)
 
 
 def test_shutdown_telemetry_is_a_noop_when_never_configured(monkeypatch):
@@ -437,16 +434,14 @@ def test_configure_elasticsearch_logging_registers_exactly_once_across_repeated_
     settings = _settings_with_es()
     root_logger = logging.getLogger()
     original_handlers = list(root_logger.handlers)
+    monkeypatch.setattr(root_logger, "handlers", list(original_handlers))
 
-    try:
-        telemetry._configure_elasticsearch_logging(settings)
-        telemetry._configure_elasticsearch_logging(settings)
+    telemetry._configure_elasticsearch_logging(settings)
+    telemetry._configure_elasticsearch_logging(settings)
 
-        assert _FakeElasticsearchClient.instances == 1
-        assert _FakeQueueListener.starts == 1
-        assert len(root_logger.handlers) == len(original_handlers) + 1
-    finally:
-        root_logger.handlers = original_handlers
+    assert _FakeElasticsearchClient.instances == 1
+    assert _FakeQueueListener.starts == 1
+    assert len(root_logger.handlers) == len(original_handlers) + 1
 
 
 def test_configure_elasticsearch_logging_disables_propagation_on_the_es_client_loggers(monkeypatch):
@@ -458,21 +453,16 @@ def test_configure_elasticsearch_logging_disables_propagation_on_the_es_client_l
     _patch_es_collaborators(monkeypatch)
     settings = _settings_with_es()
     root_logger = logging.getLogger()
-    original_handlers = list(root_logger.handlers)
     transport_logger = logging.getLogger(telemetry.ELASTIC_TRANSPORT_LOGGER)
     es_logger = logging.getLogger(telemetry.ELASTICSEARCH_LOGGER)
-    original_transport_propagate = transport_logger.propagate
-    original_es_propagate = es_logger.propagate
+    monkeypatch.setattr(root_logger, "handlers", list(root_logger.handlers))
+    monkeypatch.setattr(transport_logger, "propagate", transport_logger.propagate)
+    monkeypatch.setattr(es_logger, "propagate", es_logger.propagate)
 
-    try:
-        telemetry._configure_elasticsearch_logging(settings)
+    telemetry._configure_elasticsearch_logging(settings)
 
-        assert transport_logger.propagate is False
-        assert es_logger.propagate is False
-    finally:
-        root_logger.handlers = original_handlers
-        transport_logger.propagate = original_transport_propagate
-        es_logger.propagate = original_es_propagate
+    assert transport_logger.propagate is False
+    assert es_logger.propagate is False
 
 
 def test_configure_elasticsearch_logging_noop_when_node_absent(monkeypatch):
@@ -553,21 +543,24 @@ def test_format_log_record_timestamp_is_parseable_iso_8601():
     assert datetime.fromisoformat(doc[telemetry.TIMESTAMP_FIELD]).tzinfo is not None
 
 
+def _exc_info_of_raising(exception: Exception):
+    try:
+        raise exception
+    except type(exception):
+        return sys.exc_info()
+
+
 def test_format_log_record_includes_stack_trace_on_exception():
     failure = new_opaque_token()
-    try:
-        raise ValueError(failure)
-    except ValueError:
-        exc_info = sys.exc_info()
-        record = logging.LogRecord(
-            name="curator.app",
-            level=logging.ERROR,
-            pathname=__file__,
-            lineno=1,
-            msg=lowercase_token(),
-            args=(),
-            exc_info=exc_info,
-        )
+    record = logging.LogRecord(
+        name="curator.app",
+        level=logging.ERROR,
+        pathname=__file__,
+        lineno=1,
+        msg=lowercase_token(),
+        args=(),
+        exc_info=_exc_info_of_raising(ValueError(failure)),
+    )
 
     doc = telemetry.format_log_record(record)
 
@@ -659,6 +652,11 @@ def test_elasticsearch_log_handler_counts_and_reports_a_failure_rather_than_drop
     )
 
 
+def _emit_repeatedly(handler: logging.Handler, record: logging.LogRecord, times: int) -> None:
+    for _ in range(times):
+        handler.emit(record)
+
+
 def test_elasticsearch_log_handler_reports_the_first_failure_only_until_the_interval_is_reached(capsys):
     class _FailingClient(_FakeElasticsearchClient):
         def index(self, **kwargs):
@@ -670,8 +668,7 @@ def test_elasticsearch_log_handler_reports_the_first_failure_only_until_the_inte
     )
     emits = telemetry._ES_FAILURE_REPORT_EVERY
 
-    for _ in range(emits):
-        handler.emit(record)
+    _emit_repeatedly(handler, record, emits)
 
     assert handler.failure_count == emits
     assert capsys.readouterr().err.count("Elasticsearch log shipping has failed") == 2, (

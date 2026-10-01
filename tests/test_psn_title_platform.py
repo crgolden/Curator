@@ -35,13 +35,11 @@ def test_narrowing_is_case_sensitive():
         console_platform("ps5")
 
 
-def test_the_rejection_message_names_every_accepted_platform():
-    message = platform_vocabulary_message()
-
-    for platform in CONSOLE_PLATFORM_IDS:
-        assert f'"{platform}"' in message, (
-            "the message is built from the vocabulary so widening it cannot leave a stale list behind"
-        )
+@pytest.mark.parametrize("platform", CONSOLE_PLATFORM_IDS)
+def test_the_rejection_message_names_every_accepted_platform(platform):
+    assert f'"{platform}"' in platform_vocabulary_message(), (
+        "the message is built from the vocabulary so widening it cannot leave a stale list behind"
+    )
 
 
 @pytest.mark.parametrize(

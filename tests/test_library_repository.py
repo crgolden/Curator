@@ -219,9 +219,10 @@ async def test_list_entries_leaves_hidden_games_out_by_default():
 
     count_sql, _ = pool.connections[0].executed[0]
     select_sql, _ = pool.connections[0].executed[1]
-    for sql in (count_sql, select_sql):
-        assert "NOT EXISTS (" in sql
-        assert "FROM library_exclusions lx" in sql
+    assert "NOT EXISTS (" in count_sql
+    assert "FROM library_exclusions lx" in count_sql
+    assert "NOT EXISTS (" in select_sql
+    assert "FROM library_exclusions lx" in select_sql
 
 
 async def test_list_entries_hidden_only_lists_nothing_but_hidden_games():
@@ -298,11 +299,8 @@ async def test_list_entries_with_enrichment_rejects_unknown_sort_field():
     pool = FakePool(fetchone_results=[(0,)], fetchall_results=[[]])
     repo = LibraryRepository(pool)
 
-    try:
+    with pytest.raises(KeyError):
         await repo.list_entries_with_enrichment("sub-1", sort="not_a_real_field")
-    except KeyError:
-        return
-    raise AssertionError("expected a KeyError for an unknown sort field")
 
 
 def test_the_sort_allow_list_covers_exactly_the_declared_sort_fields():

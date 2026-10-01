@@ -198,5 +198,5 @@ async def test_moving_a_storage_device_between_consoles_touches_only_the_storage
     assert len(executed_sql) == 2
     assert "UPDATE storage_devices" in executed_sql[0]
     assert "FROM storage_devices" in executed_sql[1]
-    for sql in executed_sql:
-        assert "storage_device_installs" not in sql
+    assert "storage_device_installs" not in executed_sql[0]
+    assert "storage_device_installs" not in executed_sql[1]

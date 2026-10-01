@@ -282,11 +282,10 @@ def test_games_content_kind_rejects_a_value_outside_the_closed_vocabulary(db_con
 
 def test_games_content_kind_accepts_every_documented_kind_and_null(db_connection):
     with db_connection.cursor() as cur:
-        for kind in (*CONTENT_KINDS, None):
-            cur.execute(
-                "INSERT INTO games (canonical_title, normalized_title, content_kind) VALUES (%s, %s, %s)",
-                (f"Kind {kind}", f"kind {kind}", kind),
-            )
+        cur.executemany(
+            "INSERT INTO games (canonical_title, normalized_title, content_kind) VALUES (%s, %s, %s)",
+            [(f"Kind {kind}", f"kind {kind}", kind) for kind in (*CONTENT_KINDS, None)],
+        )
         cur.execute("SELECT count(*) FROM games WHERE normalized_title LIKE 'kind %'")
         (count,) = cur.fetchone()
     assert count == len(CONTENT_KINDS) + 1
@@ -353,16 +352,18 @@ def test_public_collections_containing_a_game_list_exactly_the_public_one(db_con
     user_sub, game_id = seeded_user_and_game
     definition_ids = {visibility: str(uuid.uuid4()) for visibility in VISIBILITIES}
     with db_connection.cursor() as cur:
-        for visibility, definition_id in definition_ids.items():
-            cur.execute(
-                "INSERT INTO collection_definitions (definition_id, identity_sub, name, kind, visibility, share_slug) "
-                "VALUES (%s, %s, %s, %s, %s, %s)",
-                (definition_id, user_sub, f"{visibility} list", FILTER_LIST_KIND, visibility, uuid.uuid4().hex),
-            )
-            cur.execute(
-                "INSERT INTO collection_definition_items (definition_id, game_id, rank) VALUES (%s, %s, %s)",
-                (definition_id, game_id, 1),
-            )
+        cur.executemany(
+            "INSERT INTO collection_definitions (definition_id, identity_sub, name, kind, visibility, share_slug) "
+            "VALUES (%s, %s, %s, %s, %s, %s)",
+            [
+                (definition_id, user_sub, f"{visibility} list", FILTER_LIST_KIND, visibility, uuid.uuid4().hex)
+                for visibility, definition_id in definition_ids.items()
+            ],
+        )
+        cur.executemany(
+            "INSERT INTO collection_definition_items (definition_id, game_id, rank) VALUES (%s, %s, %s)",
+            [(definition_id, game_id, 1) for definition_id in definition_ids.values()],
+        )
         cur.execute(PUBLIC_COLLECTIONS_CONTAINING_SQL, (game_id, 20))
         listed = [str(row[0]) for row in cur.fetchall()]
         cur.execute(PUBLIC_COLLECTIONS_CONTAINING_COUNT_SQL, (game_id,))
@@ -504,10 +505,12 @@ def test_ps_plus_leaving_reports_a_departed_title_only_when_the_caller_got_it_th
         category_id = _extra_category_id(cur)
         first_walk = _plant_ps_plus_walk(cur, category_id, started_at="2026-09-01", completed_at="2026-09-01")
         _plant_ps_plus_walk(cur, category_id, started_at="2026-09-08", completed_at="2026-09-08")
-        for title_id in (plus_title_id, bought_title_id):
-            _plant_ps_plus_membership(
-                cur, category_id, first_walk, title_id=title_id, first_seen_at="2026-09-01", left_at="2026-09-08"
-            )
+        _plant_ps_plus_membership(
+            cur, category_id, first_walk, title_id=plus_title_id, first_seen_at="2026-09-01", left_at="2026-09-08"
+        )
+        _plant_ps_plus_membership(
+            cur, category_id, first_walk, title_id=bought_title_id, first_seen_at="2026-09-01", left_at="2026-09-08"
+        )
         cur.execute(
             "INSERT INTO entitlement_pulls (pull_id, identity_sub, source, entry_count) VALUES (%s, %s, %s, %s)",
             (pull_id, user_sub, "curator-live", 2),
@@ -546,18 +549,20 @@ def test_ps_plus_lapsed_reports_an_inactive_ps_plus_entitlement_once_per_title(d
             "INSERT INTO entitlement_pulls (pull_id, identity_sub, source, entry_count) VALUES (%s, %s, %s, %s)",
             (pull_id, user_sub, "curator-live", 2),
         )
-        for entitlement_id in ("base", "edition"):
-            cur.execute(
-                "INSERT INTO entitlement_snapshots (identity_sub, pull_id, entitlement_id, title_id, active, raw, "
-                "first_seen_at, last_seen_at) VALUES (%s, %s, %s, %s, false, %s, now(), now())",
+        cur.executemany(
+            "INSERT INTO entitlement_snapshots (identity_sub, pull_id, entitlement_id, title_id, active, raw, "
+            "first_seen_at, last_seen_at) VALUES (%s, %s, %s, %s, false, %s, now(), now())",
+            [
                 (
                     user_sub,
                     pull_id,
                     entitlement_id,
                     lapsed_title_id,
                     json.dumps({"rewardMeta": {"rewardMembershipType": PS_PLUS_REWARD_MEMBERSHIP_TYPE}}),
-                ),
-            )
+                )
+                for entitlement_id in ("base", "edition")
+            ],
+        )
         cur.execute(LAPSED_SQL, (user_sub, PS_PLUS_REWARD_MEMBERSHIP_TYPE))
         rows = cur.fetchall()
     assert [row[0] for row in rows] == [lapsed_title_id]
@@ -812,17 +817,21 @@ def test_the_python_walk_stopped_reason_vocabulary_matches_the_walks_check_const
     assert stored == set(get_args(WalkStoppedReason))
 
 
+def _insert_game_linked_to_concept(cur, game_id: str, concept_id: str, product_id: str | None) -> None:
+    title = new_game_title()
+    cur.execute(
+        "INSERT INTO games (game_id, canonical_title, normalized_title) VALUES (%s, %s, %s)",
+        (game_id, title, title.lower()),
+    )
+    cur.execute(LINK_STORE_CONCEPT_SQL, (concept_id, game_id, product_id))
+
+
 def test_two_games_can_share_a_concept_but_one_game_links_a_concept_once(db_connection):
     concept_id = new_concept_id()
     game_ids = [str(uuid.uuid4()), str(uuid.uuid4())]
     with db_connection.cursor() as cur:
-        for game_id in game_ids:
-            title = new_game_title()
-            cur.execute(
-                "INSERT INTO games (game_id, canonical_title, normalized_title) VALUES (%s, %s, %s)",
-                (game_id, title, title.lower()),
-            )
-            cur.execute(LINK_STORE_CONCEPT_SQL, (concept_id, game_id, None))
+        _insert_game_linked_to_concept(cur, game_ids[0], concept_id, None)
+        _insert_game_linked_to_concept(cur, game_ids[1], concept_id, None)
         cur.execute("SELECT count(*) FROM game_concepts WHERE concept_id = %s", (concept_id,))
         (linked,) = cur.fetchone()
     assert linked == len(game_ids)
@@ -838,13 +847,8 @@ def test_a_concept_shared_by_two_products_resolves_only_through_the_product_id(d
     product_ids = [new_store_product_id(), new_store_product_id()]
     game_ids = [str(uuid.uuid4()), str(uuid.uuid4())]
     with db_connection.cursor() as cur:
-        for game_id, product_id in zip(game_ids, product_ids, strict=True):
-            title = new_game_title()
-            cur.execute(
-                "INSERT INTO games (game_id, canonical_title, normalized_title) VALUES (%s, %s, %s)",
-                (game_id, title, title.lower()),
-            )
-            cur.execute(LINK_STORE_CONCEPT_SQL, (concept_id, game_id, product_id))
+        _insert_game_linked_to_concept(cur, game_ids[0], concept_id, product_ids[0])
+        _insert_game_linked_to_concept(cur, game_ids[1], concept_id, product_ids[1])
         cur.execute(RESOLVE_STORE_IDS_SQL, ([concept_id, product_ids[1]],))
         resolved = {row[0]: row[1] for row in cur.fetchall()}
     assert resolved == {concept_id: None, product_ids[1]: uuid.UUID(game_ids[1])}
@@ -859,8 +863,10 @@ def test_a_name_override_names_one_product_under_a_concept_and_needs_no_linked_c
     concept_id = new_concept_id()
     product_ids = [new_store_product_id(), new_store_product_id()]
     with db_connection.cursor() as cur:
-        for product_id in product_ids:
-            cur.execute(INSERT_PRODUCT_NAME_OVERRIDE_SQL, (concept_id, product_id, new_game_title(), new_game_title()))
+        cur.executemany(
+            INSERT_PRODUCT_NAME_OVERRIDE_SQL,
+            [(concept_id, product_id, new_game_title(), new_game_title()) for product_id in product_ids],
+        )
         cur.execute("SELECT count(*) FROM game_name_overrides WHERE concept_id = %s", (concept_id,))
         (overrides,) = cur.fetchone()
     assert overrides == len(product_ids)
@@ -958,6 +964,28 @@ def test_user_profiles_cascade_deletes_when_user_is_deleted(db_connection, seede
     assert count == 0
 
 
+USER_OWNED_TABLES = (
+    "entitlement_pulls",
+    "library_entries",
+    "library_exclusions",
+    "user_consoles",
+    "storage_devices",
+    "collection_definitions",
+    "collection_runs",
+    "job_runs",
+)
+
+
+def _tables_holding_rows_for(cur, tables: tuple[str, ...], user_sub: str) -> list[str]:
+    holding = []
+    for table in tables:
+        cur.execute(f"SELECT count(*) FROM {table} WHERE identity_sub = %s", (user_sub,))
+        (count,) = cur.fetchone()
+        if count:
+            holding.append(table)
+    return holding
+
+
 def test_deleting_a_user_cascades_every_per_user_table(db_connection, seeded_user_and_game):
     """DELETE /me must wipe every per-user table via cascade -- the contract delete_user relies on.
 
@@ -1042,19 +1070,7 @@ def test_deleting_a_user_cascades_every_per_user_table(db_connection, seeded_use
 
         cur.execute("DELETE FROM app_users WHERE identity_sub = %s", (user_sub,))
 
-        for table in (
-            "entitlement_pulls",
-            "library_entries",
-            "library_exclusions",
-            "user_consoles",
-            "storage_devices",
-            "collection_definitions",
-            "collection_runs",
-            "job_runs",
-        ):
-            cur.execute(f"SELECT count(*) FROM {table} WHERE identity_sub = %s", (user_sub,))
-            (count,) = cur.fetchone()
-            assert count == 0, f"{table} still has rows for the deleted user"
+        assert _tables_holding_rows_for(cur, USER_OWNED_TABLES, user_sub) == [], "rows survived the deleted user"
 
         cur.execute("SELECT recorded_by FROM game_measured_sizes WHERE game_id = %s AND platform = %s", (game_id, PS5))
         assert cur.fetchone()[0] is None
