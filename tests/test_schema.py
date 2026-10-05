@@ -78,6 +78,7 @@ from curator.jobs.repository import (
     JOB_STATUS_FAILED,
 )
 from curator.psn.title_platform import CONSOLE_PLATFORM_IDS, PS3, PS5, PSP, PSVITA
+from disposable_database import is_disposable_database
 from schema_constants import EXPECTED_TABLES
 from test_values import (
     new_concept_id,
@@ -130,14 +131,14 @@ def migrated_connection():
 
     Leaves the database migrated rather than pristine; per-test isolation is ``db_connection``'s savepoint.
 
-    :raises RuntimeError: If the target database name does not end in ``_test``.
+    :raises RuntimeError: If the target database name does not end in ``_test`` or ``_triage``.
     """
     database = urlsplit(DATABASE_URL).path.lstrip("/")
-    if not database.endswith("_test"):
+    if not is_disposable_database(database):
         raise RuntimeError(
-            f"CURATOR_TEST_DATABASE_URL names {database!r}, which is not a *_test database. This module "
-            "migrates and commits, so pointing it at the exploratory 'curator' database would alter the "
-            "data kept there for manual work. See Curator/TESTING.md."
+            f"CURATOR_TEST_DATABASE_URL names {database!r}, which is not a *_test or *_triage database. "
+            "This module migrates and commits, so pointing it at the exploratory 'curator' database would "
+            "alter the data kept there for manual work. See Curator/TESTING.md."
         )
 
     _run_migrations(DATABASE_URL)

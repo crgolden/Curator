@@ -221,7 +221,8 @@ second provider on top of the first.
 ## Quick start
 
 ```powershell
-python -m pip install -e ".[dev]"
+$env:POETRY_VIRTUALENVS_CREATE = 'false'
+poetry install --extras dev
 python -m pytest
 ```
 

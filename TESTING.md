@@ -6,7 +6,8 @@ Ruff (lint + format) and mypy (strict) run against `src/` and `tests/`, configur
 (`[tool.ruff]`, `[tool.ruff.lint]`, `[tool.mypy]`). Run them locally the same way CI does:
 
 ```powershell
-python -m pip install -e ".[dev]"
+$env:POETRY_VIRTUALENVS_CREATE = 'false'
+poetry install --extras dev
 
 python -m ruff check src tests
 python -m ruff format --check src tests   # drop --check to apply formatting
@@ -73,17 +74,24 @@ Three properties of `tests/test_profile_routes.py` that its assertions cannot st
 Run:
 
 ```powershell
-python -m pip install -e ".[dev]"
+$env:POETRY_VIRTUALENVS_CREATE = 'false'
+poetry install --extras dev
 python -m pytest
 ```
+
+That is CI's install (`poetry config virtualenvs.create false`, then `poetry install --extras dev`): the
+locked dependencies go into the interpreter that runs `python`, and Curator itself is never installed,
+because `pyproject.toml` sets `package-mode = false` and `pip install -e .` fails with "Building a package
+is not possible in non-package mode". **Poetry still uses a project virtualenv it already created**, even
+with creation disabled, so on a machine where `poetry env list` names one, the install lands there and
+`python` stays without the dependencies.
 
 `pyproject.toml` sets `pythonpath = ["src"]` and `testpaths = ["tests"]`, so `python -m pytest` from the
 repo root picks up `src/curator` without an editable install of Curator itself. If running from a
 different working directory, either `Set-Location` into the repo root first or pass the tests directory
 and `-o pythonpath=<repo>/src` explicitly (or set the `PYTHONPATH` env var to `<repo>/src`).
 
-If `pip install -e ".[dev]"` doesn't resolve every dependency in your environment, install the runtime
-packages directly:
+If `poetry install` cannot run in your environment, install the runtime packages directly:
 
 ```powershell
 python -m pip install pytest pytest-asyncio pytest-xdist httpx fastapi uvicorn joserfc cryptography "psycopg[binary]" psycopg-pool redis azure-servicebus pycountry
@@ -155,7 +163,8 @@ Point it at a non-`*Test` database and the cleanup simply does not run. Copy tha
 trusting that the right connection string was supplied.
 
 **The `*_test` suffix binds CI too, and its service container is named `curator_test` for that reason
-alone.** Nothing about a container that is created and destroyed inside one job needs a careful name — but
+alone.** The guard (`tests/disposable_database.py`) also accepts `*_triage`, the alert-triage agent's own
+database. Nothing about a container that is created and destroyed inside one job needs a careful name — but
 the guard reads the name, not the lifetime, so an arbitrary one fails. It was `curator_ci` and every schema
 test errored, taking Package, Migrate and Deploy down as skipped. **The failure is invisible locally by
 construction**: the local target already ends in `_test`, so the guard's rejecting branch is the one branch
@@ -258,9 +267,9 @@ on a base nobody has exercised.
 
 ## CI
 
-`.github/workflows/main.yml` runs on push to `main`, on pull requests, and on `workflow_dispatch`. It
-installs Curator's runtime and dev dependencies directly (rather than `pip install -e .`) so the job
-doesn't depend on any cross-repo checkout.
+`.github/workflows/main_crgolden-curator.yml` runs on push to `main`, on pull requests, and on
+`workflow_dispatch`. The `test` job installs the locked runtime and dev dependencies with `poetry install
+--extras dev` into the job's interpreter (`virtualenvs.create false`), after `poetry check --lock`.
 
 The `test` job runs, in order: Ruff lint, Ruff format check, mypy, then the whole test suite with coverage
 (`--cov=src/curator --cov-report=xml:coverage.xml`), then a SonarCloud analysis over `coverage.xml`. Each

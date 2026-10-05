@@ -21,7 +21,7 @@ Register-StepInputs @{
 }
 $repo = $PSScriptRoot
 $pytestLog = Join-Path $gateOutput 'pytest.txt'
-$sonarBranch = "branch-local-$($env:COMPUTERNAME.ToLowerInvariant())"
+$sonarBranch = Get-SonarBranchName
 $pytestStep = 'Run tests with coverage (pytest -x --cov)'
 $sonarStep = "SonarCloud analysis (sonar-scanner, branch $sonarBranch, quality gate waited)"
 $sonarIssues = 'Fail on open Sonar issues'
@@ -31,10 +31,16 @@ Set-Location $repo
 Initialize-GateState 'Curator' $repo
 Invoke-CatalogSteps
 
-$databaseLine = Select-String -Path (Join-Path $repo '.env') -Pattern '^CURATOR_TEST_DATABASE_URL=' -Raw
-if (-not $databaseLine) { Stop-Gate 'Schema test database configuration' 'CURATOR_TEST_DATABASE_URL is not in Curator/.env' }
-$env:CURATOR_TEST_DATABASE_URL = ($databaseLine -split '=', 2)[1].Trim()
-Write-Row 'Schema test database configuration' 'PASS' 'CURATOR_TEST_DATABASE_URL loaded from Curator/.env'
+if ([string]::IsNullOrWhiteSpace($env:CURATOR_TEST_DATABASE_URL)) {
+    $envFile = Join-Path $repo '.env'
+    $databaseLine = if (Test-Path -LiteralPath $envFile) { Select-String -Path $envFile -Pattern '^CURATOR_TEST_DATABASE_URL=' -Raw }
+    if (-not $databaseLine) { Stop-Gate 'Schema test database configuration' 'CURATOR_TEST_DATABASE_URL is neither in the environment nor in Curator/.env' }
+    $env:CURATOR_TEST_DATABASE_URL = ($databaseLine -split '=', 2)[1].Trim()
+    Write-Row 'Schema test database configuration' 'PASS' 'CURATOR_TEST_DATABASE_URL loaded from Curator/.env'
+}
+else {
+    Write-Row 'Schema test database configuration' 'PASS' 'CURATOR_TEST_DATABASE_URL taken from the environment'
+}
 $env:MYPYPATH = 'src'
 $env:PYTHONPATH = 'src'
 
