@@ -1,4 +1,4 @@
-param([string]$Goal)
+param([string]$Goal, [string[]]$Steps)
 
 $ErrorActionPreference = 'Continue'
 $gateCommon = Join-Path $PSScriptRoot '..\Tools\Gates\GateCommon.ps1'
@@ -14,10 +14,16 @@ Register-GateSteps @('Schema test database configuration', 'poetry check --lock'
     'Bearer-list control', 'Run tests with coverage', 'SonarCloud analysis', 'Fail on open Sonar issues',
     'Verify deployment package boots')
 Register-StepInputs @{
-    'poetry check --lock' = @('pyproject.toml', 'poetry.lock')
-    'ruff check'          = @('*.py', 'pyproject.toml')
-    'ruff format --check' = @('*.py', 'pyproject.toml')
-    'mypy'                = @('*.py', 'pyproject.toml', 'poetry.lock')
+    'Schema test database configuration' = @('*')
+    'poetry check --lock'                = @('pyproject.toml', 'poetry.lock')
+    'ruff check'                         = @('*.py', 'pyproject.toml')
+    'ruff format --check'                = @('*.py', 'pyproject.toml')
+    'mypy'                               = @('*.py', 'pyproject.toml', 'poetry.lock')
+    'Bearer-list control'                = @('*')
+    'Run tests with coverage'            = @('*')
+    'SonarCloud analysis'                = @('*')
+    'Fail on open Sonar issues'          = @('*')
+    'Verify deployment package boots'    = @('*')
 }
 $repo = $PSScriptRoot
 $pytestLog = Join-Path $gateOutput 'pytest.txt'
@@ -29,6 +35,7 @@ $env:TZ = 'UTC'
 if ($env:TZ -ne 'UTC') { Write-Host 'GATE: FAILED (TZ pin)'; exit 1 }
 Set-Location $repo
 Initialize-GateState 'Curator' $repo
+Assert-RequestedSteps $Steps
 Invoke-CatalogSteps
 
 if ([string]::IsNullOrWhiteSpace($env:CURATOR_TEST_DATABASE_URL)) {
