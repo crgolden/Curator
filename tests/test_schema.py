@@ -127,12 +127,6 @@ def _run_migrations(database_url: str) -> None:
 
 @pytest.fixture(scope="session")
 def migrated_connection():
-    """Migrate the target database, then open one connection shared by every test in the session.
-
-    Leaves the database migrated rather than pristine; per-test isolation is ``db_connection``'s savepoint.
-
-    :raises RuntimeError: If the target database name does not end in ``_test`` or ``_triage``.
-    """
     database = urlsplit(DATABASE_URL).path.lstrip("/")
     if not is_disposable_database(database):
         raise RuntimeError(

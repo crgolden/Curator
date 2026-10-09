@@ -28,5 +28,11 @@ def test_a_database_carrying_the_triage_suffix_before_its_end_is_not_disposable(
     assert not is_disposable_database(triage_mid_name_database)
 
 
+def test_a_database_whose_suffix_differs_only_in_case_is_disposable_as_functions_reads_it() -> None:
+    upper_case_triage_database = (lowercase_token() + TRIAGE_DATABASE_SUFFIX).upper()
+
+    assert is_disposable_database(upper_case_triage_database)
+
+
 def test_an_absent_database_name_is_not_disposable() -> None:
     assert not is_disposable_database(None)
