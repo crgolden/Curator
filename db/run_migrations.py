@@ -7,12 +7,31 @@ TABLE``, not ``IF NOT EXISTS`` guards, so a rerun would fail outright rather tha
 
 from __future__ import annotations
 
+import os
 import sys
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 
 import psycopg
 
 MIGRATIONS_DIR = Path(__file__).parent / "migrations"
+DATABASE_URL_VARIABLE = "CURATOR_MIGRATIONS_DATABASE_URL"
+
+
+def database_url_from(arguments: Sequence[str], environment: Mapping[str, str]) -> str | None:
+    """The database to migrate: the one command-line argument, else :data:`DATABASE_URL_VARIABLE` when there is
+    no argument, so a caller holding the password can keep it off the process's command line. ``None`` when
+    neither names one.
+
+    :param arguments: The command-line arguments after the script name.
+    :param environment: The process environment.
+    """
+    if len(arguments) == 1:
+        return arguments[0]
+    if arguments:
+        return None
+    value = environment.get(DATABASE_URL_VARIABLE)
+    return value if value is not None and value.strip() else None
 
 
 def run_migrations(database_url: str) -> None:
@@ -40,10 +59,11 @@ def run_migrations(database_url: str) -> None:
 
 
 def main() -> None:
-    if len(sys.argv) != 2:
-        print("Usage: python run_migrations.py <database_url>", file=sys.stderr)
+    database_url = database_url_from(sys.argv[1:], os.environ)
+    if database_url is None:
+        print(f"Usage: python run_migrations.py <database_url>, or set {DATABASE_URL_VARIABLE}", file=sys.stderr)
         raise SystemExit(2)
-    run_migrations(sys.argv[1])
+    run_migrations(database_url)
 
 
 if __name__ == "__main__":

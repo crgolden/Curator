@@ -21,6 +21,10 @@ def lowercase_token(length: int = 8) -> str:
     return "".join(random.choice(string.ascii_lowercase) for _ in range(length))
 
 
+def new_blank() -> str:
+    return "".join(random.choice(" \t") for _ in range(random.randint(1, 3)))
+
+
 def token_from_first_half_of_alphabet(length: int = 8) -> str:
     return "".join(random.choice(_LOWER_FIRST_HALF) for _ in range(length))
 

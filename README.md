@@ -312,7 +312,9 @@ tracked in a `schema_migrations` table (one row per filename) — the deploy job
 before every deploy (see Deployment below), so a new migration file lands automatically on the next push to
 `main` instead of requiring a manual `psql` run. It's idempotent: rerunning it when nothing is new is a
 no-op. For local development, either run it yourself (`python db/run_migrations.py "$CURATOR_DATABASE_URL"`)
-or apply the files by hand via `psql` — either way ends at the same schema.
+or apply the files by hand via `psql`; either way ends at the same schema. With no argument it reads the
+URL from `CURATOR_MIGRATIONS_DATABASE_URL`, which keeps the password off the command line; the alert-triage
+gate runs it that way.
 
 ## Layout
 
