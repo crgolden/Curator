@@ -9,10 +9,10 @@ Ruff (lint + format) and mypy (strict) run against `src/` and `tests/`, configur
 $env:POETRY_VIRTUALENVS_CREATE = 'false'
 poetry install --extras dev
 
-python -m ruff check src tests
-python -m ruff format --check src tests   # drop --check to apply formatting
+python -m ruff check src tests app.py dev_server.py
+python -m ruff format --check src tests app.py dev_server.py   # drop --check to apply formatting
 $env:MYPYPATH = "src"
-python -m mypy src tests
+python -m mypy src tests app.py dev_server.py
 ```
 
 `mypy` is strict on `src/curator` (no untyped defs, no implicit `Any`); `[[tool.mypy.overrides]]` in
@@ -21,7 +21,7 @@ nominal, typing — see "Unit tests" below).
 
 ## Unit tests
 
-The whole suite under `tests/` runs fully offline: no live database, no network, no live PSN/Identity
+The whole suite under `tests/` runs fully offline: no live database, no network, no live PSN or identity-provider
 calls. Backends (the psycopg connection/cursor protocol, the `Repository`, the PSN agent, and
 `curator.token_validation.JwtValidator`) are stood in for with hand-written fake classes — never
 `unittest.mock`. `tests/test_token_validation.py` is the one place that exercises the *real*
@@ -33,11 +33,24 @@ protected-route test presents an `Authorization: Bearer <token>` header; `tests/
 `FakeTokenValidator` maps known token strings to canned `TokenClaims` and raises `TokenError` for anything
 else.
 
+**Hand-written fakes, never `unittest.mock`.** A `Mock` creates any attribute you touch, so a misspelled
+method on the production side returns another `Mock` and the test passes. A hand-written fake has only the
+methods someone wrote, so a mismatch with the real collaborator fails at the call site with an
+`AttributeError`, and a test reads as "given this data, assert this transformation".
+
+**`typing.Protocol` over `abc.ABC` for injected collaborators.** `curator.psn.session.TokenStore`,
+`curator.link_service.PsnAgentLike` and similar contracts are structural: a class satisfies one by having
+the right methods, not by inheriting. That keeps modules decoupled (`curator.persistence.DbTokenStore`
+satisfies `TokenStore` without either importing the other) and lets every fake satisfy a contract with no
+base class. The usual risk of a `Protocol`, a mismatch found only at run time, is closed by `mypy --strict`
+over `src`, `tests`, `app.py` and `dev_server.py`, which fails a missing or wrong-signature method before a
+test runs.
+
 `tests/test_authz.py` exercises this offline (`tests/test_routes.py`'s fakes, reused by importing them
 rather than duplicating — pytest's rootdir-relative import puts `tests/` on `sys.path`, so a bare
 `from test_routes import ...` resolves) but proves a structural property rather than individual status
 codes: every bearer-required route rejects a missing `Authorization` header and a garbage token (401) and
-answers 503 when Identity cannot be reached; two established callers (user A, user B) never leak, since A's
+answers 503 when the identity provider cannot be reached; two established callers (user A, user B) never leak, since A's
 requests only ever read and write A's row in the fake repository and B's is provably untouched; and the
 set of path parameter names across every effective route equals a pinned allowlist in which `sub` is the
 only name that identifies a user.
@@ -91,16 +104,9 @@ repo root picks up `src/curator` without an editable install of Curator itself. 
 different working directory, either `Set-Location` into the repo root first or pass the tests directory
 and `-o pythonpath=<repo>/src` explicitly (or set the `PYTHONPATH` env var to `<repo>/src`).
 
-If `poetry install` cannot run in your environment, install the runtime packages directly:
-
-```powershell
-python -m pip install pytest pytest-asyncio pytest-xdist httpx fastapi uvicorn joserfc cryptography "psycopg[binary]" psycopg-pool redis azure-servicebus pycountry
-python -m pytest tests -q
-```
-
-`pytest-xdist` is not optional in that list: `pyproject.toml`'s `addopts` passes `-n auto --dist loadgroup`,
-so without it every `pytest` invocation fails with `error: unrecognized arguments: -n --dist`. The suite
-runs in parallel by default because its cost is diffuse per-test overhead rather than any one slow test.
+`pytest-xdist` is required, not optional: `pyproject.toml`'s `addopts` passes `-n auto --dist loadgroup`, so
+without it every `pytest` invocation fails with `error: unrecognized arguments: -n --dist`. The suite runs
+in parallel by default because its cost is diffuse per-test overhead rather than any one slow test.
 
 To run serially, reading output in source order, pass `-n 0` to the whole suite:
 
@@ -110,10 +116,7 @@ python -m pytest -q -n 0
 
 `-p no:xdist` does **not** work for this: disabling the plugin leaves the `addopts` flags unrecognized.
 
-**Always run the whole suite, never one file or one `-k` expression.** A narrowed run is not a gate. The
-workspace's PreToolUse hook (`Tools/Claude/invoke_gate_cadence_gate.py`) denies an agent's `pytest` typed on
-its own, since every step belongs in one gate script, and denies a gate script whose `pytest` names a `.py`
-file or passes `-k`.
+**Always run the whole suite, never one file or one `-k` expression.** A narrowed run is not a gate.
 
 `tests/test_telemetry.py` covers `curator.telemetry`: both legs (OTLP traces/metrics, Elasticsearch
 logging) stay no-op when their settings are absent; the module-level registration guards make repeated
@@ -154,38 +157,25 @@ either, and nothing here should ever create or drop a database.**
 | variable | database | what it is for |
 |---|---|---|
 | `CURATOR_DATABASE_URL` | `curator` | **Manual and exploratory work.** Running a new migration by hand, driving the app, Playwright CLI sessions. It holds the local fixture data you want to keep — linked accounts, libraries, collections — so it is worth something and must not be swept. |
-| `CURATOR_TEST_DATABASE_URL` | `curator_test` | **Automated testing only.** `test_schema.py` and `Functions.Tests.Integration` both target it. Nothing in it is precious, and anything that seeds it is expected to clean up after itself. |
+| `CURATOR_TEST_DATABASE_URL` | `curator_test` | **Automated testing only.** `test_schema.py` targets it, and so may another service's integration tests that read and write this schema. Nothing in it is precious, and anything that seeds it is expected to clean up after itself. |
 
-**A suite that empties tables guards on the database name, never on configuration.** Identity's E2E fixture
-is the reference: `PlaywrightFixture.CleanupDatabaseAsync` deletes every table's rows after the run, but
-returns early unless `db.Database.GetDbConnection().Database.EndsWith("Test", StringComparison.Ordinal)`.
-Point it at a non-`*Test` database and the cleanup simply does not run. Copy that shape rather than
-trusting that the right connection string was supplied.
+**A suite that empties or commits to tables guards on the database name, never on configuration.**
+`tests/disposable_database.py` refuses any database whose name does not end in `_test` (or `_triage`),
+compared case-insensitively. Point the suite at any other name and it refuses before writing.
 
 **The `*_test` suffix binds CI too, and its service container is named `curator_test` for that reason
-alone.** The guard (`tests/disposable_database.py`) also accepts `*_triage`, the alert-triage agent's own
-database. Nothing about a container that is created and destroyed inside one job needs a careful name — but
-the guard reads the name, not the lifetime, so an arbitrary one fails. It was `curator_ci` and every schema
-test errored, taking Package, Migrate and Deploy down as skipped. **The failure is invisible locally by
-construction**: the local target already ends in `_test`, so the guard's rejecting branch is the one branch
-a local run can never take. Whenever a guard's predicate reads a value CI supplies and the developer
-supplies separately, only CI exercises half of it.
+alone.** Nothing about a container created and destroyed inside one job needs a careful name, but the guard
+reads the name, not the lifetime, so any other name fails every schema test and, with them, the Package,
+Migrate and Deploy jobs behind them. **The failure is invisible locally by construction**: a local target
+already ends in `_test`, so the guard's rejecting branch is the one branch a local run never takes. When CI
+and a developer supply a guarded value separately, only CI exercises half of it, and the fix is always the
+supplied value, never the guard.
 
-**When that happens the guard is the thing to keep, and the supplied value is the thing to change.**
-Relaxing the suffix would have deleted the only barrier between a suite that commits and the exploratory
-database, to fix a name that was free to change.
-
-**Most of what went wrong on 2026-08-28 was this distinction not being written down.** A scratch database
-was invented, a superuser was used to create it, `curator_test` was swept while another suite depended on
-it, and a credential ended up in a transcript — none of which was necessary, because both URLs were
-already in `.env` and neither needs elevated rights.
-
-**Locally, use the `CURATOR_TEST_DATABASE_URL` already in `Curator/.env`** — it points at `curator_test`.
-There is no scratch database to create and no superuser to connect as. Never point it at the `curator`
-dev database or at production: **this module commits.** The fixture applies migrations through
-`db/run_migrations.py`, the deploy job's own runner, so the target is left *migrated* rather than
-pristine. That is deliberate — `Functions.Tests.Integration` shares `curator_test` and requires the
-schema present — and it is why the older "create a throwaway database, then drop it" recipe is gone.
+**Locally, use the `CURATOR_TEST_DATABASE_URL` in `.env`**, pointing at `curator_test`. There is no scratch
+database to create and no superuser to connect as. Never point it at the `curator` dev database or at
+production: **this module commits.** The fixture applies migrations through `db/run_migrations.py`, the
+deploy job's own runner, so the target is left *migrated* rather than pristine; other suites that share
+`curator_test` rely on the schema being present.
 
 What it checks: every table the migration is expected to create exists and every dropped one is gone
 (`exclusion_rules`, the two `data_quality_flags` tables, the vestigial `collection_items` columns);
@@ -206,7 +196,7 @@ hand-written Python constant to the database.** `curator.psn.title_platform.CONS
 happy to store, and without this test nothing goes red.
 
 ```powershell
-# CURATOR_TEST_DATABASE_URL comes from Curator/.env; load it into the environment without echoing it.
+# CURATOR_TEST_DATABASE_URL comes from .env; load it into the environment without echoing it.
 $line = Select-String -Path .env -Pattern '^CURATOR_TEST_DATABASE_URL=' -Raw
 $env:CURATOR_TEST_DATABASE_URL = ($line -split '=', 2)[1].Trim()
 
@@ -217,13 +207,12 @@ With the variable set, the whole suite runs this module too, exactly as CI does.
 it did not run; `-rs` prints the reason.
 
 **Never put the connection string on a command line.** It carries the password, and any tool that fails
-to connect prints the whole conninfo — which is how a credential reached a session transcript on
-2026-08-28. Read it into the environment as above; `psycopg` and `psql` both pick it up from there.
+to connect prints the whole conninfo. Read it into the environment as above; `psycopg` and `psql` both pick
+it up from there.
 
-The application role deliberately lacks `CREATEDB`, and it no longer needs it: the fixture migrates
-whatever `CURATOR_TEST_DATABASE_URL` names rather than requiring a freshly created, empty database.
-Resetting a schema with `DROP SCHEMA public CASCADE` is no longer part of running these tests — if you
-find yourself doing it, the target is wrong, not the database.
+The application role needs no `CREATEDB`: the fixture migrates whatever `CURATOR_TEST_DATABASE_URL` names
+rather than requiring a freshly created, empty database. Running these tests never calls for
+`DROP SCHEMA public CASCADE`; if it seems to, the target is wrong, not the database.
 
 ## Testing a migration before it reaches CI
 
@@ -240,11 +229,9 @@ container starts empty, CI exercises the **fresh** path. Locally the same tests 
 which is already migrated, so they exercise the **incremental** runner — but against a database holding
 only what tests put there, not your real local data.
 
-That gap is not theoretical. Migration `0039` was rehearsed against production inside a rolled-back
-transaction, passed, and still broke `test_deleting_a_user_cascades_every_per_user_table` by adding a
-`NOT NULL` column the test's `INSERT` did not supply. Running it locally is what surfaced that, and it
-also surfaced five *pre-existing* failures in this suite that nobody had seen — the cost of a suite that
-only ran when someone opted in.
+A migration rehearsed inside a rolled-back transaction can still break a schema test, for example by
+adding a `NOT NULL` column that a test's `INSERT` does not supply; only running the suite with the
+migration applied finds it.
 
 Test both paths — they catch different things:
 
@@ -291,6 +278,9 @@ connections and fail intermittently on a cold runner.
 Coverage has to exist before the scanner runs — it reads `coverage.xml`, it does not produce it. Run both
 from the repo root:
 
+The SonarScanner CLI reads `SONAR_TOKEN` from the environment; give it `sonar.host.url=https://sonarcloud.io`
+in its global `conf/sonar-scanner.properties` or as one more `-D` argument.
+
 ```powershell
 python -m pytest --cov=src/curator --cov-report=xml:coverage.xml -q
 
@@ -306,17 +296,12 @@ sonar-scanner `
 
 `sonar.python.version` mirrors `pyproject.toml`'s `requires-python = ">=3.10,<4.0"`. Without it every
 analysis warns that the code is being checked against *all* Python 3 versions, which both weakens
-version-specific rules and hides ones that only apply to the floor. Note CI installs 3.14 only, so the
-declared 3.10 floor is analysed but never actually executed — narrow `requires-python` or add a matrix if
-that floor is meant to be a real promise.
+version-specific rules and hides ones that only apply to the floor. CI runs 3.14 only, so the 3.10 floor is
+analyzed but never executed.
 
-`sonar.host.url` and `sonar.scanner.skipJreProvisioning=true` are already set in the scanner's global
-`conf/sonar-scanner.properties`, so neither belongs on the command line: the CLI ships its own JRE 21 and
-uses it even though `java` is not on PATH.
-
-Two things mislead when you go to read the result. A **green CI run is not a passed quality gate** — the
-workflow does not set `sonar.qualitygate.wait`, so the Sonar step submits the analysis and reports success
-whatever the gate later says. And a **just-scanned project can under-report**: security findings are
-published on a lag behind the main analysis, so `ce/task` returning SUCCESS does not mean the issue list is
-complete. When the measures endpoint and the issue list disagree, believe the measures — that is what the
-gate evaluates — and re-query rather than calling the project clean.
+CI passes `sonar.qualitygate.wait=true`, so the Sonar step fails when the quality gate fails, and the next
+step, `Fail on open Sonar issues`, fails on any open issue on the branch or pull request whatever the gate
+says. A **just-scanned project can under-report**: security findings are published on a lag behind the
+main analysis, so `ce/task` returning SUCCESS does not mean the issue list is complete. When the measures
+endpoint and the issue list disagree, believe the measures (that is what the gate evaluates) and re-query
+rather than calling the project clean.

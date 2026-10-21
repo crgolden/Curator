@@ -4,419 +4,159 @@
 
 [![Quality gate](https://sonarcloud.io/api/project_badges/quality_gate?project=crgolden_Curator)](https://sonarcloud.io/summary/new_code?id=crgolden_Curator)
 
-A multi-user PlayStation library curation API. Every user authenticates elsewhere — through Duende
-IdentityServer — and identifies themselves to Curator with a bearer access token; Curator itself is a
-**JWT Bearer resource server**, matching how the workspace's `Directory` API interacts with Identity, with
-three deliberate exceptions. `GET /public/collections/{shareSlug}` is anonymous so a collection's owner can
-hand out a link that works for someone who has never signed in to Curator at all. `GET /catalog/games` and
-`GET /catalog/games/{gameId}` are anonymous because the shared game catalog is public content — it holds no
-per-user data, and requiring a login to browse it would keep it out of search engines entirely. The detail
-route reads the caller's token when one is present (`curator.deps.optional_bearer`) purely to add that
-user's own trophy progress; with no token it serves the same public response, and a token that *is*
-supplied but invalid is a 401 rather than being silently downgraded to anonymous.
-Once authenticated, a user links their PSN account through Curator's own in-repo `curator.psn` client
-(`curator.psn.session.PsnSession` and friends), and Curator ingests their entitlements, merges them into a
-shared game catalog, enriches that catalog (RAWG, OpenCritic, PS Store), and derives a per-user library,
-exclusion set, console inventory, and rotation/assignment plan. All of it is persisted in PostgreSQL.
+A multi-user PlayStation library curation API. A user signs in with any OpenID Connect provider and calls
+Curator with a bearer access token; Curator is a **JWT bearer resource server** and never issues tokens or
+holds a session. Once signed in, a user links their PlayStation Network (PSN) account, and Curator ingests
+their entitlements into a shared game catalog, enriches that catalog (RAWG, OpenCritic, the PS Store), and
+derives a per-user library, console inventory and named **collections** a user can share by link.
 
-RAWG/OpenCritic enrichment is **bring-your-own-key**: Curator never provisions a shared RAWG/OpenCritic key
-for every user's library (it doesn't scale), so a user optionally supplies their own key for either or both
-providers (`GET/PUT/DELETE /me/enrichment-keys/{rawg|opencritic}`), encrypted at rest and used only for
-their own enrichment. See "Security considerations" below.
+The long-running work (pulling entitlements, enrichment, trophy matching) runs in a separate background
+worker that reads the same database. Curator creates the `job_runs` row, publishes the job message to Azure
+Service Bus, and serves the run's status, so `POST /library/refresh` and `POST /enrichment/runs` answer
+with a `run_id` instead of a result.
 
-The long-running parts of that pipeline — pulling a user's entitlements from PSN, enriching the catalog,
-matching trophy progress — run in a separate background worker service, not on an HTTP request. This API
-creates the `job_runs` row, publishes the job message, and serves the run's status back to whoever is
-polling it; the worker leases that row, does the work, and writes the outcome to it. That split is why
-`POST /library/refresh` and `POST /enrichment/runs` return a `run_id` immediately instead of a result.
+How the parts fit together, the auth model, the privacy and security rules, and the data model:
+[ARCHITECTURE.md](ARCHITECTURE.md). How to run every check and test tier: [TESTING.md](TESTING.md).
 
-## Auth model
+## Technologies
 
-Curator never issues tokens, never redirects a browser through a login flow, and holds no session or
-cookie of its own — there is no OIDC client registration anywhere in this codebase. The sole intended
-client is the future BFF (or any other caller holding a valid access token); it presents an
-`Authorization: Bearer <token>` header on every request.
+- Python 3.14 (CI's version; `pyproject.toml` admits 3.10 and later), FastAPI, served by uvicorn locally and
+  by App Service's gunicorn on Azure App Service (Linux).
+- PostgreSQL 17 through `psycopg` 3 and one `psycopg_pool.AsyncConnectionPool`: raw parameterized SQL, no
+  ORM, schema as plain SQL migrations in [`db/migrations/`](db/migrations/).
+- Redis (trophy-read cache and the shared PSN rate limiter), Azure Service Bus (job queues).
+- `joserfc` JWT validation against the OIDC provider's JWKS; AES-256-GCM (`cryptography`) for secrets at rest.
+- `httpx` with `tenacity` retries for outbound calls (PSN, the PS Store, RAWG, OpenCritic).
+- OpenTelemetry (OTLP gRPC) and Elasticsearch structured logging, both optional off App Service.
+- Poetry, pytest with `pytest-xdist` and `pytest-cov`, Ruff, mypy `--strict`, SonarCloud.
 
-Identity issues JWT access tokens. A `curator` ApiScope is configured with an `email` user claim, so any
-access token carrying `scope: curator` also carries the user's `email` claim; `sub` is the user's
-Identity GUID. `curator.token_validation.JwtValidator` validates every presented token:
+## Prerequisites
 
-- RS256 signature, verified against Identity's published JWKS (fetched from
-  `{OIDC_AUTHORITY}/.well-known/openid-configuration` → `jwks_uri`, cached and refetched on an unrecognized
-  `kid` to cover key rotation)
-- `iss` equals the configured authority
-- `exp`/`nbf` (not expired, not used before its validity window)
-- `curator` present in the `scope` claim (Duende emits JWT scopes as a JSON array; a legacy
-  space-delimited string is accepted too)
+- Python 3.14 and Poetry (`python -m pip install poetry`).
+- To run the unit tests: nothing else. The unit suite is offline.
+- To run the schema tests: a PostgreSQL 17 database whose name ends in `_test`, owned by a login role
+  without superuser rights ([TESTING.md](TESTING.md)).
+- To run the app: PostgreSQL 17 with a second database for manual work, a reachable Redis, an Azure Service
+  Bus namespace (or a connection string) with the queues `curator-library-refresh`,
+  `curator-library-refresh-continuation`, `curator-enrichment` and `curator-scheduled-refresh`, and an OIDC
+  provider that issues access tokens carrying the `curator` scope and an `email` claim.
 
-**Audience is not validated** — this mirrors `Directory`'s `ValidateAudience = false`; Identity issues
-these tokens with no Curator-specific audience.
-
-`curator.deps.require_bearer` is the dependency every protected route uses: 401 (with
-`WWW-Authenticate: Bearer`) on a missing/malformed/invalid token, 403 if the token lacks the `curator`
-scope. Routes that compare emails (`/me`'s re-verify, `POST`/`DELETE /psn/link`) additionally depend on
-`curator.deps.require_verified_caller`, which further 403s a token missing the `email` claim — a verified
-Identity email is mandatory for those, never treated as an absent-but-fine value.
-
-PSN data-harvesting is also gated per user, independent of scope/email checks: `psn_links` carries four
-boolean opt-in flags (`harvest_trophies`, `harvest_identity`, `harvest_presence`, `harvest_devices`), all
-`false` by default, settable only by the linked user themselves via `GET`/`PUT /me/psn-preferences`.
-`curator.deps.require_preference` 404s if the caller has no PSN link at all, 403s if the specific category's
-flag is off, and is called inline at the top of `trophy_routes.py`/`identity_routes.py`/
-`presence_routes.py`/`devices_routes.py`'s handlers before any PSN call is made — enforcement lives in the
-API, not just hidden in a UI toggle.
-
-## Social profile
-
-Every user has a public profile, keyed by their Identity `sub`, that other users can view and follow.
-A profile is **private by default** (`user_profiles.is_public = false`) until the owner turns it on from
-their own profile settings page — no row exists until a user visits that page for the first time, and a
-missing row behaves exactly like a private, all-toggles-off profile rather than a 404.
-
-An owner controls four independent display toggles, each shown on their profile only if it's on:
-`show_library`, `show_collections`, `show_trophies`, `show_identity`. None of these toggles works alone.
-`show_library`/`show_collections` also require `is_public`. `show_trophies`/`show_identity` require both
-`is_public` **and** the matching PSN data-harvesting flag (`psn_links.harvest_trophies`/`harvest_identity`)
-— a user has to opt in twice, once to harvest the data at all and once to show it publicly, before a
-stranger ever sees it. The owner viewing their own profile always sees their own sections, governed by
-their own `show_*`/`harvest_*` settings, never by `is_public` — `is_public` only controls what *other*
-viewers see.
-
-An owner may also declare their handle on other PlayStation sites, which appear on the profile alongside
-everything else `is_public` governs. These are stored as a site key plus a handle, never as a URL: the
-sites are an allowlist (`profile_link_sites`, seeded by `db/migrations/0042_user_profile_links.sql`) and
-the `href` a client renders is built from that site's own `url_template`. The only user-supplied part is
-the handle, constrained to `[A-Za-z0-9_-]{3,16}` by both the API and a CHECK constraint, so a stored
-value can never carry a `javascript:` scheme or an off-allowlist host into an anchor. Growing the list is
-an INSERT into `profile_link_sites`, not a code change.
-
-Following is a simple, first-party directed graph (`follows`), unrelated to PSN. Follow/unfollow is
-idempotent — following someone already followed, or unfollowing someone not followed, is a no-op, not an
-error. **Follower/following counts and lists are always visible on any profile, regardless of whether
-that profile is public.** They're Curator's own data, not PSN-derived, so there's nothing to gate: you can
-see who follows a private profile and who it follows, even though you can't see that profile's library,
-collections, trophies, or PSN identity unless the owner has made them public.
-
-That split — follow graph always visible, PSN/library/collections content gated — is deliberate. A
-private profile still participates fully in the social graph (findable, followable, with visible
-follower/following lists); it just doesn't expose anything PSN-derived or curation-derived until the
-owner opts in.
-
-## Security considerations
-
-- **Linking a PSN account is a deliberate trade of safety for capability.** A tool that never asks for a PSN
-  credential — a community trophy tracker polling its own shared service account, say — can't be
-  compromised via any individual user's token, but is throttled to whatever queue that one shared
-  credential can sustain (hence paid tiers for faster updates on sites built that way). Curator instead asks
-  each user for their own npsso, broad enough to mint the same session tokens the official PlayStation App
-  uses, so a user's own throughput is limited only by their own account, not a shared queue or a paywall.
-  That capability is bought with a wider credential than a token-free design needs, which is why the rest
-  of this section — and the schema itself — is built to earn the safety back: npsso is never persisted or
-  logged, no email column exists anywhere in the schema (`db/migrations/0001_initial.sql`'s header
-  comment), and every stored token is AES-256-GCM-encrypted at rest.
-- **`PUT /me/enrichment-keys/{provider}` validates the key against the real provider before persisting
-  anything** — one cheap request (RAWG: `GET /genres?page_size=1`; OpenCritic: one page of the same
-  non-search catalog listing every other OpenCritic call in this codebase uses) confirms the key is
-  accepted. A rejected key (401/403) is a 400 and never written to the database; a provider that can't be
-  reached at all is a 503, also never persisted — either way the caller finds out immediately and gets a
-  chance to correct it, instead of only discovering a bad key when a later library refresh silently fails.
-- **Per-user BYOK keys are encrypted with the same AES-256-GCM key as PSN tokens** (`curator.persistence.crypto.TokenCrypto`,
-  keyed by `CURATOR_TOKEN_KEY`) — no separate encryption key was introduced for this feature. `GET
-  /me/enrichment-keys` never returns a key value, only whether one is configured and when it was added;
-  `PUT`/`DELETE` never echo the value back either.
-- **A user's own key is never exposed to anyone else** — but the *game metadata* it retrieves (title,
-  genre, score) is written into the shared `rawg_cache`/`opencritic_cache` tables so future lookups for
-  that game, by any user or the admin's own catalog-wide re-scrape, don't need to call RAWG/OpenCritic
-  again. This is a deliberate, disclosed trade-off (see Librarian's `/faq` and `/privacy` pages) — only the
-  retrieved data is shared, never the key.
-- **No display-name field exists anywhere in the social-profile feature.** The only identity a profile
-  shows is its PSN account id (if linked and shown) or "Unlinked user" — there was never a free-text name
-  field to sanitize, spoof-check, or moderate.
-- **Region is structurally absent from the profile identity response, not just hidden in the UI.**
-  `ProfileIdentityResponse` has no `region` field at all — PSN only ever exposes an account's region to
-  that account itself, which makes it meaningless for a cross-user lookup like this one (see below), and
-  it isn't useful for browsing or curation anyway. Librarian also removed the region display from the
-  existing `/psn` identity card, so region no longer appears anywhere in the product, even for a user's
-  own account.
-- **Cross-user PSN lookups always use the viewer's own token, never the profile owner's.** When viewer B
-  looks at owner A's public profile, Curator builds B's own `TrophyClient`/`SocialClient` — the same
-  client B's own requests already use — and calls it with A's `psn_account_id` as the target. A's stored
-  token is never touched on B's behalf; B's own live PSN session is simply looking up A's already-public
-  PSN account, the same way friend/profile lookups against an arbitrary account id already work. If B has
-  no PSN link of their own, or PSN rejects B's stored token, the trophy/identity sections are silently
-  omitted from the response rather than erroring — another user's PSN state can never break a profile page
-  render.
-- **Self-follow is rejected at both the database and the route layer.** The `follows` table has a
-  `follows_no_self_follow` CHECK constraint, and the follow route additionally checks `sub == claims.sub`
-  itself before that constraint would ever fire, so a self-follow attempt gets a clean 400 instead of a
-  raw database error.
-- **Follow/unfollow actions are recorded in `account_action_log`** (`followed`/`unfollowed`), the same
-  defensive audit trail used for linking, unlinking, and library refreshes. The logged detail is the other
-  user's `sub` only — never PSN data.
-- **A cautionary tale for any future external API integration that puts a secret in a URL query
-  parameter**: RAWG's API key (`?key=...`) was found leaking into `job_runs.error`, the browser, Elasticsearch
-  logs, and Tempo spans during this feature's own live testing, before BYOK even shipped. Closed at three
-  independent points, all required together: (1) `curator.enrichment.rawg_client.RawgApiError` re-raises
-  `from None` so a sanitized message (`"RAWG request failed with status {code}"`) is the only thing a
-  downstream `logger.exception(...)` can render — the original `httpx.HTTPStatusError`'s message, which
-  embeds the full URL, is fully suppressed from the exception chain; (2) `curator.telemetry`'s
-  `RawgKeyRedactingSpanProcessor` strips the `key` query param from the OTel span's URL attributes as the
-  httpx span starts (OTel's own built-in query-param redaction only covers a fixed, unrelated allowlist —
-  `AWSAccessKeyId`/`Signature`/`sig`/`X-Goog-Signature` — not `key`); (3) the process that writes
-  `job_runs.error` maps every caught job exception to short, category-based, safe text first, so even a
-  future exception type nobody thought to sanitize can't leak anything through what
-  `GET /library/refresh/{run_id}` returns. The first two live here, since RAWG calls originate from this
-  codebase's BYOK-key-validation path; the third lives in the background worker that owns the write.
-
-## Design conventions
-
-**Hand-written fakes, never `unittest.mock`.** Every test double in this repo (`FakeRepository`,
-`FakeSession`, `FakeTokenStore`, ...) is a plain class with real methods, not a `Mock()`/`MagicMock()`. A
-`Mock` auto-creates any attribute you touch, so a typo'd method name on the production side just returns
-another `Mock` instead of failing the test. A hand-written fake has no such attribute unless you wrote it,
-so a mismatch between the fake and the real collaborator's interface surfaces as a normal `AttributeError`
-at the call site, not a silently-passing test. It also means a test reads as "given this fake data, assert
-this real transformation" instead of a string of `.return_value`/`.assert_called_with` configuration calls
-scattered through the test body.
-
-**`typing.Protocol` over `abc.ABC` for injected collaborators.** `curator.psn.session.TokenStore`,
-`curator.link_service.PsnAgentLike`, and similar contracts are structural (`Protocol`), not nominal
-(`ABC`) — a class satisfies them by having the right async methods, not by inheriting from anything. This
-keeps modules that shouldn't know about each other decoupled (`curator.persistence.DbTokenStore` satisfies
-`curator.psn.session.TokenStore` without either module importing the other) and lets every hand-written
-fake satisfy a contract for free, with no `class FakeTokenStore(TokenStore):` boilerplate or
-`@abstractmethod` ceremony. The risk a `Protocol` normally carries — a mismatched fake or implementation
-isn't caught until it actually runs — is closed here by `mypy --strict` running in CI on every module: a
-missing or wrong-signature method fails type-checking before a test ever executes it. An `ABC` would be the
-better choice if a contract needed shared base-class behavior (not just a shared shape), or if this repo
-didn't already enforce strict mypy — under those conditions the earlier, class-definition-time failure an
-`ABC` gives you would be worth the added coupling.
-
-## Telemetry
-
-Two independent, optional legs, wired up in `curator.telemetry.configure_telemetry` and invoked once from
-`create_app`:
-
-- **Traces + metrics**: OTLP gRPC to Grafana Alloy, enabled by setting `AlloyEndpoint`. Resource
-  `service.name` is `crgolden-curator`; the FastAPI app, psycopg, and outbound `httpx` calls (covers
-  `curator.psn`'s calls to Sony) are all instrumented. `/health` is excluded from tracing, matching the
-  fleet convention.
-- **Structured logging**: root-logger documents shipped to Elasticsearch, enabled by setting
-  `ElasticsearchNode` together with `ElasticsearchUsername`/`ElasticsearchPassword`. Each document carries
-  `service.name: "crgolden-curator"` and a flat `log.level` field translated to the fleet's Serilog/ECS vocabulary
-  (`Information`/`Warning`/`Error`/... rather than Python's own `INFO`/`WARNING`/`ERROR`) — mirroring what
-  the `Churches` Node app ships — written into the `logs-app-curator` data stream (`op_type="create"`,
-  matching the Grafana Elasticsearch datasource pattern `logs-app-*` and Elasticsearch's built-in `logs`
-  index template, so it rolls over/retains under the same managed ILM policy as every other app instead of
-  accumulating forever in an unmanaged index). Shipping runs on a background thread (a
-  `QueueHandler`/`QueueListener` pair), so a slow or unreachable Elasticsearch node never blocks a request.
-
-Both legs are **no-op when their settings are unset** — the default for local dev and CI — and neither can
-ever prevent the app from starting: every telemetry init path is wrapped in its own broad `except Exception`
-that logs to stderr and continues. Each leg's global state (the OTel providers, the library instrumentors,
-the Elasticsearch log handler) is registered at most once per process, so calling `create_app` more than
-once — as the test suite and, incidentally, each gunicorn worker's own factory call do — never stacks a
-second provider on top of the first.
-
-## Quick start
+## Clone and install
 
 ```powershell
+git clone https://github.com/crgolden/Curator.git
+cd Curator
 $env:POETRY_VIRTUALENVS_CREATE = 'false'
 poetry install --extras dev
-python -m pytest
 ```
 
-The unit test suite is fully offline (hand-written fakes, no live database, no network, no live PSN/Identity
-calls). See [TESTING.md](TESTING.md) for the full testing approach, including the opt-in, env-var-gated
-schema integration tests that apply the migration to a real (disposable) PostgreSQL instance.
+This is CI's install. Leave out the first assignment to install into a Poetry-managed virtual environment
+instead.
 
-To run the app itself locally (not needed just to run the test suite), copy [`.env.example`](.env.example)
-to `.env` and fill in real values — every field `Settings.from_config` resolves is documented there, with
-required vs. optional called out. Point `CURATOR_DATABASE_URL` at your own local PostgreSQL instance (not
-the shared production server) and apply [`db/migrations/0001_initial.sql`](db/migrations/0001_initial.sql)
-to it via `psql` before starting the app.
+## Configuration
 
-## CI
+Every setting resolves from, in order, an explicit argument, an environment variable, then a `.env` file in
+the repo root (`curator.persistence.config`). Copy [`.env.example`](.env.example) to `.env` (gitignored) and
+fill it in; it documents each setting and which are required. A required setting that is missing stops
+startup with a `ConfigError` naming it.
 
-`.github/workflows/main_crgolden-curator.yml` runs Ruff lint, Ruff format check, mypy, the test suite (with
-coverage), and a SonarCloud analysis on push to `main`, on pull requests, and on `workflow_dispatch`. It
-**does** set `CURATOR_TEST_DATABASE_URL`, against a PostgreSQL service container, so the schema
-integration tests run there — they are skipped only in a plain local `pytest` run that leaves the variable
-unset. A local total therefore excludes them and is not evidence about a migration. See
-[TESTING.md](TESTING.md#ci) for the local lint/type-check commands.
+| Setting | Required | Purpose |
+|---|---|---|
+| `OIDC_AUTHORITY` | yes | the OIDC provider's base URL: the JWKS source and the expected `iss` |
+| `CURATOR_TOKEN_KEY` | yes | AES-256-GCM key for secrets at rest; `.env.example` shows how to generate one |
+| `CURATOR_DATABASE_URL` | yes | the app's PostgreSQL connection URL |
+| `ServiceBusNamespace` or `ServiceBusConnectionString` | one of them | the job queues; the namespace form signs in with `DefaultAzureCredential` |
+| `RedisHost`, `RedisPort`, `RedisSsl`; `RedisPassword` when the server has one | yes | cache and rate limiter; Curator pings Redis at startup |
+| `StoreGraphqlEndpoint`, `StoreQueryHash__0` (and `__1`, ... as fallbacks) | yes | the anonymous PS Store storefront gateway |
+| `AlloyEndpoint`; `ElasticsearchNode`, `ElasticsearchUsername`, `ElasticsearchPassword` | on App Service | telemetry; off when unset elsewhere |
+| `CURATOR_TEST_DATABASE_URL` | for schema tests | the disposable `*_test` database ([TESTING.md](TESTING.md)) |
+| `CURATOR_MIGRATIONS_DATABASE_URL` | no | the migration runner's target when no argument is given |
 
-Run the app itself locally (once `.env` is filled in — see Quick Start above) with:
+Never put a connection string on a command line: it carries the password, and a tool that fails to connect
+prints it.
+
+## Run locally
+
+Apply the migrations to your manual-work database, then start the development server:
 
 ```powershell
+python db/run_migrations.py "$env:CURATOR_DATABASE_URL"
 python dev_server.py
 ```
 
-[`dev_server.py`](dev_server.py) is the local-only entry point (`app.py` is the separate Azure App Service
-entry point — see Deployment below): it starts `uvicorn` with `--reload` against `curator.app:create_app`.
-It also works around a **Windows-only gotcha**: `psycopg`'s async mode waits on the connection socket via
-`loop.add_reader()`/`add_writer()`, which Windows' default `ProactorEventLoop` (used since Python 3.8)
-doesn't implement — it raises `NotImplementedError` the first time a real query runs. On Windows,
-`dev_server.py` points `uvicorn.run(..., loop=...)` at
-[`curator._windows_event_loop.selector_loop_factory`](src/curator/_windows_event_loop.py), which builds a
-`SelectorEventLoop` instead. This replaces an older approach that called
-`asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())` before starting `uvicorn`: that API
-is deprecated (removal slated for Python 3.16) and, separately, stopped having any effect once uvicorn 0.36
-started building its loop straight from `Config.get_loop_factory()` rather than consulting the ambient
-policy — see `_windows_event_loop.py`'s module docstring for the full history. It no-ops on macOS/Linux. The
-unit test suite never hits this at all (every repository test uses a hand-written fake pool, never a real
-`AsyncConnectionPool`); it only matters when running the app against a real Postgres connection on Windows.
-Production runs on Linux App Service and is unaffected.
+`run_migrations.py` applies every file in `db/migrations/` not yet recorded in `schema_migrations`, so
+rerunning it is a no-op. With no argument it reads `CURATOR_MIGRATIONS_DATABASE_URL`, which keeps the URL
+off the command line.
+
+[`dev_server.py`](dev_server.py) starts uvicorn with `--reload` against `curator.app:create_app`, and the
+interactive API docs are at `/docs`. On Windows it builds a `SelectorEventLoop`
+([`curator._windows_event_loop`](src/curator/_windows_event_loop.py)), because psycopg's async mode needs
+`add_reader`/`add_writer`, which Windows' default `ProactorEventLoop` does not implement. `app.py` is the
+App Service entry point and is not used locally.
+
+Admin routes require the `curator.admin` claim in the access token.
+
+## Tests
+
+```powershell
+python -m pytest
+```
+
+The unit suite needs no database, network or secrets. With `CURATOR_TEST_DATABASE_URL` set, the same run
+also applies every migration to that database and runs the schema tests; any `skipped` count means they did
+not run. [TESTING.md](TESTING.md) covers lint, format and type checks, both test tiers, and rehearsing a
+migration.
+
+## Gate
+
+`gate.ps1` is the maintainers' gate. It loads a private toolkit from a folder beside this repo, so in a plain
+clone it stops at once. To gate your own change, run the checks CI runs, in this order, from the repo root:
+
+```powershell
+poetry check --lock
+python -m ruff check src tests app.py dev_server.py
+python -m ruff format --check src tests app.py dev_server.py
+$env:MYPYPATH = 'src'
+python -m mypy src tests app.py dev_server.py
+python -m pytest -x --cov=src/curator --cov-report=term -q
+```
+
+Run the last command with `CURATOR_TEST_DATABASE_URL` set, so the schema tier runs as it does in CI. Every
+command must exit 0. CI additionally runs a SonarCloud analysis and fails on any open issue.
 
 ## Deployment
 
-`main_crgolden-curator.yml`'s `deploy` job (runs after `test` passes, only on push to `main`) applies
-pending database migrations (see Schema above), then deploys to the Azure Linux Web App `crgolden-curator`
-via `azure/webapps-deploy`, authenticating over OIDC federated credentials with `azure/login` — no client
-secret. `SCM_DO_BUILD_DURING_DEPLOYMENT=true` is set on the app, so Oryx installs
-[`requirements.txt`](requirements.txt) during deployment; `pyproject.toml` remains the dev/test manifest and
-is not used at deploy time.
+[`.github/workflows/main_crgolden-curator.yml`](.github/workflows/main_crgolden-curator.yml) runs on every
+push and pull request. `Test` runs the checks above against a `postgres:17` service container named
+`curator_test`, then SonarCloud. On a push to `main` three more jobs follow, each gated on the one before:
 
-The deploy package itself contains only `src/`, `db/`, `requirements.txt`, and `app.py` — no tests, no
-`.github/`, no local caches.
+1. `Package` assembles `src/`, `db/`, `pyproject.toml`, `poetry.lock` and `app.py`, and imports `app` from a
+   fresh virtual environment under placeholder settings to prove the package boots.
+2. `Migrate` applies pending migrations to the CI test database and then to production, and dry-runs
+   `db/reencrypt_tokens.py` to prove every secret at rest still decrypts.
+3. `Deploy` signs in to Azure over OIDC federated credentials (no client secret) and deploys the package to
+   the App Service app, which installs from `poetry.lock` during deployment.
 
-Required repository secrets:
-
-| Secret | Purpose |
+| Repository secret or variable | Used by |
 |---|---|
-| `AZUREAPPSERVICE_CLIENTID_29C8B941EEC941B3B025951A74F5176F` | `azure/login` client id (federated credential) |
-| `AZUREAPPSERVICE_TENANTID_7933356A53994B7987CBFABB49879C36` | `azure/login` tenant id |
-| `AZUREAPPSERVICE_SUBSCRIPTIONID_1FCCBD0626644623AC4FF179F9E82B74` | `azure/login` subscription id |
-| `CURATOR_DATABASE_URL` | Production Postgres connection string, used only by the pre-deploy migration step |
+| `SONAR_TOKEN` (secret); `SONAR_PROJECT_KEY`, `SONAR_ORGANIZATION` (variables) | `Test` |
+| `CURATOR_TEST_DATABASE_URL`, `CURATOR_DATABASE_URL`, `CURATOR_TOKEN_KEY` | `Migrate` |
+| `AZUREAPPSERVICE_CLIENTID_*`, `AZUREAPPSERVICE_TENANTID_*`, `AZUREAPPSERVICE_SUBSCRIPTIONID_*` | `Deploy` |
 
-There is deliberately no module-level `app = create_app()` instance — building the real app resolves every
-setting (OIDC authority, token key, database URL) at construction time, which import alone must never
-require.
-
-## Schema
-
-The database schema lives in [`db/migrations/`](db/migrations/) as plain SQL. `0001_initial.sql` has a
-header comment explaining the design (account layer, per-user append-only ingestion, the shared global
-catalog, curation-rule config-as-data, and the per-user library/console/assignment tables). `0004_user_enrichment_keys.sql`
-adds the per-user BYOK enrichment keys table, the `game_enrichment.rawg_enriched`/`opencritic_enriched`
-checkmark columns, `job_runs.result_summary`, and `opencritic_pagination_cursor` (the shared, resumable
-cursor both the admin catalog-wide re-scrape and per-user OpenCritic top-ups advance cooperatively).
-
-Every migration file carries a header comment explaining *why* it exists. For several of them that comment
-is the only written record of the decision behind a design — `0011` on why a collection is a stored list of
-games rather than a re-evaluated filter, `0012` on why a title's active/lapsed state belongs to a user and
-not to the shared catalog, and `0015` on why per-game trophy completion earns a column when the rest of the
-trophy data does not.
-
-[`db/run_migrations.py`](db/run_migrations.py) applies every migration file not yet recorded as applied,
-tracked in a `schema_migrations` table (one row per filename) — the deploy job runs it against production
-before every deploy (see Deployment below), so a new migration file lands automatically on the next push to
-`main` instead of requiring a manual `psql` run. It's idempotent: rerunning it when nothing is new is a
-no-op. For local development, either run it yourself (`python db/run_migrations.py "$CURATOR_DATABASE_URL"`)
-or apply the files by hand via `psql`; either way ends at the same schema. With no argument it reads the
-URL from `CURATOR_MIGRATIONS_DATABASE_URL`, which keeps the password off the command line; the alert-triage
-gate runs it that way.
+There is no module-level `app = create_app()`: building the app resolves every required setting, which
+importing a module must never require.
 
 ## Layout
 
-```
-src/curator/
-  settings.py           # Settings: resolves OIDC authority/token/database config
-  token_validation.py    # JwtValidator: RS256 bearer-token validation against Identity's JWKS
-  deps.py                  # require_bearer / require_verified_caller: the auth gates every route depends on
-  reverify.py               # reverify_link(): re-check a stored PSN link against the caller's token
-  app.py                     # create_app(): FastAPI factory, DI seams on app.state
-  telemetry.py                # configure_telemetry(): optional OTLP traces/metrics + Elasticsearch logging
-  me_routes.py                # GET /me
-  link_service.py               # link()/unlink(): PSN account linking, email verification rules
-  psn_routes.py                   # POST/DELETE /psn/link
-  preferences_routes.py             # GET/PUT /me/psn-preferences: per-category harvest opt-in flags
-  enrichment_keys_routes.py           # GET/PUT/DELETE /me/enrichment-keys/{provider}: BYOK RAWG/OpenCritic keys
-  trophy_routes.py                    # GET /trophies/summary|titles|titles/{id}|titles/{id}/groups
-  identity_routes.py                    # GET /identity
-  presence_routes.py                      # GET /presence
-  devices_routes.py                         # GET /devices
-  library_routes.py                           # GET /library, GET /library/genres, POST/GET /library/refresh,
-                                               # POST/DELETE /library/manual[/{gameId}] -- POST also admits a
-                                               # searched store title to the shared catalog,
-                                               # GET /library/manual/candidates -- what is still addable by name,
-                                               # GET /library/manual/search -- PS Store name lookup
-  catalog_routes.py                           # GET /catalog/games
-  collections_routes.py                       # POST /collections/preview, POST/GET /collections,
-                                               # GET/PATCH/DELETE /collections/{id}, POST /collections/{id}/runs,
-                                               # PUT /collections/{id}/visibility, POST/DELETE /collections/{id}/follow,
-                                               # GET /collections/followed
-  public_collections_routes.py                # GET /public/collections/{shareSlug} -- anonymous, no bearer token
-  consoles_routes.py                          # POST/GET/PATCH/DELETE /consoles,
-                                               # GET/PUT /consoles/{id}/installs[/{gameId}]
-  storage_devices_routes.py                   # POST/GET/PATCH/DELETE /storage-devices,
-                                               # PUT/DELETE /storage-devices/{id}/attach[/{consoleId}],
-                                               # GET/PUT /storage-devices/{id}/installs[/{gameId}]
-  enrichment_routes.py                        # POST /enrichment/runs, POST /enrichment/runs/{run_id}/cancel,
-                                               # GET /enrichment/runs/latest|{run_id} (all admin-only)
-  refresh_schedules_routes.py                 # GET/PUT/DELETE /me/refresh-schedule: the standing daily/weekly/monthly refresh
-  measured_sizes_routes.py                    # GET/PUT /games/{gameId}/measured-sizes[/{platform}]
-  social_routes.py                            # PUT/DELETE /me/friends/{onlineId}, PSN chat group create/leave
-  profile_routes.py                             # GET/PUT /me/profile-settings, GET /users/{sub}/profile,
-                                                 # GET /me/profile-link-sites, GET/PUT/DELETE /me/profile-links,
-                                                 # POST/DELETE /users/{sub}/follow, followers/following,
-                                                 # library/collections passthrough for another user's sub
-  jobs/                 # queue publishing and job_runs status; the runs themselves execute in the worker service
-    queue_publisher.py    # QueuePublisher: publishes the library-refresh, scheduled-refresh and enrichment messages
-    queue_depth_monitor.py # QueueDepthMonitor: polls each queue's dead-letter depth into a telemetry gauge
-    repository.py         # JobRunsRepository: job_runs DAO -- creates a run, reads its status, fails an abandoned one
-    staleness.py          # abandoned_run_reason(): whether an in-flight run is still alive or has been abandoned
-  library/
-    repository.py         # LibraryRepository: library_entries DAO, incl. the trophy match/progress columns
-  collections/
-    repository.py        # CollectionsRepository: definitions, definition items, run history, candidate pool
-    collection_orchestrator.py     # dispatches a spec to a strategy
-    filter_list_strategy.py        # apply_filter_list(): the console-free authoring aid
-    capacity_fill_strategy.py      # fill_capacity(): the opt-in per-console capacity mode
-  catalog/              # the shared game catalog: the games DAO, cover art, and the PS Store backfill
-  enrichment/           # the RAWG and OpenCritic clients, the RAWG title matcher, and the enrichment DAO
-  scoring/              # genre selection, install-size estimation, and the collection scoring pass
-  audit/
-    repository.py        # AccountActionLogRepository: the account_action_log defensive audit trail
-  psn/                  # the in-repo PSN client: session and npsso auth, trophies, social, presence,
-                        #   the store, and the shared request rate limiter
-  persistence/
-    config.py          # generic arg -> env var -> .env resolution
-    connection.py       # PostgreSQL connection URL resolution
-    crypto.py            # TokenCrypto: AES-256-GCM encryption for tokens at rest
-    repository.py        # Repository: psycopg 3 DAO over app_users / psn_links
-    enrichment_keys_repository.py  # EnrichmentKeysRepository: psycopg 3 DAO over user_enrichment_keys
-    profile_repository.py  # ProfileRepository: psycopg 3 DAO over user_profiles (display toggles)
-    follow_repository.py   # FollowRepository: psycopg 3 DAO over follows (the follow graph)
-    refresh_schedules_repository.py  # RefreshSchedulesRepository: a user's standing daily/weekly/monthly refresh
-    db_token_store.py    # DbTokenStore: curator.psn.session.TokenStore contract, backed by Repository
-db/migrations/
-  0001_initial.sql        # full schema
-  0004_user_enrichment_keys.sql  # BYOK keys, enrichment checkmarks, job result_summary, OC pagination cursor
-  0005_user_profiles.sql  # user_profiles: is_public + per-section show_* display toggles
-  0006_follows.sql        # follows: the directed follow graph, plus account_action_log's followed/unfollowed actions
-  0008_job_runs_rate_limited_status.sql   # job_runs.status gains 'rate_limited' for the continuation workflow
-  0009_fix_delete_cascades.sql            # repairs DELETE /me: twelve FKs that never had ON DELETE CASCADE
-  0010_entitlement_artwork_and_fidelity.sql  # three artwork URLs, platform_ids, is_game; raw/sku_id/active_date fixes
-  0011_collection_definition_items.sql    # collection membership as a stored, ordered list
-  0012_library_entry_active_state.sql     # library_entries.is_active + collection_definitions.include_inactive
-  0013_collection_definitions_min_percent_completed.sql  # the trophy-completion floor as an authoring filter
-  0014_library_entries_trophy_match.sql   # np_communication_id + match method/attempted-at
-  0015_library_entries_trophy_progress.sql  # trophy_percent_completed + fetched-at
-  run_migrations.py       # idempotent runner, applied automatically by the deploy job
-tests/                     # offline pytest suite, plus the gated tests/test_schema.py
-.github/workflows/
-  main.yml                # CI: offline unit tests only, on push/PR/workflow_dispatch
-```
-
-## Current scope
-
-Some capability exists in the API ahead of any UI for it, deliberately: `POST /enrichment/runs` is an
-admin-wide operation rather than a per-user feature, and the title-level trophy endpoints
-(`GET /trophies/titles` and friends) are available but only the summary is surfaced today. Console and
-storage-device CRUD have a Librarian UI (create/edit/delete, attach/detach); marking a game installed is
-covered for a console's own built-in storage, but a per-storage-device install toggle doesn't have a page
-yet even though the route exists. Marking a PS5 title installed on `kind="usb"` storage is allowed —
-Sony's own Extended Storage lets a PS5 game be copied to USB, it just can't run from there until moved
-back to the console's own drive or an M.2 expansion. A `capacity_fill` collection run is the one place
-that distinction is enforced: it never offers a USB bin to a PS5 run in the first place, since a run's job
-is producing a playable set.
+| Path | What it holds |
+|---|---|
+| `src/curator/app.py`, `settings.py`, `deps.py`, `token_validation.py` | the app factory, settings, and the bearer-token gate every route depends on |
+| `src/curator/*_routes.py` | one module per route group; route docstrings are the published OpenAPI descriptions |
+| `src/curator/psn/` | the in-repo PSN client: npsso auth and session, trophies, social, presence, the storefront, the shared rate limiter |
+| `src/curator/catalog/`, `library/`, `collections/`, `scoring/`, `enrichment/` | the shared catalog and store walks, per-user libraries, collection strategies, ranking and size estimation, the RAWG and OpenCritic key validators |
+| `src/curator/jobs/` | queue publishing, `job_runs` status, the queue-depth monitor and the PS Plus walk scheduler |
+| `src/curator/persistence/`, `audit/` | settings resolution, the database URL, `TokenCrypto`, the data-access classes, and the account action log |
+| `src/curator/telemetry.py` | OTLP traces and metrics, Elasticsearch logging |
+| `db/migrations/`, `db/run_migrations.py`, `db/reencrypt_tokens.py` | the schema, its runner, and the secrets-at-rest verifier |
+| `tests/` | the offline suite plus the gated `tests/test_schema.py` |
+| `app.py`, `dev_server.py` | the App Service entry point and the local one |

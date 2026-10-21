@@ -37,7 +37,7 @@ def test_build_redis_client_returns_none_when_host_unset():
 
 def test_build_redis_client_builds_real_client_when_host_set():
     client = build_redis_client(
-        _settings(redis_host="redis.example.test", redis_port=6380, redis_password="secret", redis_ssl=True)
+        _settings(redis_host="redis.example.test", redis_port=6380, redis_password=lowercase_token(), redis_ssl=True)
     )
     assert isinstance(client, Redis)
 
