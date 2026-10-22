@@ -7,7 +7,7 @@ Backend-for-Frontend (BFF) holds the user's session; the frontend never calls PS
 itself. Those calls come from two places only: this API, for anything a user is waiting on, and a separate
 background job consumer, for the long-running imports and enrichment passes it picks up off the job queue.
 
-## System overview
+## Bird's-eye view
 
 ```mermaid
 flowchart LR
@@ -40,6 +40,21 @@ The last edge covers the three routes that take no `Authorization` header at all
 and `GET /catalog/games` / `GET /catalog/games/{gameId}`, the shared game catalog. The catalog is public
 content with no per-user data in it, and a frontend may publish a sitemap covering every game's detail
 page, so those two routes have to answer without a session for the pages to be indexable at all.
+
+## Codemap
+
+| Path | What it does |
+|---|---|
+| `src/curator/app.py`, `settings.py`, `deps.py`, `token_validation.py` | The app factory, settings, and the bearer-token gate every route depends on |
+| `src/curator/*_routes.py` | One module per route group; route docstrings are the published OpenAPI descriptions |
+| `src/curator/psn/` | The PSN client: npsso auth and session, trophies, social, presence, the storefront, the shared rate limiter |
+| `src/curator/catalog/`, `library/`, `collections/`, `scoring/`, `enrichment/` | The shared catalog and store walks, per-user libraries, collection strategies, ranking and size estimation, the RAWG and OpenCritic key validators |
+| `src/curator/jobs/` | Queue publishing, `job_runs` status, the queue-depth monitor and the PS Plus walk scheduler |
+| `src/curator/persistence/`, `audit/` | Settings resolution, the database URL, `TokenCrypto`, the data-access classes, and the account action log |
+| `src/curator/telemetry.py` | OTLP traces and metrics, Elasticsearch logging |
+| `db/migrations/`, `db/run_migrations.py`, `db/reencrypt_tokens.py` | The schema, its runner, and the secrets-at-rest verifier |
+| `tests/` | The offline suite plus the gated `tests/test_schema.py` |
+| `app.py`, `dev_server.py` | The App Service entry point and the local one |
 
 ## Sign-in
 
@@ -448,7 +463,9 @@ Following is a first-party directed graph (`follows`), unrelated to PSN, and fol
 **Follower and following lists are always visible, public profile or not**: they are Curator's own data, so a
 private profile still takes part in the social graph while exposing nothing PSN-derived or curation-derived.
 
-## Security considerations
+## Invariants
+
+The privacy and security rules the code holds, each pinned by tests:
 
 - **Linking a PSN account trades a wider credential for per-user throughput.** Each user supplies their own
   npsso, broad enough to mint the same session tokens the official PlayStation App uses, so a user's
@@ -482,7 +499,26 @@ private profile still takes part in the social graph while exposing nothing PSN-
   fixed list that does not include it; and the worker that writes `job_runs.error` maps every exception to
   short category text, so `GET /library/refresh/{run_id}` can never echo one.
 
-## Telemetry
+## Boundaries
+
+- **The OIDC provider** issues the access tokens; Curator reads only its discovery document and JWKS.
+- **PostgreSQL** is shared with the background job consumer, which reads and writes the same schema. Curator owns
+  the schema: every migration lives in `db/migrations/`.
+- **Azure Service Bus**: Curator publishes to `curator-library-refresh`, `curator-enrichment` and, as scheduled
+  messages, `curator-scheduled-refresh` (`src/curator/jobs/queue_publisher.py`), and consumes nothing; it reads the
+  depth of those queues and of `curator-library-refresh-continuation` for metrics.
+- **Redis** holds the trophy-read cache and the PSN rate limiter shared with the job consumer.
+- **PlayStation Network**: the mobile gateway with the user's own token, and the anonymous storefront gateway whose
+  endpoint and query hashes are configuration.
+- **RAWG and OpenCritic** are called here only to validate a user's key before it is stored; enrichment itself runs
+  in the job consumer.
+
+## Cross-cutting concerns
+
+Configuration resolves every setting from an explicit argument, then the environment, then `.env`, and a missing
+required setting stops startup (`src/curator/persistence/config.py`, `src/curator/settings.py`).
+
+### Telemetry
 
 `curator.telemetry.configure_telemetry` wires two legs at the end of `create_app`:
 

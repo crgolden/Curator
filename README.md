@@ -41,7 +41,7 @@ How the parts fit together, the auth model, the privacy and security rules, and 
   `curator-library-refresh-continuation`, `curator-enrichment` and `curator-scheduled-refresh`, and an OIDC
   provider that issues access tokens carrying the `curator` scope and an `email` claim.
 
-## Clone and install
+## Clone and build
 
 ```powershell
 git clone https://github.com/crgolden/Curator.git
@@ -51,7 +51,7 @@ poetry install --extras dev
 ```
 
 This is CI's install. Leave out the first assignment to install into a Poetry-managed virtual environment
-instead.
+instead. There is no compile step: the app runs from `src/`, so the install is the whole build.
 
 ## Configuration
 
@@ -109,8 +109,10 @@ migration.
 
 ## Gate
 
-`gate.ps1` is the maintainers' gate. It loads a private toolkit from a folder beside this repo, so in a plain
-clone it stops at once. To gate your own change, run the checks CI runs, in this order, from the repo root:
+`gate.ps1` is the maintainers' gate. It dot-sources the gate library script that the `GATE_LIBRARY` environment
+variable names, which defines the step functions `gate.ps1` calls; unset, as in a plain clone, it stops at once with
+`GATE: FAILED` and records nothing. To gate with a library of your own, set `GATE_LIBRARY` to its path; it must
+define every function `gate.ps1` calls, since those functions decide whether each step ran and passed. To gate your own change without one, run the checks CI runs, in this order, from the repo root:
 
 ```powershell
 poetry check --lock
@@ -148,15 +150,4 @@ importing a module must never require.
 
 ## Layout
 
-| Path | What it holds |
-|---|---|
-| `src/curator/app.py`, `settings.py`, `deps.py`, `token_validation.py` | the app factory, settings, and the bearer-token gate every route depends on |
-| `src/curator/*_routes.py` | one module per route group; route docstrings are the published OpenAPI descriptions |
-| `src/curator/psn/` | the in-repo PSN client: npsso auth and session, trophies, social, presence, the storefront, the shared rate limiter |
-| `src/curator/catalog/`, `library/`, `collections/`, `scoring/`, `enrichment/` | the shared catalog and store walks, per-user libraries, collection strategies, ranking and size estimation, the RAWG and OpenCritic key validators |
-| `src/curator/jobs/` | queue publishing, `job_runs` status, the queue-depth monitor and the PS Plus walk scheduler |
-| `src/curator/persistence/`, `audit/` | settings resolution, the database URL, `TokenCrypto`, the data-access classes, and the account action log |
-| `src/curator/telemetry.py` | OTLP traces and metrics, Elasticsearch logging |
-| `db/migrations/`, `db/run_migrations.py`, `db/reencrypt_tokens.py` | the schema, its runner, and the secrets-at-rest verifier |
-| `tests/` | the offline suite plus the gated `tests/test_schema.py` |
-| `app.py`, `dev_server.py` | the App Service entry point and the local one |
+What each folder holds: [ARCHITECTURE.md § Codemap](ARCHITECTURE.md#codemap).

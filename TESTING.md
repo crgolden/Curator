@@ -1,5 +1,28 @@
 # Testing
 
+## Test tiers
+
+| Tier | Tool | Location | Needs | Runs in CI |
+|---|---|---|---|---|
+| Lint, format and types | Ruff, mypy `--strict` | `src/`, `tests/`, `app.py`, `dev_server.py` | nothing | every push and pull request |
+| Unit | pytest, hand-written fakes | `tests/` | nothing: no database, network or secret | every push and pull request |
+| Schema (integration) | pytest against PostgreSQL | `tests/test_schema.py` | `CURATOR_TEST_DATABASE_URL` naming a `*_test` database; skipped without it | every push and pull request, against a `postgres:17` service container |
+
+## Running tests locally
+
+```powershell
+$env:POETRY_VIRTUALENVS_CREATE = 'false'
+poetry install --extras dev
+python -m ruff check src tests app.py dev_server.py
+python -m ruff format --check src tests app.py dev_server.py
+$env:MYPYPATH = 'src'
+python -m mypy src tests app.py dev_server.py
+python -m pytest
+```
+
+`python -m pytest` runs the unit tier and, with `CURATOR_TEST_DATABASE_URL` in the environment, the schema tier as
+well; any `skipped` count means the schema tier did not run. Each tier is described below.
+
 ## Lint, format, and type checking
 
 Ruff (lint + format) and mypy (strict) run against `src/` and `tests/`, configured in `pyproject.toml`
@@ -252,7 +275,7 @@ Keeping the local database current is part of this: if it has drifted several mi
 incremental path stops resembling the deploy job it is supposed to imitate, and each new migration lands
 on a base nobody has exercised.
 
-## CI
+## CI pipeline
 
 `.github/workflows/main_crgolden-curator.yml` runs on push to `main`, on pull requests, and on
 `workflow_dispatch`. The `test` job installs the locked runtime and dev dependencies with `poetry install
