@@ -1,4 +1,4 @@
-param([string]$Goal, [string]$Probe)
+param([string]$Goal, [string]$Probe, [string]$Only)
 
 $ErrorActionPreference = 'Continue'
 $gateCommon = $env:GATE_LIBRARY
@@ -37,7 +37,14 @@ $sonarIssues = 'Fail on open Sonar issues'
 $env:TZ = 'UTC'
 if ($env:TZ -ne 'UTC') { Write-Host 'GATE: FAILED (TZ pin)'; exit 1 }
 Set-Location $repo
-Initialize-GateState 'Curator' $repo -Probe $Probe
+if ($Only -and -not $Probe) { Write-Host 'PROBE: FAILED (-Only names the one test a probe runs, so it needs -Probe)'; exit 1 }
+if ($Probe -and ($Probe.Contains(',') -or [string]::IsNullOrWhiteSpace($Only) -or $Only.Contains(',') -or -not $pytestStep.StartsWith($Probe.Trim(), [StringComparison]::Ordinal))) {
+    Write-Host "PROBE: FAILED (a probe runs exactly one test: -Probe 'Run tests with coverage' -Only '<tests/file.py::test_name>')"
+    exit 1
+}
+$gateState = @{ Probe = $Probe }
+if ((Get-Command Initialize-GateState).Parameters.ContainsKey('Only')) { $gateState['Only'] = $Only }
+Initialize-GateState 'Curator' $repo @gateState
 Resolve-OwedSteps
 Invoke-CatalogSteps
 
@@ -96,14 +103,15 @@ if (-not (Test-StepCarried $bearerControl)) {
 }
 
 if (-not (Test-StepCarried $pytestStep)) {
+    $selection = if ($Only) { @($Only.Trim()) } else { @('--cov=src/curator', '--cov-report=xml:coverage.xml', '--cov-report=term') }
     $global:LASTEXITCODE = $null
-    python -m pytest -x --cov=src/curator --cov-report=xml:coverage.xml --cov-report=term -q *>&1 | Tee-Object -FilePath $pytestLog
+    python -m pytest -x @selection -q *>&1 | Tee-Object -FilePath $pytestLog
     $pytestExit = $global:LASTEXITCODE
     $summary = Select-String -Path $pytestLog -Pattern '(\d+) passed' | Select-Object -Last 1
     $skipped = Select-String -Path $pytestLog -Pattern '(\d+) skipped' | Select-Object -Last 1
     $passed = if ($summary) { [int]$summary.Matches[0].Groups[1].Value } else { 0 }
     $detail = "exit $pytestExit, passed $passed, skipped $(if ($skipped) { $skipped.Matches[0].Groups[1].Value } else { 0 })"
-    if ($pytestExit -ne 0 -or $passed -eq 0 -or $skipped) { Stop-Gate $pytestStep $detail }
+    if ($pytestExit -ne 0 -or $passed -eq 0 -or $skipped -or ($Only -and $passed -ne 1)) { Stop-Gate $pytestStep $detail }
     Write-Row $pytestStep 'PASS' $detail
 }
 
