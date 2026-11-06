@@ -1,4 +1,4 @@
-param([string]$Goal, [string]$Probe, [string]$Only)
+param([string]$Goal, [string]$Only)
 
 $ErrorActionPreference = 'Continue'
 $gateCommon = $env:GATE_LIBRARY
@@ -37,14 +37,32 @@ $sonarIssues = 'Fail on open Sonar issues'
 $env:TZ = 'UTC'
 if ($env:TZ -ne 'UTC') { Write-Host 'GATE: FAILED (TZ pin)'; exit 1 }
 Set-Location $repo
-if ($Only -and -not $Probe) { Write-Host 'PROBE: FAILED (-Only names the one test a probe runs, so it needs -Probe)'; exit 1 }
-if ($Probe -and ($Probe.Contains(',') -or [string]::IsNullOrWhiteSpace($Only) -or $Only.Contains(',') -or -not $pytestStep.StartsWith($Probe.Trim(), [StringComparison]::Ordinal))) {
-    Write-Host "PROBE: FAILED (a probe runs exactly one test: -Probe 'Run tests with coverage' -Only '<tests/file.py::test_name>')"
+if ($Only -and ($Only.Contains(',') -or -not $Only.Contains('::') -or -not $Only.Trim().StartsWith('tests/', [StringComparison]::Ordinal))) {
+    Write-Host "PROBE: FAILED (a probe runs exactly one test, named by the file it lives in: -Only '<tests/file.py::test_name>')"
     exit 1
 }
-$gateState = @{ Probe = $Probe }
-if ((Get-Command Initialize-GateState).Parameters.ContainsKey('Only')) { $gateState['Only'] = $Only }
-Initialize-GateState 'Curator' $repo @gateState
+if ($Only) {
+    if ([string]::IsNullOrWhiteSpace($env:CURATOR_TEST_DATABASE_URL)) {
+        $envFile = Join-Path $repo '.env'
+        $databaseLine = if (Test-Path -LiteralPath $envFile) { Select-String -Path $envFile -Pattern '^CURATOR_TEST_DATABASE_URL=' -Raw }
+        if ($databaseLine) { $env:CURATOR_TEST_DATABASE_URL = ($databaseLine -split '=', 2)[1].Trim() }
+    }
+    $env:PYTHONPATH = 'src'
+    Write-Host "PROBE: running one test, '$($Only.Trim())' of $pytestStep; no gate record or verdict is written"
+    $global:LASTEXITCODE = $null
+    python -m pytest -x $Only.Trim() -q *>&1 | Tee-Object -FilePath $pytestLog
+    $pytestExit = $global:LASTEXITCODE
+    $summary = Select-String -Path $pytestLog -Pattern '(\d+) passed' | Select-Object -Last 1
+    $skipped = Select-String -Path $pytestLog -Pattern '(\d+) skipped' | Select-Object -Last 1
+    $passed = if ($summary) { [int]$summary.Matches[0].Groups[1].Value } else { 0 }
+    if ($pytestExit -ne 0 -or $passed -ne 1 -or $skipped) {
+        Write-Host "PROBE: FAILED (a probe runs one test, and '$($Only.Trim())' passed $passed, skipped $(if ($skipped) { $skipped.Matches[0].Groups[1].Value } else { 0 }), exit $pytestExit)"
+        exit 1
+    }
+    Write-Host 'PROBE: PASSED for the one test named; no verdict was saved'
+    exit 0
+}
+Initialize-GateState 'Curator' $repo
 Resolve-OwedSteps
 Invoke-CatalogSteps
 
@@ -103,15 +121,14 @@ if (-not (Test-StepCarried $bearerControl)) {
 }
 
 if (-not (Test-StepCarried $pytestStep)) {
-    $selection = if ($Only) { @($Only.Trim()) } else { @('--cov=src/curator', '--cov-report=xml:coverage.xml', '--cov-report=term') }
     $global:LASTEXITCODE = $null
-    python -m pytest -x @selection -q *>&1 | Tee-Object -FilePath $pytestLog
+    python -m pytest -x --cov=src/curator --cov-report=xml:coverage.xml --cov-report=term -q *>&1 | Tee-Object -FilePath $pytestLog
     $pytestExit = $global:LASTEXITCODE
     $summary = Select-String -Path $pytestLog -Pattern '(\d+) passed' | Select-Object -Last 1
     $skipped = Select-String -Path $pytestLog -Pattern '(\d+) skipped' | Select-Object -Last 1
     $passed = if ($summary) { [int]$summary.Matches[0].Groups[1].Value } else { 0 }
     $detail = "exit $pytestExit, passed $passed, skipped $(if ($skipped) { $skipped.Matches[0].Groups[1].Value } else { 0 })"
-    if ($pytestExit -ne 0 -or $passed -eq 0 -or $skipped -or ($Only -and $passed -ne 1)) { Stop-Gate $pytestStep $detail }
+    if ($pytestExit -ne 0 -or $passed -eq 0 -or $skipped) { Stop-Gate $pytestStep $detail }
     Write-Row $pytestStep 'PASS' $detail
 }
 
