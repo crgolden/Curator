@@ -62,6 +62,7 @@ if ($Only) {
     Write-Host 'PROBE: PASSED for the one test named; no verdict was saved'
     exit 0
 }
+exit (Invoke-Gate {
 Initialize-GateState 'Curator' $repo
 Resolve-OwedSteps
 Invoke-CatalogSteps
@@ -174,3 +175,4 @@ if (-not (Test-StepCarried $bootStep)) {
 
 Write-Row 'Upload package / Migrate / Deploy' 'NOT RUN' 'delivery jobs, not checks'
 Complete-Gate
+})
