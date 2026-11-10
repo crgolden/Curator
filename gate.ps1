@@ -83,22 +83,22 @@ $env:PYTHONPATH = 'src'
 if (-not (Test-StepCarried 'poetry check --lock')) {
     $global:LASTEXITCODE = $null
     poetry check --lock
-    $null = Test-Exit 'poetry check --lock'
+    Assert-StepExit 'poetry check --lock'
 }
 if (-not (Test-StepCarried 'ruff check')) {
     $global:LASTEXITCODE = $null
     python -m ruff check src tests app.py dev_server.py
-    $null = Test-Exit 'ruff check'
+    Assert-StepExit 'ruff check'
 }
 if (-not (Test-StepCarried 'ruff format --check')) {
     $global:LASTEXITCODE = $null
     python -m ruff format --check src tests app.py dev_server.py
-    $null = Test-Exit 'ruff format --check'
+    Assert-StepExit 'ruff format --check'
 }
 if (-not (Test-StepCarried 'mypy')) {
     $global:LASTEXITCODE = $null
     python -m mypy src tests app.py dev_server.py
-    $null = Test-Exit 'mypy'
+    Assert-StepExit 'mypy'
 }
 
 $GateDelta = @('plant:tests/test_authz.py')
@@ -140,7 +140,7 @@ else {
     $sonarStartedAt = [DateTimeOffset]::UtcNow
     $global:LASTEXITCODE = $null
     sonar-scanner -D"sonar.projectKey=crgolden_Curator" -D"sonar.organization=crgolden" -D"sonar.host.url=https://sonarcloud.io" -D"sonar.sources=src" -D"sonar.tests=tests" -D"sonar.python.coverage.reportPaths=coverage.xml" -D"sonar.python.version=3.10,3.11,3.12,3.13,3.14" -D"sonar.exclusions=**/__pycache__/**,**/*.pyc,.venv/**" -D"sonar.qualitygate.wait=true" -D"sonar.scanner.skipJreProvisioning=true" -D"sonar.branch.name=$sonarBranch"
-    $null = Test-Exit $sonarStep
+    Assert-StepExit $sonarStep
     Test-SonarIssues $sonarIssues 'crgolden_Curator' $sonarBranch $sonarStartedAt
 }
 
