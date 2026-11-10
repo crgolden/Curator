@@ -1,0 +1,47 @@
+info:
+  name: Me
+  type: http
+  seq: 1
+  tags:
+    - account
+
+http:
+  method: GET
+  url: "{{baseUrl}}/me"
+  auth:
+    type: bearer
+    token: "{{token}}"
+
+settings:
+  encodeUrl: true
+  timeout: 0
+  followRedirects: true
+  maxRedirects: 5
+
+examples:
+  - name: 200 Response
+    description: Successful Response
+    request:
+      url: "{{baseUrl}}/me"
+      method: GET
+    response:
+      status: 200
+      statusText: OK
+      headers:
+        - name: Content-Type
+          value: application/json
+      body:
+        type: json
+        data: |-
+          {
+            "sub": "",
+            "email": "",
+            "linked": false,
+            "psn": ""
+          }
+
+docs: |-
+  Return the caller's identity plus their PSN link status.
+
+  :returns: ``{"sub", "email", "linked", "psn"}`` where ``psn`` is ``None`` when unlinked, else
+      ``{"access_token_expires_at", "refresh_token_expires_at"}`` (ISO-8601 strings, or ``None``).

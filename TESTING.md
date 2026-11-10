@@ -8,6 +8,8 @@
 | Unit | pytest, hand-written fakes | `tests/` | nothing: no database, network or secret | every push and pull request |
 | Schema (integration) | pytest against PostgreSQL | `tests/test_schema.py` | `CURATOR_TEST_DATABASE_URL` naming a `*_test` database; skipped without it | every push and pull request, against a `postgres:17` service container |
 
+The Bruno requests in `collection/` are for calling a running server by hand; no tier or CI step runs them.
+
 ## Running tests locally
 
 ```powershell

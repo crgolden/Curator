@@ -1,0 +1,101 @@
+info:
+  name: Get Trophy Titles
+  type: http
+  seq: 2
+  tags:
+    - trophies
+
+http:
+  method: GET
+  url: "{{baseUrl}}/trophies/titles"
+  params:
+    - name: limit
+      value: "100"
+      type: query
+  auth:
+    type: bearer
+    token: "{{token}}"
+
+settings:
+  encodeUrl: true
+  timeout: 0
+  followRedirects: true
+  maxRedirects: 5
+
+examples:
+  - name: 200 Response
+    description: Successful Response
+    request:
+      url: "{{baseUrl}}/trophies/titles"
+      method: GET
+      params:
+        - name: limit
+          value: "100"
+          type: query
+    response:
+      status: 200
+      statusText: OK
+      headers:
+        - name: Content-Type
+          value: application/json
+      body:
+        type: json
+        data: |-
+          {
+            "titles": [
+              {
+                "name": "",
+                "np_communication_id": "",
+                "platforms": [],
+                "progress": "",
+                "earned": {
+                  "bronze": 0,
+                  "silver": 0,
+                  "gold": 0,
+                  "platinum": 0
+                },
+                "defined": {
+                  "bronze": 0,
+                  "silver": 0,
+                  "gold": 0,
+                  "platinum": 0
+                },
+                "last_updated": ""
+              }
+            ]
+          }
+  - name: 422 Response
+    description: Validation Error
+    request:
+      url: "{{baseUrl}}/trophies/titles"
+      method: GET
+      params:
+        - name: limit
+          value: "100"
+          type: query
+    response:
+      status: 422
+      statusText: Unprocessable Entity
+      headers:
+        - name: Content-Type
+          value: application/json
+      body:
+        type: json
+        data: |-
+          {
+            "detail": [
+              {
+                "loc": [],
+                "msg": "",
+                "type": "",
+                "input": "",
+                "ctx": {}
+              }
+            ]
+          }
+
+docs: |-
+  List the caller's games that have trophies, with per-game progress.
+
+  :raises fastapi.HTTPException: 404, if the caller has no PSN link; 401, if PSN rejects the stored
+      token.

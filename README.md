@@ -96,6 +96,9 @@ App Service entry point and is not used locally.
 
 Admin routes require the `curator.admin` claim in the access token.
 
+To call the API by hand, open [`collection/`](collection/) in [Bruno](https://www.usebruno.com/) and set its
+`baseUrl` variable to the running server and `token` to an access token for the API.
+
 ## Tests
 
 ```powershell

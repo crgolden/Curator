@@ -1,0 +1,112 @@
+info:
+  name: Set Console Install
+  type: http
+  seq: 1
+  tags:
+    - consoles
+
+http:
+  method: PUT
+  url: "{{baseUrl}}/consoles/:console_id/installs/:game_id"
+  params:
+    - name: console_id
+      value: ""
+      type: path
+    - name: game_id
+      value: ""
+      type: path
+  body:
+    type: json
+    data: |-
+      {
+        "installed": false
+      }
+  auth:
+    type: bearer
+    token: "{{token}}"
+
+settings:
+  encodeUrl: true
+  timeout: 0
+  followRedirects: true
+  maxRedirects: 5
+
+examples:
+  - name: 200 Response
+    description: Successful Response
+    request:
+      url: "{{baseUrl}}/consoles/:console_id/installs/:game_id"
+      method: PUT
+      params:
+        - name: console_id
+          value: ""
+          type: path
+        - name: game_id
+          value: ""
+          type: path
+      body:
+        type: json
+        data: |-
+          {
+            "installed": false
+          }
+    response:
+      status: 200
+      statusText: OK
+      headers:
+        - name: Content-Type
+          value: application/json
+      body:
+        type: json
+        data: |-
+          {
+            "console_id": "",
+            "game_id": "",
+            "installed": false
+          }
+  - name: 422 Response
+    description: Validation Error
+    request:
+      url: "{{baseUrl}}/consoles/:console_id/installs/:game_id"
+      method: PUT
+      params:
+        - name: console_id
+          value: ""
+          type: path
+        - name: game_id
+          value: ""
+          type: path
+      body:
+        type: json
+        data: |-
+          {
+            "installed": false
+          }
+    response:
+      status: 422
+      statusText: Unprocessable Entity
+      headers:
+        - name: Content-Type
+          value: application/json
+      body:
+        type: json
+        data: |-
+          {
+            "detail": [
+              {
+                "loc": [],
+                "msg": "",
+                "type": "",
+                "input": "",
+                "ctx": {}
+              }
+            ]
+          }
+
+docs: |-
+  Set a game's current install state on a specific console.
+
+  :returns: The state just recorded.
+  :raises fastapi.HTTPException: 404, if ``console_id`` doesn't belong to the caller -- ``console_id`` is
+      a path parameter, but ownership is always re-checked against the caller's own token rather than
+      trusted from the URL, so one user can never set install state on another user's console.

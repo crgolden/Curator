@@ -1,0 +1,133 @@
+info:
+  name: List Games
+  type: http
+  seq: 1
+  tags:
+    - catalog
+
+http:
+  method: GET
+  url: "{{baseUrl}}/catalog/games"
+  params:
+    - name: franchise
+      value: ""
+      type: query
+      disabled: true
+    - name: genre
+      value: ""
+      type: query
+      disabled: true
+    - name: aaaTier
+      value: ""
+      type: query
+      disabled: true
+    - name: limit
+      value: "50"
+      type: query
+    - name: offset
+      value: "0"
+      type: query
+  auth:
+    type: bearer
+    token: "{{token}}"
+
+settings:
+  encodeUrl: true
+  timeout: 0
+  followRedirects: true
+  maxRedirects: 5
+
+examples:
+  - name: 200 Response
+    description: Successful Response
+    request:
+      url: "{{baseUrl}}/catalog/games"
+      method: GET
+      params:
+        - name: franchise
+          value: ""
+          type: query
+          disabled: true
+        - name: genre
+          value: ""
+          type: query
+          disabled: true
+        - name: aaaTier
+          value: ""
+          type: query
+          disabled: true
+        - name: limit
+          value: "50"
+          type: query
+        - name: offset
+          value: "0"
+          type: query
+    response:
+      status: 200
+      statusText: OK
+      headers:
+        - name: Content-Type
+          value: application/json
+      body:
+        type: json
+        data: |-
+          {
+            "games": [
+              {
+                "game_id": "",
+                "canonical_title": "",
+                "franchise": "",
+                "genre": "",
+                "aaa_tier": ""
+              }
+            ]
+          }
+  - name: 422 Response
+    description: Validation Error
+    request:
+      url: "{{baseUrl}}/catalog/games"
+      method: GET
+      params:
+        - name: franchise
+          value: ""
+          type: query
+          disabled: true
+        - name: genre
+          value: ""
+          type: query
+          disabled: true
+        - name: aaaTier
+          value: ""
+          type: query
+          disabled: true
+        - name: limit
+          value: "50"
+          type: query
+        - name: offset
+          value: "0"
+          type: query
+    response:
+      status: 422
+      statusText: Unprocessable Entity
+      headers:
+        - name: Content-Type
+          value: application/json
+      body:
+        type: json
+        data: |-
+          {
+            "detail": [
+              {
+                "loc": [],
+                "msg": "",
+                "type": "",
+                "input": "",
+                "ctx": {}
+              }
+            ]
+          }
+
+docs: |-
+  Browse the shared game catalog, optionally filtered by franchise, genre, or publisher tier.
+
+  :returns: A page of matching games, ordered by canonical title.

@@ -1,0 +1,51 @@
+info:
+  name: List Definitions
+  type: http
+  seq: 2
+  tags:
+    - collections
+
+http:
+  method: GET
+  url: "{{baseUrl}}/collections"
+  auth:
+    type: bearer
+    token: "{{token}}"
+
+settings:
+  encodeUrl: true
+  timeout: 0
+  followRedirects: true
+  maxRedirects: 5
+
+examples:
+  - name: 200 Response
+    description: Successful Response
+    request:
+      url: "{{baseUrl}}/collections"
+      method: GET
+    response:
+      status: 200
+      statusText: OK
+      headers:
+        - name: Content-Type
+          value: application/json
+      body:
+        type: json
+        data: |-
+          [
+            {
+              "definition_id": "",
+              "name": "",
+              "kind": "",
+              "console_id": "",
+              "genre_filter": [],
+              "min_score": "",
+              "aaa_tier_filter": ""
+            }
+          ]
+
+docs: |-
+  List the caller's saved collection definitions.
+
+  :returns: The caller's :class:`DefinitionResponse` list, newest first.

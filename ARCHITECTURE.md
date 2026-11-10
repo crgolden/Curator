@@ -55,6 +55,7 @@ page, so those two routes have to answer without a session for the pages to be i
 | `db/migrations/`, `db/run_migrations.py`, `db/reencrypt_tokens.py` | The schema, its runner, and the secrets-at-rest verifier |
 | `tests/` | The offline suite plus the gated `tests/test_schema.py` |
 | `app.py`, `dev_server.py` | The App Service entry point and the local one |
+| `collection/` | A hand-picked Bruno collection of requests against the API (open it in Bruno; each request reads the `baseUrl` and `token` variables); not a mirror of the route table, which `/docs` serves |
 
 ## Sign-in
 

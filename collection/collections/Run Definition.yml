@@ -1,0 +1,107 @@
+info:
+  name: Run Definition
+  type: http
+  seq: 4
+  tags:
+    - collections
+
+http:
+  method: POST
+  url: "{{baseUrl}}/collections/:definition_id/runs"
+  params:
+    - name: definition_id
+      value: ""
+      type: path
+  auth:
+    type: bearer
+    token: "{{token}}"
+
+settings:
+  encodeUrl: true
+  timeout: 0
+  followRedirects: true
+  maxRedirects: 5
+
+examples:
+  - name: 201 Response
+    description: Successful Response
+    request:
+      url: "{{baseUrl}}/collections/:definition_id/runs"
+      method: POST
+      params:
+        - name: definition_id
+          value: ""
+          type: path
+    response:
+      status: 201
+      statusText: Created
+      headers:
+        - name: Content-Type
+          value: application/json
+      body:
+        type: json
+        data: |-
+          {
+            "run_id": "",
+            "included": [
+              {
+                "game_id": "",
+                "title": "",
+                "genre": "",
+                "aaa_tier": "",
+                "franchise": "",
+                "composite_score": "",
+                "rank_score": 0,
+                "size_gb": 0
+              }
+            ],
+            "excluded": [
+              {
+                "game_id": "",
+                "title": "",
+                "genre": "",
+                "aaa_tier": "",
+                "franchise": "",
+                "composite_score": "",
+                "rank_score": 0,
+                "size_gb": 0
+              }
+            ],
+            "used_gb": ""
+          }
+  - name: 422 Response
+    description: Validation Error
+    request:
+      url: "{{baseUrl}}/collections/:definition_id/runs"
+      method: POST
+      params:
+        - name: definition_id
+          value: ""
+          type: path
+    response:
+      status: 422
+      statusText: Unprocessable Entity
+      headers:
+        - name: Content-Type
+          value: application/json
+      body:
+        type: json
+        data: |-
+          {
+            "detail": [
+              {
+                "loc": [],
+                "msg": "",
+                "type": "",
+                "input": "",
+                "ctx": {}
+              }
+            ]
+          }
+
+docs: |-
+  Generate and persist a run against one of the caller's saved definitions.
+
+  :returns: The persisted :class:`CollectionRunResponse`.
+  :raises fastapi.HTTPException: 404, if ``definition_id`` doesn't exist or isn't the caller's own; 400,
+      if the saved definition is a ``capacity_fill`` whose console no longer exists.

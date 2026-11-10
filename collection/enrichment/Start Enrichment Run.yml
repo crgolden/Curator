@@ -1,0 +1,44 @@
+info:
+  name: Start Enrichment Run
+  type: http
+  seq: 1
+  tags:
+    - enrichment
+
+http:
+  method: POST
+  url: "{{baseUrl}}/enrichment/runs"
+  auth:
+    type: bearer
+    token: "{{token}}"
+
+settings:
+  encodeUrl: true
+  timeout: 0
+  followRedirects: true
+  maxRedirects: 5
+
+examples:
+  - name: 202 Response
+    description: Successful Response
+    request:
+      url: "{{baseUrl}}/enrichment/runs"
+      method: POST
+    response:
+      status: 202
+      statusText: Accepted
+      headers:
+        - name: Content-Type
+          value: application/json
+      body:
+        type: json
+        data: |-
+          {
+            "run_id": ""
+          }
+
+docs: |-
+  Queue a global catalog re-enrichment job (RAWG + OpenCritic + official PSN catalog). Admin-scoped.
+
+  :returns: The new job's run id.
+  :raises fastapi.HTTPException: 503, if the job queue isn't configured on this deployment.

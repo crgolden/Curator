@@ -1,0 +1,108 @@
+info:
+  name: Save Definition
+  type: http
+  seq: 3
+  tags:
+    - collections
+
+http:
+  method: POST
+  url: "{{baseUrl}}/collections"
+  body:
+    type: json
+    data: |-
+      {
+        "name": "",
+        "kind": "",
+        "console_id": "",
+        "genre_filter": [],
+        "min_score": "",
+        "aaa_tier_filter": ""
+      }
+  auth:
+    type: bearer
+    token: "{{token}}"
+
+settings:
+  encodeUrl: true
+  timeout: 0
+  followRedirects: true
+  maxRedirects: 5
+
+examples:
+  - name: 201 Response
+    description: Successful Response
+    request:
+      url: "{{baseUrl}}/collections"
+      method: POST
+      body:
+        type: json
+        data: |-
+          {
+            "name": "",
+            "kind": "",
+            "console_id": "",
+            "genre_filter": [],
+            "min_score": "",
+            "aaa_tier_filter": ""
+          }
+    response:
+      status: 201
+      statusText: Created
+      headers:
+        - name: Content-Type
+          value: application/json
+      body:
+        type: json
+        data: |-
+          {
+            "definition_id": "",
+            "name": "",
+            "kind": "",
+            "console_id": "",
+            "genre_filter": [],
+            "min_score": "",
+            "aaa_tier_filter": ""
+          }
+  - name: 422 Response
+    description: Validation Error
+    request:
+      url: "{{baseUrl}}/collections"
+      method: POST
+      body:
+        type: json
+        data: |-
+          {
+            "name": "",
+            "kind": "",
+            "console_id": "",
+            "genre_filter": [],
+            "min_score": "",
+            "aaa_tier_filter": ""
+          }
+    response:
+      status: 422
+      statusText: Unprocessable Entity
+      headers:
+        - name: Content-Type
+          value: application/json
+      body:
+        type: json
+        data: |-
+          {
+            "detail": [
+              {
+                "loc": [],
+                "msg": "",
+                "type": "",
+                "input": "",
+                "ctx": {}
+              }
+            ]
+          }
+
+docs: |-
+  Save a named, reusable collection definition for the caller.
+
+  :returns: The saved :class:`DefinitionResponse`.
+  :raises fastapi.HTTPException: 400, if ``kind`` is invalid.

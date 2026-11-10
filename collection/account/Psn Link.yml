@@ -1,0 +1,93 @@
+info:
+  name: Psn Link
+  type: http
+  seq: 3
+  tags:
+    - account
+
+http:
+  method: POST
+  url: "{{baseUrl}}/psn/link"
+  body:
+    type: json
+    data: |-
+      {
+        "npsso": ""
+      }
+  auth:
+    type: bearer
+    token: "{{token}}"
+
+settings:
+  encodeUrl: true
+  timeout: 0
+  followRedirects: true
+  maxRedirects: 5
+
+examples:
+  - name: 200 Response
+    description: Successful Response
+    request:
+      url: "{{baseUrl}}/psn/link"
+      method: POST
+      body:
+        type: json
+        data: |-
+          {
+            "npsso": ""
+          }
+    response:
+      status: 200
+      statusText: OK
+      headers:
+        - name: Content-Type
+          value: application/json
+      body:
+        type: json
+        data: |-
+          {
+            "linked": false,
+            "psn": {
+              "access_token_expires_at": "",
+              "refresh_token_expires_at": ""
+            }
+          }
+  - name: 422 Response
+    description: Validation Error
+    request:
+      url: "{{baseUrl}}/psn/link"
+      method: POST
+      body:
+        type: json
+        data: |-
+          {
+            "npsso": ""
+          }
+    response:
+      status: 422
+      statusText: Unprocessable Entity
+      headers:
+        - name: Content-Type
+          value: application/json
+      body:
+        type: json
+        data: |-
+          {
+            "detail": [
+              {
+                "loc": [],
+                "msg": "",
+                "type": "",
+                "input": "",
+                "ctx": {}
+              }
+            ]
+          }
+
+docs: |-
+  Link the caller's PSN account, requiring a verified-matching PSN email.
+
+  :raises fastapi.HTTPException: 400 (invalid npsso), 401 (PSN auth failed), or 409 (email mismatch /
+      unverified email) -- see :class:`curator.link_service.LinkError`. The body's ``detail`` is
+      ``{"error": <LinkError.kind>, "message": <human-readable>}`` so callers can branch on ``error``
+      (stable) instead of parsing ``message`` (may change wording).
