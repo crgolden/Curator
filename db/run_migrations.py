@@ -3,6 +3,9 @@
 Tracks applied filenames in a ``schema_migrations`` table so this can run safely on every deploy
 without re-executing an already-applied file -- the migrations use plain ``CREATE TABLE``/``ALTER
 TABLE``, not ``IF NOT EXISTS`` guards, so a rerun would fail outright rather than no-op.
+
+Concurrent runs against one database take turns: each holds a session advisory lock from before it reads
+``schema_migrations`` until its connection closes, so a second run sees every file the first applied.
 """
 
 from __future__ import annotations
@@ -16,6 +19,9 @@ import psycopg
 
 MIGRATIONS_DIR = Path(__file__).parent / "migrations"
 DATABASE_URL_VARIABLE = "CURATOR_MIGRATIONS_DATABASE_URL"
+MIGRATIONS_ADVISORY_LOCK_CLASS = 6
+MIGRATIONS_ADVISORY_LOCK_KEY = 0
+MIGRATIONS_LOCK_SQL = "SELECT pg_advisory_lock(%s, %s)"
 
 
 def database_url_from(arguments: Sequence[str], environment: Mapping[str, str]) -> str | None:
@@ -40,6 +46,7 @@ def run_migrations(database_url: str) -> None:
     :param database_url: The ``postgresql://`` connection string to migrate.
     """
     with psycopg.connect(database_url, autocommit=True) as conn, conn.cursor() as cur:
+        cur.execute(MIGRATIONS_LOCK_SQL, (MIGRATIONS_ADVISORY_LOCK_CLASS, MIGRATIONS_ADVISORY_LOCK_KEY))
         cur.execute(
             "CREATE TABLE IF NOT EXISTS schema_migrations "
             "(filename TEXT PRIMARY KEY, applied_at TIMESTAMPTZ NOT NULL DEFAULT now())"

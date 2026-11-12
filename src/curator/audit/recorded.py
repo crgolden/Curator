@@ -66,9 +66,13 @@ async def recorded(
     :param detail: A short summary written with the ``started`` row.
     """
     entry = RecordedAction(await recorder.begin(identity_sub, action, detail))
+    body_returned = False
     try:
         yield entry
+        body_returned = True
     except Exception:
         await recorder.finish(entry.log_id, OUTCOME_FAILED, entry.detail)
         raise
-    await recorder.finish(entry.log_id, entry.outcome, entry.detail)
+    finally:
+        if body_returned:
+            await recorder.finish(entry.log_id, entry.outcome, entry.detail)

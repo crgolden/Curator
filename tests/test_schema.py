@@ -12,7 +12,8 @@ what its ``schema_migrations`` table does not already record.
 in a ``SAVEPOINT`` rolled back in teardown.
 
 The module shares one connection, so it carries an ``xdist_group`` mark: under ``-n``/``--dist loadgroup``
-every test lands on one worker rather than contending on the same migration locks.
+every test lands on one worker. Workers that migrate at once anyway (a pytest-xdist that drops the group) take
+turns on the runner's advisory lock, so none applies a file another already recorded.
 
 Example (PowerShell):
 
