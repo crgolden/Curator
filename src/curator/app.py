@@ -398,7 +398,7 @@ def create_app(settings: Settings | None = None, **collaborators: Unpack[AppColl
         ps_plus_walk_scheduler=ps_plus_walk_scheduler,
     )
 
-    app = FastAPI(title="Curator", lifespan=_lifespan(owned))
+    app = _CuratorApi(title="Curator", lifespan=_lifespan(owned))
 
     app.state.settings = settings
     app.state.http_client = http_client
@@ -478,8 +478,6 @@ def create_app(settings: Settings | None = None, **collaborators: Unpack[AppColl
 
     configure_telemetry(app, settings)
 
-    app.openapi = lambda: _openapi_schema_with_bearer_auth(app)  # type: ignore[method-assign]
-
     return app
 
 
@@ -502,6 +500,13 @@ def _openapi_schema_with_bearer_auth(app: FastAPI) -> dict[str, Any]:
 
     app.openapi_schema = schema
     return schema
+
+
+class _CuratorApi(FastAPI):
+    """Curator's app, whose OpenAPI schema applies ``BearerAuth`` to every route but ``/health``."""
+
+    def openapi(self) -> dict[str, Any]:
+        return _openapi_schema_with_bearer_auth(self)
 
 
 def _default_agent_factory(

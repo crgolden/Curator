@@ -92,16 +92,13 @@ from test_values import (
 
 DATABASE_URL = os.environ.get("CURATOR_TEST_DATABASE_URL")
 
-pytestmark = [
-    pytest.mark.skipif(
-        not DATABASE_URL,
-        reason=(
-            "CURATOR_TEST_DATABASE_URL is not set; schema integration tests only run against an explicitly "
-            "configured disposable PostgreSQL database. See this module's docstring."
-        ),
-    ),
-    pytest.mark.xdist_group("schema"),
-]
+if not DATABASE_URL:
+    raise RuntimeError(
+        "CURATOR_TEST_DATABASE_URL is not set; schema integration tests run only against an explicitly "
+        "configured disposable PostgreSQL database. See this module's docstring."
+    )
+
+pytestmark = [pytest.mark.xdist_group("schema")]
 
 RUN_MIGRATIONS_PATH = Path(__file__).resolve().parent.parent / "db" / "run_migrations.py"
 

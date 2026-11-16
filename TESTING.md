@@ -6,7 +6,7 @@
 |---|---|---|---|---|
 | Lint, format and types | Ruff, mypy `--strict` | `src/`, `tests/`, `app.py`, `dev_server.py` | nothing | every push and pull request |
 | Unit | pytest, hand-written fakes | `tests/` | nothing: no database, network or secret | every push and pull request |
-| Schema (integration) | pytest against PostgreSQL | `tests/test_schema.py` | `CURATOR_TEST_DATABASE_URL` naming a `*_test` database; skipped without it | every push and pull request, against a `postgres:17` service container |
+| Schema (integration) | pytest against PostgreSQL | `tests/test_schema.py` | `CURATOR_TEST_DATABASE_URL` naming a `*_test` database; collection fails without it | every push and pull request, against a `postgres:17` service container |
 
 The Bruno requests in `collection/` are for calling a running server by hand; no tier or CI step runs them.
 
@@ -22,8 +22,8 @@ python -m mypy src tests app.py dev_server.py
 python -m pytest
 ```
 
-`python -m pytest` runs the unit tier and, with `CURATOR_TEST_DATABASE_URL` in the environment, the schema tier as
-well; any `skipped` count means the schema tier did not run. Each tier is described below.
+`python -m pytest` runs the unit tier and the schema tier, and needs `CURATOR_TEST_DATABASE_URL` in the environment:
+without it, collecting `tests/test_schema.py` fails naming the variable. Each tier is described below.
 
 ## Lint, format, and type checking
 
@@ -152,12 +152,12 @@ exporters, the psycopg/requests instrumentors, the `Elasticsearch` client, `Queu
 hand-written fake swapped in via `monkeypatch.setattr` — no live OTLP collector, no live Elasticsearch node,
 no `unittest.mock`.
 
-## Integration tests (schema, gated — opt-in only)
+## Integration tests (schema)
 
-`tests/test_schema.py` is the one place in this suite that touches a real PostgreSQL instance. It is
-gated on the `CURATOR_TEST_DATABASE_URL` environment variable via a module-level `pytest.mark.skipif`:
-unset (the default for a plain local `python -m pytest` run), every test in the module is skipped rather
-than run against a fake. CI does set it, against the `postgres:17` service container described below.
+`tests/test_schema.py` is the one place in this suite that touches a real PostgreSQL instance. It requires
+the `CURATOR_TEST_DATABASE_URL` environment variable: unset, the module raises at import, so collection fails
+naming the variable rather than the tier reading as passed. CI sets it, against the `postgres:17` service
+container described below.
 
 When set, a **session**-scoped fixture applies every `db/migrations/*.sql` file in filename order, once,
 inside a transaction that is never committed. Each test then runs inside a nested `SAVEPOINT` that is
@@ -225,11 +225,10 @@ happy to store, and without this test nothing goes red.
 $line = Select-String -Path .env -Pattern '^CURATOR_TEST_DATABASE_URL=' -Raw
 $env:CURATOR_TEST_DATABASE_URL = ($line -split '=', 2)[1].Trim()
 
-python -m pytest -q -rs
+python -m pytest -q
 ```
 
-With the variable set, the whole suite runs this module too, exactly as CI does. Any `skipped` count means
-it did not run; `-rs` prints the reason.
+With the variable set, the whole suite runs this module too, exactly as CI does.
 
 **Never put the connection string on a command line.** It carries the password, and any tool that fails
 to connect prints the whole conninfo. Read it into the environment as above; `psycopg` and `psql` both pick
@@ -287,7 +286,7 @@ The `test` job runs, in order: Ruff lint, Ruff format check, mypy, then the whol
 (`--cov=src/curator --cov-report=xml:coverage.xml`), then a SonarCloud analysis over `coverage.xml`. Each
 lint/type-check step is its own named step so a failure is attributable at a glance.
 
-**The job carries a `postgres:17` service container, so `test_schema.py` runs in CI rather than skipping.**
+**The job carries a `postgres:17` service container, which `test_schema.py` requires.**
 `POSTGRES_DB` gives it the empty database the fixture requires — the fixture applies every migration
 itself once per session and rolls back each test's savepoint, so one container serves the whole suite. The credentials are throwaway:
 the container is bound to localhost and destroyed with the job, so they live in the workflow rather than

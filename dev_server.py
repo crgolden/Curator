@@ -19,11 +19,11 @@ from __future__ import annotations
 import os
 import sys
 
+import uvicorn
+
 _SRC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "src")
 sys.path.insert(0, _SRC_DIR)
 os.environ["PYTHONPATH"] = _SRC_DIR + os.pathsep + os.environ.get("PYTHONPATH", "")
-
-import uvicorn  # noqa: E402 -- must follow the sys.path setup above
 
 if __name__ == "__main__":
     uvicorn.run(

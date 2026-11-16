@@ -34,6 +34,9 @@ GAMES_LIST_URI: Final = "https://m.np.playstation.com/api/gamelist/v2"
 PS4_GAME_CATEGORY: Final = "ps4_game"
 PS5_NATIVE_GAME_CATEGORY: Final = "ps5_native_game"
 UNKNOWN_CATEGORY: Final = "UNKNOWN"
+MAX_TROPHY_TITLE_PAGES: Final = 10
+MAX_TITLE_TROPHY_PAGES: Final = 10
+MAX_TITLE_STATS_PAGES: Final = 10
 
 _PLATFORM_CATEGORY_NAMES = {PS4_GAME_CATEGORY: PS4, PS5_NATIVE_GAME_CATEGORY: PS5}
 
@@ -206,7 +209,9 @@ class TrophyClient:
         titles: list[TrophyTitle] = []
         offset = 0
         page_size = 50
-        while len(titles) < limit:
+        for _page in range(MAX_TROPHY_TITLE_PAGES):
+            if len(titles) >= limit:
+                break
             page_limit = min(page_size, limit - len(titles))
             response = (
                 await self._session.get(trophy_titles_url(path_id), params={"limit": page_limit, "offset": offset})
@@ -292,7 +297,9 @@ class TrophyClient:
         details: list[TrophyDetail] = []
         offset = 0
         page_size = 200
-        while limit is None or len(details) < limit:
+        for _page in range(MAX_TITLE_TROPHY_PAGES):
+            if limit is not None and len(details) >= limit:
+                break
             page_limit = page_size if limit is None else min(page_size, limit - len(details))
             params = {"npServiceName": service_name, "limit": page_limit, "offset": offset}
             meta_response = (await self._session.get(meta_url, params=params)).json()
@@ -407,7 +414,9 @@ class TrophyClient:
         stats: list[TitleStat] = []
         offset = 0
         page_size = 200
-        while len(stats) < limit:
+        for _page in range(MAX_TITLE_STATS_PAGES):
+            if len(stats) >= limit:
+                break
             page_limit = min(page_size, limit - len(stats))
             response = (
                 await self._session.get(title_stats_url(path_id), params={"limit": page_limit, "offset": offset})

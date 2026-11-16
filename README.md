@@ -105,9 +105,8 @@ To call the API by hand, open [`collection/`](collection/) in [Bruno](https://ww
 python -m pytest
 ```
 
-The unit suite needs no database, network or secrets. With `CURATOR_TEST_DATABASE_URL` set, the same run
-also applies every migration to that database and runs the schema tests; any `skipped` count means they did
-not run. [TESTING.md](TESTING.md) covers lint, format and type checks, both test tiers, and rehearsing a
+The unit suite needs no database, network or secrets. The same run also applies every migration to the
+database `CURATOR_TEST_DATABASE_URL` names and runs the schema tests, so it fails without that variable. [TESTING.md](TESTING.md) covers lint, format and type checks, both test tiers, and rehearsing a
 migration.
 
 ## Gate

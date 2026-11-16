@@ -97,25 +97,32 @@ def test_predicate_to_dict_and_parse_predicate_round_trip():
     assert parse_predicate(predicate_to_dict(predicate)) == predicate
 
 
+_NOT_A_NODE = "an object with an 'op' field"
+_UNKNOWN_OP = "Unknown predicate op"
+_NOT_A_STRING_LIST = "non-empty list of strings"
+_NOT_A_THRESHOLD = "numeric 'threshold'"
+_NOT_A_NODE_LIST = "non-empty 'nodes' list"
+
+
 @pytest.mark.parametrize(
-    "raw",
+    ("raw", "expected_error"),
     [
-        {},
-        {PREDICATE_OP_KEY: lowercase_token()},
-        {PREDICATE_OP_KEY: GENRE_IN_OP},
-        {PREDICATE_OP_KEY: GENRE_IN_OP, PREDICATE_VALUES_KEY: []},
-        {PREDICATE_OP_KEY: GENRE_IN_OP, PREDICATE_VALUES_KEY: [1, 2]},
-        {PREDICATE_OP_KEY: TIER_IN_OP, PREDICATE_VALUES_KEY: lowercase_token()},
-        {PREDICATE_OP_KEY: SCORE_AT_LEAST_OP},
-        {PREDICATE_OP_KEY: SCORE_AT_LEAST_OP, PREDICATE_THRESHOLD_KEY: lowercase_token()},
-        {PREDICATE_OP_KEY: SCORE_AT_LEAST_OP, PREDICATE_THRESHOLD_KEY: True},
-        {PREDICATE_OP_KEY: AND_OP, PREDICATE_NODES_KEY: []},
-        {PREDICATE_OP_KEY: OR_OP, PREDICATE_NODES_KEY: lowercase_token()},
-        {PREDICATE_OP_KEY: AND_OP, PREDICATE_NODES_KEY: [{PREDICATE_OP_KEY: lowercase_token()}]},
-        pytest.param(lowercase_token(), id="not-a-dict"),
+        ({}, _NOT_A_NODE),
+        ({PREDICATE_OP_KEY: lowercase_token()}, _UNKNOWN_OP),
+        ({PREDICATE_OP_KEY: GENRE_IN_OP}, _NOT_A_STRING_LIST),
+        ({PREDICATE_OP_KEY: GENRE_IN_OP, PREDICATE_VALUES_KEY: []}, _NOT_A_STRING_LIST),
+        ({PREDICATE_OP_KEY: GENRE_IN_OP, PREDICATE_VALUES_KEY: [1, 2]}, _NOT_A_STRING_LIST),
+        ({PREDICATE_OP_KEY: TIER_IN_OP, PREDICATE_VALUES_KEY: lowercase_token()}, _NOT_A_STRING_LIST),
+        ({PREDICATE_OP_KEY: SCORE_AT_LEAST_OP}, _NOT_A_THRESHOLD),
+        ({PREDICATE_OP_KEY: SCORE_AT_LEAST_OP, PREDICATE_THRESHOLD_KEY: lowercase_token()}, _NOT_A_THRESHOLD),
+        ({PREDICATE_OP_KEY: SCORE_AT_LEAST_OP, PREDICATE_THRESHOLD_KEY: True}, _NOT_A_THRESHOLD),
+        ({PREDICATE_OP_KEY: AND_OP, PREDICATE_NODES_KEY: []}, _NOT_A_NODE_LIST),
+        ({PREDICATE_OP_KEY: OR_OP, PREDICATE_NODES_KEY: lowercase_token()}, _NOT_A_NODE_LIST),
+        ({PREDICATE_OP_KEY: AND_OP, PREDICATE_NODES_KEY: [{PREDICATE_OP_KEY: lowercase_token()}]}, _UNKNOWN_OP),
+        pytest.param(lowercase_token(), _NOT_A_NODE, id="not-a-dict"),
     ],
 )
-def test_parse_predicate_rejects_malformed_input(raw):
+def test_parse_predicate_rejects_malformed_input(raw, expected_error):
 
-    with pytest.raises(ValueError):  # noqa: PT011
+    with pytest.raises(ValueError, match=expected_error):
         parse_predicate(raw)

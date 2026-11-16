@@ -208,9 +208,9 @@ class ManualGameRequest(BaseModel):
         :data:`~curator.psn.title_platform.CONSOLE_PLATFORM_IDS`. Omit it to have the platform derived --
         from PSN's own ``platforms`` array for a ``store_hit``, or from the catalog's stored npTitleId
         prefix for a ``game_id``.
-    :param native_ps5: Deprecated spelling of ``platforms: ["PS5"]``, unioned into ``platforms``. Kept
-        because Librarian still sends it; a boolean pair cannot name PS3, Vita or PSP, which is why
-        ``platforms`` exists.
+    :param native_ps5: Deprecated spelling of ``platforms: ["PS5"]``, unioned into ``platforms``. Still
+        accepted, though no Librarian call sends it; a boolean pair cannot name PS3, Vita or PSP, which is
+        why ``platforms`` exists.
     :param ps4_eligible: Deprecated spelling of ``platforms: ["PS4"]``.
     """
 

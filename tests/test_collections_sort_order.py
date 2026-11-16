@@ -23,7 +23,8 @@ def _candidate(composite_score):
 
 
 def test_none_returns_the_default_key_unchanged():
-    default = lambda candidate: (candidate.composite_score,)  # noqa: E731
+    def default(candidate):
+        return (candidate.composite_score,)
 
     key = resolve_sort_key(None, default=default)
 
@@ -31,7 +32,8 @@ def test_none_returns_the_default_key_unchanged():
 
 
 def test_composite_desc_resolves_to_a_different_key_than_the_default():
-    default = lambda candidate: ("default-sentinel",)  # noqa: E731
+    def default(candidate):
+        return ("default-sentinel",)
 
     key = resolve_sort_key(COMPOSITE_DESC, default=default)
 

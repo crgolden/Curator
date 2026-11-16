@@ -39,6 +39,9 @@ from datetime import datetime, timezone
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "src"))
 
 _ES_DATA_STREAM = "logs-app-curator"
+_ES_NODE_SETTING = "ElasticsearchNode"
+_ES_USERNAME_SETTING = "ElasticsearchUsername"
+_ES_PASSWORD_SETTING = "ElasticsearchPassword"
 
 
 def _report_bootstrap_failure(exc: BaseException) -> None:
@@ -52,9 +55,9 @@ def _report_bootstrap_failure(exc: BaseException) -> None:
 
     :param exc: The exception that aborted bootstrap.
     """
-    node = os.environ.get("ElasticsearchNode")  # noqa: SIM112
-    username = os.environ.get("ElasticsearchUsername")  # noqa: SIM112
-    password = os.environ.get("ElasticsearchPassword")  # noqa: SIM112
+    node = os.environ.get(_ES_NODE_SETTING)
+    username = os.environ.get(_ES_USERNAME_SETTING)
+    password = os.environ.get(_ES_PASSWORD_SETTING)
     if not (node and username and password):
         return
 

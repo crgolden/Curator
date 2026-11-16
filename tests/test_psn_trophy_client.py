@@ -24,6 +24,9 @@ from curator.psn.trophy_client import (
     EARNED_DATE_KEY,
     EARNED_KEY,
     EARNED_TROPHIES_KEY,
+    MAX_TITLE_STATS_PAGES,
+    MAX_TITLE_TROPHY_PAGES,
+    MAX_TROPHY_TITLE_PAGES,
     NAME_KEY,
     NEXT_OFFSET_KEY,
     NP_COMMUNICATION_ID_KEY,
@@ -136,6 +139,46 @@ async def test_trophy_titles_paginates_until_next_offset_is_zero():
     titles = await client.trophy_titles(limit=100)
 
     assert [(t.name, t.platforms) for t in titles] == [(first_name, (PS5,)), (second_name, (PS4,))]
+
+
+async def test_trophy_titles_stops_at_its_page_cap_when_psn_never_reports_the_last_page():
+    url = trophy_titles_url(SELF_PATH_ID)
+    endless = {TROPHY_TITLES_KEY: [_title_entry(new_game_title(), new_np_communication_id())], NEXT_OFFSET_KEY: 1}
+    session = FakeSession(responses={url: endless})
+
+    titles = await TrophyClient(session).trophy_titles(limit=MAX_TROPHY_TITLE_PAGES + new_positive_count())
+
+    assert [called for called, _ in session.get_calls].count(url) == MAX_TROPHY_TITLE_PAGES
+    assert len(titles) == MAX_TROPHY_TITLE_PAGES
+
+
+async def test_title_trophies_stops_at_its_page_cap_when_psn_never_reports_the_last_page():
+    np_communication_id = new_np_communication_id()
+    group = new_trophy_group_id()
+    meta_url = group_trophies_url(np_communication_id, group)
+    trophy = {TROPHY_ID_KEY: new_positive_count()}
+    session = FakeSession(
+        responses={
+            meta_url: {TROPHIES_KEY: [trophy], NEXT_OFFSET_KEY: 1},
+            user_group_trophies_url(SELF_PATH_ID, np_communication_id, group): {TROPHIES_KEY: [trophy]},
+        }
+    )
+
+    details = await TrophyClient(session).title_trophies(np_communication_id, PS5, group=group)
+
+    assert [called for called, _ in session.get_calls].count(meta_url) == MAX_TITLE_TROPHY_PAGES
+    assert len(details) == MAX_TITLE_TROPHY_PAGES
+
+
+async def test_title_stats_stops_at_its_page_cap_when_psn_never_reports_the_last_page():
+    url = title_stats_url(SELF_PATH_ID)
+    endless = {TITLES_KEY: [{TITLE_ID_KEY: new_ps4_title_id(), NAME_KEY: new_game_title()}], NEXT_OFFSET_KEY: 1}
+    session = FakeSession(responses={url: endless})
+
+    stats = await TrophyClient(session).title_stats(limit=MAX_TITLE_STATS_PAGES + new_positive_count())
+
+    assert [called for called, _ in session.get_calls].count(url) == MAX_TITLE_STATS_PAGES
+    assert len(stats) == MAX_TITLE_STATS_PAGES
 
 
 async def test_trophy_titles_for_title_flattens_nested_entries():
