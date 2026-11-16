@@ -20,7 +20,7 @@ How the parts fit together, the auth model, the privacy and security rules, and 
 
 ## Technologies
 
-- Python 3.14 (CI's version; `pyproject.toml` admits 3.10 and later), FastAPI, served by uvicorn locally and
+- Python 3.15 (`pyproject.toml`'s floor, CI's version and App Service's runtime), FastAPI, served by uvicorn locally and
   by App Service's gunicorn on Azure App Service (Linux).
 - PostgreSQL 17 through `psycopg` 3 and one `psycopg_pool.AsyncConnectionPool`: raw parameterized SQL, no
   ORM, schema as plain SQL migrations in [`db/migrations/`](db/migrations/).
@@ -32,11 +32,11 @@ How the parts fit together, the auth model, the privacy and security rules, and 
 
 ## Prerequisites
 
-- Python 3.14 and Poetry (`python -m pip install poetry`).
+- Python 3.15 and Poetry (`python -m pip install poetry`).
 - To run the unit tests: nothing else. The unit suite is offline.
-- To run the schema tests: a PostgreSQL 17 database whose name ends in `_test`, owned by a login role
-  without superuser rights ([TESTING.md](TESTING.md)).
-- To run the app: PostgreSQL 17 with a second database for manual work, a reachable Redis, an Azure Service
+- To run the schema tests: a database on PostgreSQL 17 or later (production and CI run 17) whose name ends in
+  `_test`, owned by a login role without superuser rights ([TESTING.md](TESTING.md)).
+- To run the app: PostgreSQL 17 or later with a second database for manual work, a reachable Redis, an Azure Service
   Bus namespace (or a connection string) with the queues `curator-library-refresh`,
   `curator-library-refresh-continuation`, `curator-enrichment` and `curator-scheduled-refresh`, and an OIDC
   provider that issues access tokens carrying the `curator` scope and an `email` claim.

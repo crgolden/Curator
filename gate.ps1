@@ -117,7 +117,9 @@ if (-not (Test-StepCarried $bearerControl)) {
         [IO.File]::WriteAllText($authzPath, $authzOriginal)
     }
     if ([IO.File]::ReadAllText($authzPath) -ne $authzOriginal) { Write-Host 'GATE: FAILED (the control could not restore test_authz.py)'; exit 1 }
-    if ($controlLog -notmatch 'GET /consoles') { Stop-Gate $bearerControl 'the completeness test did not fail naming GET /consoles' }
+    $controlLogPath = Join-Path $gateOutput 'bearer-control.txt'
+    [IO.File]::WriteAllText($controlLogPath, $controlLog)
+    if ($controlLog -notmatch 'GET /consoles') { Stop-Gate $bearerControl "the completeness test did not fail naming GET /consoles; its output is in $controlLogPath" }
     Write-Row $bearerControl 'PASS' 'the completeness test failed naming GET /consoles'
 }
 

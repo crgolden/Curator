@@ -20,7 +20,7 @@ import json
 import urllib.request
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any, Protocol, cast
 
 from joserfc import jwt
@@ -161,7 +161,7 @@ class JwtValidator:
         return TokenClaims(
             sub=sub,
             email=claims.get(EMAIL_CLAIM),
-            iat=datetime.fromtimestamp(iat, tz=timezone.utc),
+            iat=datetime.fromtimestamp(iat, tz=UTC),
             scopes=_parse_scopes(claims.get(SCOPE_CLAIM)),
             is_admin=_is_true(claims.get(ADMIN_CLAIM)),
         )

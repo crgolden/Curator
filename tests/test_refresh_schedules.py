@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import json
 import random
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import get_args
 
 import pytest
@@ -270,8 +270,8 @@ def test_put_schedule_accepts_a_daily_cadence_and_schedules_the_first_run_a_day_
     assert RefreshScheduleResponse.model_validate(response.json()).cadence == CADENCE_DAILY
     assert schedules.schedules[caller.sub].cadence == CADENCE_DAILY
     _, published_at = publisher.scheduled_calls[0]
-    assert published_at - datetime.now(timezone.utc) < timedelta(days=1)
-    assert published_at - datetime.now(timezone.utc) > timedelta(hours=23)
+    assert published_at - datetime.now(UTC) < timedelta(days=1)
+    assert published_at - datetime.now(UTC) > timedelta(hours=23)
 
 
 def test_put_schedule_rejects_an_unknown_cadence():
@@ -337,7 +337,7 @@ def test_put_schedule_on_a_paused_chain_restarts_it_from_now_even_with_the_same_
 
     assert response.status_code == 200
     restarted_next_run_at = schedules.schedules[caller.sub].next_run_at
-    assert restarted_next_run_at > datetime.now(timezone.utc)
+    assert restarted_next_run_at > datetime.now(UTC)
     assert publisher.scheduled_calls == [(caller.sub, restarted_next_run_at)]
 
 

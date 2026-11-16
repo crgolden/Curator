@@ -7,7 +7,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Coroutine
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any, Final
 
 from curator.psn import _identity
@@ -61,8 +61,8 @@ def _epoch_millis_iso(value: Any) -> str | None:
     if value is None:
         return None
     try:
-        return datetime.fromtimestamp(int(value) / 1000, tz=timezone.utc).isoformat()
-    except (TypeError, ValueError, OverflowError, OSError):
+        return datetime.fromtimestamp(int(value) / 1000, tz=UTC).isoformat()
+    except TypeError, ValueError, OverflowError, OSError:
         return None
 
 

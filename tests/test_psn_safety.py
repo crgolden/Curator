@@ -6,7 +6,7 @@ via a fake repository instead of a temp file.
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -220,7 +220,7 @@ async def test_require_allowed_counts_mutations_over_a_rolling_24_hours():
     await guard.require_allowed(linked_account, CHAT_WRITES)
 
     _, _, since = counter.calls[0]
-    assert abs((datetime.now(timezone.utc) - timedelta(days=1)) - since) < timedelta(seconds=5)
+    assert abs((datetime.now(UTC) - timedelta(days=1)) - since) < timedelta(seconds=5)
 
 
 async def test_require_allowed_raises_when_this_attempt_would_exceed_the_daily_cap():

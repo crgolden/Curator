@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from fastapi.testclient import TestClient
 
@@ -57,7 +57,7 @@ class FakeJobRun:
         self.status = status
         self.error = error
         self.result_summary = result_summary
-        self.updated_at = updated_at or datetime.now(timezone.utc)
+        self.updated_at = updated_at or datetime.now(UTC)
         self.lease_expires_at = lease_expires_at
 
 
@@ -165,7 +165,7 @@ def test_a_live_in_flight_run_is_returned_rather_than_queueing_a_second_one():
         in_flight_run_id,
         JOB_KIND_ENRICHMENT,
         JOB_STATUS_RUNNING,
-        lease_expires_at=datetime.now(timezone.utc) + new_short_interval(),
+        lease_expires_at=datetime.now(UTC) + new_short_interval(),
     )
     job_runs = FakeJobRunsRepository([running])
     client, validator, publisher = _build(job_runs)
@@ -185,7 +185,7 @@ def test_a_running_run_whose_lease_lapsed_is_superseded_by_a_fresh_one():
         lapsed_run_id,
         JOB_KIND_ENRICHMENT,
         JOB_STATUS_RUNNING,
-        lease_expires_at=datetime.now(timezone.utc) - new_short_interval(),
+        lease_expires_at=datetime.now(UTC) - new_short_interval(),
     )
     job_runs = FakeJobRunsRepository([lapsed])
     client, validator, publisher = _build(job_runs)
@@ -205,7 +205,7 @@ def test_a_queued_run_that_made_no_progress_for_a_day_is_superseded():
         stuck_run_id,
         JOB_KIND_ENRICHMENT,
         _QUEUED_STATUS,
-        updated_at=datetime.now(timezone.utc) - STALE_RUN_THRESHOLD - new_short_interval(),
+        updated_at=datetime.now(UTC) - STALE_RUN_THRESHOLD - new_short_interval(),
     )
     job_runs = FakeJobRunsRepository([stuck])
     client, validator, publisher = _build(job_runs)

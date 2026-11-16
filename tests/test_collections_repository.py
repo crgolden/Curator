@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from random import randint
 from uuid import uuid4
 
@@ -875,7 +875,7 @@ async def test_save_run_writes_run_and_items():
 
 
 async def test_list_measured_sizes_maps_rows():
-    recorded_at = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    recorded_at = datetime(2026, 1, 1, tzinfo=UTC)
     pool = FakePool(fetchall_results=[[("g1", PS5, 42.5, "sub-a", recorded_at)]])
     repo = CollectionsRepository(pool)
 
@@ -890,7 +890,7 @@ async def test_list_measured_sizes_maps_rows():
 
 
 async def test_list_measured_sizes_reports_no_contributor_after_recorded_by_is_set_null():
-    recorded_at = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    recorded_at = datetime(2026, 1, 1, tzinfo=UTC)
     pool = FakePool(fetchall_results=[[("g1", PS5, 42.5, None, recorded_at)]])
     repo = CollectionsRepository(pool)
 
@@ -900,7 +900,7 @@ async def test_list_measured_sizes_reports_no_contributor_after_recorded_by_is_s
 
 
 async def test_upsert_measured_size_upserts_on_game_and_platform():
-    recorded_at = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    recorded_at = datetime(2026, 1, 1, tzinfo=UTC)
     pool = FakePool(fetchone_results=[(recorded_at,)])
     repo = CollectionsRepository(pool)
 

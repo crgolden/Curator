@@ -8,7 +8,7 @@ bare ``SimpleNamespace`` standing in for the one thing this dependency actually 
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from types import SimpleNamespace
 
 import pytest
@@ -48,10 +48,10 @@ def _link(
     return LinkRecord(
         psn_account_id=new_account_id(),
         token_response_enc=b"encrypted",
-        access_token_expires_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
-        refresh_token_expires_at=datetime(2026, 2, 1, tzinfo=timezone.utc),
-        linked_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
-        updated_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+        access_token_expires_at=datetime(2026, 1, 1, tzinfo=UTC),
+        refresh_token_expires_at=datetime(2026, 2, 1, tzinfo=UTC),
+        linked_at=datetime(2026, 1, 1, tzinfo=UTC),
+        updated_at=datetime(2026, 1, 1, tzinfo=UTC),
         last_verified_at=None,
         harvest_trophies=harvest_trophies,
         harvest_identity=harvest_identity,

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import pytest
 
@@ -49,8 +49,8 @@ class FakeRepository:
             token_response_enc=token_response_enc,
             access_token_expires_at=access_token_expires_at,
             refresh_token_expires_at=refresh_token_expires_at,
-            linked_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
-            updated_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+            linked_at=datetime(2026, 1, 1, tzinfo=UTC),
+            updated_at=datetime(2026, 1, 1, tzinfo=UTC),
             last_verified_at=existing.last_verified_at if existing else None,
         )
 
@@ -79,7 +79,7 @@ class FakeRepository:
                 refresh_token_expires_at=existing.refresh_token_expires_at,
                 linked_at=existing.linked_at,
                 updated_at=existing.updated_at,
-                last_verified_at=datetime(2026, 1, 1, 12, tzinfo=timezone.utc),
+                last_verified_at=datetime(2026, 1, 1, 12, tzinfo=UTC),
             )
 
     async def delete_link(self, sub):
@@ -123,8 +123,8 @@ async def _seed_link(repo: FakeRepository, crypto: TokenCrypto, sub: str) -> Non
     await repo.upsert_link(
         sub,
         encrypted,
-        datetime(2026, 1, 1, 1, tzinfo=timezone.utc),
-        datetime(2026, 2, 1, tzinfo=timezone.utc),
+        datetime(2026, 1, 1, 1, tzinfo=UTC),
+        datetime(2026, 2, 1, tzinfo=UTC),
     )
 
 
@@ -282,7 +282,7 @@ async def test_link_verified_match_with_no_refresh_token_still_links():
     await repo.upsert_link(
         sub,
         encrypted,
-        datetime(2026, 1, 1, 1, tzinfo=timezone.utc),
+        datetime(2026, 1, 1, 1, tzinfo=UTC),
         None,
     )
 

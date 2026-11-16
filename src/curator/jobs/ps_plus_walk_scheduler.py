@@ -4,7 +4,7 @@ import asyncio
 import contextlib
 import logging
 from collections.abc import Callable
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import Protocol
 
 from curator.catalog.ps_plus_walk_service import PsPlusWalkProgress
@@ -42,7 +42,7 @@ class PsPlusWalkScheduler:
         self._walk_interval = walk_interval
         self._check_interval_seconds = check_interval_seconds
         self._max_pages_per_category = max_pages_per_category
-        self._clock = clock or (lambda: datetime.now(timezone.utc))
+        self._clock = clock or (lambda: datetime.now(UTC))
         self._task: asyncio.Task[None] | None = None
 
     def start(self) -> None:

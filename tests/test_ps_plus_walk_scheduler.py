@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import random
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 from curator.jobs.ps_plus_walk_scheduler import (
     DEFAULT_MAX_PAGES_PER_CATEGORY,
@@ -32,7 +32,7 @@ class FakeHistory:
         return self._latest
 
 
-_NOW = datetime(2026, 9, 10, 12, tzinfo=timezone.utc)
+_NOW = datetime(2026, 9, 10, 12, tzinfo=UTC)
 
 
 def _scheduler(walker, latest, **options):

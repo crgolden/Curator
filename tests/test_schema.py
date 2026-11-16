@@ -1,9 +1,9 @@
 """Integration tests for every ``db/migrations/*.sql`` file, applied in order to a **real** PostgreSQL
 instance.
 
-These are the only tests in this suite that touch a live database. They are gated on
-``CURATOR_TEST_DATABASE_URL``; ``Curator/TESTING.md`` owns how to set it, locally and in CI. Point it at a
-database you are willing to have migrated — never production.
+These are the only tests in this suite that touch a live database. They require
+``CURATOR_TEST_DATABASE_URL`` and fail without it; ``Curator/TESTING.md`` owns how to set it, locally and in
+CI. Point it at a database you are willing to have migrated — never production.
 
 The schema is built by ``db/run_migrations.py``, the same runner the deploy job uses, which applies only
 what its ``schema_migrations`` table does not already record.

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import get_args
 
 from curator.catalog.ps_plus_repository import PsPlusCategory, PsPlusTier
@@ -124,7 +124,7 @@ class FakeCatalog:
 
 class FixedClock:
     def __init__(self):
-        self.now = datetime(2026, 9, 1, tzinfo=timezone.utc)
+        self.now = datetime(2026, 9, 1, tzinfo=UTC)
 
     def __call__(self):
         self.now += timedelta(seconds=1)

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import pytest
 
@@ -41,7 +41,7 @@ class FakeRepository:
                 refresh_token_expires_at=existing.refresh_token_expires_at,
                 linked_at=existing.linked_at,
                 updated_at=existing.updated_at,
-                last_verified_at=datetime(2026, 1, 1, 12, tzinfo=timezone.utc),
+                last_verified_at=datetime(2026, 1, 1, 12, tzinfo=UTC),
             )
 
     async def delete_link(self, sub):
@@ -75,11 +75,11 @@ def _seed_access_token_only_link(repo: FakeRepository, crypto: TokenCrypto, sub:
     repo.links[sub] = LinkRecord(
         psn_account_id="psn-account-1",
         token_response_enc=encrypted,
-        access_token_expires_at=datetime(2026, 1, 1, 1, tzinfo=timezone.utc),
+        access_token_expires_at=datetime(2026, 1, 1, 1, tzinfo=UTC),
         refresh_token_expires_at=None,
-        linked_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
-        updated_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
-        last_verified_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+        linked_at=datetime(2026, 1, 1, tzinfo=UTC),
+        updated_at=datetime(2026, 1, 1, tzinfo=UTC),
+        last_verified_at=datetime(2026, 1, 1, tzinfo=UTC),
     )
 
 
@@ -92,7 +92,7 @@ async def test_reverify_clears_access_token_only_link_when_expired_access_token_
     crypto = _make_crypto()
     sub = "sub-1"
     _seed_access_token_only_link(repo, crypto, sub)
-    claims = TokenClaims(sub=sub, email=EMAIL, iat=datetime(2026, 2, 1, tzinfo=timezone.utc), scopes=(CURATOR_SCOPE,))
+    claims = TokenClaims(sub=sub, email=EMAIL, iat=datetime(2026, 2, 1, tzinfo=UTC), scopes=(CURATOR_SCOPE,))
 
     async def agent_factory(sub_arg, npsso=None):
         return FakeAgent(sub_arg, npsso, raise_error=PsnAuthError("no refresh token available"))
@@ -109,7 +109,7 @@ async def test_reverify_clears_access_token_only_link_when_expired_access_token_
 
 
 def _stale_verification_claims(sub: str) -> TokenClaims:
-    return TokenClaims(sub=sub, email=EMAIL, iat=datetime(2026, 2, 1, tzinfo=timezone.utc), scopes=(CURATOR_SCOPE,))
+    return TokenClaims(sub=sub, email=EMAIL, iat=datetime(2026, 2, 1, tzinfo=UTC), scopes=(CURATOR_SCOPE,))
 
 
 async def test_reverify_records_the_check_before_it_reaches_psn():

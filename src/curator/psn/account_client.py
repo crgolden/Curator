@@ -90,7 +90,7 @@ def _region_from_npid(npid: str) -> str | None:
     """
     try:
         decoded = base64.b64decode(npid).decode("utf-8")
-    except (binascii.Error, UnicodeDecodeError):
+    except binascii.Error, UnicodeDecodeError:
         return None
     if "@" not in decoded or "." not in decoded:
         return None

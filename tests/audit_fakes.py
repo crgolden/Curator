@@ -4,7 +4,7 @@ to fail the write that starts a row or the one that marks its outcome."""
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from curator.audit.repository import OUTCOME_COMPLETED, OUTCOME_FAILED, OUTCOME_STARTED, AccountActionLogEntry
 
@@ -61,7 +61,7 @@ class RecordingAuditRepository:
                 identity_sub=row.identity_sub,
                 action=row.action,
                 detail=row.detail,
-                occurred_at=datetime.now(timezone.utc),
+                occurred_at=datetime.now(UTC),
                 outcome=row.outcome,
             )
             for index, row in enumerate(self.rows)

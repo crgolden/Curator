@@ -15,7 +15,7 @@ from __future__ import annotations
 import dataclasses
 import logging
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from types import SimpleNamespace
 
 import pytest
@@ -52,10 +52,10 @@ from test_values import lowercase_token, new_sha256_hash
 SUB = "sub-1"
 EMAIL = "user@example.com"
 
-TOUCHED_AT = datetime(2027, 1, 1, tzinfo=timezone.utc)
+TOUCHED_AT = datetime(2027, 1, 1, tzinfo=UTC)
 
-OLD_IAT = datetime(2026, 1, 1, tzinfo=timezone.utc)
-NEW_IAT = datetime(2026, 6, 1, tzinfo=timezone.utc)
+OLD_IAT = datetime(2026, 1, 1, tzinfo=UTC)
+NEW_IAT = datetime(2026, 6, 1, tzinfo=UTC)
 
 
 class FakeRepository:
@@ -78,7 +78,7 @@ class FakeRepository:
         return sub in self.users
 
     async def get_created_at(self, sub):
-        return datetime(2026, 1, 2, 3, 4, 5, tzinfo=timezone.utc) if sub in self.users else None
+        return datetime(2026, 1, 2, 3, 4, 5, tzinfo=UTC) if sub in self.users else None
 
     async def touch_login(self, sub):
         self.login_touches.append(sub)
@@ -97,8 +97,8 @@ class FakeRepository:
             token_response_enc=token_response_enc,
             access_token_expires_at=access_token_expires_at,
             refresh_token_expires_at=refresh_token_expires_at,
-            linked_at=existing.linked_at if existing else datetime(2026, 1, 1, tzinfo=timezone.utc),
-            updated_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+            linked_at=existing.linked_at if existing else datetime(2026, 1, 1, tzinfo=UTC),
+            updated_at=datetime(2026, 1, 1, tzinfo=UTC),
             last_verified_at=existing.last_verified_at if existing else None,
             harvest_trophies=existing.harvest_trophies if existing else False,
             harvest_identity=existing.harvest_identity if existing else False,
@@ -209,10 +209,10 @@ def _seed_link(
     repo.links[sub] = LinkRecord(
         psn_account_id=account_id,
         token_response_enc=encrypted,
-        access_token_expires_at=datetime(2026, 1, 1, 1, tzinfo=timezone.utc),
-        refresh_token_expires_at=datetime(2026, 2, 1, tzinfo=timezone.utc),
-        linked_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
-        updated_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+        access_token_expires_at=datetime(2026, 1, 1, 1, tzinfo=UTC),
+        refresh_token_expires_at=datetime(2026, 2, 1, tzinfo=UTC),
+        linked_at=datetime(2026, 1, 1, tzinfo=UTC),
+        updated_at=datetime(2026, 1, 1, tzinfo=UTC),
         last_verified_at=last_verified_at,
         harvest_trophies=harvest_trophies,
         harvest_identity=harvest_identity,
@@ -243,8 +243,8 @@ class FakeAgent:
         await self._repository.upsert_link(
             self._sub,
             encrypted,
-            datetime(2026, 1, 1, 1, tzinfo=timezone.utc),
-            datetime(2026, 2, 1, tzinfo=timezone.utc),
+            datetime(2026, 1, 1, 1, tzinfo=UTC),
+            datetime(2026, 2, 1, tzinfo=UTC),
         )
         return SimpleNamespace(account_id=self._account_id)
 

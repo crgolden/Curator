@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import replace
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from fastapi.testclient import TestClient
@@ -125,7 +125,7 @@ class FakeProfileRepository:
 class FakeFollowRepository:
     def __init__(self) -> None:
         self.edges: dict[tuple[str, str], datetime] = {}
-        self._next_time = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        self._next_time = datetime(2026, 1, 1, tzinfo=UTC)
 
     async def follow(self, follower_sub: str, followed_sub: str) -> None:
         key = (follower_sub, followed_sub)
@@ -1212,10 +1212,10 @@ def _link(*, psn_account_id, harvest_trophies=False, harvest_identity=False):
     return LinkRecord(
         psn_account_id=psn_account_id,
         token_response_enc=b"enc",
-        access_token_expires_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
-        refresh_token_expires_at=datetime(2026, 2, 1, tzinfo=timezone.utc),
-        linked_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
-        updated_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+        access_token_expires_at=datetime(2026, 1, 1, tzinfo=UTC),
+        refresh_token_expires_at=datetime(2026, 2, 1, tzinfo=UTC),
+        linked_at=datetime(2026, 1, 1, tzinfo=UTC),
+        updated_at=datetime(2026, 1, 1, tzinfo=UTC),
         last_verified_at=None,
         harvest_trophies=harvest_trophies,
         harvest_identity=harvest_identity,

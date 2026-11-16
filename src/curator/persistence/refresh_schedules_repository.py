@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import Any, Final, Literal
 
 from psycopg_pool import AsyncConnectionPool
@@ -40,7 +40,7 @@ def next_run_after(cadence: Cadence, *, now: datetime | None = None) -> datetime
     :param cadence: ``"daily"``, ``"weekly"`` or ``"monthly"``.
     :param now: The instant to measure from; defaults to the current UTC time.
     """
-    return (now or datetime.now(timezone.utc)) + _CADENCE_INTERVALS[cadence]
+    return (now or datetime.now(UTC)) + _CADENCE_INTERVALS[cadence]
 
 
 @dataclass(frozen=True, slots=True)

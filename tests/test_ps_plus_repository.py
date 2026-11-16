@@ -1,12 +1,12 @@
 """The rotation window that ``GET /me/ps-plus-rotation`` measures ``added`` and ``leaving`` against."""
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 from curator.catalog.ps_plus_repository import _earliest_only_when_no_value_is_missing
 
 
 def _completions(count: int) -> list[datetime]:
-    first = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    first = datetime(2026, 1, 1, tzinfo=UTC)
     return [first + timedelta(days=offset) for offset in range(count)]
 
 

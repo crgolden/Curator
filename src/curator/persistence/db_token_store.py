@@ -28,7 +28,7 @@ from __future__ import annotations
 
 import json
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any, Protocol
 
 from curator.persistence.crypto import InvalidToken, TokenCrypto
@@ -174,7 +174,7 @@ class DbTokenStore:
 
         try:
             data = json.loads(cached if isinstance(cached, str) else cached.decode())
-        except (json.JSONDecodeError, UnicodeDecodeError):
+        except json.JSONDecodeError, UnicodeDecodeError:
             return None
 
         return data if isinstance(data, dict) else None
@@ -188,4 +188,4 @@ def _to_datetime(value: Any) -> datetime | None:
     """
     if value is None:
         return None
-    return datetime.fromtimestamp(value, tz=timezone.utc)
+    return datetime.fromtimestamp(value, tz=UTC)

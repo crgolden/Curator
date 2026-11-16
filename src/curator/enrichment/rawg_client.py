@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
 from typing import Any, Final, TypeVar
 
@@ -90,11 +90,11 @@ def _parse_retry_after(response: httpx.Response) -> float | None:
         return float(value)
     try:
         retry_at = parsedate_to_datetime(value)
-    except (TypeError, ValueError):
+    except TypeError, ValueError:
         return None
     if retry_at.tzinfo is None:
-        retry_at = retry_at.replace(tzinfo=timezone.utc)
-    return max((retry_at - datetime.now(timezone.utc)).total_seconds(), 0.0)
+        retry_at = retry_at.replace(tzinfo=UTC)
+    return max((retry_at - datetime.now(UTC)).total_seconds(), 0.0)
 
 
 class RawgClient:

@@ -7,7 +7,7 @@ not exist until the worker actually starts it.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -62,7 +62,7 @@ async def start_enrichment_run(
     job_runs_repository: JobRunsRepository = request.app.state.job_runs_repository
     active_run = await job_runs_repository.find_active_global_run(JOB_KIND_ENRICHMENT)
     if active_run is not None:
-        reason = abandoned_run_reason(active_run, datetime.now(timezone.utc), noun=ENRICHMENT_RUN_NOUN)
+        reason = abandoned_run_reason(active_run, datetime.now(UTC), noun=ENRICHMENT_RUN_NOUN)
         if reason is None:
             return EnrichmentRunResponse(run_id=active_run.run_id)
         await job_runs_repository.mark_failed(active_run.run_id, reason)

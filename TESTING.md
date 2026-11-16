@@ -314,14 +314,13 @@ sonar-scanner `
   "-Dsonar.sources=src" `
   "-Dsonar.tests=tests" `
   "-Dsonar.python.coverage.reportPaths=coverage.xml" `
-  "-Dsonar.python.version=3.10,3.11,3.12,3.13,3.14" `
+  "-Dsonar.python.version=3.15" `
   "-Dsonar.exclusions=**/__pycache__/**,**/*.pyc,.venv/**"
 ```
 
-`sonar.python.version` mirrors `pyproject.toml`'s `requires-python = ">=3.10,<4.0"`. Without it every
-analysis warns that the code is being checked against *all* Python 3 versions, which both weakens
-version-specific rules and hides ones that only apply to the floor. CI runs 3.14 only, so the 3.10 floor is
-analyzed but never executed.
+`sonar.python.version` mirrors `pyproject.toml`'s `requires-python = ">=3.15,<4.0"`, the one version CI
+runs and App Service serves. Without it every analysis warns that the code is being checked against *all*
+Python 3 versions, which both weakens version-specific rules and hides ones that only apply to the floor.
 
 CI passes `sonar.qualitygate.wait=true`, so the Sonar step fails when the quality gate fails, and the next
 step, `Fail on open Sonar issues`, fails on any open issue on the branch or pull request whatever the gate

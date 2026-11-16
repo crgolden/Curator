@@ -14,7 +14,7 @@ the only path in this repo that creates a ``games`` row outside ``POST /catalog/
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Annotated, Any, Final, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
@@ -701,7 +701,7 @@ async def refresh_library(
     job_runs_repository: JobRunsRepository = request.app.state.job_runs_repository
     active_run = await job_runs_repository.find_active_run(claims.sub, JOB_KIND_LIBRARY_REFRESH)
     if active_run is not None:
-        reason = abandoned_run_reason(active_run, datetime.now(timezone.utc), noun=LIBRARY_REFRESH_RUN_NOUN)
+        reason = abandoned_run_reason(active_run, datetime.now(UTC), noun=LIBRARY_REFRESH_RUN_NOUN)
         if reason is None:
             return LibraryRefreshResponse(run_id=active_run.run_id)
         await job_runs_repository.mark_failed(active_run.run_id, reason)

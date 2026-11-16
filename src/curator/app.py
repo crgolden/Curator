@@ -19,7 +19,7 @@ import logging
 from collections.abc import AsyncIterator, Callable
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, TypedDict, TypeVar, cast
+from typing import TYPE_CHECKING, Any, TypedDict, cast
 
 import httpx
 from azure.identity import DefaultAzureCredential as SyncDefaultAzureCredential
@@ -97,7 +97,7 @@ from curator.token_validation import JwtValidator, TokenValidatorLike
 from curator.trophy_routes import router as trophy_router
 
 if TYPE_CHECKING:
-    from typing_extensions import Unpack
+    from typing import Unpack
 
 CURATOR_LOGGER_NAME = "curator"
 HEALTH_PATH = "/health"
@@ -105,9 +105,6 @@ HEALTHY_BODY = "Healthy"
 INTERNAL_SERVER_ERROR_BODY = "Internal Server Error"
 
 logger = logging.getLogger(CURATOR_LOGGER_NAME)
-
-
-_T = TypeVar("_T")
 
 
 class AppCollaborators(TypedDict, total=False):
@@ -154,7 +151,7 @@ class _OwnedResources:
     ps_plus_walk_scheduler: PsPlusWalkScheduler
 
 
-def _given(value: _T | None, build: Callable[[], _T]) -> _T:
+def _given[T](value: T | None, build: Callable[[], T]) -> T:
     return value or build()
 
 

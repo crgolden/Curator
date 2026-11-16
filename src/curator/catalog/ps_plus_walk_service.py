@@ -11,7 +11,7 @@ import asyncio
 from collections.abc import Callable, Sequence
 from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Protocol
 
 from curator.catalog.ps_plus_repository import PsPlusCategory, PsPlusTier, PsPlusWalkWriter, WalkStoppedReason
@@ -91,7 +91,7 @@ class PsPlusWalkService:
         self._repository = repository
         self._catalog = catalog
         self._page_delay_seconds = page_delay_seconds
-        self._clock = clock or (lambda: datetime.now(timezone.utc))
+        self._clock = clock or (lambda: datetime.now(UTC))
 
     async def walk_all(self, *, max_pages_per_category: int | None = None) -> list[PsPlusWalkProgress]:
         """Walk every configured category in turn, stopping early when the persisted query has rotated.

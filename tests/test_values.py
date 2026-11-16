@@ -7,7 +7,7 @@ from __future__ import annotations
 import random
 import string
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import get_args
 
 from curator.catalog.content_kind import CONTENT_KINDS, GAME_KIND, ContentKind
@@ -106,7 +106,7 @@ def new_cover_image_url() -> str:
 
 
 def new_utc_instant() -> datetime:
-    return datetime.now(timezone.utc) - timedelta(seconds=random.randint(60, 10**7))
+    return datetime.now(UTC) - timedelta(seconds=random.randint(60, 10**7))
 
 
 def new_price_cents() -> int:

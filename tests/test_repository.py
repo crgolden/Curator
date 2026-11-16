@@ -3,7 +3,7 @@ database, no unittest.mock)."""
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from curator.persistence.repository import LinkRecord, Repository
 
@@ -92,11 +92,11 @@ async def test_get_link_returns_none_when_no_row():
 
 
 async def test_get_link_maps_row_to_link_record():
-    linked_at = datetime(2026, 1, 1, tzinfo=timezone.utc)
-    updated_at = datetime(2026, 2, 1, tzinfo=timezone.utc)
-    access_expires = datetime(2026, 1, 2, tzinfo=timezone.utc)
-    refresh_expires = datetime(2026, 3, 1, tzinfo=timezone.utc)
-    last_verified_at = datetime(2026, 2, 2, tzinfo=timezone.utc)
+    linked_at = datetime(2026, 1, 1, tzinfo=UTC)
+    updated_at = datetime(2026, 2, 1, tzinfo=UTC)
+    access_expires = datetime(2026, 1, 2, tzinfo=UTC)
+    refresh_expires = datetime(2026, 3, 1, tzinfo=UTC)
+    last_verified_at = datetime(2026, 2, 2, tzinfo=UTC)
     row = (
         "psn-account-1",
         b"encrypted-bytes",
@@ -141,8 +141,8 @@ async def test_get_link_maps_row_to_link_record():
 
 
 async def test_get_link_maps_harvest_flags_when_some_are_true():
-    linked_at = datetime(2026, 1, 1, tzinfo=timezone.utc)
-    updated_at = datetime(2026, 2, 1, tzinfo=timezone.utc)
+    linked_at = datetime(2026, 1, 1, tzinfo=UTC)
+    updated_at = datetime(2026, 2, 1, tzinfo=UTC)
     row = (
         "psn-account-1",
         b"encrypted-bytes",
@@ -187,8 +187,8 @@ async def test_touch_link_verified_executes_update():
 async def test_upsert_link_sql_has_on_conflict_coalesce_and_correct_params():
     pool = FakePool()
     repo = Repository(pool)
-    access_expires = datetime(2026, 1, 2, tzinfo=timezone.utc)
-    refresh_expires = datetime(2026, 3, 1, tzinfo=timezone.utc)
+    access_expires = datetime(2026, 1, 2, tzinfo=UTC)
+    refresh_expires = datetime(2026, 3, 1, tzinfo=UTC)
 
     await repo.upsert_link(
         "sub-1",

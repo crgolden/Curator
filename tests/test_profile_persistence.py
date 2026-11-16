@@ -4,7 +4,7 @@ unittest.mock)."""
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from uuid import UUID
 
 from curator.persistence.follow_repository import FollowRepository
@@ -183,15 +183,15 @@ async def test_follower_count_and_following_count():
 
 
 async def test_list_followers_returns_newest_first_and_respects_pagination_params():
-    row1 = ("sub-b", datetime(2026, 2, 1, tzinfo=timezone.utc))
-    row2 = ("sub-c", datetime(2026, 1, 1, tzinfo=timezone.utc))
+    row1 = ("sub-b", datetime(2026, 2, 1, tzinfo=UTC))
+    row2 = ("sub-c", datetime(2026, 1, 1, tzinfo=UTC))
     pool = FakePool(fetchall_results=[[row1, row2]])
     repo = FollowRepository(pool)
 
     edges = await repo.list_followers("sub-a", limit=10, offset=5)
 
     assert [edge.sub for edge in edges] == ["sub-b", "sub-c"]
-    assert edges[0].followed_at == datetime(2026, 2, 1, tzinfo=timezone.utc)
+    assert edges[0].followed_at == datetime(2026, 2, 1, tzinfo=UTC)
     sql, params = pool.connections[0].executed[0]
     assert "ORDER BY created_at DESC" in sql
     assert "followed_sub = %s" in sql
@@ -199,7 +199,7 @@ async def test_list_followers_returns_newest_first_and_respects_pagination_param
 
 
 async def test_list_following_returns_newest_first_and_respects_pagination_params():
-    row1 = ("sub-b", datetime(2026, 2, 1, tzinfo=timezone.utc))
+    row1 = ("sub-b", datetime(2026, 2, 1, tzinfo=UTC))
     pool = FakePool(fetchall_results=[[row1]])
     repo = FollowRepository(pool)
 
@@ -217,7 +217,7 @@ async def test_list_followers_coerces_uuid_column_to_str():
     reproduces a production bug where ``FollowEdge.sub`` stayed a ``UUID`` and failed
     ``FollowListEntryResponse`` pydantic validation (``sub: str``) with a real ``ValidationError``.
     """
-    row = (UUID("9bd7af1c-7196-46f1-cadd-08dee5d60140"), datetime(2026, 2, 1, tzinfo=timezone.utc))
+    row = (UUID("9bd7af1c-7196-46f1-cadd-08dee5d60140"), datetime(2026, 2, 1, tzinfo=UTC))
     pool = FakePool(fetchall_results=[[row]])
     repo = FollowRepository(pool)
 
@@ -228,7 +228,7 @@ async def test_list_followers_coerces_uuid_column_to_str():
 
 
 async def test_list_following_coerces_uuid_column_to_str():
-    row = (UUID("cb6d81d9-c670-425b-bfdb-08de789d89c0"), datetime(2026, 2, 1, tzinfo=timezone.utc))
+    row = (UUID("cb6d81d9-c670-425b-bfdb-08de789d89c0"), datetime(2026, 2, 1, tzinfo=UTC))
     pool = FakePool(fetchall_results=[[row]])
     repo = FollowRepository(pool)
 

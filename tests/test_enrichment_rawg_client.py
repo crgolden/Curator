@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from email.utils import format_datetime
 
 import httpx
@@ -160,7 +160,7 @@ async def test_parses_retry_after_seconds_header():
 
 
 async def test_parses_retry_after_http_date_header():
-    retry_at = datetime.now(timezone.utc) + timedelta(seconds=300)
+    retry_at = datetime.now(UTC) + timedelta(seconds=300)
     retry_after = format_datetime(retry_at, usegmt=True)
     recorder = RequestRecorder([httpx.Response(429, headers={RETRY_AFTER_HEADER: retry_after})])
     client = _client(recorder)

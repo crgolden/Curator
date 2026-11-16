@@ -34,7 +34,7 @@ import sys
 import traceback
 import urllib.error
 import urllib.request
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "src"))
 
@@ -62,7 +62,7 @@ def _report_bootstrap_failure(exc: BaseException) -> None:
         return
 
     doc = {
-        "@timestamp": datetime.now(timezone.utc).isoformat(),
+        "@timestamp": datetime.now(UTC).isoformat(),
         "message": "Bootstrap failed before create_app() returned",
         "log.level": "Fatal",
         "service.name": "curator",

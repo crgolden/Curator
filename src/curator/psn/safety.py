@@ -17,7 +17,7 @@ development and manual testing; they are not the production path.
 from __future__ import annotations
 
 import os
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Protocol
 
 from curator.psn.errors import MutationNotAllowedError
@@ -165,7 +165,7 @@ class MutationGuard:
             return
         from curator.audit.repository import PSN_MUTATION_ACTIONS
 
-        since = datetime.now(timezone.utc) - timedelta(days=1)
+        since = datetime.now(UTC) - timedelta(days=1)
         attempts_including_this_one = await self._mutations.count_since(self._identity_sub, PSN_MUTATION_ACTIONS, since)
         if attempts_including_this_one > MUTATION_DAILY_CAP:
             raise MutationNotAllowedError(

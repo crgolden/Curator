@@ -8,7 +8,7 @@ import inspect
 import json
 import random
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from curator.persistence.crypto import TokenCrypto
 from curator.persistence.db_token_store import DbTokenStore, access_token_cache_key
@@ -49,8 +49,8 @@ class FakeRepository:
             token_response_enc=token_response_enc,
             access_token_expires_at=access_token_expires_at,
             refresh_token_expires_at=refresh_token_expires_at,
-            linked_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
-            updated_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+            linked_at=datetime(2026, 1, 1, tzinfo=UTC),
+            updated_at=datetime(2026, 1, 1, tzinfo=UTC),
             last_verified_at=None,
         )
 
@@ -90,8 +90,8 @@ def _encrypted_link(crypto: TokenCrypto, payload: dict) -> LinkRecord:
         token_response_enc=encrypted,
         access_token_expires_at=None,
         refresh_token_expires_at=None,
-        linked_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
-        updated_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+        linked_at=datetime(2026, 1, 1, tzinfo=UTC),
+        updated_at=datetime(2026, 1, 1, tzinfo=UTC),
         last_verified_at=None,
     )
 
@@ -120,8 +120,8 @@ async def test_load_returns_none_on_corrupt_ciphertext():
         token_response_enc=new_opaque_token().encode(),
         access_token_expires_at=None,
         refresh_token_expires_at=None,
-        linked_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
-        updated_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+        linked_at=datetime(2026, 1, 1, tzinfo=UTC),
+        updated_at=datetime(2026, 1, 1, tzinfo=UTC),
         last_verified_at=None,
     )
     store = DbTokenStore(SUB, repo, _make_crypto())
@@ -291,8 +291,8 @@ async def test_save_still_sets_the_sql_expiry_columns_even_though_the_blob_omits
     )
 
     _, _, access_expires, refresh_expires, _ = repo.upsert_calls[0]
-    assert access_expires == datetime.fromtimestamp(access_expires_at, tz=timezone.utc)
-    assert refresh_expires == datetime.fromtimestamp(refresh_expires_at, tz=timezone.utc)
+    assert access_expires == datetime.fromtimestamp(access_expires_at, tz=UTC)
+    assert refresh_expires == datetime.fromtimestamp(refresh_expires_at, tz=UTC)
 
 
 async def test_save_persists_when_access_token_present_but_refresh_token_absent():
@@ -306,7 +306,7 @@ async def test_save_persists_when_access_token_present_but_refresh_token_absent(
     assert len(repo.upsert_calls) == 1
     _, token_response_enc, access_expires, refresh_expires, _ = repo.upsert_calls[0]
     assert json.loads(crypto.decrypt(token_response_enc)) == {}
-    assert access_expires == datetime.fromtimestamp(access_expires_at, tz=timezone.utc)
+    assert access_expires == datetime.fromtimestamp(access_expires_at, tz=UTC)
     assert refresh_expires is None
 
 

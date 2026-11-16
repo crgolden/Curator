@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Coroutine
-from typing import Annotated, Any, Final, TypeVar
+from typing import Annotated, Any, Final
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel
@@ -239,9 +239,6 @@ async def _trophy_client(request: Request, claims: TokenClaims) -> TrophyClient 
         raise HTTPException(status_code=404, detail=PREFERENCE_NOT_LINKED_DETAIL) from exc
 
 
-_T = TypeVar("_T")
-
-
 def _valid(validator: Callable[[str], str], value: str) -> str:
     try:
         return validator(value)
@@ -249,7 +246,7 @@ def _valid(validator: Callable[[str], str], value: str) -> str:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
-async def _call(method: Callable[..., Coroutine[Any, Any, _T]], *args: Any, **kwargs: Any) -> _T:
+async def _call[T](method: Callable[..., Coroutine[Any, Any, T]], *args: Any, **kwargs: Any) -> T:
     """Invoke a trophy-client method, translating ``PsnAuthError`` to a 401."""
     try:
         return await method(*args, **kwargs)

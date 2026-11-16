@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from fastapi.testclient import TestClient
@@ -88,7 +88,7 @@ class FakeJobRun:
         self.status = status
         self.error = error
         self.result_summary = result_summary
-        self.updated_at = updated_at if updated_at is not None else datetime.now(timezone.utc)
+        self.updated_at = updated_at if updated_at is not None else datetime.now(UTC)
         self.lease_expires_at = lease_expires_at
 
 
@@ -517,7 +517,7 @@ def test_duplicate_refresh_returns_existing_run_id_instead_of_publishing_again()
         JOB_KIND_LIBRARY_REFRESH,
         "sub-a",
         JOB_STATUS_RUNNING,
-        lease_expires_at=datetime.now(timezone.utc) + timedelta(minutes=2),
+        lease_expires_at=datetime.now(UTC) + timedelta(minutes=2),
     )
     client, validator, publisher = _build(FakeJobRunsRepository([active]))
     validator.register("token-a", _claims(sub="sub-a"))
@@ -561,7 +561,7 @@ def test_a_stale_non_terminal_run_is_superseded_not_returned():
         JOB_KIND_LIBRARY_REFRESH,
         "sub-a",
         "rate_limited",
-        updated_at=datetime.now(timezone.utc) - timedelta(hours=25),
+        updated_at=datetime.now(UTC) - timedelta(hours=25),
     )
     job_runs_repository = FakeJobRunsRepository([stale])
     client, validator, publisher = _build(job_runs_repository)
@@ -582,7 +582,7 @@ def test_a_running_run_holding_a_live_lease_is_returned_not_superseded():
         JOB_KIND_LIBRARY_REFRESH,
         "sub-a",
         JOB_STATUS_RUNNING,
-        lease_expires_at=datetime.now(timezone.utc) + timedelta(minutes=2),
+        lease_expires_at=datetime.now(UTC) + timedelta(minutes=2),
     )
     job_runs_repository = FakeJobRunsRepository([alive])
     client, validator, publisher = _build(job_runs_repository)
@@ -601,8 +601,8 @@ def test_a_running_run_whose_lease_expired_is_superseded_even_though_updated_at_
         JOB_KIND_LIBRARY_REFRESH,
         "sub-a",
         JOB_STATUS_RUNNING,
-        updated_at=datetime.now(timezone.utc) - timedelta(minutes=1),
-        lease_expires_at=datetime.now(timezone.utc) - timedelta(minutes=5),
+        updated_at=datetime.now(UTC) - timedelta(minutes=1),
+        lease_expires_at=datetime.now(UTC) - timedelta(minutes=5),
     )
     job_runs_repository = FakeJobRunsRepository([dead])
     client, validator, publisher = _build(job_runs_repository)
@@ -634,7 +634,7 @@ def test_a_run_within_the_staleness_threshold_is_not_superseded_even_while_rate_
         JOB_KIND_LIBRARY_REFRESH,
         "sub-a",
         "rate_limited",
-        updated_at=datetime.now(timezone.utc) - timedelta(hours=8),
+        updated_at=datetime.now(UTC) - timedelta(hours=8),
     )
     job_runs_repository = FakeJobRunsRepository([waiting])
     client, validator, publisher = _build(job_runs_repository)

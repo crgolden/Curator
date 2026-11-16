@@ -44,7 +44,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v7
         with:
-          python-version: '3.14'
+          python-version: '3.15'
 
       - name: Install Poetry
         run: python -m pip install poetry
@@ -87,7 +87,7 @@ jobs:
             -Dsonar.sources=src
             -Dsonar.tests=tests
             -Dsonar.python.coverage.reportPaths=coverage.xml
-            -Dsonar.python.version=3.10,3.11,3.12,3.13,3.14
+            -Dsonar.python.version=3.15
             -Dsonar.exclusions=**/__pycache__/**,**/*.pyc,.venv/**
             -Dsonar.qualitygate.wait=true
             -Dsonar.scanner.skipJreProvisioning=true
@@ -125,7 +125,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v7
         with:
-          python-version: '3.14'
+          python-version: '3.15'
 
       - name: Assemble deployment package
         run: |
@@ -180,7 +180,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v7
         with:
-          python-version: '3.14'
+          python-version: '3.15'
 
       - name: Install Poetry
         run: python -m pip install poetry
@@ -232,6 +232,9 @@ jobs:
           client-id: ${{ secrets.AZUREAPPSERVICE_CLIENTID_29C8B941EEC941B3B025951A74F5176F }}
           tenant-id: ${{ secrets.AZUREAPPSERVICE_TENANTID_7933356A53994B7987CBFABB49879C36 }}
           subscription-id: ${{ secrets.AZUREAPPSERVICE_SUBSCRIPTIONID_1FCCBD0626644623AC4FF179F9E82B74 }}
+
+      - name: Set the App Service Python runtime
+        run: az webapp config set --name crgolden-curator --resource-group "${{ vars.AZURE_RESOURCE_GROUP }}" --linux-fx-version "PYTHON|3.15"
 
       - name: Deploy to Azure Web App
         id: deploy-to-webapp

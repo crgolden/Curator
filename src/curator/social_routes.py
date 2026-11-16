@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Coroutine
-from typing import Annotated, Any, TypeVar
+from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import BaseModel, Field
@@ -44,8 +44,6 @@ from curator.psn.social_client import SocialClientFactory
 from curator.token_validation import TokenClaims
 
 router = APIRouter(tags=["social"])
-
-_T = TypeVar("_T")
 
 NO_PENDING_REQUEST_DETAIL = "no_pending_request"
 """``PUT /me/friends/{online_id}``'s 409 detail when the target has not sent the caller a request."""
@@ -392,7 +390,7 @@ async def _service(request: Request, sub: str) -> MutationService:
         raise HTTPException(status_code=404, detail=PREFERENCE_NOT_LINKED_DETAIL) from exc
 
 
-async def _run(awaitable: Coroutine[Any, Any, _T]) -> _T:
+async def _run[T](awaitable: Coroutine[Any, Any, T]) -> T:
     try:
         return await awaitable
     except MutationNotAllowedError as exc:

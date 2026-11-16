@@ -3,7 +3,7 @@ test_repository.py (no real database, no unittest.mock)."""
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from curator.persistence.enrichment_keys_repository import EnrichmentKeysRepository
 
@@ -66,8 +66,8 @@ async def test_get_status_returns_both_false_when_no_row():
 
 
 async def test_get_status_maps_row():
-    rawg_added = datetime(2026, 1, 1, tzinfo=timezone.utc)
-    oc_added = datetime(2026, 2, 1, tzinfo=timezone.utc)
+    rawg_added = datetime(2026, 1, 1, tzinfo=UTC)
+    oc_added = datetime(2026, 2, 1, tzinfo=UTC)
     row = (b"rawg-enc", b"oc-enc", rawg_added, oc_added, None, None)
     pool = FakePool(fetchone_result=row)
     repo = EnrichmentKeysRepository(pool)
@@ -83,7 +83,7 @@ async def test_get_status_maps_row():
 
 
 async def test_get_status_treats_null_column_as_not_configured():
-    row = (None, b"oc-enc", None, datetime(2026, 2, 1, tzinfo=timezone.utc), None, None)
+    row = (None, b"oc-enc", None, datetime(2026, 2, 1, tzinfo=UTC), None, None)
     pool = FakePool(fetchone_result=row)
     repo = EnrichmentKeysRepository(pool)
 
@@ -94,8 +94,8 @@ async def test_get_status_treats_null_column_as_not_configured():
 
 
 async def test_get_status_maps_rejected_at_columns():
-    rejected = datetime(2026, 3, 1, tzinfo=timezone.utc)
-    row = (b"rawg-enc", None, datetime(2026, 1, 1, tzinfo=timezone.utc), None, rejected, None)
+    rejected = datetime(2026, 3, 1, tzinfo=UTC)
+    row = (b"rawg-enc", None, datetime(2026, 1, 1, tzinfo=UTC), None, rejected, None)
     pool = FakePool(fetchone_result=row)
     repo = EnrichmentKeysRepository(pool)
 

@@ -12,7 +12,7 @@ them -- pytest's rootdir-relative import inserts ``tests/`` onto ``sys.path``, s
 from __future__ import annotations
 
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import pytest
 from fastapi.routing import iter_route_contexts
@@ -287,11 +287,11 @@ def _seed_custom_link(repo: RecordingRepository, crypto: TokenCrypto, sub: str, 
     repo.links[sub] = LinkRecord(
         psn_account_id=account_id,
         token_response_enc=encrypted,
-        access_token_expires_at=datetime(2026, 1, 1, hour, tzinfo=timezone.utc),
-        refresh_token_expires_at=datetime(2026, 2, 1, hour, tzinfo=timezone.utc),
-        linked_at=datetime(2026, 1, 1, hour, tzinfo=timezone.utc),
-        updated_at=datetime(2026, 1, 1, hour, tzinfo=timezone.utc),
-        last_verified_at=datetime(2026, 1, 1, hour, tzinfo=timezone.utc),
+        access_token_expires_at=datetime(2026, 1, 1, hour, tzinfo=UTC),
+        refresh_token_expires_at=datetime(2026, 2, 1, hour, tzinfo=UTC),
+        linked_at=datetime(2026, 1, 1, hour, tzinfo=UTC),
+        updated_at=datetime(2026, 1, 1, hour, tzinfo=UTC),
+        last_verified_at=datetime(2026, 1, 1, hour, tzinfo=UTC),
     )
 
 
@@ -356,7 +356,7 @@ def test_cross_user_isolation_between_two_established_callers():
     validator = FakeTokenValidator()
     validator.register(
         "token-a",
-        _claims(sub="sub-a", email="usera@example.com", iat=datetime(2026, 1, 1, 2, tzinfo=timezone.utc)),
+        _claims(sub="sub-a", email="usera@example.com", iat=datetime(2026, 1, 1, 2, tzinfo=UTC)),
     )
     app = create_app(
         _make_settings(),
@@ -389,8 +389,8 @@ def test_cross_user_isolation_between_two_established_callers():
     assert repo.delete_calls == ["sub-a"]
     assert "sub-b" in repo.links
     assert repo.links["sub-b"].psn_account_id == "psn-account-b"
-    assert repo.links["sub-b"].access_token_expires_at == datetime(2026, 1, 1, 2, tzinfo=timezone.utc)
-    assert repo.links["sub-b"].refresh_token_expires_at == datetime(2026, 2, 1, 2, tzinfo=timezone.utc)
+    assert repo.links["sub-b"].access_token_expires_at == datetime(2026, 1, 1, 2, tzinfo=UTC)
+    assert repo.links["sub-b"].refresh_token_expires_at == datetime(2026, 2, 1, 2, tzinfo=UTC)
 
     agent_factory.account_id = "psn-account-a-relinked"
     link_response = client.post(
@@ -401,7 +401,7 @@ def test_cross_user_isolation_between_two_established_callers():
     assert repo.set_link_account_calls[-1] == ("sub-a", "psn-account-a-relinked")
 
     assert repo.links["sub-b"].psn_account_id == "psn-account-b"
-    assert repo.links["sub-b"].access_token_expires_at == datetime(2026, 1, 1, 2, tzinfo=timezone.utc)
+    assert repo.links["sub-b"].access_token_expires_at == datetime(2026, 1, 1, 2, tzinfo=UTC)
 
     subs_touched_by_a = set(repo.all_subs_seen[baseline:])
     assert subs_touched_by_a == {"sub-a"}

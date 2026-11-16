@@ -27,7 +27,7 @@ import logging
 import os
 import sys
 import threading
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from logging.handlers import QueueHandler, QueueListener
 from queue import SimpleQueue
 from typing import Any, cast
@@ -329,7 +329,7 @@ def format_log_record(record: logging.LogRecord) -> dict[str, Any]:
     :returns: A JSON-serializable document.
     """
     doc: dict[str, Any] = {
-        TIMESTAMP_FIELD: datetime.fromtimestamp(record.created, tz=timezone.utc).isoformat(),
+        TIMESTAMP_FIELD: datetime.fromtimestamp(record.created, tz=UTC).isoformat(),
         MESSAGE_FIELD: record.getMessage(),
         LOG_LEVEL_FIELD: _LEVEL_NAMES.get(record.levelname, record.levelname),
         SERVICE_NAME_FIELD: SERVICE_NAME_VALUE,

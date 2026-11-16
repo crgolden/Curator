@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from fastapi.testclient import TestClient
 
@@ -83,7 +83,7 @@ class FakePsPlusRepository:
     def __init__(self, report=None, summary=None, latest_walk_started_at=None):
         self._report = report
         self._summary = summary
-        self._latest_walk_started_at = latest_walk_started_at or datetime.now(timezone.utc)
+        self._latest_walk_started_at = latest_walk_started_at or datetime.now(UTC)
         self.report_calls: list[str] = []
         self.summary_calls: list[str] = []
 
