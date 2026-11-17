@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import time
 import uuid
-from typing import TYPE_CHECKING, Any, Final, Protocol, TypeVar
+from typing import TYPE_CHECKING, Any, Final, Protocol
 from urllib.parse import parse_qs, unquote, urlparse
 
 import httpx
@@ -46,8 +46,6 @@ from curator.token_response import (
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Coroutine, Mapping
-
-T = TypeVar("T")
 
 _AUTH_BASE = "https://ca.account.sony.com/api/authz/v3/oauth"
 AUTHORIZE_URL: Final = f"{_AUTH_BASE}/authorize"
@@ -210,7 +208,7 @@ class PsnSession:
         """Close the underlying :class:`httpx.AsyncClient`."""
         await self._client.aclose()
 
-    async def run_with_reauth(self, operation: Callable[[], Coroutine[Any, Any, T]]) -> T:
+    async def run_with_reauth[T](self, operation: Callable[[], Coroutine[Any, Any, T]]) -> T:
         """Run an async operation, re-bootstrapping from npsso once if PSN rejects the current token.
 
         Retry-once semantics. Token *persistence* is not a separate step a client must remember to call:

@@ -344,9 +344,9 @@ async def manual_add_candidates(
     try:
         hits = await _search_the_store(request, claims.sub, q, domain=FULL_GAMES_DOMAIN, limit=limit)
     except HTTPException as exc:
-        unavailable: StoreUnavailableReason = (
-            STORE_UNAVAILABLE_NO_PSN_LINK if exc.status_code == 404 else STORE_UNAVAILABLE_PSN_AUTH_FAILED
-        )
+        unavailable: StoreUnavailableReason = STORE_UNAVAILABLE_PSN_AUTH_FAILED
+        if exc.status_code == 404:
+            unavailable = STORE_UNAVAILABLE_NO_PSN_LINK
         return ManualCandidatesResponse(
             catalog=catalog, already_owned=page.excluded_owned, store_unavailable=unavailable
         )
