@@ -16,6 +16,7 @@ from curator.psn.title_platform import (
     platform_for_title_id,
     platform_vocabulary_message,
 )
+from test_values import lowercase_token, new_title_id_fragment, new_unmapped_title_id
 
 
 @pytest.mark.parametrize("platform", CONSOLE_PLATFORM_IDS)
@@ -24,15 +25,17 @@ def test_every_platform_in_the_vocabulary_narrows(platform):
 
 
 def test_a_value_outside_the_vocabulary_raises():
-    with pytest.raises(ValueError, match="Xbox"):
-        console_platform("Xbox")
+    unknown_platform = lowercase_token()
+    with pytest.raises(ValueError, match=unknown_platform):
+        console_platform(unknown_platform)
 
 
 def test_narrowing_is_case_sensitive():
     """platforms.platform_id stores the uppercase form and every route contract is written in it, so a
     lowercase value is a caller mistake rather than a spelling to accept silently."""
-    with pytest.raises(ValueError, match="ps5"):
-        console_platform("ps5")
+    lowercase_platform = PS5.lower()
+    with pytest.raises(ValueError, match=lowercase_platform):
+        console_platform(lowercase_platform)
 
 
 @pytest.mark.parametrize("platform", CONSOLE_PLATFORM_IDS)
@@ -83,8 +86,9 @@ def test_a_subscription_reward_or_media_sku_is_not_a_title(title_id):
 
 
 def test_an_unmapped_prefix_reports_no_platform_rather_than_guessing():
-    assert platform_for_title_id("ZZZZ00001_00") is None
-    assert is_non_title_entitlement("ZZZZ00001_00") is False, (
+    unmapped_title_id = new_unmapped_title_id()
+    assert platform_for_title_id(unmapped_title_id) is None
+    assert is_non_title_entitlement(unmapped_title_id) is False, (
         "unknown and known-not-a-title are different answers: the first may become a platform later"
     )
 
@@ -96,4 +100,4 @@ def test_a_missing_title_id_reports_no_platform(title_id):
 
 
 def test_a_prefix_shorter_than_four_characters_does_not_crash():
-    assert platform_for_title_id("CU") is None
+    assert platform_for_title_id(new_title_id_fragment()) is None

@@ -62,7 +62,7 @@ from curator.psn.title_platform import (
     platform_for_title_id,
     platform_vocabulary_message,
 )
-from curator.query_params import SORT_DIR_PARAM
+from curator.query_params import HIDDEN_PARAM, SORT_ASC, SORT_DIR_PARAM, SortDirection
 from curator.token_validation import TokenClaims
 
 router = APIRouter(prefix="/library", tags=["library"])
@@ -592,10 +592,10 @@ async def get_library(
     q: Annotated[str | None, Query()] = None,
     genre: Annotated[str | None, Query()] = None,
     sort: Annotated[LibrarySortField, Query()] = "title",
-    sort_dir: Annotated[Literal["asc", "desc"], Query(alias=SORT_DIR_PARAM)] = "asc",
+    sort_dir: Annotated[SortDirection, Query(alias=SORT_DIR_PARAM)] = SORT_ASC,
     limit: Annotated[int, Query(ge=1, le=100)] = 20,
     offset: Annotated[int, Query(ge=0)] = 0,
-    hidden: Annotated[HiddenFilter, Query()] = HIDDEN_EXCLUDE,
+    hidden: Annotated[HiddenFilter, Query(alias=HIDDEN_PARAM)] = HIDDEN_EXCLUDE,
 ) -> LibraryPageResponse:
     """Return one page of the caller's own library, with per-provider (RAWG/OpenCritic) ratings,
     the resolved genre, and PSN's own catalog rating/product id per game.

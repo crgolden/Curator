@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from http import HTTPStatus
+
 import httpx
 import pytest
 
@@ -36,7 +38,7 @@ def _client(recorder: RequestRecorder) -> OpenCriticClient:
 
 async def test_error_carries_the_response_body_as_provider_detail():
     provider_explanation = lowercase_token()
-    recorder = RequestRecorder([httpx.Response(403, text=provider_explanation)])
+    recorder = RequestRecorder([httpx.Response(HTTPStatus.FORBIDDEN, text=provider_explanation)])
     client = _client(recorder)
 
     with pytest.raises(OpenCriticApiError) as exc_info:
@@ -47,7 +49,7 @@ async def test_error_carries_the_response_body_as_provider_detail():
 
 async def test_provider_detail_redacts_the_api_key_if_the_body_echoes_it():
     provider_explanation = lowercase_token()
-    recorder = RequestRecorder([httpx.Response(401, text=f"{provider_explanation} {API_KEY}")])
+    recorder = RequestRecorder([httpx.Response(HTTPStatus.UNAUTHORIZED, text=f"{provider_explanation} {API_KEY}")])
     client = _client(recorder)
 
     with pytest.raises(OpenCriticApiError) as exc_info:
@@ -57,7 +59,7 @@ async def test_provider_detail_redacts_the_api_key_if_the_body_echoes_it():
 
 
 async def test_validate_key_succeeds_on_200():
-    recorder = RequestRecorder([httpx.Response(200, json=[])])
+    recorder = RequestRecorder([httpx.Response(HTTPStatus.OK, json=[])])
     client = _client(recorder)
 
     await client.validate_key()
@@ -77,31 +79,33 @@ def test_validation_request_uses_opencritics_published_names():
 
 async def test_validate_key_raises_sanitized_error_on_401():
     provider_explanation = lowercase_token()
-    recorder = RequestRecorder([httpx.Response(401, text=provider_explanation)])
+    recorder = RequestRecorder([httpx.Response(HTTPStatus.UNAUTHORIZED, text=provider_explanation)])
     client = _client(recorder)
 
     with pytest.raises(OpenCriticApiError) as exc_info:
         await client.validate_key()
 
-    assert exc_info.value.status_code == 401
+    assert exc_info.value.status_code == HTTPStatus.UNAUTHORIZED
     assert provider_explanation not in str(exc_info.value)
     assert exc_info.value.__cause__ is None
 
 
 async def test_parses_retry_after_seconds_header():
     retry_after_seconds = new_positive_count()
-    recorder = RequestRecorder([httpx.Response(429, headers={RETRY_AFTER_HEADER: str(retry_after_seconds)})])
+    recorder = RequestRecorder(
+        [httpx.Response(HTTPStatus.TOO_MANY_REQUESTS, headers={RETRY_AFTER_HEADER: str(retry_after_seconds)})]
+    )
     client = _client(recorder)
 
     with pytest.raises(OpenCriticApiError) as exc_info:
         await client.validate_key()
 
-    assert exc_info.value.status_code == 429
+    assert exc_info.value.status_code == HTTPStatus.TOO_MANY_REQUESTS
     assert exc_info.value.retry_after_seconds == float(retry_after_seconds)
 
 
 async def test_retry_after_seconds_none_when_header_absent():
-    recorder = RequestRecorder([httpx.Response(500)])
+    recorder = RequestRecorder([httpx.Response(HTTPStatus.INTERNAL_SERVER_ERROR)])
     client = _client(recorder)
 
     with pytest.raises(OpenCriticApiError) as exc_info:

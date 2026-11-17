@@ -17,9 +17,8 @@ of what the real SQL does.
 from __future__ import annotations
 
 import random
-from random import randint
+from http import HTTPStatus
 from typing import get_args
-from uuid import uuid4
 
 from fastapi.testclient import TestClient
 
@@ -49,6 +48,20 @@ from test_routes import (
     _path,
     _seed_link,
 )
+from test_values import (
+    lowercase_token,
+    new_console_id,
+    new_definition_id,
+    new_game_id,
+    new_game_title,
+    new_genre_name,
+    new_identity_sub,
+    new_opaque_token,
+    new_review_score,
+    new_size_gb,
+    new_small_count,
+    new_storage_device_id,
+)
 
 
 class _InstallTrackingCollectionsRepository(_RunCollectionsRepository):
@@ -70,16 +83,16 @@ class _InstallTrackingCollectionsRepository(_RunCollectionsRepository):
 
 
 def test_a_collection_run_never_writes_console_or_storage_device_install_state():
-    definition = _definition(definition_id=f"def-{uuid4()}", identity_sub=f"sub-{uuid4()}")
+    definition = _definition(definition_id=new_definition_id(), identity_sub=new_identity_sub())
     candidate = GameCandidate(
-        game_id=f"game-{uuid4()}",
-        title=f"Generated Title {uuid4()}",
-        genre="Action",
-        aaa_tier="AAA",
-        franchise=f"Generated Franchise {uuid4()}",
-        composite_score=float(randint(50, 100)),
-        rank_score=randint(1, 5),
-        size_gb=float(randint(10, 100)),
+        game_id=new_game_id(),
+        title=new_game_title(),
+        genre=new_genre_name(),
+        aaa_tier=lowercase_token(),
+        franchise=lowercase_token(),
+        composite_score=new_review_score(),
+        rank_score=new_small_count(),
+        size_gb=new_size_gb(),
     )
     orchestrator = FakeOrchestrator(
         result=CollectionResult(included=(candidate,), excluded=(), used_gb=candidate.size_gb)
@@ -100,21 +113,22 @@ def test_a_collection_run_never_writes_console_or_storage_device_install_state()
     app.state.collection_orchestrator = orchestrator
     app.state.collections_repository = collections_repository
     client = TestClient(app)
-    validator.register("token-a", _claims(sub=definition.identity_sub))
+    token = new_opaque_token()
+    validator.register(token, _claims(sub=definition.identity_sub))
 
     response = client.post(
         _path(client, collections_routes.run_definition, definition_id=definition.definition_id),
-        headers=_bearer("token-a"),
+        headers=_bearer(token),
     )
 
-    assert response.status_code == 201
+    assert response.status_code == HTTPStatus.CREATED
     assert collections_repository.set_console_install_calls == []
     assert collections_repository.set_storage_device_install_calls == []
 
 
 async def test_the_install_tracking_fake_records_calls_unlike_a_collection_run():
     collections_repository = _InstallTrackingCollectionsRepository(definitions=[])
-    console_id, device_id, game_id = f"console-{uuid4()}", f"device-{uuid4()}", f"game-{uuid4()}"
+    console_id, device_id, game_id = new_console_id(), new_storage_device_id(), new_game_id()
 
     await collections_repository.set_console_install(console_id, game_id, True)
     await collections_repository.set_storage_device_install(device_id, game_id, True)
@@ -126,13 +140,14 @@ async def test_the_install_tracking_fake_records_calls_unlike_a_collection_run()
 
 
 def test_deleting_an_enrichment_key_does_not_reverify_the_psn_link():
-    sub = f"sub-{uuid4()}"
+    sub = new_identity_sub()
     repo = FakeRepository()
     crypto = TokenCrypto(TokenCrypto.generate_key())
     agent_factory = FakeAgentFactory(repo, crypto)
     _seed_link(repo, crypto, sub, last_verified_at=OLD_IAT)
     validator = FakeTokenValidator()
-    validator.register("valid-token", _claims(sub=sub, iat=NEW_IAT))
+    token = new_opaque_token()
+    validator.register(token, _claims(sub=sub, iat=NEW_IAT))
     app = create_app(
         _make_settings(),
         repository=repo,
@@ -146,23 +161,24 @@ def test_deleting_an_enrichment_key_does_not_reverify_the_psn_link():
 
     response = client.delete(
         _path(client, enrichment_keys_routes.delete_enrichment_key, provider=random.choice(get_args(Provider))),
-        headers=_bearer("valid-token"),
+        headers=_bearer(token),
     )
 
-    assert response.status_code == 204
+    assert response.status_code == HTTPStatus.NO_CONTENT
     assert agent_factory.calls == []
 
 
 def test_unlinking_psn_does_reverify_the_link_unlike_deleting_a_key():
     """The discriminating control for the test above: without it, asserting ``calls == []`` for the key
     delete would pass vacuously even with the assertion backwards."""
-    sub = f"sub-{uuid4()}"
+    sub = new_identity_sub()
     repo = FakeRepository()
     crypto = TokenCrypto(TokenCrypto.generate_key())
     agent_factory = FakeAgentFactory(repo, crypto)
     _seed_link(repo, crypto, sub, last_verified_at=OLD_IAT)
     validator = FakeTokenValidator()
-    validator.register("valid-token", _claims(sub=sub, iat=NEW_IAT))
+    token = new_opaque_token()
+    validator.register(token, _claims(sub=sub, iat=NEW_IAT))
     app = create_app(
         _make_settings(),
         repository=repo,
@@ -175,18 +191,18 @@ def test_unlinking_psn_does_reverify_the_link_unlike_deleting_a_key():
     )
     client = TestClient(app)
 
-    response = client.delete(_path(client, psn_routes.psn_unlink), headers=_bearer("valid-token"))
+    response = client.delete(_path(client, psn_routes.psn_unlink), headers=_bearer(token))
 
-    assert response.status_code == 204
+    assert response.status_code == HTTPStatus.NO_CONTENT
     assert agent_factory.calls == [(sub, None)]
 
 
 async def test_moving_a_storage_device_between_consoles_touches_only_the_storage_devices_table():
-    identity_sub = f"sub-{uuid4()}"
-    device_id = f"device-{uuid4()}"
-    console_id = f"console-{uuid4()}"
-    capacity_gb = float(randint(100, 2000))
-    pool = FakePool(fetchone_results=[(device_id, console_id, "Drive", STORAGE_KIND_USB, capacity_gb, 0.0)])
+    identity_sub = new_identity_sub()
+    device_id = new_storage_device_id()
+    console_id = new_console_id()
+    capacity_gb = new_size_gb()
+    pool = FakePool(fetchone_results=[(device_id, console_id, lowercase_token(), STORAGE_KIND_USB, capacity_gb, 0.0)])
     repo = CollectionsRepository(pool)
 
     device = await repo.set_storage_device_attachment(identity_sub, device_id, console_id)

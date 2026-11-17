@@ -3,25 +3,29 @@
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta
 from typing import get_args
 
 from curator.catalog.ps_plus_repository import PsPlusCategory, PsPlusTier
 from curator.catalog.ps_plus_walk_service import CATEGORY_RENAMED, PsPlusWalkService
-from curator.catalog.store_backfill_service import NO_PRODUCTS, PAGE_BUDGET_EXHAUSTED, QUERY_ROTATED
+from curator.catalog.store_backfill_service import NO_PRODUCTS, PAGE_BUDGET_EXHAUSTED, PAGE_SIZE, QUERY_ROTATED
 from curator.psn.store_client import (
     FULL_GAME_CLASSIFICATION,
     StoreCategoryPage,
     StoreProduct,
     StoreQueryRotatedError,
 )
+from curator.psn.title_platform import PS4, PS5
 from test_values import (
+    lowercase_token,
     new_category_id,
     new_facet_key,
     new_game_title,
     new_ps4_title_id,
     new_reporting_name,
+    new_small_count,
     new_store_product_id,
+    new_utc_instant,
     new_walk_id,
 )
 
@@ -31,7 +35,9 @@ _TIER, _OTHER_TIER = get_args(PsPlusTier)
 
 
 def category(prefix=_PREFIX, tier=_TIER):
-    return PsPlusCategory(category_id=new_category_id(), tier=tier, locale="en-US", reporting_name_prefix=prefix)
+    return PsPlusCategory(
+        category_id=new_category_id(), tier=tier, locale=lowercase_token(), reporting_name_prefix=prefix
+    )
 
 
 def product(title_id=None, *, raw=None):
@@ -39,7 +45,7 @@ def product(title_id=None, *, raw=None):
     return StoreProduct(
         product_id=new_store_product_id(title_id),
         name=new_game_title(),
-        platforms=("PS4",),
+        platforms=(PS4,),
         np_title_id=title_id,
         cover_image_url=None,
         classification=FULL_GAME_CLASSIFICATION,
@@ -63,10 +69,10 @@ class FakeStoreClient:
         self._raise_on_page = raise_on_page
         self.calls: list[tuple[str, int, int]] = []
 
-    async def category_page(self, category_id, *, offset=0, size=100, filter_by=()):
+    async def category_page(self, category_id, *, offset=0, size, filter_by=()):
         self.calls.append((category_id, offset, size))
         if self._raise_on_page is not None and len(self.calls) == self._raise_on_page:
-            raise StoreQueryRotatedError("rotated")
+            raise StoreQueryRotatedError(lowercase_token())
         return self._pages.pop(0)
 
 
@@ -124,7 +130,7 @@ class FakeCatalog:
 
 class FixedClock:
     def __init__(self):
-        self.now = datetime(2026, 9, 1, tzinfo=UTC)
+        self.now = new_utc_instant()
 
     def __call__(self):
         self.now += timedelta(seconds=1)
@@ -137,7 +143,7 @@ def _service(client, repository, catalog=None):
 
 async def test_a_walk_interrupted_on_page_two_marks_no_departure():
     walked = category()
-    client = FakeStoreClient([page([product()], total=2)], raise_on_page=2)
+    client = FakeStoreClient([page([product()], total=new_small_count() + 1)], raise_on_page=2)
     repository = FakePsPlusRepository([walked])
 
     progress = await _service(client, repository).walk_category(walked)
@@ -165,19 +171,20 @@ async def test_a_completed_walk_marks_departures_only_when_nothing_was_missed():
 
 async def test_a_completed_walk_with_a_coverage_shortfall_marks_no_departure():
     walked = category()
-    client = FakeStoreClient([page([product()], is_last=True, total=5)])
+    shortfall = new_small_count()
+    client = FakeStoreClient([page([product()], is_last=True, total=shortfall + 1)])
     repository = FakePsPlusRepository([walked])
 
     progress = await _service(client, repository).walk_category(walked)
 
     assert progress.completed
-    assert progress.coverage_shortfall == 4
+    assert progress.coverage_shortfall == shortfall
     assert repository.writers[0].departures == []
 
 
 async def test_a_category_whose_reporting_name_lost_its_prefix_stops_and_writes_nothing():
     walked = category(prefix=_PREFIX)
-    client = FakeStoreClient([page([product()], is_last=True, reporting_name="WM_EU_ALL_PS4_GAMES")])
+    client = FakeStoreClient([page([product()], is_last=True, reporting_name=new_reporting_name(_OTHER_PREFIX))])
     repository = FakePsPlusRepository([walked])
 
     progress = await _service(client, repository).walk_category(walked)
@@ -217,10 +224,10 @@ async def test_a_bundle_member_is_recorded_but_never_admitted():
     bundle = StoreProduct(
         product_id=new_store_product_id(),
         name=new_game_title(),
-        platforms=("PS5",),
+        platforms=(PS5,),
         np_title_id=new_ps4_title_id(),
         cover_image_url=None,
-        classification="Game Bundle",
+        classification=lowercase_token(),
     )
     catalog = FakeCatalog()
     client = FakeStoreClient([page([bundle], is_last=True)])
@@ -235,7 +242,7 @@ async def test_a_bundle_member_is_recorded_but_never_admitted():
 async def test_a_renamed_category_admits_nothing():
     walked = category(prefix=_PREFIX)
     catalog = FakeCatalog()
-    client = FakeStoreClient([page([product()], is_last=True, reporting_name="WM_EU_ALL_PS4_GAMES")])
+    client = FakeStoreClient([page([product()], is_last=True, reporting_name=new_reporting_name(_OTHER_PREFIX))])
     repository = FakePsPlusRepository([walked])
 
     await _service(client, repository, catalog).walk_category(walked)
@@ -248,10 +255,10 @@ async def test_a_bundle_is_a_member_too():
     bundle = StoreProduct(
         product_id=new_store_product_id(),
         name=new_game_title(),
-        platforms=("PS5",),
+        platforms=(PS5,),
         np_title_id=new_ps4_title_id(),
         cover_image_url=None,
-        classification="Game Bundle",
+        classification=lowercase_token(),
     )
     client = FakeStoreClient([page([bundle], is_last=True)])
     repository = FakePsPlusRepository([walked])
@@ -267,7 +274,7 @@ async def test_the_walk_asks_for_no_facet_filter():
 
     await _service(client, FakePsPlusRepository([walked])).walk_category(walked)
 
-    assert client.calls == [(walked.category_id, 0, 100)]
+    assert client.calls == [(walked.category_id, 0, PAGE_SIZE)]
 
 
 async def test_an_empty_first_page_stops_as_no_products():
@@ -284,7 +291,8 @@ async def test_an_empty_first_page_stops_as_no_products():
 
 async def test_a_page_budget_stops_short_and_marks_no_departure():
     walked = category()
-    client = FakeStoreClient([page([product()], total=3), page([product()], offset=1, total=3)])
+    total = new_small_count() + 1
+    client = FakeStoreClient([page([product()], total=total), page([product()], offset=1, total=total)])
     repository = FakePsPlusRepository([walked])
 
     progress = await _service(client, repository).walk_category(walked, max_pages=1)

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import math
+
 import pytest
 
 from curator.collections.filter_predicate import (
@@ -24,73 +26,103 @@ from curator.collections.filter_predicate import (
     predicate_to_dict,
 )
 from curator.collections.game_candidate import GameCandidate
-from test_values import lowercase_token
+from test_values import lowercase_token, new_game_id, new_game_title, new_genre_name, new_review_score, new_size_gb
 
 
-def _candidate(genre="RPG", aaa_tier="AAA", composite_score=80.0):
+def _candidate(*, genre, aaa_tier, composite_score=None):
     return GameCandidate(
-        game_id="g1",
-        title="g1",
+        game_id=new_game_id(),
+        title=new_game_title(),
         genre=genre,
         aaa_tier=aaa_tier,
         franchise="",
         composite_score=composite_score,
         rank_score=1,
-        size_gb=10,
+        size_gb=new_size_gb(),
     )
 
 
 def test_genre_in_matches_case_insensitively():
-    assert evaluate(GenreIn(values=("RPG",)), _candidate(genre="rpg")) is True
-    assert evaluate(GenreIn(values=("RPG",)), _candidate(genre="Sports")) is False
+    genre = new_genre_name()
+    other_genre = new_genre_name()
+    tier = lowercase_token()
+    assert evaluate(GenreIn(values=(genre.upper(),)), _candidate(genre=genre.lower(), aaa_tier=tier)) is True
+    assert evaluate(GenreIn(values=(genre.upper(),)), _candidate(genre=other_genre, aaa_tier=tier)) is False
 
 
 def test_tier_in_matches_any_listed_tier():
-    predicate = TierIn(values=("AAA", "AA"))
-    assert evaluate(predicate, _candidate(aaa_tier="AA")) is True
-    assert evaluate(predicate, _candidate(aaa_tier="Indie")) is False
+    genre = new_genre_name()
+    listed_tier = lowercase_token()
+    other_listed_tier = lowercase_token()
+    unlisted_tier = lowercase_token()
+    predicate = TierIn(values=(other_listed_tier, listed_tier))
+    assert evaluate(predicate, _candidate(genre=genre, aaa_tier=listed_tier)) is True
+    assert evaluate(predicate, _candidate(genre=genre, aaa_tier=unlisted_tier)) is False
 
 
 def test_score_at_least_excludes_unscored_games():
-    predicate = ScoreAtLeast(threshold=50.0)
-    assert evaluate(predicate, _candidate(composite_score=None)) is False
-    assert evaluate(predicate, _candidate(composite_score=49.9)) is False
-    assert evaluate(predicate, _candidate(composite_score=50.0)) is True
+    genre = new_genre_name()
+    tier = lowercase_token()
+    threshold = new_review_score()
+    just_below_threshold = math.nextafter(threshold, 0)
+    predicate = ScoreAtLeast(threshold=threshold)
+    assert evaluate(predicate, _candidate(genre=genre, aaa_tier=tier, composite_score=None)) is False
+    assert evaluate(predicate, _candidate(genre=genre, aaa_tier=tier, composite_score=just_below_threshold)) is False
+    assert evaluate(predicate, _candidate(genre=genre, aaa_tier=tier, composite_score=threshold)) is True
 
 
 def test_and_requires_every_child():
-    predicate = And(nodes=(GenreIn(values=("RPG",)), TierIn(values=("Indie",))))
-    assert evaluate(predicate, _candidate(genre="RPG", aaa_tier="Indie")) is True
-    assert evaluate(predicate, _candidate(genre="RPG", aaa_tier="AAA")) is False
+    genre = new_genre_name()
+    tier = lowercase_token()
+    other_tier = lowercase_token()
+    predicate = And(nodes=(GenreIn(values=(genre,)), TierIn(values=(tier,))))
+    assert evaluate(predicate, _candidate(genre=genre, aaa_tier=tier)) is True
+    assert evaluate(predicate, _candidate(genre=genre, aaa_tier=other_tier)) is False
 
 
 def test_or_requires_only_one_child():
-    predicate = Or(nodes=(GenreIn(values=("RPG",)), TierIn(values=("Indie",))))
-    assert evaluate(predicate, _candidate(genre="Sports", aaa_tier="Indie")) is True
-    assert evaluate(predicate, _candidate(genre="Sports", aaa_tier="AAA")) is False
+    genre = new_genre_name()
+    other_genre = new_genre_name()
+    tier = lowercase_token()
+    other_tier = lowercase_token()
+    predicate = Or(nodes=(GenreIn(values=(genre,)), TierIn(values=(tier,))))
+    assert evaluate(predicate, _candidate(genre=other_genre, aaa_tier=tier)) is True
+    assert evaluate(predicate, _candidate(genre=other_genre, aaa_tier=other_tier)) is False
 
 
 def test_criterion_shape_genre_set_or_action_and_indie():
     """The one concrete requirement this tree exists for: genre in SET or (genre == action and
     tier == indie), from the legacy PS4 "Criterion" classifier."""
+    set_genre = new_genre_name()
+    other_set_genre = new_genre_name()
+    action_genre = new_genre_name()
+    unlisted_genre = new_genre_name()
+    indie_tier = lowercase_token()
+    other_tier = lowercase_token()
     predicate = Or(
         nodes=(
-            GenreIn(values=("RPG", "Adventure")),
-            And(nodes=(GenreIn(values=("Action",)), TierIn(values=("Indie",)))),
+            GenreIn(values=(set_genre, other_set_genre)),
+            And(nodes=(GenreIn(values=(action_genre,)), TierIn(values=(indie_tier,)))),
         )
     )
 
-    assert evaluate(predicate, _candidate(genre="RPG", aaa_tier="AAA")) is True
-    assert evaluate(predicate, _candidate(genre="Action", aaa_tier="Indie")) is True
-    assert evaluate(predicate, _candidate(genre="Action", aaa_tier="AAA")) is False
-    assert evaluate(predicate, _candidate(genre="Sports", aaa_tier="Indie")) is False
+    assert evaluate(predicate, _candidate(genre=set_genre, aaa_tier=other_tier)) is True
+    assert evaluate(predicate, _candidate(genre=action_genre, aaa_tier=indie_tier)) is True
+    assert evaluate(predicate, _candidate(genre=action_genre, aaa_tier=other_tier)) is False
+    assert evaluate(predicate, _candidate(genre=unlisted_genre, aaa_tier=indie_tier)) is False
 
 
 def test_predicate_to_dict_and_parse_predicate_round_trip():
     predicate = Or(
         nodes=(
-            GenreIn(values=("RPG", "Adventure")),
-            And(nodes=(GenreIn(values=("Action",)), TierIn(values=("Indie",)), ScoreAtLeast(threshold=60.0))),
+            GenreIn(values=(new_genre_name(), new_genre_name())),
+            And(
+                nodes=(
+                    GenreIn(values=(new_genre_name(),)),
+                    TierIn(values=(lowercase_token(),)),
+                    ScoreAtLeast(threshold=new_review_score()),
+                )
+            ),
         )
     )
 

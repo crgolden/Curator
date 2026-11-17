@@ -4,11 +4,11 @@ unittest.mock)."""
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
 from uuid import UUID
 
 from curator.persistence.follow_repository import FollowRepository
 from curator.persistence.profile_repository import ProfileRepository
+from test_values import new_identity_sub, new_positive_count, new_small_count, new_utc_instant
 
 
 class FakeCursor:
@@ -75,7 +75,7 @@ async def test_get_settings_returns_all_false_defaults_when_no_row():
     pool = FakePool(fetchone_result=None)
     repo = ProfileRepository(pool)
 
-    settings = await repo.get_settings("sub-1")
+    settings = await repo.get_settings(new_identity_sub())
 
     assert settings.is_public is False
     assert settings.show_library is False
@@ -89,7 +89,7 @@ async def test_get_settings_maps_row():
     pool = FakePool(fetchone_result=row)
     repo = ProfileRepository(pool)
 
-    settings = await repo.get_settings("sub-1")
+    settings = await repo.get_settings(new_identity_sub())
 
     assert settings.is_public is True
     assert settings.show_library is True
@@ -99,11 +99,12 @@ async def test_get_settings_maps_row():
 
 
 async def test_upsert_settings_round_trips_every_field():
+    sub = new_identity_sub()
     pool = FakePool()
     repo = ProfileRepository(pool)
 
     await repo.upsert_settings(
-        "sub-1",
+        sub,
         is_public=True,
         show_library=True,
         show_collections=True,
@@ -114,48 +115,54 @@ async def test_upsert_settings_round_trips_every_field():
     sql, params = pool.connections[0].executed[0]
     assert "INSERT INTO user_profiles" in sql
     assert "ON CONFLICT (identity_sub) DO UPDATE" in sql
-    assert params == ("sub-1", True, True, True, False, True)
+    assert params == (sub, True, True, True, False, True)
 
 
 async def test_follow_executes_insert_with_on_conflict_do_nothing():
+    follower = new_identity_sub()
+    followed = new_identity_sub()
     pool = FakePool()
     repo = FollowRepository(pool)
 
-    await repo.follow("sub-a", "sub-b")
+    await repo.follow(follower, followed)
 
     sql, params = pool.connections[0].executed[0]
     assert "INSERT INTO follows" in sql
     assert "ON CONFLICT (follower_sub, followed_sub) DO NOTHING" in sql
-    assert params == ("sub-a", "sub-b")
+    assert params == (follower, followed)
 
 
 async def test_follow_is_idempotent_at_the_repository_call_level():
+    follower = new_identity_sub()
+    followed = new_identity_sub()
     pool = FakePool()
     repo = FollowRepository(pool)
 
-    await repo.follow("sub-a", "sub-b")
-    await repo.follow("sub-a", "sub-b")
+    await repo.follow(follower, followed)
+    await repo.follow(follower, followed)
 
     assert len(pool.connections) == 2
 
 
 async def test_unfollow_returns_true_when_a_row_was_removed():
+    follower = new_identity_sub()
+    followed = new_identity_sub()
     pool = FakePool(rowcount=1)
     repo = FollowRepository(pool)
 
-    removed = await repo.unfollow("sub-a", "sub-b")
+    removed = await repo.unfollow(follower, followed)
 
     assert removed is True
     sql, params = pool.connections[0].executed[0]
     assert "DELETE FROM follows" in sql
-    assert params == ("sub-a", "sub-b")
+    assert params == (follower, followed)
 
 
 async def test_unfollow_returns_false_when_nothing_was_removed():
     pool = FakePool(rowcount=0)
     repo = FollowRepository(pool)
 
-    removed = await repo.unfollow("sub-a", "sub-b")
+    removed = await repo.unfollow(new_identity_sub(), new_identity_sub())
 
     assert removed is False
 
@@ -164,52 +171,58 @@ async def test_is_following_true_when_row_exists():
     pool = FakePool(fetchone_result=(1,))
     repo = FollowRepository(pool)
 
-    assert await repo.is_following("sub-a", "sub-b") is True
+    assert await repo.is_following(new_identity_sub(), new_identity_sub()) is True
 
 
 async def test_is_following_false_when_no_row():
     pool = FakePool(fetchone_result=None)
     repo = FollowRepository(pool)
 
-    assert await repo.is_following("sub-a", "sub-b") is False
+    assert await repo.is_following(new_identity_sub(), new_identity_sub()) is False
 
 
 async def test_follower_count_and_following_count():
-    pool = FakePool(fetchone_result=(3,))
+    count = new_small_count() + 1
+    pool = FakePool(fetchone_result=(count,))
     repo = FollowRepository(pool)
 
-    assert await repo.follower_count("sub-a") == 3
-    assert await repo.following_count("sub-a") == 3
+    assert await repo.follower_count(new_identity_sub()) == count
+    assert await repo.following_count(new_identity_sub()) == count
 
 
 async def test_list_followers_returns_newest_first_and_respects_pagination_params():
-    row1 = ("sub-b", datetime(2026, 2, 1, tzinfo=UTC))
-    row2 = ("sub-c", datetime(2026, 1, 1, tzinfo=UTC))
-    pool = FakePool(fetchall_results=[[row1, row2]])
+    sub = new_identity_sub()
+    newer_sub, newer_at = new_identity_sub(), new_utc_instant()
+    older_sub = new_identity_sub()
+    limit = new_positive_count()
+    offset = limit + new_positive_count()
+    pool = FakePool(fetchall_results=[[(newer_sub, newer_at), (older_sub, new_utc_instant())]])
     repo = FollowRepository(pool)
 
-    edges = await repo.list_followers("sub-a", limit=10, offset=5)
+    edges = await repo.list_followers(sub, limit=limit, offset=offset)
 
-    assert [edge.sub for edge in edges] == ["sub-b", "sub-c"]
-    assert edges[0].followed_at == datetime(2026, 2, 1, tzinfo=UTC)
+    assert [edge.sub for edge in edges] == [newer_sub, older_sub]
+    assert edges[0].followed_at == newer_at
     sql, params = pool.connections[0].executed[0]
     assert "ORDER BY created_at DESC" in sql
     assert "followed_sub = %s" in sql
-    assert params == ("sub-a", 10, 5)
+    assert params == (sub, limit, offset)
 
 
 async def test_list_following_returns_newest_first_and_respects_pagination_params():
-    row1 = ("sub-b", datetime(2026, 2, 1, tzinfo=UTC))
-    pool = FakePool(fetchall_results=[[row1]])
+    sub = new_identity_sub()
+    followed_sub = new_identity_sub()
+    limit = new_positive_count()
+    pool = FakePool(fetchall_results=[[(followed_sub, new_utc_instant())]])
     repo = FollowRepository(pool)
 
-    edges = await repo.list_following("sub-a", limit=25, offset=0)
+    edges = await repo.list_following(sub, limit=limit, offset=0)
 
-    assert [edge.sub for edge in edges] == ["sub-b"]
+    assert [edge.sub for edge in edges] == [followed_sub]
     sql, params = pool.connections[0].executed[0]
     assert "ORDER BY created_at DESC" in sql
     assert "follower_sub = %s" in sql
-    assert params == ("sub-a", 25, 0)
+    assert params == (sub, limit, 0)
 
 
 async def test_list_followers_coerces_uuid_column_to_str():
@@ -217,22 +230,24 @@ async def test_list_followers_coerces_uuid_column_to_str():
     reproduces a production bug where ``FollowEdge.sub`` stayed a ``UUID`` and failed
     ``FollowListEntryResponse`` pydantic validation (``sub: str``) with a real ``ValidationError``.
     """
-    row = (UUID("9bd7af1c-7196-46f1-cadd-08dee5d60140"), datetime(2026, 2, 1, tzinfo=UTC))
+    follower_sub = new_identity_sub()
+    row = (UUID(follower_sub), new_utc_instant())
     pool = FakePool(fetchall_results=[[row]])
     repo = FollowRepository(pool)
 
-    edges = await repo.list_followers("sub-a")
+    edges = await repo.list_followers(new_identity_sub())
 
-    assert edges[0].sub == "9bd7af1c-7196-46f1-cadd-08dee5d60140"
+    assert edges[0].sub == follower_sub
     assert isinstance(edges[0].sub, str)
 
 
 async def test_list_following_coerces_uuid_column_to_str():
-    row = (UUID("cb6d81d9-c670-425b-bfdb-08de789d89c0"), datetime(2026, 2, 1, tzinfo=UTC))
+    followed_sub = new_identity_sub()
+    row = (UUID(followed_sub), new_utc_instant())
     pool = FakePool(fetchall_results=[[row]])
     repo = FollowRepository(pool)
 
-    edges = await repo.list_following("sub-a")
+    edges = await repo.list_following(new_identity_sub())
 
-    assert edges[0].sub == "cb6d81d9-c670-425b-bfdb-08de789d89c0"
+    assert edges[0].sub == followed_sub
     assert isinstance(edges[0].sub, str)

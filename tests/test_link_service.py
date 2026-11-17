@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
-from datetime import UTC, datetime
 
 import pytest
 
@@ -22,6 +22,17 @@ from curator.link_service import (
 from curator.persistence.crypto import TokenCrypto
 from curator.persistence.repository import LinkRecord
 from curator.psn.errors import PsnAuthError
+from curator.token_response import ACCESS_TOKEN_KEY, REFRESH_TOKEN_KEY
+from test_values import (
+    lowercase_token,
+    new_account_id,
+    new_blank,
+    new_email_address,
+    new_identity_sub,
+    new_npsso,
+    new_opaque_token,
+    new_utc_instant,
+)
 
 
 class FakeRepository:
@@ -49,8 +60,8 @@ class FakeRepository:
             token_response_enc=token_response_enc,
             access_token_expires_at=access_token_expires_at,
             refresh_token_expires_at=refresh_token_expires_at,
-            linked_at=datetime(2026, 1, 1, tzinfo=UTC),
-            updated_at=datetime(2026, 1, 1, tzinfo=UTC),
+            linked_at=new_utc_instant(),
+            updated_at=new_utc_instant(),
             last_verified_at=existing.last_verified_at if existing else None,
         )
 
@@ -79,7 +90,7 @@ class FakeRepository:
                 refresh_token_expires_at=existing.refresh_token_expires_at,
                 linked_at=existing.linked_at,
                 updated_at=existing.updated_at,
-                last_verified_at=datetime(2026, 1, 1, 12, tzinfo=UTC),
+                last_verified_at=new_utc_instant(),
             )
 
     async def delete_link(self, sub):
@@ -98,18 +109,18 @@ class FakeAgent:
     def __init__(self, sub, npsso=None, *, account=None, email_info=None, raise_on=None):
         self.sub = sub
         self.npsso = npsso
-        self._account = account or FakeAccount(account_id="psn-account-1")
+        self._account = account or FakeAccount(account_id=new_account_id())
         self._email_info = email_info
         self._raise_on = raise_on or ()
 
     async def whoami(self):
-        if "whoami" in self._raise_on:
-            raise PsnAuthError("boom")
+        if FakeAgent.whoami.__name__ in self._raise_on:
+            raise PsnAuthError(lowercase_token())
         return self._account
 
     async def account_email_verified(self):
-        if "account_email_verified" in self._raise_on:
-            raise PsnAuthError("boom")
+        if FakeAgent.account_email_verified.__name__ in self._raise_on:
+            raise PsnAuthError(lowercase_token())
         return self._email_info
 
 
@@ -119,50 +130,57 @@ def _make_crypto() -> TokenCrypto:
 
 async def _seed_link(repo: FakeRepository, crypto: TokenCrypto, sub: str) -> None:
     """Simulate a token store having already persisted tokens during whoami() (as DbTokenStore does)."""
-    encrypted = crypto.encrypt(b'{"access_token": "AT", "refresh_token": "RT"}')
+    token_response = json.dumps({ACCESS_TOKEN_KEY: new_opaque_token(), REFRESH_TOKEN_KEY: new_opaque_token()})
+    encrypted = crypto.encrypt(token_response.encode())
     await repo.upsert_link(
         sub,
         encrypted,
-        datetime(2026, 1, 1, 1, tzinfo=UTC),
-        datetime(2026, 2, 1, tzinfo=UTC),
+        new_utc_instant(),
+        new_utc_instant(),
     )
 
 
 def test_normalize_email_strips_and_lowercases():
-    assert normalize_email("  Foo@Example.COM  ") == "foo@example.com"
+    email = new_email_address()
+    assert normalize_email(f"{new_blank()}{email.upper()}{new_blank()}") == email
 
 
 def test_emails_match_requires_verified_and_equal():
-    assert emails_match("Foo@Example.com", "foo@example.com", True) is True
-    assert emails_match("foo@example.com", "foo@example.com", False) is False
-    assert emails_match("foo@example.com", "bar@example.com", True) is False
+    email = new_email_address()
+    other_email = new_email_address()
+    assert emails_match(email.upper(), email, True) is True
+    assert emails_match(email, email, False) is False
+    assert emails_match(email, other_email, True) is False
 
 
 async def test_link_verified_match_links_and_sets_account_id():
     repo = FakeRepository()
     crypto = _make_crypto()
-    sub = "sub-1"
+    sub = new_identity_sub()
+    supplied_npsso = new_npsso()
+    email = new_email_address()
+    account_id = new_account_id()
     await _seed_link(repo, crypto, sub)
 
     async def agent_factory(sub_arg, npsso=None):
         assert sub_arg == sub
-        assert npsso == "the-npsso-token"
-        return FakeAgent(sub_arg, npsso, email_info=("user@example.com", True))
+        assert npsso == supplied_npsso
+        return FakeAgent(sub_arg, npsso, account=FakeAccount(account_id=account_id), email_info=(email, True))
 
     result = await link(
         sub,
-        "the-npsso-token",
-        "User@Example.com",
+        supplied_npsso,
+        email.upper(),
         repository=repo,
         token_crypto=crypto,
         agent_factory=agent_factory,
     )
 
     assert isinstance(result, LinkResult)
-    assert result.psn_account_id == "psn-account-1"
-    assert repo.set_link_account_calls == [(sub, "psn-account-1")]
+    assert result.psn_account_id == account_id
+    assert repo.set_link_account_calls == [(sub, account_id)]
     assert repo.delete_calls == []
-    assert repo.links[sub].psn_account_id == "psn-account-1"
+    assert repo.links[sub].psn_account_id == account_id
     assert repo.touch_verified_calls == [sub]
     assert repo.links[sub].last_verified_at is not None
 
@@ -170,17 +188,18 @@ async def test_link_verified_match_links_and_sets_account_id():
 async def test_link_address_mismatch_clears_and_raises():
     repo = FakeRepository()
     crypto = _make_crypto()
-    sub = "sub-1"
+    sub = new_identity_sub()
+    psn_email = new_email_address()
     await _seed_link(repo, crypto, sub)
 
     async def agent_factory(sub_arg, npsso=None):
-        return FakeAgent(sub_arg, npsso, email_info=("other@example.com", True))
+        return FakeAgent(sub_arg, npsso, email_info=(psn_email, True))
 
     with pytest.raises(LinkError) as exc_info:
         await link(
             sub,
-            "npsso",
-            "user@example.com",
+            new_npsso(),
+            new_email_address(),
             repository=repo,
             token_crypto=crypto,
             agent_factory=agent_factory,
@@ -196,17 +215,18 @@ async def test_link_address_mismatch_clears_and_raises():
 async def test_link_matching_but_unverified_clears_and_raises():
     repo = FakeRepository()
     crypto = _make_crypto()
-    sub = "sub-1"
+    sub = new_identity_sub()
+    email = new_email_address()
     await _seed_link(repo, crypto, sub)
 
     async def agent_factory(sub_arg, npsso=None):
-        return FakeAgent(sub_arg, npsso, email_info=("user@example.com", False))
+        return FakeAgent(sub_arg, npsso, email_info=(email, False))
 
     with pytest.raises(LinkError) as exc_info:
         await link(
             sub,
-            "npsso",
-            "user@example.com",
+            new_npsso(),
+            email,
             repository=repo,
             token_crypto=crypto,
             agent_factory=agent_factory,
@@ -221,7 +241,7 @@ async def test_link_matching_but_unverified_clears_and_raises():
 async def test_link_none_email_clears_and_raises_unverified():
     repo = FakeRepository()
     crypto = _make_crypto()
-    sub = "sub-1"
+    sub = new_identity_sub()
     await _seed_link(repo, crypto, sub)
 
     async def agent_factory(sub_arg, npsso=None):
@@ -230,8 +250,8 @@ async def test_link_none_email_clears_and_raises_unverified():
     with pytest.raises(LinkError) as exc_info:
         await link(
             sub,
-            "npsso",
-            "user@example.com",
+            new_npsso(),
+            new_email_address(),
             repository=repo,
             token_crypto=crypto,
             agent_factory=agent_factory,
@@ -246,17 +266,17 @@ async def test_link_none_email_clears_and_raises_unverified():
 async def test_link_psn_auth_error_clears_and_raises_auth_failed():
     repo = FakeRepository()
     crypto = _make_crypto()
-    sub = "sub-1"
+    sub = new_identity_sub()
     await _seed_link(repo, crypto, sub)
 
     async def agent_factory(sub_arg, npsso=None):
-        return FakeAgent(sub_arg, npsso, raise_on=("whoami",))
+        return FakeAgent(sub_arg, npsso, raise_on=(FakeAgent.whoami.__name__,))
 
     with pytest.raises(LinkError) as exc_info:
         await link(
             sub,
-            "npsso",
-            "user@example.com",
+            new_npsso(),
+            new_email_address(),
             repository=repo,
             token_crypto=crypto,
             agent_factory=agent_factory,
@@ -277,34 +297,36 @@ async def test_link_verified_match_with_no_refresh_token_still_links():
     """
     repo = FakeRepository()
     crypto = _make_crypto()
-    sub = "sub-1"
-    encrypted = crypto.encrypt(b'{"access_token": "AT"}')
+    sub = new_identity_sub()
+    email = new_email_address()
+    account_id = new_account_id()
+    encrypted = crypto.encrypt(json.dumps({ACCESS_TOKEN_KEY: new_opaque_token()}).encode())
     await repo.upsert_link(
         sub,
         encrypted,
-        datetime(2026, 1, 1, 1, tzinfo=UTC),
+        new_utc_instant(),
         None,
     )
 
     async def agent_factory(sub_arg, npsso=None):
-        return FakeAgent(sub_arg, npsso, email_info=("user@example.com", True))
+        return FakeAgent(sub_arg, npsso, account=FakeAccount(account_id=account_id), email_info=(email, True))
 
     result = await link(
         sub,
-        "npsso",
-        "user@example.com",
+        new_npsso(),
+        email,
         repository=repo,
         token_crypto=crypto,
         agent_factory=agent_factory,
     )
 
     assert isinstance(result, LinkResult)
-    assert result.psn_account_id == "psn-account-1"
+    assert result.psn_account_id == account_id
     assert result.access_token_expires_at is not None
     assert result.refresh_token_expires_at is None
-    assert repo.set_link_account_calls == [(sub, "psn-account-1")]
+    assert repo.set_link_account_calls == [(sub, account_id)]
     assert repo.touch_verified_calls == [sub]
-    assert repo.links[sub].psn_account_id == "psn-account-1"
+    assert repo.links[sub].psn_account_id == account_id
 
 
 async def test_link_invalid_npsso_rejected_before_any_agent_call():
@@ -316,15 +338,10 @@ async def test_link_invalid_npsso_rejected_before_any_agent_call():
         calls.append(sub_arg)
         raise AssertionError("agent_factory must not be called for an invalid npsso")
 
+    sub, malformed_npsso, email = new_identity_sub(), "{" + lowercase_token(), new_email_address()
+
     with pytest.raises(LinkError) as exc_info:
-        await link(
-            "sub-1",
-            "{not valid json",
-            "user@example.com",
-            repository=repo,
-            token_crypto=crypto,
-            agent_factory=agent_factory,
-        )
+        await link(sub, malformed_npsso, email, repository=repo, token_crypto=crypto, agent_factory=agent_factory)
 
     assert exc_info.value.kind == LINK_ERROR_INVALID_NPSSO
     assert calls == []
@@ -335,28 +352,31 @@ async def test_link_invalid_npsso_rejected_before_any_agent_call():
 async def test_link_accepts_npsso_json_blob():
     repo = FakeRepository()
     crypto = _make_crypto()
-    sub = "sub-1"
+    sub = new_identity_sub()
+    email = new_email_address()
+    account_id = new_account_id()
+    npsso_blob = json.dumps({"npsso": new_npsso()})
     await _seed_link(repo, crypto, sub)
 
     async def agent_factory(sub_arg, npsso=None):
-        assert npsso == '{"npsso": "abc123"}'
-        return FakeAgent(sub_arg, npsso, email_info=("user@example.com", True))
+        assert npsso == npsso_blob
+        return FakeAgent(sub_arg, npsso, account=FakeAccount(account_id=account_id), email_info=(email, True))
 
     result = await link(
         sub,
-        '{"npsso": "abc123"}',
-        "user@example.com",
+        npsso_blob,
+        email,
         repository=repo,
         token_crypto=crypto,
         agent_factory=agent_factory,
     )
-    assert result.psn_account_id == "psn-account-1"
+    assert result.psn_account_id == account_id
 
 
 async def test_unlink_clears_the_link():
     repo = FakeRepository()
     crypto = _make_crypto()
-    sub = "sub-1"
+    sub = new_identity_sub()
     await _seed_link(repo, crypto, sub)
 
     await unlink(sub, repository=repo, token_crypto=crypto)

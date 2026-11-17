@@ -3,9 +3,8 @@ database, no unittest.mock)."""
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
-
 from curator.persistence.repository import LinkRecord, Repository
+from test_values import new_account_id, new_identity_sub, new_opaque_token, new_utc_instant
 
 
 class FakeCursor:
@@ -59,47 +58,52 @@ class FakePool:
 
 
 async def test_upsert_user_executes_upsert():
+    sub = new_identity_sub()
     pool = FakePool()
     repo = Repository(pool)
 
-    await repo.upsert_user("11111111-1111-1111-1111-111111111111")
+    await repo.upsert_user(sub)
 
     conn = pool.connections[0]
     sql, params = conn.executed[0]
     assert "INSERT INTO app_users" in sql
     assert "ON CONFLICT (identity_sub) DO UPDATE SET updated_at = now()" in sql
-    assert params == ("11111111-1111-1111-1111-111111111111",)
+    assert params == (sub,)
 
 
 async def test_touch_login_executes_update():
+    sub = new_identity_sub()
     pool = FakePool()
     repo = Repository(pool)
 
-    await repo.touch_login("sub-1")
+    await repo.touch_login(sub)
 
     conn = pool.connections[0]
     sql, params = conn.executed[0]
     assert "UPDATE app_users" in sql
     assert "last_login_at = now()" in sql
-    assert params == ("sub-1",)
+    assert params == (sub,)
 
 
 async def test_get_link_returns_none_when_no_row():
     pool = FakePool(fetchone_result=None)
     repo = Repository(pool)
 
-    assert await repo.get_link("sub-1") is None
+    assert await repo.get_link(new_identity_sub()) is None
 
 
 async def test_get_link_maps_row_to_link_record():
-    linked_at = datetime(2026, 1, 1, tzinfo=UTC)
-    updated_at = datetime(2026, 2, 1, tzinfo=UTC)
-    access_expires = datetime(2026, 1, 2, tzinfo=UTC)
-    refresh_expires = datetime(2026, 3, 1, tzinfo=UTC)
-    last_verified_at = datetime(2026, 2, 2, tzinfo=UTC)
+    sub = new_identity_sub()
+    psn_account_id = new_account_id()
+    token_response_enc = new_opaque_token().encode()
+    linked_at = new_utc_instant()
+    updated_at = new_utc_instant()
+    access_expires = new_utc_instant()
+    refresh_expires = new_utc_instant()
+    last_verified_at = new_utc_instant()
     row = (
-        "psn-account-1",
-        b"encrypted-bytes",
+        psn_account_id,
+        token_response_enc,
         access_expires,
         refresh_expires,
         linked_at,
@@ -115,11 +119,11 @@ async def test_get_link_maps_row_to_link_record():
     pool = FakePool(fetchone_result=row)
     repo = Repository(pool)
 
-    result = await repo.get_link("sub-1")
+    result = await repo.get_link(sub)
 
     assert result == LinkRecord(
-        psn_account_id="psn-account-1",
-        token_response_enc=b"encrypted-bytes",
+        psn_account_id=psn_account_id,
+        token_response_enc=token_response_enc,
         access_token_expires_at=access_expires,
         refresh_token_expires_at=refresh_expires,
         linked_at=linked_at,
@@ -137,19 +141,17 @@ async def test_get_link_maps_row_to_link_record():
     assert "harvest_trophies, harvest_identity, harvest_presence, harvest_devices" in sql
     assert "allow_friend_writes, allow_chat_writes" in sql
     assert "FROM psn_links WHERE identity_sub = %s" in sql
-    assert params == ("sub-1",)
+    assert params == (sub,)
 
 
 async def test_get_link_maps_harvest_flags_when_some_are_true():
-    linked_at = datetime(2026, 1, 1, tzinfo=UTC)
-    updated_at = datetime(2026, 2, 1, tzinfo=UTC)
     row = (
-        "psn-account-1",
-        b"encrypted-bytes",
+        new_account_id(),
+        new_opaque_token().encode(),
         None,
         None,
-        linked_at,
-        updated_at,
+        new_utc_instant(),
+        new_utc_instant(),
         None,
         True,
         False,
@@ -161,7 +163,7 @@ async def test_get_link_maps_harvest_flags_when_some_are_true():
     pool = FakePool(fetchone_result=row)
     repo = Repository(pool)
 
-    result = await repo.get_link("sub-1")
+    result = await repo.get_link(new_identity_sub())
 
     assert result is not None
     assert result.harvest_trophies is True
@@ -173,29 +175,33 @@ async def test_get_link_maps_harvest_flags_when_some_are_true():
 
 
 async def test_touch_link_verified_executes_update():
+    sub = new_identity_sub()
     pool = FakePool()
     repo = Repository(pool)
 
-    await repo.touch_link_verified("sub-1")
+    await repo.touch_link_verified(sub)
 
     conn = pool.connections[0]
     sql, params = conn.executed[0]
     assert "UPDATE psn_links SET last_verified_at = now()" in sql
-    assert params == ("sub-1",)
+    assert params == (sub,)
 
 
 async def test_upsert_link_sql_has_on_conflict_coalesce_and_correct_params():
+    sub = new_identity_sub()
+    psn_account_id = new_account_id()
+    token_response_enc = new_opaque_token().encode()
     pool = FakePool()
     repo = Repository(pool)
-    access_expires = datetime(2026, 1, 2, tzinfo=UTC)
-    refresh_expires = datetime(2026, 3, 1, tzinfo=UTC)
+    access_expires = new_utc_instant()
+    refresh_expires = new_utc_instant()
 
     await repo.upsert_link(
-        "sub-1",
-        b"encrypted",
+        sub,
+        token_response_enc,
         access_expires,
         refresh_expires,
-        psn_account_id="psn-account-1",
+        psn_account_id=psn_account_id,
     )
 
     conn = pool.connections[0]
@@ -204,37 +210,42 @@ async def test_upsert_link_sql_has_on_conflict_coalesce_and_correct_params():
     assert "ON CONFLICT (identity_sub) DO UPDATE SET" in sql
     assert "COALESCE(EXCLUDED.psn_account_id, psn_links.psn_account_id)" in sql
     assert "updated_at = now()" in sql
-    assert params == ("sub-1", "psn-account-1", b"encrypted", access_expires, refresh_expires)
+    assert params == (sub, psn_account_id, token_response_enc, access_expires, refresh_expires)
 
 
 async def test_upsert_link_defaults_psn_account_id_to_none():
+    sub = new_identity_sub()
+    token_response_enc = new_opaque_token().encode()
     pool = FakePool()
     repo = Repository(pool)
 
-    await repo.upsert_link("sub-1", b"encrypted", None, None)
+    await repo.upsert_link(sub, token_response_enc, None, None)
 
     _, params = pool.connections[0].executed[0]
-    assert params == ("sub-1", None, b"encrypted", None, None)
+    assert params == (sub, None, token_response_enc, None, None)
 
 
 async def test_set_link_account_executes_update():
+    sub = new_identity_sub()
+    psn_account_id = new_account_id()
     pool = FakePool()
     repo = Repository(pool)
 
-    await repo.set_link_account("sub-1", "psn-account-1")
+    await repo.set_link_account(sub, psn_account_id)
 
     conn = pool.connections[0]
     sql, params = conn.executed[0]
     assert "UPDATE psn_links SET psn_account_id" in sql
-    assert params == ("psn-account-1", "sub-1")
+    assert params == (psn_account_id, sub)
 
 
 async def test_set_psn_preferences_executes_update_with_every_capability_flag():
+    sub = new_identity_sub()
     pool = FakePool()
     repo = Repository(pool)
 
     await repo.set_psn_preferences(
-        "sub-1",
+        sub,
         harvest_trophies=True,
         harvest_identity=False,
         harvest_presence=True,
@@ -248,15 +259,16 @@ async def test_set_psn_preferences_executes_update_with_every_capability_flag():
     assert "UPDATE psn_links SET harvest_trophies = %s, harvest_identity = %s" in sql
     assert "harvest_presence = %s, harvest_devices = %s, allow_friend_writes = %s" in sql
     assert "allow_chat_writes = %s, updated_at = now() WHERE identity_sub = %s" in sql
-    assert params == (True, False, True, False, True, False, "sub-1")
+    assert params == (True, False, True, False, True, False, sub)
 
 
 async def test_set_psn_preferences_defaults_write_flags_off_when_caller_omits_them():
+    sub = new_identity_sub()
     pool = FakePool()
     repo = Repository(pool)
 
     await repo.set_psn_preferences(
-        "sub-1",
+        sub,
         harvest_trophies=True,
         harvest_identity=True,
         harvest_presence=True,
@@ -264,7 +276,7 @@ async def test_set_psn_preferences_defaults_write_flags_off_when_caller_omits_th
     )
 
     _, params = pool.connections[0].executed[0]
-    assert params == (True, True, True, True, False, False, "sub-1")
+    assert params == (True, True, True, True, False, False, sub)
 
 
 async def test_set_psn_preferences_noops_without_raising_when_unlinked():
@@ -272,7 +284,7 @@ async def test_set_psn_preferences_noops_without_raising_when_unlinked():
     repo = Repository(pool)
 
     await repo.set_psn_preferences(
-        "unlinked-sub",
+        new_identity_sub(),
         harvest_trophies=True,
         harvest_identity=True,
         harvest_presence=True,
@@ -284,22 +296,24 @@ async def test_set_psn_preferences_noops_without_raising_when_unlinked():
 
 
 async def test_delete_link_executes_delete():
+    sub = new_identity_sub()
     pool = FakePool()
     repo = Repository(pool)
 
-    await repo.delete_link("sub-1")
+    await repo.delete_link(sub)
 
     conn = pool.connections[0]
     sql, params = conn.executed[0]
     assert "DELETE FROM psn_links WHERE identity_sub = %s" in sql
-    assert params == ("sub-1",)
+    assert params == (sub,)
 
 
 async def test_each_method_call_checks_out_its_own_connection():
+    sub = new_identity_sub()
     pool = FakePool()
     repo = Repository(pool)
 
-    await repo.upsert_user("sub-1")
-    await repo.touch_login("sub-1")
+    await repo.upsert_user(sub)
+    await repo.touch_login(sub)
 
     assert len(pool.connections) == 2

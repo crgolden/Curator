@@ -3,9 +3,8 @@ test_repository.py (no real database, no unittest.mock)."""
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
-
 from curator.persistence.enrichment_keys_repository import EnrichmentKeysRepository
+from test_values import new_identity_sub, new_opaque_token, new_utc_instant
 
 
 class FakeCursor:
@@ -51,11 +50,15 @@ class FakePool:
         return conn
 
 
+def _encrypted_key() -> bytes:
+    return new_opaque_token().encode()
+
+
 async def test_get_status_returns_both_false_when_no_row():
     pool = FakePool(fetchone_result=None)
     repo = EnrichmentKeysRepository(pool)
 
-    status = await repo.get_status("sub-1")
+    status = await repo.get_status(new_identity_sub())
 
     assert status.rawg_configured is False
     assert status.opencritic_configured is False
@@ -66,13 +69,13 @@ async def test_get_status_returns_both_false_when_no_row():
 
 
 async def test_get_status_maps_row():
-    rawg_added = datetime(2026, 1, 1, tzinfo=UTC)
-    oc_added = datetime(2026, 2, 1, tzinfo=UTC)
-    row = (b"rawg-enc", b"oc-enc", rawg_added, oc_added, None, None)
+    rawg_added = new_utc_instant()
+    oc_added = new_utc_instant()
+    row = (_encrypted_key(), _encrypted_key(), rawg_added, oc_added, None, None)
     pool = FakePool(fetchone_result=row)
     repo = EnrichmentKeysRepository(pool)
 
-    status = await repo.get_status("sub-1")
+    status = await repo.get_status(new_identity_sub())
 
     assert status.rawg_configured is True
     assert status.opencritic_configured is True
@@ -83,23 +86,23 @@ async def test_get_status_maps_row():
 
 
 async def test_get_status_treats_null_column_as_not_configured():
-    row = (None, b"oc-enc", None, datetime(2026, 2, 1, tzinfo=UTC), None, None)
+    row = (None, _encrypted_key(), None, new_utc_instant(), None, None)
     pool = FakePool(fetchone_result=row)
     repo = EnrichmentKeysRepository(pool)
 
-    status = await repo.get_status("sub-1")
+    status = await repo.get_status(new_identity_sub())
 
     assert status.rawg_configured is False
     assert status.opencritic_configured is True
 
 
 async def test_get_status_maps_rejected_at_columns():
-    rejected = datetime(2026, 3, 1, tzinfo=UTC)
-    row = (b"rawg-enc", None, datetime(2026, 1, 1, tzinfo=UTC), None, rejected, None)
+    rejected = new_utc_instant()
+    row = (_encrypted_key(), None, new_utc_instant(), None, rejected, None)
     pool = FakePool(fetchone_result=row)
     repo = EnrichmentKeysRepository(pool)
 
-    status = await repo.get_status("sub-1")
+    status = await repo.get_status(new_identity_sub())
 
     assert status.rawg_configured is True
     assert status.rawg_key_rejected_at == rejected
@@ -110,21 +113,24 @@ async def test_get_decrypted_key_material_returns_none_none_when_no_row():
     pool = FakePool(fetchone_result=None)
     repo = EnrichmentKeysRepository(pool)
 
-    assert await repo.get_decrypted_key_material("sub-1") == (None, None)
+    assert await repo.get_decrypted_key_material(new_identity_sub()) == (None, None)
 
 
 async def test_get_decrypted_key_material_returns_raw_bytes():
-    pool = FakePool(fetchone_result=(b"rawg-enc", None))
+    rawg_key = _encrypted_key()
+    pool = FakePool(fetchone_result=(rawg_key, None))
     repo = EnrichmentKeysRepository(pool)
 
-    assert await repo.get_decrypted_key_material("sub-1") == (b"rawg-enc", None)
+    assert await repo.get_decrypted_key_material(new_identity_sub()) == (rawg_key, None)
 
 
 async def test_upsert_rawg_key_executes_upsert():
+    sub = new_identity_sub()
+    rawg_key = _encrypted_key()
     pool = FakePool()
     repo = EnrichmentKeysRepository(pool)
 
-    await repo.upsert_rawg_key("sub-1", b"rawg-enc")
+    await repo.upsert_rawg_key(sub, rawg_key)
 
     conn = pool.connections[0]
     sql, params = conn.executed[0]
@@ -132,71 +138,77 @@ async def test_upsert_rawg_key_executes_upsert():
     assert "ON CONFLICT (identity_sub) DO UPDATE" in sql
     assert "rawg_api_key_enc" in sql
     assert "rawg_key_rejected_at = NULL" in sql
-    assert params == ("sub-1", b"rawg-enc")
+    assert params == (sub, rawg_key)
 
 
 async def test_upsert_opencritic_key_executes_upsert():
+    sub = new_identity_sub()
+    opencritic_key = _encrypted_key()
     pool = FakePool()
     repo = EnrichmentKeysRepository(pool)
 
-    await repo.upsert_opencritic_key("sub-1", b"oc-enc")
+    await repo.upsert_opencritic_key(sub, opencritic_key)
 
     conn = pool.connections[0]
     sql, params = conn.executed[0]
     assert "opencritic_api_key_enc" in sql
     assert "opencritic_key_rejected_at = NULL" in sql
-    assert params == ("sub-1", b"oc-enc")
+    assert params == (sub, opencritic_key)
 
 
 async def test_mark_rawg_key_rejected_updates_only_rawg_rejected_at():
+    sub = new_identity_sub()
     pool = FakePool()
     repo = EnrichmentKeysRepository(pool)
 
-    await repo.mark_rawg_key_rejected("sub-1")
+    await repo.mark_rawg_key_rejected(sub)
 
     conn = pool.connections[0]
     sql, params = conn.executed[0]
     assert "rawg_key_rejected_at = now()" in sql
     assert "opencritic_key_rejected_at" not in sql
-    assert params == ("sub-1",)
+    assert params == (sub,)
 
 
 async def test_mark_opencritic_key_rejected_updates_only_opencritic_rejected_at():
+    sub = new_identity_sub()
     pool = FakePool()
     repo = EnrichmentKeysRepository(pool)
 
-    await repo.mark_opencritic_key_rejected("sub-1")
+    await repo.mark_opencritic_key_rejected(sub)
 
     conn = pool.connections[0]
     sql, params = conn.executed[0]
     assert "opencritic_key_rejected_at = now()" in sql
     assert "rawg_key_rejected_at" not in sql
-    assert params == ("sub-1",)
+    assert params == (sub,)
 
 
 async def test_delete_rawg_key_clears_only_rawg_columns():
+    sub = new_identity_sub()
     pool = FakePool()
     repo = EnrichmentKeysRepository(pool)
 
-    await repo.delete_rawg_key("sub-1")
+    await repo.delete_rawg_key(sub)
 
     conn = pool.connections[0]
     sql, params = conn.executed[0]
     assert "rawg_api_key_enc = NULL" in sql
     assert "rawg_added_at = NULL" in sql
     assert "opencritic_api_key_enc" not in sql
-    assert params == ("sub-1",)
+    assert params == (sub,)
 
 
 async def test_delete_opencritic_key_clears_only_opencritic_columns():
+    sub = new_identity_sub()
     pool = FakePool()
     repo = EnrichmentKeysRepository(pool)
 
-    await repo.delete_opencritic_key("sub-1")
+    await repo.delete_opencritic_key(sub)
 
     conn = pool.connections[0]
     sql, params = conn.executed[0]
     assert "opencritic_api_key_enc = NULL" in sql
     assert "opencritic_added_at = NULL" in sql
     assert "rawg_api_key_enc" not in sql
-    assert params == ("sub-1",)
+    assert params == (sub,)

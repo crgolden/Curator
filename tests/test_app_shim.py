@@ -11,13 +11,14 @@ import pytest
 
 import curator.app
 import curator.telemetry as telemetry
+from test_values import lowercase_token
 
 _APP_SHIM_PATH = pathlib.Path(__file__).resolve().parent.parent / "app.py"
 
 
 def _load_app_shim(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(curator.app, "create_app", lambda: object())
-    spec = importlib.util.spec_from_file_location("curator_app_shim", _APP_SHIM_PATH)
+    spec = importlib.util.spec_from_file_location(lowercase_token(), _APP_SHIM_PATH)
     assert spec is not None
     assert spec.loader is not None
     module = importlib.util.module_from_spec(spec)

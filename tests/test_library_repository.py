@@ -11,12 +11,30 @@ from curator.catalog.cover_art import SQUARE_COVER_ART_SQL
 from curator.library.repository import (
     _OWNED_PLATFORMS_SQL,
     _SORT_COLUMNS,
+    HIDDEN_ONLY,
     HIDDEN_REASON,
+    LIBRARY_SOURCE_PSN,
     TROPHY_MATCHED,
     TROPHY_NOT_ATTEMPTED,
     TROPHY_UNMATCHED,
     LibraryRepository,
     LibrarySortField,
+)
+from curator.psn.title_platform import PS4, PS5
+from test_values import (
+    lowercase_token,
+    new_cover_image_url,
+    new_game_id,
+    new_game_title,
+    new_genre_name,
+    new_identity_sub,
+    new_np_communication_id,
+    new_percent_completed,
+    new_positive_count,
+    new_psn_rating,
+    new_review_score,
+    new_store_product_id,
+    new_utc_instant,
 )
 
 
@@ -83,39 +101,52 @@ async def test_upsert_manual_entry_records_platforms_only_when_a_row_was_written
     pool = FakePool(rowcount=0)
     repo = LibraryRepository(pool)
 
-    await repo.upsert_manual_entry("sub-1", "game-1", platforms=("PS5",), owned_edition=None)
+    await repo.upsert_manual_entry(new_identity_sub(), new_game_id(), platforms=(PS5,), owned_edition=None)
 
     executed = pool.connections[0].executed
     assert not any("library_entry_platforms" in sql for sql, _ in executed)
 
 
 async def test_list_entries_with_enrichment_maps_rows_and_total():
+    identity_sub = new_identity_sub()
+    expected_total = new_positive_count()
+    first_game_id = new_game_id()
+    second_game_id = new_game_id()
+    genre = new_genre_name()
+    rawg_rating = new_review_score()
+    opencritic_rating = new_review_score()
+    psn_rating = new_psn_rating()
+    product_id = new_store_product_id()
+    np_communication_id = new_np_communication_id()
+    percent_completed = new_percent_completed()
+    cover_image_url = new_cover_image_url()
+    second_source = lowercase_token()
     pool = FakePool(
-        fetchone_results=[(2,)],
+        fetchone_results=[(expected_total,)],
         fetchall_results=[
             [
                 (
-                    "game-1",
-                    "Elden Ring",
-                    "Action RPG",
-                    96.0,
-                    94.0,
-                    4.8,
-                    "product-1",
+                    first_game_id,
+                    new_game_title(),
+                    genre,
+                    rawg_rating,
+                    opencritic_rating,
+                    psn_rating,
+                    product_id,
                     True,
                     True,
                     False,
                     True,
-                    "NPWR12345_00",
-                    63,
-                    "psn",
-                    "https://cdn.example/elden-ring.jpg",
-                    ["PS5", "PS4"],
-                    "2026-09-01T00:00:00Z",
+                    np_communication_id,
+                    percent_completed,
+                    LIBRARY_SOURCE_PSN,
+                    cover_image_url,
+                    [PS5, PS4],
+                    new_utc_instant(),
                 ),
                 (
-                    "game-2",
-                    "Store Enriched Only",
+                    second_game_id,
+                    new_game_title(),
                     None,
                     None,
                     None,
@@ -127,7 +158,7 @@ async def test_list_entries_with_enrichment_maps_rows_and_total():
                     False,
                     None,
                     None,
-                    "manual",
+                    second_source,
                     None,
                     [],
                     None,
@@ -137,33 +168,32 @@ async def test_list_entries_with_enrichment_maps_rows_and_total():
     )
     repo = LibraryRepository(pool)
 
-    games, total = await repo.list_entries_with_enrichment("sub-1")
+    games, total = await repo.list_entries_with_enrichment(identity_sub)
 
-    assert total == 2
-    assert len(games) == 2
-    assert games[0].game_id == "game-1"
+    assert total == expected_total
+    assert [game.game_id for game in games] == [first_game_id, second_game_id]
     assert games[0].trophy_match == TROPHY_MATCHED
     assert games[1].trophy_match == TROPHY_NOT_ATTEMPTED
-    assert games[0].genre == "Action RPG"
-    assert games[0].rawg_rating == 96.0
-    assert games[0].opencritic_rating == 94.0
-    assert games[0].psn_rating == 4.8
-    assert games[0].psn_product_id == "product-1"
+    assert games[0].genre == genre
+    assert games[0].rawg_rating == rawg_rating
+    assert games[0].opencritic_rating == opencritic_rating
+    assert games[0].psn_rating == psn_rating
+    assert games[0].psn_product_id == product_id
     assert games[0].rawg_enriched is True
     assert games[0].opencritic_enriched is True
     assert games[0].psn_enriched is False
     assert games[1].psn_enriched is True
     assert games[0].is_active is True
-    assert games[0].np_communication_id == "NPWR12345_00"
+    assert games[0].np_communication_id == np_communication_id
 
-    assert games[0].percent_completed == 63
-    assert games[0].cover_image_url == "https://cdn.example/elden-ring.jpg"
+    assert games[0].percent_completed == percent_completed
+    assert games[0].cover_image_url == cover_image_url
     assert games[1].percent_completed is None
     assert games[1].genre is None
     assert games[1].cover_image_url is None
-    assert games[0].source == "psn"
-    assert games[1].source == "manual", "provenance must survive the row mapping so the UI can mark it"
-    assert games[0].platforms == ("PS5", "PS4")
+    assert games[0].source == LIBRARY_SOURCE_PSN
+    assert games[1].source == second_source, "provenance must survive the row mapping so the UI can mark it"
+    assert games[0].platforms == (PS5, PS4)
     assert games[1].platforms == ()
 
     assert games[1].is_active is False
@@ -194,10 +224,10 @@ async def test_list_entries_with_enrichment_reports_psn_enriched_from_the_column
         True,
         None,
         None,
-        "psn",
+        LIBRARY_SOURCE_PSN,
         None,
         None,
-        "2026-09-01T00:00:00Z",
+        new_utc_instant(),
     )
     pool = FakePool(fetchone_results=[(1,)], fetchall_results=[[concept_without_a_star_rating]])
     repo = LibraryRepository(pool)
@@ -229,7 +259,7 @@ async def test_list_entries_hidden_only_lists_nothing_but_hidden_games():
     pool = FakePool(fetchone_results=[(0,)], fetchall_results=[[]])
     repo = LibraryRepository(pool)
 
-    await repo.list_entries_with_enrichment(str(uuid4()), hidden="only")
+    await repo.list_entries_with_enrichment(str(uuid4()), hidden=HIDDEN_ONLY)
 
     select_sql, _ = pool.connections[0].executed[1]
     assert "FROM library_exclusions lx" in select_sql
@@ -283,16 +313,20 @@ async def test_list_entries_with_enrichment_builds_search_and_genre_conditions()
     pool = FakePool(fetchone_results=[(0,)], fetchall_results=[[]])
     repo = LibraryRepository(pool)
 
-    await repo.list_entries_with_enrichment("sub-1", search="ring", genre="Action RPG")
+    identity_sub = new_identity_sub()
+    search = lowercase_token()
+    genre = new_genre_name()
+
+    await repo.list_entries_with_enrichment(identity_sub, search=search, genre=genre)
 
     count_sql, count_params = pool.connections[0].executed[0]
     assert "ILIKE" in count_sql
     assert "gen.name = %s" in count_sql
-    assert count_params == ("sub-1", "%ring%", "Action RPG")
+    assert count_params == (identity_sub, f"%{search}%", genre)
 
     select_sql, select_params = pool.connections[0].executed[1]
     assert "ILIKE" in select_sql
-    assert select_params == ("sub-1", "%ring%", "Action RPG", 20, 0)
+    assert select_params == (identity_sub, f"%{search}%", genre, 20, 0)
 
 
 async def test_list_entries_with_enrichment_rejects_unknown_sort_field():
@@ -300,7 +334,7 @@ async def test_list_entries_with_enrichment_rejects_unknown_sort_field():
     repo = LibraryRepository(pool)
 
     with pytest.raises(KeyError):
-        await repo.list_entries_with_enrichment("sub-1", sort="not_a_real_field")
+        await repo.list_entries_with_enrichment(new_identity_sub(), sort=lowercase_token())
 
 
 def test_the_sort_allow_list_covers_exactly_the_declared_sort_fields():
@@ -312,7 +346,7 @@ async def test_list_entries_with_enrichment_orders_by_sort_column_nulls_last(sor
     pool = FakePool(fetchone_results=[(0,)], fetchall_results=[[]])
     repo = LibraryRepository(pool)
 
-    await repo.list_entries_with_enrichment("sub-1", sort=sort, sort_dir="desc")
+    await repo.list_entries_with_enrichment(new_identity_sub(), sort=sort, sort_dir="desc")
 
     select_sql, _ = pool.connections[0].executed[1]
     assert f"ORDER BY {_SORT_COLUMNS[sort]} DESC NULLS LAST, g.canonical_title ASC" in select_sql
@@ -325,7 +359,7 @@ async def test_list_entries_with_enrichment_reads_platforms_as_a_scalar_subquery
     pool = FakePool(fetchone_results=[(0,)], fetchall_results=[[]])
     repo = LibraryRepository(pool)
 
-    await repo.list_entries_with_enrichment("sub-1")
+    await repo.list_entries_with_enrichment(new_identity_sub())
 
     count_sql, _ = pool.connections[0].executed[0]
     select_sql, _ = pool.connections[0].executed[1]
@@ -337,8 +371,8 @@ async def test_list_entries_with_enrichment_reads_platforms_as_a_scalar_subquery
 async def test_list_entries_with_enrichment_defaults_absent_platforms_to_empty():
     """``array_agg`` yields NULL over no rows; the caller must see an empty tuple, not ``None``."""
     row = (
-        "game-1",
-        "Solo",
+        new_game_id(),
+        new_game_title(),
         None,
         None,
         None,
@@ -350,7 +384,7 @@ async def test_list_entries_with_enrichment_defaults_absent_platforms_to_empty()
         True,
         None,
         None,
-        "manual",
+        lowercase_token(),
         None,
         None,
         None,
@@ -358,7 +392,7 @@ async def test_list_entries_with_enrichment_defaults_absent_platforms_to_empty()
     pool = FakePool(fetchone_results=[(1,)], fetchall_results=[[row]])
     repo = LibraryRepository(pool)
 
-    games, _total = await repo.list_entries_with_enrichment("sub-1")
+    games, _total = await repo.list_entries_with_enrichment(new_identity_sub())
 
     assert games[0].platforms == ()
 
@@ -370,7 +404,7 @@ async def test_list_entries_with_enrichment_uses_the_shared_cover_art_expression
     pool = FakePool(fetchone_results=[(0,)], fetchall_results=[[]])
     repo = LibraryRepository(pool)
 
-    await repo.list_entries_with_enrichment("sub-1")
+    await repo.list_entries_with_enrichment(new_identity_sub())
 
     select_sql, _ = pool.connections[0].executed[1]
     assert SQUARE_COVER_ART_SQL in select_sql
@@ -381,29 +415,36 @@ async def test_list_entries_with_enrichment_applies_limit_and_offset():
     pool = FakePool(fetchone_results=[(0,)], fetchall_results=[[]])
     repo = LibraryRepository(pool)
 
-    await repo.list_entries_with_enrichment("sub-1", limit=5, offset=10)
+    limit = new_positive_count()
+    offset = new_positive_count()
+
+    await repo.list_entries_with_enrichment(new_identity_sub(), limit=limit, offset=offset)
 
     _, select_params = pool.connections[0].executed[1]
     assert select_params is not None
-    assert select_params[-2:] == (5, 10)
+    paging = (limit, offset)
+    assert select_params[-len(paging) :] == paging
 
 
 async def test_list_genres_returns_distinct_sorted_names():
-    pool = FakePool(fetchall_results=[[("Puzzle",), ("RPG",)]])
+    identity_sub = new_identity_sub()
+    first_genre = new_genre_name()
+    second_genre = new_genre_name()
+    pool = FakePool(fetchall_results=[[(first_genre,), (second_genre,)]])
     repo = LibraryRepository(pool)
 
-    genres = await repo.list_genres("sub-1")
+    genres = await repo.list_genres(identity_sub)
 
-    assert genres == ["Puzzle", "RPG"]
+    assert genres == [first_genre, second_genre]
     sql, params = pool.connections[0].executed[0]
     assert "SELECT DISTINCT gen.name" in sql
-    assert params == ("sub-1",)
+    assert params == (identity_sub,)
 
 
 async def test_list_genres_empty_when_no_rows():
     repo = LibraryRepository(FakePool(fetchall_results=[[]]))
 
-    assert await repo.list_genres("sub-1") == []
+    assert await repo.list_genres(new_identity_sub()) == []
 
 
 async def test_clear_trophy_progress_erases_percentages_but_keeps_the_match():
@@ -415,10 +456,12 @@ async def test_clear_trophy_progress_erases_percentages_but_keeps_the_match():
     pool = FakePool()
     repo = LibraryRepository(pool)
 
-    await repo.clear_trophy_progress("sub-1")
+    identity_sub = new_identity_sub()
+
+    await repo.clear_trophy_progress(identity_sub)
 
     sql, params = pool.connections[0].executed[0]
     assert "trophy_percent_completed = NULL" in sql
     assert "trophy_progress_fetched_at = NULL" in sql
     assert "np_communication_id" not in sql
-    assert params == ("sub-1",)
+    assert params == (identity_sub,)

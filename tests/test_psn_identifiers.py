@@ -12,7 +12,7 @@ from curator.psn.identifiers import (
 from curator.psn.models import ALL_TROPHY_GROUPS
 from curator.psn.mutation_service import group_member_url
 from curator.psn.session import PsnSession
-from test_values import new_group_id, new_trophy_group_id
+from test_values import new_direct_message_group_id, new_group_id, new_trophy_group_id
 
 _TRAVERSAL_PAYLOADS = (
     "..",
@@ -75,12 +75,12 @@ def test_trophy_group_rejects_everything_else(value):
 
 
 def test_group_id_accepts_a_derived_one_to_one_dm_id():
-    value = "~300A4EB95AD46BAD.7DEFC8FC0BA52FCB"
+    value = new_direct_message_group_id()
     assert validate_group_id(value) == value
 
 
 def test_group_id_accepts_a_server_allocated_multi_member_id():
-    value = "ba08b67ca0b044b7688a29abdc884f37b5dd47cd-215"
+    value = new_group_id()
     assert validate_group_id(value) == value
 
 

@@ -31,23 +31,33 @@ from curator.app import HEALTH_PATH, HEALTHY_BODY, create_app
 from curator.persistence.crypto import TokenCrypto
 from curator.settings import Settings
 from test_routes import FakeAgentFactory, FakeRepository, FakeTokenValidator
-from test_values import lowercase_token, new_opaque_token, new_sha256_hash
+from test_values import (
+    lowercase_token,
+    new_database_url,
+    new_endpoint_url,
+    new_opaque_token,
+    new_port,
+    new_sha256_hash,
+    new_url_on_host,
+)
+
+_ALLOY_ENDPOINT = f"{new_endpoint_url()}:{new_port()}"
 
 _SETTINGS_NO_TELEMETRY = Settings(
-    oidc_authority="https://identity.example.test",
-    token_key="token-key",
-    database_url="postgresql://unused",
-    store_graphql_endpoint=f"https://{lowercase_token()}.example.test",
+    oidc_authority=new_endpoint_url(),
+    token_key=new_opaque_token(),
+    database_url=new_database_url(),
+    store_graphql_endpoint=new_endpoint_url(),
     store_query_hashes=(new_sha256_hash(),),
 )
 
 _SETTINGS_WITH_TELEMETRY = Settings(
-    oidc_authority="https://identity.example.test",
-    token_key="token-key",
-    database_url="postgresql://unused",
-    store_graphql_endpoint=f"https://{lowercase_token()}.example.test",
+    oidc_authority=new_endpoint_url(),
+    token_key=new_opaque_token(),
+    database_url=new_database_url(),
+    store_graphql_endpoint=new_endpoint_url(),
     store_query_hashes=(new_sha256_hash(),),
-    alloy_endpoint="https://alloy.example.test:4317",
+    alloy_endpoint=_ALLOY_ENDPOINT,
 )
 
 
@@ -200,8 +210,8 @@ def test_configure_telemetry_lets_a_failing_elasticsearch_leg_stop_startup(monke
 def test_register_otlp_providers_registers_exactly_once_across_repeated_calls(monkeypatch):
     _patch_otlp_collaborators(monkeypatch)
 
-    telemetry._register_otlp_providers("https://alloy.example.test:4317")
-    telemetry._register_otlp_providers("https://alloy.example.test:4317")
+    telemetry._register_otlp_providers(_ALLOY_ENDPOINT)
+    telemetry._register_otlp_providers(_ALLOY_ENDPOINT)
 
     assert _FakeTracerProvider.instances == 1
     assert _FakeMeterProvider.instances == 1
@@ -215,7 +225,7 @@ def test_register_otlp_providers_shortens_the_metric_export_interval(monkeypatch
     """
     _patch_otlp_collaborators(monkeypatch)
 
-    telemetry._register_otlp_providers("https://alloy.example.test:4317")
+    telemetry._register_otlp_providers(_ALLOY_ENDPOINT)
 
     assert _FakeMetricReader.last_kwargs == {"export_interval_millis": telemetry._METRIC_EXPORT_INTERVAL_MILLIS}
     assert telemetry._METRIC_EXPORT_INTERVAL_MILLIS < 60_000
@@ -224,11 +234,11 @@ def test_register_otlp_providers_shortens_the_metric_export_interval(monkeypatch
 def test_register_otlp_providers_gives_both_exporters_a_timeout_longer_than_the_grpc_default(monkeypatch):
     _patch_otlp_collaborators(monkeypatch)
 
-    telemetry._register_otlp_providers("https://alloy.example.test:4317")
+    telemetry._register_otlp_providers(_ALLOY_ENDPOINT)
 
-    assert [kwargs["timeout"] for kwargs in _FakeExporter.all_kwargs] == [telemetry._EXPORT_TIMEOUT_SECONDS] * 2, (
-        "one span exporter and one metric exporter"
-    )
+    timeouts = [kwargs["timeout"] for kwargs in _FakeExporter.all_kwargs]
+    expected_timeouts = [telemetry._EXPORT_TIMEOUT_SECONDS, telemetry._EXPORT_TIMEOUT_SECONDS]
+    assert timeouts == expected_timeouts, "one span exporter and one metric exporter"
     assert telemetry._EXPORT_TIMEOUT_SECONDS > 10
 
 
@@ -242,11 +252,9 @@ def test_configure_elasticsearch_logging_keeps_otlp_exporter_failures_out_of_ela
     queue_handler = root_logger.handlers[-1]
 
     exporter_record = logging.LogRecord(
-        telemetry._OTLP_EXPORTER_LOGGER, logging.ERROR, __file__, 1, "Failed to export metrics", None, None
+        telemetry._OTLP_EXPORTER_LOGGER, logging.ERROR, __file__, 1, lowercase_token(), None, None
     )
-    application_record = logging.LogRecord(
-        "curator.jobs.queue_publisher", logging.ERROR, __file__, 1, "a real failure", None, None
-    )
+    application_record = logging.LogRecord(lowercase_token(), logging.ERROR, __file__, 1, lowercase_token(), None, None)
 
     assert not queue_handler.filter(exporter_record)
     assert queue_handler.filter(application_record)
@@ -265,33 +273,35 @@ def test_shutdown_telemetry_is_a_noop_when_never_configured(monkeypatch):
 
 def test_shutdown_telemetry_shuts_down_both_providers_when_configured(monkeypatch):
     _patch_otlp_collaborators(monkeypatch)
-    telemetry._register_otlp_providers("https://alloy.example.test:4317")
+    telemetry._register_otlp_providers(_ALLOY_ENDPOINT)
 
     shutdown_calls: list[str] = []
 
     class _ShutdownTracerProvider:
         def shutdown(self):
-            shutdown_calls.append("tracer")
+            shutdown_calls.append(type(self).__name__)
 
     class _ShutdownMeterProvider:
         def shutdown(self):
-            shutdown_calls.append("meter")
+            shutdown_calls.append(type(self).__name__)
 
     telemetry.trace.set_tracer_provider(_ShutdownTracerProvider())
     telemetry.metrics.set_meter_provider(_ShutdownMeterProvider())
 
     telemetry.shutdown_telemetry()
 
-    assert shutdown_calls == ["tracer", "meter"]
+    assert shutdown_calls == [_ShutdownTracerProvider.__name__, _ShutdownMeterProvider.__name__]
 
 
 def test_shutdown_telemetry_swallows_a_failing_provider_shutdown(monkeypatch):
     _patch_otlp_collaborators(monkeypatch)
-    telemetry._register_otlp_providers("https://alloy.example.test:4317")
+    telemetry._register_otlp_providers(_ALLOY_ENDPOINT)
+
+    failure = lowercase_token()
 
     class _BoomProvider:
         def shutdown(self):
-            raise RuntimeError("collector unreachable")
+            raise RuntimeError(failure)
 
     telemetry.trace.set_tracer_provider(_BoomProvider())
     telemetry.metrics.set_meter_provider(_BoomProvider())
@@ -339,13 +349,14 @@ def test_configure_tracing_and_metrics_selects_the_semconv_before_anything_is_in
 
 
 def test_configure_tracing_and_metrics_leaves_an_explicit_semconv_value_alone(monkeypatch):
-    monkeypatch.setenv(telemetry._SEMCONV_STABILITY_OPT_IN_ENV, "http/dup")
+    explicit_opt_in = lowercase_token()
+    monkeypatch.setenv(telemetry._SEMCONV_STABILITY_OPT_IN_ENV, explicit_opt_in)
     monkeypatch.setattr(telemetry, "_register_otlp_providers", lambda endpoint: None)
     monkeypatch.setattr(telemetry, "_instrument_app", lambda app: None)
 
     telemetry._configure_tracing_and_metrics(app=object(), settings=_SETTINGS_WITH_TELEMETRY)
 
-    assert os.environ[telemetry._SEMCONV_STABILITY_OPT_IN_ENV] == "http/dup"
+    assert os.environ[telemetry._SEMCONV_STABILITY_OPT_IN_ENV] == explicit_opt_in
 
 
 def test_configure_tracing_and_metrics_does_not_select_a_semconv_when_telemetry_is_off(monkeypatch):
@@ -416,12 +427,12 @@ def _patch_es_collaborators(monkeypatch):
 
 def _settings_with_es(**overrides):
     values = {
-        "oidc_authority": "https://identity.example.test",
-        "token_key": "token-key",
-        "database_url": "postgresql://unused",
-        "store_graphql_endpoint": f"https://{lowercase_token()}.example.test",
+        "oidc_authority": new_endpoint_url(),
+        "token_key": new_opaque_token(),
+        "database_url": new_database_url(),
+        "store_graphql_endpoint": new_endpoint_url(),
         "store_query_hashes": (new_sha256_hash(),),
-        "elasticsearch_node": "https://es.example.test:9200",
+        "elasticsearch_node": f"{new_endpoint_url()}:{new_port()}",
         "elasticsearch_username": lowercase_token(),
         "elasticsearch_password": new_opaque_token(),
     }
@@ -529,11 +540,11 @@ def test_format_log_record_produces_flat_log_level_and_service_name():
 
 def test_format_log_record_timestamp_is_parseable_iso_8601():
     record = logging.LogRecord(
-        name="curator.psn_routes",
+        name=lowercase_token(),
         level=logging.WARNING,
         pathname=__file__,
         lineno=1,
-        msg="something happened",
+        msg=lowercase_token(),
         args=(),
         exc_info=None,
     )
@@ -553,7 +564,7 @@ def _exc_info_of_raising(exception: Exception):
 def test_format_log_record_includes_stack_trace_on_exception():
     failure = new_opaque_token()
     record = logging.LogRecord(
-        name="curator.app",
+        name=lowercase_token(),
         level=logging.ERROR,
         pathname=__file__,
         lineno=1,
@@ -621,32 +632,48 @@ def test_elasticsearch_log_handler_emits_a_create_write_to_the_data_stream():
 
 
 def test_elasticsearch_log_handler_swallows_index_failures():
+    failure = lowercase_token()
+
     class _FailingClient(_FakeElasticsearchClient):
         def index(self, **kwargs):
-            raise RuntimeError("elasticsearch unreachable")
+            raise RuntimeError(failure)
 
     handler = telemetry._ElasticsearchLogHandler(_FailingClient())
     record = logging.LogRecord(
-        name="curator.app", level=logging.INFO, pathname=__file__, lineno=1, msg="x", args=(), exc_info=None
+        name=lowercase_token(),
+        level=logging.INFO,
+        pathname=__file__,
+        lineno=1,
+        msg=lowercase_token(),
+        args=(),
+        exc_info=None,
     )
 
     handler.emit(record)
 
 
 def test_elasticsearch_log_handler_counts_and_reports_a_failure_rather_than_dropping_it_silently(capsys):
+    failure = lowercase_token()
+
     class _FailingClient(_FakeElasticsearchClient):
         def index(self, **kwargs):
-            raise RuntimeError("elasticsearch unreachable")
+            raise RuntimeError(failure)
 
     handler = telemetry._ElasticsearchLogHandler(_FailingClient())
     record = logging.LogRecord(
-        name="curator.app", level=logging.INFO, pathname=__file__, lineno=1, msg="x", args=(), exc_info=None
+        name=lowercase_token(),
+        level=logging.INFO,
+        pathname=__file__,
+        lineno=1,
+        msg=lowercase_token(),
+        args=(),
+        exc_info=None,
     )
 
     handler.emit(record)
 
     assert handler.failure_count == 1
-    assert "elasticsearch unreachable" in capsys.readouterr().err, (
+    assert failure in capsys.readouterr().err, (
         "a silently suppressed failure makes 'Elasticsearch is refusing our writes' and 'there was "
         "nothing to log' the same observation"
     )
@@ -658,13 +685,21 @@ def _emit_repeatedly(handler: logging.Handler, record: logging.LogRecord, times:
 
 
 def test_elasticsearch_log_handler_reports_the_first_failure_only_until_the_interval_is_reached(capsys):
+    failure = lowercase_token()
+
     class _FailingClient(_FakeElasticsearchClient):
         def index(self, **kwargs):
-            raise RuntimeError("elasticsearch unreachable")
+            raise RuntimeError(failure)
 
     handler = telemetry._ElasticsearchLogHandler(_FailingClient())
     record = logging.LogRecord(
-        name="curator.app", level=logging.INFO, pathname=__file__, lineno=1, msg="x", args=(), exc_info=None
+        name=lowercase_token(),
+        level=logging.INFO,
+        pathname=__file__,
+        lineno=1,
+        msg=lowercase_token(),
+        args=(),
+        exc_info=None,
     )
     emits = telemetry._ES_FAILURE_REPORT_EVERY
 
@@ -693,12 +728,12 @@ def test_create_app_health_check_unaffected_by_telemetry_wiring(monkeypatch):
 
     response = client.get(HEALTH_PATH)
 
-    assert response.status_code == 200
+    assert response.status_code == httpx.codes.OK
     assert response.text == HEALTHY_BODY
 
 
 def _rawg_base() -> str:
-    return f"https://{telemetry._REDACT_QUERY_PARAM_HOSTS[0]}/{lowercase_token()}"
+    return new_url_on_host(telemetry._REDACT_QUERY_PARAM_HOSTS[0])
 
 
 def _exported_url_attributes(url):
@@ -710,7 +745,7 @@ def _exported_url_attributes(url):
     provider.add_span_processor(telemetry.RawgKeyRedactingSpanProcessor())
     provider.add_span_processor(SimpleSpanProcessor(exporter))
     attributes = {key: url for key in telemetry._URL_SPAN_ATTRIBUTE_KEYS}
-    provider.get_tracer(__name__).start_span("test-span", attributes=attributes).end()
+    provider.get_tracer(__name__).start_span(lowercase_token(), attributes=attributes).end()
     (recorded,) = exporter.get_finished_spans()
     recorded_attributes = recorded.attributes
     assert recorded_attributes is not None
@@ -731,7 +766,7 @@ def test_redacting_processor_strips_the_key_param_for_the_rawg_host():
 def test_redacting_processor_leaves_another_hosts_key_param_untouched():
     other_host_url = str(
         httpx.URL(
-            f"https://{lowercase_token()}.example.test/{lowercase_token()}",
+            f"{new_endpoint_url()}/{lowercase_token()}",
             params={telemetry._REDACT_QUERY_PARAM_NAME: new_opaque_token()},
         )
     )
@@ -752,7 +787,7 @@ def test_redacting_processor_leaves_a_rawg_url_without_a_key_untouched():
 def test_register_otlp_providers_adds_the_redacting_processor_to_the_tracer_provider(monkeypatch):
     _patch_otlp_collaborators(monkeypatch)
 
-    telemetry._register_otlp_providers("https://alloy.example.test:4317")
+    telemetry._register_otlp_providers(_ALLOY_ENDPOINT)
 
     processor_types = [type(processor) for processor in _FakeTracerProvider.last_processors]
     assert processor_types.count(telemetry.RawgKeyRedactingSpanProcessor) == 1

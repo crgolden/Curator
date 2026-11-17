@@ -6,6 +6,7 @@ reading/writing another user's console.
 from __future__ import annotations
 
 import random
+from http import HTTPStatus
 
 import pytest
 from fastapi.testclient import TestClient
@@ -318,7 +319,7 @@ def test_requires_bearer_token():
 
     response = client.put(_install_path(client, new_console_id(), new_game_id()), json=_installed(True))
 
-    assert response.status_code == 401
+    assert response.status_code == HTTPStatus.UNAUTHORIZED
 
 
 def test_creates_a_console():
@@ -330,7 +331,7 @@ def test_creates_a_console():
         _path(client, consoles_routes.create_console), json=requested.model_dump(), headers=_bearer(caller.token)
     )
 
-    assert response.status_code == 201
+    assert response.status_code == HTTPStatus.CREATED
     created = ConsoleResponse.model_validate(response.json())
     assert created.name == requested.name
     assert created.platform == PS5
@@ -347,7 +348,7 @@ def test_creates_a_console_with_no_capacity_using_a_known_model_default():
         _path(client, consoles_routes.create_console), json=requested.model_dump(), headers=_bearer(caller.token)
     )
 
-    assert response.status_code == 201
+    assert response.status_code == HTTPStatus.CREATED
     created = ConsoleResponse.model_validate(response.json())
     assert created.raw_capacity_gb == MODEL_CAPACITY_GB[model]
     assert created.capacity_is_default is True
@@ -362,7 +363,7 @@ def test_creates_a_console_with_no_capacity_and_no_model_using_the_platform_fall
         _path(client, consoles_routes.create_console), json=requested.model_dump(), headers=_bearer(caller.token)
     )
 
-    assert response.status_code == 201
+    assert response.status_code == HTTPStatus.CREATED
     created = ConsoleResponse.model_validate(response.json())
     assert created.raw_capacity_gb == PLATFORM_FALLBACK_GB[PS5]
     assert created.capacity_is_default is True
@@ -378,7 +379,7 @@ def test_creates_a_console_with_explicit_capacity_is_never_flagged_as_default():
         _path(client, consoles_routes.create_console), json=requested.model_dump(), headers=_bearer(caller.token)
     )
 
-    assert response.status_code == 201
+    assert response.status_code == HTTPStatus.CREATED
     created = ConsoleResponse.model_validate(response.json())
     assert created.raw_capacity_gb == requested.raw_capacity_gb
     assert created.capacity_is_default is False
@@ -479,7 +480,7 @@ def test_create_console_rejects_unknown_platform():
         _path(client, consoles_routes.create_console), json=requested.model_dump(), headers=_bearer(caller.token)
     )
 
-    assert response.status_code == 400
+    assert response.status_code == HTTPStatus.BAD_REQUEST
 
 
 @pytest.mark.parametrize("platform", [PS3, PSVITA, PSP, PS2, PS1])
@@ -494,7 +495,7 @@ def test_create_console_accepts_every_platform_the_platforms_table_carries(platf
         _path(client, consoles_routes.create_console), json=requested.model_dump(), headers=_bearer(caller.token)
     )
 
-    assert response.status_code == 201
+    assert response.status_code == HTTPStatus.CREATED
     assert ConsoleResponse.model_validate(response.json()).platform == platform
 
 
@@ -509,7 +510,7 @@ def test_a_console_on_a_platform_with_no_published_capacity_is_flagged_rather_th
         _path(client, consoles_routes.create_console), json=requested.model_dump(), headers=_bearer(caller.token)
     )
 
-    assert response.status_code == 201
+    assert response.status_code == HTTPStatus.CREATED
     created = ConsoleResponse.model_validate(response.json())
     assert created.capacity_is_default is True
     assert created.raw_capacity_gb == UNKNOWN_PLATFORM_FALLBACK_GB
@@ -522,7 +523,7 @@ def test_gets_one_owned_console():
 
     response = client.get(_console_path(client, console_id), headers=_bearer(caller.token))
 
-    assert response.status_code == 200
+    assert response.status_code == HTTPStatus.OK
     assert ConsoleResponse.model_validate(response.json()).console_id == console_id
 
 
@@ -533,7 +534,7 @@ def test_get_console_404s_for_another_users_console():
 
     response = client.get(_console_path(client, console_id), headers=_bearer(caller.token))
 
-    assert response.status_code == 404
+    assert response.status_code == HTTPStatus.NOT_FOUND
 
 
 def test_patches_a_console():
@@ -548,7 +549,7 @@ def test_patches_a_console():
         headers=_bearer(caller.token),
     )
 
-    assert response.status_code == 200
+    assert response.status_code == HTTPStatus.OK
     patched = ConsoleResponse.model_validate(response.json())
     assert patched.name == new_name
     assert patched.platform == PS5
@@ -565,7 +566,7 @@ def test_patch_console_404s_for_another_users_console():
         headers=_bearer(caller.token),
     )
 
-    assert response.status_code == 404
+    assert response.status_code == HTTPStatus.NOT_FOUND
 
 
 def test_deletes_a_console():
@@ -577,7 +578,7 @@ def test_deletes_a_console():
         _path(client, consoles_routes.delete_console, console_id=console_id), headers=_bearer(caller.token)
     )
 
-    assert response.status_code == 204
+    assert response.status_code == HTTPStatus.NO_CONTENT
     assert console_id not in repo._consoles
 
 
@@ -590,7 +591,7 @@ def test_delete_console_404s_for_another_users_console():
         _path(client, consoles_routes.delete_console, console_id=console_id), headers=_bearer(caller.token)
     )
 
-    assert response.status_code == 404
+    assert response.status_code == HTTPStatus.NOT_FOUND
     assert console_id in repo._consoles
 
 
@@ -604,7 +605,7 @@ def test_sets_install_state_for_owned_console():
         _install_path(client, console_id, game_id), json=_installed(True), headers=_bearer(caller.token)
     )
 
-    assert response.status_code == 200
+    assert response.status_code == HTTPStatus.OK
     assert ConsoleInstallResponse.model_validate(response.json()) == ConsoleInstallResponse(
         console_id=console_id, game_id=game_id, installed=True
     )
@@ -620,7 +621,7 @@ def test_unknown_console_is_404():
         _install_path(client, new_console_id(), new_game_id()), json=_installed(True), headers=_bearer(caller.token)
     )
 
-    assert response.status_code == 404
+    assert response.status_code == HTTPStatus.NOT_FOUND
     assert repo.set_install_calls == []
 
 
@@ -635,7 +636,7 @@ def test_cannot_set_install_state_on_another_users_console():
         headers=_bearer(caller.token),
     )
 
-    assert response.status_code == 404
+    assert response.status_code == HTTPStatus.NOT_FOUND
     assert repo.set_install_calls == []
 
 
@@ -652,7 +653,7 @@ def test_gets_installed_game_ids_hydrating_from_the_server():
 
     response = client.get(_installs_path(client, console_id), headers=headers)
 
-    assert response.status_code == 200
+    assert response.status_code == HTTPStatus.OK
     assert ConsoleInstallsResponse.model_validate(response.json()) == ConsoleInstallsResponse(
         game_ids=sorted([first_installed_game_id, second_installed_game_id])
     )
@@ -665,7 +666,7 @@ def test_get_installs_404s_for_another_users_console():
 
     response = client.get(_installs_path(client, console_id), headers=_bearer(caller.token))
 
-    assert response.status_code == 404
+    assert response.status_code == HTTPStatus.NOT_FOUND
 
 
 def test_install_map_returns_the_console_installs_and_each_attached_device_with_its_own_installs():
@@ -695,7 +696,7 @@ def test_install_map_returns_the_console_installs_and_each_attached_device_with_
 
     response = client.get(_install_map_path(client, console_id), headers=headers)
 
-    assert response.status_code == 200
+    assert response.status_code == HTTPStatus.OK
     assert ConsoleInstallMapResponse.model_validate(response.json()) == ConsoleInstallMapResponse(
         game_ids=[console_game_id],
         attached_devices=[
@@ -712,7 +713,7 @@ def test_install_map_reports_no_devices_and_no_installs_for_a_bare_console():
 
     response = client.get(_install_map_path(client, console_id), headers=_bearer(caller.token))
 
-    assert response.status_code == 200
+    assert response.status_code == HTTPStatus.OK
     assert ConsoleInstallMapResponse.model_validate(response.json()) == ConsoleInstallMapResponse(
         game_ids=[], attached_devices=[]
     )
@@ -731,4 +732,4 @@ def test_install_map_404s_for_another_users_console():
 
     response = client.get(_install_map_path(client, console_id), headers=_bearer(caller.token))
 
-    assert response.status_code == 404
+    assert response.status_code == HTTPStatus.NOT_FOUND

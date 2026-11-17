@@ -25,6 +25,9 @@ TrophyMatch = Literal["matched", "unmatched", "not_attempted"]
 """Whether a library entry has been resolved to a PSN trophy title: matched to one, tried and not
 matched, or never tried."""
 
+SORT_BY_RAWG_RATING: Final[LibrarySortField] = "rawg_rating"
+SORT_BY_PERCENT_COMPLETED: Final[LibrarySortField] = "percent_completed"
+
 HIDDEN_EXCLUDE: Final[HiddenFilter] = "exclude"
 HIDDEN_ONLY: Final[HiddenFilter] = "only"
 
@@ -45,10 +48,10 @@ _HIDDEN_EXISTS_SQL = """EXISTS (
 _SORT_COLUMNS: dict[str, str] = {
     "title": "g.canonical_title",
     "genre": "gen.name",
-    "rawg_rating": "ge.critical_score",
+    SORT_BY_RAWG_RATING: "ge.critical_score",
     "opencritic_rating": "ge.oc_score",
     "psn_rating": "ge.psn_rating",
-    "percent_completed": "le.trophy_percent_completed",
+    SORT_BY_PERCENT_COMPLETED: "le.trophy_percent_completed",
 }
 
 _OWNED_PLATFORMS_SQL = """(

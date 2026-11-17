@@ -4,13 +4,13 @@ from __future__ import annotations
 
 import base64
 import os
-import uuid
 
 import pytest
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 from curator.persistence.config import ConfigError
 from curator.persistence.crypto import SCHEME_AES_GCM_V1, TOKEN_KEY_ENV, InvalidToken, TokenCrypto
+from test_values import lowercase_token, new_opaque_token
 
 NONCE_SIZE_BYTES = 12
 TAG_SIZE_BYTES = 16
@@ -34,7 +34,7 @@ DOTNET_GENERATED_PLAINTEXT = '{"refresh_token": "sample-refresh-token-value", "s
 
 
 def new_secret() -> bytes:
-    return f"secret-{uuid.uuid4().hex}".encode()
+    return new_opaque_token().encode()
 
 
 def new_raw_key() -> bytes:
@@ -62,7 +62,7 @@ def test_encrypt_decrypt_round_trip():
     key = TokenCrypto.generate_key()
     crypto = TokenCrypto(key)
 
-    plaintext = b'{"access_token": "AT", "refresh_token": "RT"}'
+    plaintext = new_secret()
     encrypted = crypto.encrypt(plaintext)
 
     assert encrypted != plaintext
@@ -73,7 +73,7 @@ def test_decrypt_wrong_key_raises_invalid_token():
     crypto_a = TokenCrypto(TokenCrypto.generate_key())
     crypto_b = TokenCrypto(TokenCrypto.generate_key())
 
-    encrypted = crypto_a.encrypt(b"secret")
+    encrypted = crypto_a.encrypt(new_secret())
 
     with pytest.raises(InvalidToken):
         crypto_b.decrypt(encrypted)
@@ -96,7 +96,7 @@ def test_an_unpadded_key_decodes_to_the_same_bytes_the_padded_form_does():
     padded = TokenCrypto.generate_key()
     unpadded = padded.rstrip(b"=")
 
-    plaintext = b"parity"
+    plaintext = new_secret()
     assert TokenCrypto(unpadded).decrypt(TokenCrypto(padded).encrypt(plaintext)) == plaintext
 
 
@@ -112,13 +112,15 @@ def test_a_key_one_character_past_a_multiple_of_four_is_rejected():
 def test_decrypt_too_short_raises_invalid_token():
     crypto = TokenCrypto(TokenCrypto.generate_key())
 
+    too_short = lowercase_token(NONCE_SIZE_BYTES).encode()
+
     with pytest.raises(InvalidToken):
-        crypto.decrypt(b"short")
+        crypto.decrypt(too_short)
 
 
 def test_decrypt_tampered_ciphertext_raises_invalid_token():
     crypto = TokenCrypto(TokenCrypto.generate_key())
-    encrypted = bytearray(crypto.encrypt(b"secret"))
+    encrypted = bytearray(crypto.encrypt(new_secret()))
     encrypted[-1] ^= 0xFF
 
     with pytest.raises(InvalidToken):
@@ -127,38 +129,42 @@ def test_decrypt_tampered_ciphertext_raises_invalid_token():
 
 def test_from_config_prefers_explicit_key():
     explicit_key = TokenCrypto.generate_key()
-    crypto = TokenCrypto.from_config(explicit_key.decode("ascii"))
+    crypto = TokenCrypto.from_config(explicit_key.decode())
+    plaintext = new_secret()
 
-    encrypted = crypto.encrypt(b"data")
-    assert crypto.decrypt(encrypted) == b"data"
+    encrypted = crypto.encrypt(plaintext)
+    assert crypto.decrypt(encrypted) == plaintext
 
 
 def test_from_config_reads_env_var(monkeypatch, tmp_path):
     key = TokenCrypto.generate_key()
-    monkeypatch.setenv(TOKEN_KEY_ENV, key.decode("ascii"))
+    monkeypatch.setenv(TOKEN_KEY_ENV, key.decode())
+    plaintext = new_secret()
 
-    crypto = TokenCrypto.from_config(dotenv_path=tmp_path / "absent.env")
+    crypto = TokenCrypto.from_config(dotenv_path=tmp_path / lowercase_token())
 
-    encrypted = crypto.encrypt(b"data")
-    assert crypto.decrypt(encrypted) == b"data"
+    encrypted = crypto.encrypt(plaintext)
+    assert crypto.decrypt(encrypted) == plaintext
 
 
 def test_from_config_reads_dotenv(monkeypatch, tmp_path):
     monkeypatch.delenv(TOKEN_KEY_ENV, raising=False)
     key = TokenCrypto.generate_key()
-    dotenv = tmp_path / ".env"
-    dotenv.write_text(f"CURATOR_TOKEN_KEY={key.decode('ascii')}\n", encoding="utf-8")
+    dotenv = tmp_path / lowercase_token()
+    dotenv.write_text(f"{TOKEN_KEY_ENV}={key.decode()}")
+    plaintext = new_secret()
 
     crypto = TokenCrypto.from_config(dotenv_path=dotenv)
 
-    encrypted = crypto.encrypt(b"data")
-    assert crypto.decrypt(encrypted) == b"data"
+    encrypted = crypto.encrypt(plaintext)
+    assert crypto.decrypt(encrypted) == plaintext
 
 
 def test_from_config_missing_raises_config_error(monkeypatch, tmp_path):
     monkeypatch.delenv(TOKEN_KEY_ENV, raising=False)
+    dotenv_path = tmp_path / lowercase_token()
     with pytest.raises(ConfigError):
-        TokenCrypto.from_config(dotenv_path=tmp_path / "absent.env")
+        TokenCrypto.from_config(dotenv_path=dotenv_path)
 
 
 def test_decrypt_reads_a_versioned_token_when_the_scheme_byte_leads_the_unversioned_framing():
@@ -224,16 +230,16 @@ def test_encrypt_writes_the_versioned_framing_led_by_the_scheme_byte():
 
 
 def test_decrypt_reads_an_unversioned_token_encrypted_by_functions_dotnet_token_crypto():
-    crypto = TokenCrypto(DOTNET_GENERATED_KEY.encode("ascii"))
+    crypto = TokenCrypto(DOTNET_GENERATED_KEY.encode())
 
     plaintext = crypto.decrypt(base64.b64decode(DOTNET_GENERATED_UNVERSIONED_TOKEN_BASE64))
 
-    assert plaintext.decode("utf-8") == DOTNET_GENERATED_PLAINTEXT
+    assert plaintext.decode() == DOTNET_GENERATED_PLAINTEXT
 
 
 def test_decrypt_reads_a_versioned_token_encrypted_by_functions_dotnet_token_crypto():
-    crypto = TokenCrypto(DOTNET_GENERATED_KEY.encode("ascii"))
+    crypto = TokenCrypto(DOTNET_GENERATED_KEY.encode())
 
     plaintext = crypto.decrypt(base64.b64decode(DOTNET_GENERATED_VERSIONED_TOKEN_BASE64))
 
-    assert plaintext.decode("utf-8") == DOTNET_GENERATED_PLAINTEXT
+    assert plaintext.decode() == DOTNET_GENERATED_PLAINTEXT

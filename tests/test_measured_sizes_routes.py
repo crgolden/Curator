@@ -4,6 +4,8 @@ CollectionsRepository.
 
 from __future__ import annotations
 
+from http import HTTPStatus
+
 import pytest
 from fastapi.testclient import TestClient
 from pydantic import TypeAdapter
@@ -89,7 +91,7 @@ def test_requires_bearer_token():
 
     response = client.get(_list_path(client, new_game_id()))
 
-    assert response.status_code == 401
+    assert response.status_code == HTTPStatus.UNAUTHORIZED
 
 
 def test_lists_no_measured_sizes_for_a_game_nobody_has_measured():
@@ -98,7 +100,7 @@ def test_lists_no_measured_sizes_for_a_game_nobody_has_measured():
 
     response = client.get(_list_path(client, new_game_id()), headers=_bearer(TOKEN_A))
 
-    assert response.status_code == 200
+    assert response.status_code == HTTPStatus.OK
     assert _SIZES.validate_python(response.json()) == []
 
 
@@ -111,7 +113,7 @@ def test_sets_a_measured_size_recorded_by_the_caller():
 
     response = client.put(_set_path(client, game_id, PS5), json=_size_body(size_gb), headers=_bearer(TOKEN_A))
 
-    assert response.status_code == 200
+    assert response.status_code == HTTPStatus.OK
     assert MeasuredSizeResponse.model_validate(response.json()) == MeasuredSizeResponse(
         game_id=game_id,
         platform=PS5,
@@ -139,7 +141,7 @@ def test_any_authenticated_user_may_contribute_a_measured_size_not_only_the_firs
         _set_path(client, game_id, PS5), json=_size_body(contributed_size_gb), headers=_bearer(TOKEN_B)
     )
 
-    assert response.status_code == 200
+    assert response.status_code == HTTPStatus.OK
     body = MeasuredSizeResponse.model_validate(response.json())
     assert body.recorded_by == SUB_B
     assert body.size_gb == contributed_size_gb
@@ -153,7 +155,7 @@ def test_rejects_a_platform_outside_the_platforms_table():
         _set_path(client, new_game_id(), lowercase_token()), json=_size_body(new_size_gb()), headers=_bearer(TOKEN_A)
     )
 
-    assert response.status_code == 400
+    assert response.status_code == HTTPStatus.BAD_REQUEST
     assert response.json()["detail"] == platform_vocabulary_message()
 
 
@@ -168,7 +170,7 @@ def test_accepts_a_legacy_platform_the_schema_already_allows(platform):
         _set_path(client, new_game_id(), platform), json=_size_body(new_size_gb()), headers=_bearer(TOKEN_A)
     )
 
-    assert response.status_code == 200
+    assert response.status_code == HTTPStatus.OK
     assert MeasuredSizeResponse.model_validate(response.json()).platform == platform
 
 
@@ -186,5 +188,5 @@ def test_lists_measured_sizes_for_both_platforms():
 
     response = client.get(_list_path(client, game_id), headers=_bearer(TOKEN_A))
 
-    assert response.status_code == 200
+    assert response.status_code == HTTPStatus.OK
     assert _SIZES.validate_python(response.json()) == [_response(ps4_size), _response(ps5_size)]

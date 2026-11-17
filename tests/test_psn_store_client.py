@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-import random
+from http import HTTPStatus
 
 import httpx
 import pytest
@@ -84,6 +84,7 @@ from test_values import (
     lowercase_token,
     new_category_id,
     new_cover_image_url,
+    new_endpoint_url,
     new_facet_key,
     new_game_title,
     new_opaque_token,
@@ -94,6 +95,7 @@ from test_values import (
     new_reporting_name,
     new_sha256_hash,
     new_store_product_id,
+    new_thousands_price_cents,
 )
 
 
@@ -145,7 +147,7 @@ def _product(*, product_id=None, name=None, platforms=(PS4,), np_title_id=None, 
     }
 
 
-_ENDPOINT = f"https://{lowercase_token()}.example.test/{lowercase_token()}"
+_ENDPOINT = f"{new_endpoint_url()}/{lowercase_token()}"
 
 
 def _client(handler, *, query_hashes=None):
@@ -156,7 +158,7 @@ def _client(handler, *, query_hashes=None):
     )
 
 
-def _answering(body, status_code=200):
+def _answering(body, status_code=HTTPStatus.OK):
     def handler(request):
         return httpx.Response(status_code, json=body)
 
@@ -172,7 +174,7 @@ class Recorder:
 
     def __call__(self, request):
         self.request = request
-        return httpx.Response(200, json=self._body)
+        return httpx.Response(HTTPStatus.OK, json=self._body)
 
     @property
     def variables(self):
@@ -321,7 +323,7 @@ async def test_a_product_with_no_usable_image_reports_none_rather_than_a_video_u
 async def test_distinguishes_full_games_from_add_ons():
     products = [_product(cls=FULL_GAME_CLASSIFICATION), _product(cls=lowercase_token())]
 
-    page = await _client(_answering(_grid(products, 2))).category_page(new_category_id())
+    page = await _client(_answering(_grid(products, len(products)))).category_page(new_category_id())
 
     assert [product.is_full_game for product in page.products] == [True, False]
 
@@ -379,7 +381,7 @@ async def test_paging_arguments_reach_the_gateway():
 
 
 async def test_a_rotated_persisted_query_hash_is_its_own_error():
-    client = _client(_answering(_rotated_body(), 400))
+    client = _client(_answering(_rotated_body(), HTTPStatus.BAD_REQUEST))
     category_id = new_category_id()
 
     with pytest.raises(StoreQueryRotatedError) as excinfo:
@@ -392,8 +394,8 @@ async def test_a_rotated_hash_falls_through_to_the_next_candidate():
     dead_hash, live_hash = new_sha256_hash(), new_sha256_hash()
     handler = DeadHashThenLive(
         dead_hash,
-        httpx.Response(400, json=_rotated_body()),
-        httpx.Response(200, json=_grid([_product()], 1, is_last=True)),
+        httpx.Response(HTTPStatus.BAD_REQUEST, json=_rotated_body()),
+        httpx.Response(HTTPStatus.OK, json=_grid([_product()], 1, is_last=True)),
     )
 
     page = await _client(handler, query_hashes=(dead_hash, live_hash)).category_page(new_category_id())
@@ -413,8 +415,8 @@ async def test_a_persisted_query_not_found_answer_falls_through_to_the_next_cand
     dead_hash, live_hash = new_sha256_hash(), new_sha256_hash()
     handler = DeadHashThenLive(
         dead_hash,
-        httpx.Response(200, json={ERRORS_KEY: [unknown_hash_error]}),
-        httpx.Response(200, json=_grid([_product()], 1, is_last=True)),
+        httpx.Response(HTTPStatus.OK, json={ERRORS_KEY: [unknown_hash_error]}),
+        httpx.Response(HTTPStatus.OK, json=_grid([_product()], 1, is_last=True)),
     )
 
     page = await _client(handler, query_hashes=(dead_hash, live_hash)).category_page(new_category_id())
@@ -424,7 +426,9 @@ async def test_a_persisted_query_not_found_answer_falls_through_to_the_next_cand
 
 
 async def test_the_rotated_error_only_surfaces_once_every_candidate_is_exhausted():
-    client = _client(_answering(_rotated_body(), 400), query_hashes=(new_sha256_hash(), new_sha256_hash()))
+    client = _client(
+        _answering(_rotated_body(), HTTPStatus.BAD_REQUEST), query_hashes=(new_sha256_hash(), new_sha256_hash())
+    )
     category_id = new_category_id()
 
     with pytest.raises(StoreQueryRotatedError):
@@ -461,8 +465,8 @@ async def test_facet_census_shares_the_hash_rotation_rather_than_reimplementing_
     census = {new_facet_key(): new_positive_count()}
     handler = DeadHashThenLive(
         dead_hash,
-        httpx.Response(400, json=_rotated_body()),
-        httpx.Response(200, json=_grid([_product()], 1, facets={facet_name: census})),
+        httpx.Response(HTTPStatus.BAD_REQUEST, json=_rotated_body()),
+        httpx.Response(HTTPStatus.OK, json=_grid([_product()], 1, facets={facet_name: census})),
     )
 
     result = await _client(handler, query_hashes=(dead_hash, live_hash)).facet_census(new_category_id(), facet_name)
@@ -579,7 +583,7 @@ async def test_other_graphql_errors_are_not_reported_as_a_rotated_hash():
 
 async def test_a_server_error_is_surfaced_without_parsing_the_body():
     def handler(request):
-        return httpx.Response(503, text=lowercase_token())
+        return httpx.Response(HTTPStatus.SERVICE_UNAVAILABLE, text=lowercase_token())
 
     client = _client(handler)
     category_id = new_category_id()
@@ -589,7 +593,7 @@ async def test_a_server_error_is_surfaced_without_parsing_the_body():
 
 
 async def test_a_csrf_rejection_is_not_mistaken_for_a_rotated_hash():
-    client = _client(_answering({ERRORS_KEY: [{MESSAGE_KEY: new_game_title()}]}, 400))
+    client = _client(_answering({ERRORS_KEY: [{MESSAGE_KEY: new_game_title()}]}, HTTPStatus.BAD_REQUEST))
     category_id = new_category_id()
 
     with pytest.raises(StoreCatalogError) as excinfo:
@@ -600,7 +604,8 @@ async def test_a_csrf_rejection_is_not_mistaken_for_a_rotated_hash():
 
 async def test_products_without_an_id_are_skipped_rather_than_crashing_the_walk():
     identified = _product()
-    body = _grid([{NAME_KEY: new_game_title()}, identified], 2)
+    products = [{NAME_KEY: new_game_title()}, identified]
+    body = _grid(products, len(products))
 
     page = await _client(_answering(body)).category_page(new_category_id())
 
@@ -670,7 +675,7 @@ async def test_the_price_node_is_parsed_into_cents():
 
 
 def test_a_display_price_with_a_thousands_separator_parses_to_cents():
-    cents = random.randint(100_000, 99_999_999)
+    cents = new_thousands_price_cents()
 
     assert parse_price_cents(_display_price(cents)) == cents
 

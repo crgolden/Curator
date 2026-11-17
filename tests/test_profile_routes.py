@@ -11,7 +11,8 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import replace
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta
+from http import HTTPStatus
 
 import pytest
 from fastapi.testclient import TestClient
@@ -73,13 +74,16 @@ from test_values import (
     new_cover_image_url,
     new_definition_id,
     new_email_address,
+    new_endpoint_url,
     new_game_id,
     new_game_title,
     new_identity_sub,
     new_online_id,
     new_opaque_token,
     new_positive_count,
+    new_profile_handle,
     new_small_count,
+    new_utc_instant,
     token_from_first_half_of_alphabet,
     token_from_second_half_of_alphabet,
 )
@@ -125,7 +129,7 @@ class FakeProfileRepository:
 class FakeFollowRepository:
     def __init__(self) -> None:
         self.edges: dict[tuple[str, str], datetime] = {}
-        self._next_time = datetime(2026, 1, 1, tzinfo=UTC)
+        self._next_time = new_utc_instant()
 
     async def follow(self, follower_sub: str, followed_sub: str) -> None:
         key = (follower_sub, followed_sub)
@@ -145,13 +149,13 @@ class FakeFollowRepository:
     async def following_count(self, sub: str) -> int:
         return sum(1 for (f, _t) in self.edges if f == sub)
 
-    async def list_followers(self, sub: str, *, limit: int = 100, offset: int = 0) -> list[FollowEdge]:
+    async def list_followers(self, sub: str, *, limit: int, offset: int = 0) -> list[FollowEdge]:
         items = sorted(
             ((f, ts) for (f, t), ts in self.edges.items() if t == sub), key=lambda item: item[1], reverse=True
         )
         return [FollowEdge(sub=f, followed_at=ts) for f, ts in items[offset : offset + limit]]
 
-    async def list_following(self, sub: str, *, limit: int = 100, offset: int = 0) -> list[FollowEdge]:
+    async def list_following(self, sub: str, *, limit: int, offset: int = 0) -> list[FollowEdge]:
         items = sorted(
             ((t, ts) for (f, t), ts in self.edges.items() if f == sub), key=lambda item: item[1], reverse=True
         )
@@ -229,9 +233,9 @@ class FakeLibraryRepository:
         *,
         search=None,
         genre=None,
-        sort="title",
-        sort_dir="asc",
-        limit=20,
+        sort,
+        sort_dir,
+        limit,
         offset=0,
         hidden=HIDDEN_EXCLUDE,
     ):
@@ -281,13 +285,13 @@ def _site() -> ProfileLinkSite:
     return ProfileLinkSite(
         site_key=lowercase_token(),
         display_name=new_game_title(),
-        url_template=f"https://{lowercase_token()}.com/{HANDLE_PLACEHOLDER}",
+        url_template=f"{new_endpoint_url()}/{HANDLE_PLACEHOLDER}",
         sort_order=1,
     )
 
 
 def _handle() -> str:
-    return lowercase_token(new_small_count() + 3)
+    return new_profile_handle()
 
 
 class FakeProfileLinkRepository:
@@ -452,7 +456,7 @@ def test_get_my_profile_settings_never_404s_with_no_row():
 
     response = client.get(_path(client, profile_routes.get_my_profile_settings), headers=_bearer(TOKEN_A))
 
-    assert response.status_code == 200
+    assert response.status_code == HTTPStatus.OK
     assert ProfileSettingsResponse.model_validate(response.json()) == _settings_response(_HIDDEN)
 
 
@@ -476,7 +480,7 @@ def test_get_profile_unknown_sub_is_404():
         _path(client, profile_routes.get_user_profile, sub=new_identity_sub()), headers=_bearer(TOKEN_A)
     )
 
-    assert response.status_code == 404
+    assert response.status_code == HTTPStatus.NOT_FOUND
 
 
 def test_owner_viewing_own_private_profile_sees_everything():
@@ -614,22 +618,19 @@ def test_collections_count_for_a_non_owner_excludes_private_and_unlisted():
     _seed_users(repository, SUB_A, SUB_B)
     profile_repository = FakeProfileRepository()
     profile_repository.settings[SUB_A] = _settings(is_public=True, show_collections=True)
-    collections_repository = FakeCollectionsRepository(
-        {
-            SUB_A: [
-                _definition(visibility=VISIBILITY_PUBLIC),
-                _definition(visibility=VISIBILITY_UNLISTED),
-                _definition(visibility=VISIBILITY_PRIVATE),
-            ]
-        }
-    )
+    definitions = [
+        _definition(visibility=VISIBILITY_PUBLIC),
+        _definition(visibility=VISIBILITY_UNLISTED),
+        _definition(visibility=VISIBILITY_PRIVATE),
+    ]
+    collections_repository = FakeCollectionsRepository({SUB_A: definitions})
 
     client, *_ = _build(
         repository=repository, profile_repository=profile_repository, collections_repository=collections_repository
     )
 
     assert _profile(client, SUB_A, TOKEN_B).collections_count == 1
-    assert _profile(client, SUB_A, TOKEN_A).collections_count == 3
+    assert _profile(client, SUB_A, TOKEN_A).collections_count == len(definitions)
 
 
 def test_library_count_includes_inactive_entries():
@@ -637,15 +638,14 @@ def test_library_count_includes_inactive_entries():
     _seed_users(repository, SUB_A)
     profile_repository = FakeProfileRepository()
     profile_repository.settings[SUB_A] = _settings(show_library=True)
-    library_repository = FakeLibraryRepository(
-        {SUB_A: [FakeLibraryGameView(is_active=True), FakeLibraryGameView(is_active=False)]}
-    )
+    games = [FakeLibraryGameView(is_active=True), FakeLibraryGameView(is_active=False)]
+    library_repository = FakeLibraryRepository({SUB_A: games})
 
     client, *_ = _build(
         repository=repository, profile_repository=profile_repository, library_repository=library_repository
     )
 
-    assert _profile(client, SUB_A, TOKEN_A).library_count == 2
+    assert _profile(client, SUB_A, TOKEN_A).library_count == len(games)
 
 
 def test_created_at_is_returned_even_to_a_viewer_of_a_private_profile():
@@ -714,14 +714,14 @@ def test_profile_links_are_withheld_from_a_viewer_of_a_private_profile():
 def test_setting_a_profile_link_builds_the_url_from_the_site_template():
     repository = FakeRepository()
     _seed_users(repository, SUB_A)
-    site_root = f"https://{lowercase_token()}.com/"
+    site_root = f"{new_endpoint_url()}/"
     site = replace(_site(), url_template=f"{site_root}{HANDLE_PLACEHOLDER}")
     handle = _handle()
     client, *_ = _build(repository=repository, profile_link_repository=FakeProfileLinkRepository(sites=[site]))
 
     response = _put_link(client, TOKEN_A, site.site_key, handle)
 
-    assert response.status_code == 200
+    assert response.status_code == HTTPStatus.OK
     assert ProfileLinkResponse.model_validate(response.json()) == ProfileLinkResponse(
         site_key=site.site_key,
         display_name=site.display_name,
@@ -737,7 +737,7 @@ def test_setting_a_profile_link_rejects_a_site_outside_the_allowlist():
 
     response = _put_link(client, TOKEN_A, lowercase_token(), _handle())
 
-    assert response.status_code == 400
+    assert response.status_code == HTTPStatus.BAD_REQUEST
 
 
 @pytest.mark.parametrize(
@@ -760,7 +760,7 @@ def test_setting_a_profile_link_rejects_a_handle_that_is_not_a_handle(handle):
 
     response = _put_link(client, TOKEN_A, site.site_key, handle)
 
-    assert response.status_code == 400
+    assert response.status_code == HTTPStatus.BAD_REQUEST
 
 
 def test_deleting_a_profile_link_is_idempotent():
@@ -775,8 +775,8 @@ def test_deleting_a_profile_link_is_idempotent():
     first = client.delete(link_path, headers=_bearer(TOKEN_A))
     second = client.delete(link_path, headers=_bearer(TOKEN_A))
 
-    assert first.status_code == 204
-    assert second.status_code == 204
+    assert first.status_code == HTTPStatus.NO_CONTENT
+    assert second.status_code == HTTPStatus.NO_CONTENT
     links = client.get(_path(client, profile_routes.get_my_profile_links), headers=_bearer(TOKEN_A))
     assert _LINKS.validate_python(links.json()) == []
 
@@ -791,7 +791,7 @@ def test_show_trophies_true_but_harvest_trophies_false_is_none():
     client, *_ = _build(repository=repository, profile_repository=profile_repository)
 
     response = client.get(_path(client, profile_routes.get_user_profile, sub=SUB_A), headers=_bearer(TOKEN_B))
-    assert response.status_code == 200
+    assert response.status_code == HTTPStatus.OK
     assert PublicProfileResponse.model_validate(response.json()).trophies is None
 
 
@@ -808,7 +808,7 @@ def test_show_and_harvest_trophies_true_but_viewer_has_no_psn_link_is_none_and_s
     )
 
     response = client.get(_path(client, profile_routes.get_user_profile, sub=SUB_A), headers=_bearer(TOKEN_B))
-    assert response.status_code == 200
+    assert response.status_code == HTTPStatus.OK
     assert PublicProfileResponse.model_validate(response.json()).trophies is None
 
 
@@ -885,7 +885,7 @@ def test_follow_unknown_sub_is_404():
 
     response = client.post(_path(client, profile_routes.follow_user, sub=new_identity_sub()), headers=_bearer(TOKEN_A))
 
-    assert response.status_code == 404
+    assert response.status_code == HTTPStatus.NOT_FOUND
 
 
 def test_follow_self_is_400():
@@ -895,7 +895,7 @@ def test_follow_self_is_400():
 
     response = client.post(_path(client, profile_routes.follow_user, sub=SUB_A), headers=_bearer(TOKEN_A))
 
-    assert response.status_code == 400
+    assert response.status_code == HTTPStatus.BAD_REQUEST
 
 
 def test_follow_is_204_and_logs_action_followed_every_call():
@@ -907,8 +907,8 @@ def test_follow_is_204_and_logs_action_followed_every_call():
     first = client.post(follow_path, headers=_bearer(TOKEN_B))
     second = client.post(follow_path, headers=_bearer(TOKEN_B))
 
-    assert first.status_code == 204
-    assert second.status_code == 204
+    assert first.status_code == HTTPStatus.NO_CONTENT
+    assert second.status_code == HTTPStatus.NO_CONTENT
     assert audit.entries == [(SUB_B, ACTION_FOLLOWED, SUB_A), (SUB_B, ACTION_FOLLOWED, SUB_A)]
 
 
@@ -919,12 +919,12 @@ def test_unfollow_is_always_204_but_only_logs_when_a_row_was_removed():
     follow_path = _path(client, profile_routes.follow_user, sub=SUB_A)
 
     not_following_yet = client.delete(follow_path, headers=_bearer(TOKEN_B))
-    assert not_following_yet.status_code == 204
+    assert not_following_yet.status_code == HTTPStatus.NO_CONTENT
     assert audit.entries == []
 
     client.post(follow_path, headers=_bearer(TOKEN_B))
     removed = client.delete(follow_path, headers=_bearer(TOKEN_B))
-    assert removed.status_code == 204
+    assert removed.status_code == HTTPStatus.NO_CONTENT
     assert audit.entries == [(SUB_B, ACTION_FOLLOWED, SUB_A), (SUB_B, ACTION_UNFOLLOWED, SUB_A)]
 
 
@@ -933,7 +933,7 @@ def test_followers_unknown_sub_is_404():
 
     response = client.get(_path(client, profile_routes.get_followers, sub=new_identity_sub()), headers=_bearer(TOKEN_A))
 
-    assert response.status_code == 404
+    assert response.status_code == HTTPStatus.NOT_FOUND
 
 
 def test_followers_not_gated_by_is_public():
@@ -946,7 +946,7 @@ def test_followers_not_gated_by_is_public():
 
     response = client.get(_path(client, profile_routes.get_followers, sub=SUB_A), headers=_bearer(TOKEN_B))
 
-    assert response.status_code == 200
+    assert response.status_code == HTTPStatus.OK
     body = FollowListResponse.model_validate(response.json())
     assert body.total == 1
     assert body.entries[0].sub == SUB_B
@@ -972,7 +972,7 @@ def test_followers_pagination():
         headers=_bearer(TOKEN_B),
     )
 
-    assert response.status_code == 200
+    assert response.status_code == HTTPStatus.OK
     body = FollowListResponse.model_validate(response.json())
     assert body.total == 3
     assert [entry.sub for entry in body.entries] == [followers[1], followers[0]]
@@ -983,7 +983,7 @@ def test_following_not_gated_by_is_public_and_unknown_sub_is_404():
 
     response = client.get(_path(client, profile_routes.get_following, sub=new_identity_sub()), headers=_bearer(TOKEN_A))
 
-    assert response.status_code == 404
+    assert response.status_code == HTTPStatus.NOT_FOUND
 
 
 def test_library_403_when_private():
@@ -995,7 +995,7 @@ def test_library_403_when_private():
 
     response = client.get(_path(client, profile_routes.get_user_library, sub=SUB_A), headers=_bearer(TOKEN_B))
 
-    assert response.status_code == 403
+    assert response.status_code == HTTPStatus.FORBIDDEN
 
 
 def test_library_403_when_public_but_show_library_false():
@@ -1007,7 +1007,7 @@ def test_library_403_when_public_but_show_library_false():
 
     response = client.get(_path(client, profile_routes.get_user_library, sub=SUB_A), headers=_bearer(TOKEN_B))
 
-    assert response.status_code == 403
+    assert response.status_code == HTTPStatus.FORBIDDEN
 
 
 def test_library_200_with_data_when_public_and_show_library_true():
@@ -1029,7 +1029,7 @@ def test_library_200_with_data_when_public_and_show_library_true():
 
     response = client.get(_path(client, profile_routes.get_user_library, sub=SUB_A), headers=_bearer(TOKEN_B))
 
-    assert response.status_code == 200
+    assert response.status_code == HTTPStatus.OK
     assert ProfileLibraryPageResponse.model_validate(response.json()) == ProfileLibraryPageResponse(
         games=[
             ProfileLibraryGameResponse(
@@ -1065,7 +1065,7 @@ def test_library_200_for_owner_regardless_of_flags():
 
     response = client.get(_path(client, profile_routes.get_user_library, sub=SUB_A), headers=_bearer(TOKEN_A))
 
-    assert response.status_code == 200
+    assert response.status_code == HTTPStatus.OK
     body = ProfileLibraryPageResponse.model_validate(response.json())
     assert len(body.games) == 1
     assert body.total == 1
@@ -1086,7 +1086,7 @@ def test_library_genres_returns_distinct_genres_when_visible():
 
     response = client.get(_path(client, profile_routes.get_user_library_genres, sub=SUB_A), headers=_bearer(TOKEN_B))
 
-    assert response.status_code == 200
+    assert response.status_code == HTTPStatus.OK
     assert LibraryGenresResponse.model_validate(response.json()).genres == [earlier_genre, later_genre]
 
 
@@ -1099,7 +1099,7 @@ def test_library_genres_403_when_private():
 
     response = client.get(_path(client, profile_routes.get_user_library_genres, sub=SUB_A), headers=_bearer(TOKEN_B))
 
-    assert response.status_code == 403
+    assert response.status_code == HTTPStatus.FORBIDDEN
 
 
 def test_collections_403_when_private():
@@ -1111,7 +1111,7 @@ def test_collections_403_when_private():
 
     response = client.get(_path(client, profile_routes.get_user_collections, sub=SUB_A), headers=_bearer(TOKEN_B))
 
-    assert response.status_code == 403
+    assert response.status_code == HTTPStatus.FORBIDDEN
 
 
 def test_collections_403_when_public_but_show_collections_false():
@@ -1123,7 +1123,7 @@ def test_collections_403_when_public_but_show_collections_false():
 
     response = client.get(_path(client, profile_routes.get_user_collections, sub=SUB_A), headers=_bearer(TOKEN_B))
 
-    assert response.status_code == 403
+    assert response.status_code == HTTPStatus.FORBIDDEN
 
 
 def test_collections_200_with_data_when_public_and_show_collections_true():
@@ -1144,7 +1144,7 @@ def test_collections_200_with_data_when_public_and_show_collections_true():
 
     response = client.get(_path(client, profile_routes.get_user_collections, sub=SUB_A), headers=_bearer(TOKEN_B))
 
-    assert response.status_code == 200
+    assert response.status_code == HTTPStatus.OK
     assert _DEFINITIONS.validate_python(response.json()) == [
         ProfileDefinitionResponse(
             definition_id=definition.definition_id,
@@ -1171,7 +1171,7 @@ def test_collections_hides_unlisted_and_private_collections_from_a_non_owner():
 
     response = client.get(_path(client, profile_routes.get_user_collections, sub=SUB_A), headers=_bearer(TOKEN_B))
 
-    assert response.status_code == 200
+    assert response.status_code == HTTPStatus.OK
     assert [d.definition_id for d in _DEFINITIONS.validate_python(response.json())] == [public_def.definition_id]
 
 
@@ -1187,7 +1187,7 @@ def test_collections_200_for_owner_regardless_of_flags():
 
     response = client.get(_path(client, profile_routes.get_user_collections, sub=SUB_A), headers=_bearer(TOKEN_A))
 
-    assert response.status_code == 200
+    assert response.status_code == HTTPStatus.OK
     assert len(_DEFINITIONS.validate_python(response.json())) == 1
 
 
@@ -1211,11 +1211,11 @@ def _definition(**overrides):
 def _link(*, psn_account_id, harvest_trophies=False, harvest_identity=False):
     return LinkRecord(
         psn_account_id=psn_account_id,
-        token_response_enc=b"enc",
-        access_token_expires_at=datetime(2026, 1, 1, tzinfo=UTC),
-        refresh_token_expires_at=datetime(2026, 2, 1, tzinfo=UTC),
-        linked_at=datetime(2026, 1, 1, tzinfo=UTC),
-        updated_at=datetime(2026, 1, 1, tzinfo=UTC),
+        token_response_enc=new_opaque_token().encode(),
+        access_token_expires_at=new_utc_instant(),
+        refresh_token_expires_at=new_utc_instant(),
+        linked_at=new_utc_instant(),
+        updated_at=new_utc_instant(),
         last_verified_at=None,
         harvest_trophies=harvest_trophies,
         harvest_identity=harvest_identity,

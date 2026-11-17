@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
 import time
 
 from curator.psn.rate_limiter import RedisRateLimiter
-from test_values import lowercase_token
+from test_values import lowercase_token, new_positive_count, new_short_interval, new_small_count
 
 
 class FakeRedis:
@@ -40,9 +41,9 @@ class FakeRedis:
 
 async def test_acquire_under_budget_does_not_sleep(monkeypatch):
     sleeps: list[float] = []
-    monkeypatch.setattr("asyncio.sleep", _record_sleep(sleeps))
+    monkeypatch.setattr(asyncio, "sleep", _record_sleep(sleeps))
     redis = FakeRedis()
-    limiter = RedisRateLimiter(redis, max_requests=5, window_seconds=60)
+    limiter = RedisRateLimiter(redis, max_requests=new_small_count(), window_seconds=new_positive_count())
 
     await limiter.acquire()
 
@@ -52,25 +53,28 @@ async def test_acquire_under_budget_does_not_sleep(monkeypatch):
 
 async def test_acquire_over_budget_sleeps_out_the_oldest_entry(monkeypatch):
     sleeps: list[float] = []
-    monkeypatch.setattr("asyncio.sleep", _record_sleep(sleeps))
+    monkeypatch.setattr(asyncio, "sleep", _record_sleep(sleeps))
     redis = FakeRedis()
     now = time.time()
-    redis.members = {f"seed-{i}": now - 10 for i in range(3)}
-    limiter = RedisRateLimiter(redis, max_requests=3, window_seconds=60)
+    max_requests = new_small_count()
+    seed_age_seconds = new_small_count()
+    redis.members = {lowercase_token(): now - seed_age_seconds for _ in range(max_requests)}
+    limiter = RedisRateLimiter(redis, max_requests=max_requests, window_seconds=new_short_interval().total_seconds())
 
     await limiter.acquire()
 
     assert len(sleeps) == 1
     assert sleeps[0] > 0
-    assert len(redis.members) == 4
+    assert len(redis.members) == max_requests + 1
 
 
 async def test_acquire_prunes_entries_older_than_the_window():
     redis = FakeRedis()
     now = time.time()
+    window_seconds = new_short_interval().total_seconds()
     stale_member = lowercase_token()
-    redis.members = {stale_member: now - 120}
-    limiter = RedisRateLimiter(redis, max_requests=5, window_seconds=60)
+    redis.members = {stale_member: now - window_seconds - new_positive_count()}
+    limiter = RedisRateLimiter(redis, max_requests=new_small_count(), window_seconds=window_seconds)
 
     await limiter.acquire()
 
@@ -81,7 +85,7 @@ async def test_acquire_prunes_entries_older_than_the_window():
 async def test_acquire_sets_expiry_on_the_key():
     redis = FakeRedis()
     key = lowercase_token()
-    limiter = RedisRateLimiter(redis, key=key, max_requests=5, window_seconds=60)
+    limiter = RedisRateLimiter(redis, key=key, max_requests=new_small_count(), window_seconds=60)
 
     await limiter.acquire()
 

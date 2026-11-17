@@ -31,14 +31,14 @@ def test_normalize_name_strips_the_trademark_letters_and_the_parentheses_that_he
 
 def test_edition_family_drops_every_edition_keyword_and_the_space_it_leaves() -> None:
     base = f"{_word()} {_word()}"
-    keywords = [f"{_word()} edition", f"{_word()} cut"]
+    keywords = [f"{_word()} {_word()}", f"{_word()} {_word()}"]
 
     assert edition_family(f"{base} {keywords[0]} {keywords[1]}", keywords) == base
 
 
 def test_edition_family_lowers_the_name_before_matching_the_way_functions_does() -> None:
     base = _word()
-    keyword = f"{_word()} edition"
+    keyword = f"{_word()} {_word()}"
 
     assert edition_family(f"{base.upper()} {keyword.upper()}", [keyword]) == base
 

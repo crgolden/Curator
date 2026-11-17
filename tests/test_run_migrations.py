@@ -15,7 +15,7 @@ RUN_MIGRATIONS_PATH = Path(__file__).resolve().parent.parent / "db" / "run_migra
 
 
 def _load_run_migrations_module() -> ModuleType:
-    spec = importlib.util.spec_from_file_location("curator_db_run_migrations_arguments", RUN_MIGRATIONS_PATH)
+    spec = importlib.util.spec_from_file_location(lowercase_token(), RUN_MIGRATIONS_PATH)
     assert spec is not None
     assert spec.loader is not None
     module = importlib.util.module_from_spec(spec)
@@ -94,7 +94,7 @@ def _run_against_a_recording_database(
 ) -> list[tuple[str, object]]:
     statements: list[tuple[str, object]] = []
     migration = tmp_path / f"{lowercase_token()}.sql"
-    migration.write_text(f"SELECT '{lowercase_token()}'", encoding="utf-8")
+    migration.write_text(lowercase_token(), encoding="utf-8")
     monkeypatch.setattr(RUN_MIGRATIONS, "MIGRATIONS_DIR", tmp_path)
     monkeypatch.setattr(RUN_MIGRATIONS.psycopg, "connect", lambda *_, **__: _RecordingConnection(statements, applied))
     RUN_MIGRATIONS.run_migrations(lowercase_token())

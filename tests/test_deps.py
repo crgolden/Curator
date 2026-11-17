@@ -8,7 +8,7 @@ bare ``SimpleNamespace`` standing in for the one thing this dependency actually 
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from http import HTTPStatus
 from types import SimpleNamespace
 
 import pytest
@@ -24,7 +24,7 @@ from curator.deps import (
     require_preference,
 )
 from curator.persistence.repository import LinkRecord
-from test_values import new_account_id, new_identity_sub
+from test_values import new_account_id, new_identity_sub, new_opaque_token, new_utc_instant
 
 SUB = new_identity_sub()
 
@@ -47,11 +47,11 @@ def _link(
 ) -> LinkRecord:
     return LinkRecord(
         psn_account_id=new_account_id(),
-        token_response_enc=b"encrypted",
-        access_token_expires_at=datetime(2026, 1, 1, tzinfo=UTC),
-        refresh_token_expires_at=datetime(2026, 2, 1, tzinfo=UTC),
-        linked_at=datetime(2026, 1, 1, tzinfo=UTC),
-        updated_at=datetime(2026, 1, 1, tzinfo=UTC),
+        token_response_enc=new_opaque_token().encode(),
+        access_token_expires_at=new_utc_instant(),
+        refresh_token_expires_at=new_utc_instant(),
+        linked_at=new_utc_instant(),
+        updated_at=new_utc_instant(),
         last_verified_at=None,
         harvest_trophies=harvest_trophies,
         harvest_identity=harvest_identity,
@@ -71,7 +71,7 @@ async def test_require_preference_raises_404_when_no_link():
     with pytest.raises(HTTPException) as exc_info:
         await require_preference(request, SUB, HARVEST_TROPHIES)
 
-    assert exc_info.value.status_code == 404
+    assert exc_info.value.status_code == HTTPStatus.NOT_FOUND
     assert exc_info.value.detail == PREFERENCE_NOT_LINKED_DETAIL
 
 
@@ -83,7 +83,7 @@ async def test_require_preference_raises_403_when_category_flag_off():
     with pytest.raises(HTTPException) as exc_info:
         await require_preference(request, SUB, HARVEST_TROPHIES)
 
-    assert exc_info.value.status_code == 403
+    assert exc_info.value.status_code == HTTPStatus.FORBIDDEN
     assert exc_info.value.detail == preference_disabled_detail(HARVEST_TROPHIES)
 
 
@@ -106,5 +106,5 @@ async def test_require_preference_checks_the_named_category_independently(catego
     with pytest.raises(HTTPException) as exc_info:
         await require_preference(request, SUB, category)
 
-    assert exc_info.value.status_code == 403
+    assert exc_info.value.status_code == HTTPStatus.FORBIDDEN
     assert exc_info.value.detail == preference_disabled_detail(category)

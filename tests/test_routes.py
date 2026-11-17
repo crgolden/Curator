@@ -13,9 +13,10 @@ psycopg.
 from __future__ import annotations
 
 import dataclasses
+import json
 import logging
 import uuid
-from datetime import UTC, datetime
+from http import HTTPStatus
 from types import SimpleNamespace
 
 import pytest
@@ -46,16 +47,44 @@ from curator.persistence.repository import LinkRecord
 from curator.psn.errors import PsnAuthError
 from curator.psn_routes import LINK_ERROR_MESSAGES, LinkErrorDetail, LinkRequest, LinkResponse
 from curator.settings import Settings
+from curator.token_response import ACCESS_TOKEN_KEY, REFRESH_TOKEN_KEY
 from curator.token_validation import TokenClaims, TokenError
-from test_values import lowercase_token, new_sha256_hash
+from test_values import (
+    lowercase_token,
+    new_account_id,
+    new_database_url,
+    new_email_address,
+    new_endpoint_url,
+    new_identity_sub,
+    new_npsso,
+    new_opaque_token,
+    new_service_bus_connection_string,
+    new_service_bus_namespace,
+    new_sha256_hash,
+    new_short_interval,
+    new_utc_instant,
+)
 
-SUB = "sub-1"
-EMAIL = "user@example.com"
+SUB = new_identity_sub()
+EMAIL = new_email_address()
+TOKEN = new_opaque_token()
+ACCOUNT_ID = new_account_id()
 
-TOUCHED_AT = datetime(2027, 1, 1, tzinfo=UTC)
+CREATED_AT = new_utc_instant()
 
-OLD_IAT = datetime(2026, 1, 1, tzinfo=UTC)
-NEW_IAT = datetime(2026, 6, 1, tzinfo=UTC)
+OLD_IAT = new_utc_instant()
+NEW_IAT = OLD_IAT + new_short_interval()
+
+TOUCHED_AT = NEW_IAT + new_short_interval()
+
+RAISE_ON_WHOAMI = object()
+RAISE_ON_EMAIL = object()
+
+
+def _token_response_blob(crypto: TokenCrypto) -> bytes:
+    return crypto.encrypt(
+        json.dumps({ACCESS_TOKEN_KEY: new_opaque_token(), REFRESH_TOKEN_KEY: new_opaque_token()}).encode()
+    )
 
 
 class FakeRepository:
@@ -78,7 +107,7 @@ class FakeRepository:
         return sub in self.users
 
     async def get_created_at(self, sub):
-        return datetime(2026, 1, 2, 3, 4, 5, tzinfo=UTC) if sub in self.users else None
+        return CREATED_AT if sub in self.users else None
 
     async def touch_login(self, sub):
         self.login_touches.append(sub)
@@ -97,8 +126,8 @@ class FakeRepository:
             token_response_enc=token_response_enc,
             access_token_expires_at=access_token_expires_at,
             refresh_token_expires_at=refresh_token_expires_at,
-            linked_at=existing.linked_at if existing else datetime(2026, 1, 1, tzinfo=UTC),
-            updated_at=datetime(2026, 1, 1, tzinfo=UTC),
+            linked_at=existing.linked_at if existing else new_utc_instant(),
+            updated_at=new_utc_instant(),
             last_verified_at=existing.last_verified_at if existing else None,
             harvest_trophies=existing.harvest_trophies if existing else False,
             harvest_identity=existing.harvest_identity if existing else False,
@@ -195,7 +224,7 @@ def _seed_link(
     repo: FakeRepository,
     crypto: TokenCrypto,
     sub: str,
-    account_id: str = "psn-account-1",
+    account_id: str = ACCOUNT_ID,
     last_verified_at=None,
     harvest_trophies: bool = False,
     harvest_identity: bool = False,
@@ -205,14 +234,13 @@ def _seed_link(
     allow_chat_writes: bool = False,
 ) -> None:
     """Seed a pre-existing PSN link, as if a previous /psn/link call (or DbTokenStore.save) had run."""
-    encrypted = crypto.encrypt(b'{"access_token": "AT", "refresh_token": "RT"}')
     repo.links[sub] = LinkRecord(
         psn_account_id=account_id,
-        token_response_enc=encrypted,
-        access_token_expires_at=datetime(2026, 1, 1, 1, tzinfo=UTC),
-        refresh_token_expires_at=datetime(2026, 2, 1, tzinfo=UTC),
-        linked_at=datetime(2026, 1, 1, tzinfo=UTC),
-        updated_at=datetime(2026, 1, 1, tzinfo=UTC),
+        token_response_enc=_token_response_blob(crypto),
+        access_token_expires_at=new_utc_instant(),
+        refresh_token_expires_at=new_utc_instant(),
+        linked_at=new_utc_instant(),
+        updated_at=new_utc_instant(),
         last_verified_at=last_verified_at,
         harvest_trophies=harvest_trophies,
         harvest_identity=harvest_identity,
@@ -237,20 +265,19 @@ class FakeAgent:
         self._raise_kind = raise_kind
 
     async def whoami(self):
-        if self._raise_kind == "whoami":
-            raise PsnAuthError("boom")
-        encrypted = self._token_crypto.encrypt(b'{"access_token": "AT", "refresh_token": "RT"}')
+        if self._raise_kind is RAISE_ON_WHOAMI:
+            raise PsnAuthError(new_opaque_token())
         await self._repository.upsert_link(
             self._sub,
-            encrypted,
-            datetime(2026, 1, 1, 1, tzinfo=UTC),
-            datetime(2026, 2, 1, tzinfo=UTC),
+            _token_response_blob(self._token_crypto),
+            new_utc_instant(),
+            new_utc_instant(),
         )
         return SimpleNamespace(account_id=self._account_id)
 
     async def account_email_verified(self):
-        if self._raise_kind == "email":
-            raise PsnAuthError("boom")
+        if self._raise_kind is RAISE_ON_EMAIL:
+            raise PsnAuthError(new_opaque_token())
         return self._email_info
 
 
@@ -261,7 +288,7 @@ class FakeAgentFactory:
         self.repository = repository
         self.token_crypto = token_crypto
         self.email_info = (EMAIL, True)
-        self.account_id = "psn-account-1"
+        self.account_id = ACCOUNT_ID
         self.raise_kind = None
         self.calls: list[tuple[str, str | None]] = []
 
@@ -320,7 +347,7 @@ class FakeTokenValidator:
     def validate(self, token: str) -> TokenClaims:
         claims = self.tokens.get(token)
         if claims is None:
-            raise TokenError("Unknown or invalid token.")
+            raise TokenError(new_opaque_token())
         return claims
 
 
@@ -346,10 +373,10 @@ def _link_error_detail(kind: str) -> dict[str, object]:
 
 def _make_settings() -> Settings:
     return Settings(
-        oidc_authority="https://identity.example.test",
+        oidc_authority=new_endpoint_url(),
         token_key=TokenCrypto.generate_key().decode(),
-        database_url="postgresql://unused",
-        store_graphql_endpoint=f"https://{lowercase_token()}.example.test",
+        database_url=new_database_url(),
+        store_graphql_endpoint=new_endpoint_url(),
         store_query_hashes=(new_sha256_hash(),),
     )
 
@@ -376,11 +403,11 @@ def _build(repository=None, token_crypto=None, agent_factory=None, token_validat
     return client, repository, token_crypto, agent_factory, token_validator, audit_repository
 
 
-def _upsert_app_user_row_the_way_a_real_caller_would(client, token="valid-token"):
+def _upsert_app_user_row_the_way_a_real_caller_would(client, token=TOKEN):
     client.get(_path(client, me_routes.me), headers=_bearer(token))
 
 
-def _build_with_valid_token(token="valid-token", **claims_kwargs):
+def _build_with_valid_token(token=TOKEN, **claims_kwargs):
     client, repo, crypto, agent_factory, validator, audit_repository = _build()
     validator.register(token, _claims(**claims_kwargs))
     return client, repo, crypto, agent_factory, validator, audit_repository
@@ -396,7 +423,7 @@ def test_create_app_returns_a_fastapi_instance():
 def test_health_returns_plain_text_healthy():
     client, *_ = _build()
     response = client.get(HEALTH_PATH)
-    assert response.status_code == 200
+    assert response.status_code == HTTPStatus.OK
     assert response.text == HEALTHY_BODY
 
 
@@ -418,14 +445,14 @@ def test_unhandled_exception_returns_500_and_is_logged(caplog):
 
     @app.get("/boom")
     def _boom():
-        raise RuntimeError("kaboom")
+        raise RuntimeError(new_opaque_token())
 
     client = TestClient(app, raise_server_exceptions=False)
 
     with caplog.at_level(logging.ERROR, logger=CURATOR_LOGGER_NAME):
         response = client.get("/boom")
 
-    assert response.status_code == 500
+    assert response.status_code == HTTPStatus.INTERNAL_SERVER_ERROR
     assert response.text == INTERNAL_SERVER_ERROR_BODY
     assert any("Unhandled exception" in record.getMessage() for record in caplog.records)
     assert any(record.exc_info is not None for record in caplog.records)
@@ -464,7 +491,7 @@ def test_create_app_with_service_bus_namespace_wires_queue_publisher():
     """Production sets only ``ServiceBusNamespace`` -- the fleet's shared namespace has ``DisableLocalAuth``
     enabled, so this is the only path that actually works there (managed identity via
     ``DefaultAzureCredential``, no connection string)."""
-    settings = dataclasses.replace(_make_settings(), service_bus_namespace="crgolden.servicebus.windows.net")
+    settings = dataclasses.replace(_make_settings(), service_bus_namespace=new_service_bus_namespace())
     client = _build_with_settings(settings)
 
     assert client.app.state.queue_publisher is not None
@@ -473,13 +500,7 @@ def test_create_app_with_service_bus_namespace_wires_queue_publisher():
 def test_create_app_with_service_bus_connection_string_wires_queue_publisher():
     """The connection-string fallback (local dev / an environment without a real managed identity) must
     still wire the publisher, matching the pre-managed-identity behavior."""
-    settings = dataclasses.replace(
-        _make_settings(),
-        service_bus_connection_string=(
-            "Endpoint=sb://example.servicebus.windows.net/;SharedAccessKeyName=RootManageSharedAccessKey;"
-            "SharedAccessKey=x"
-        ),
-    )
+    settings = dataclasses.replace(_make_settings(), service_bus_connection_string=new_service_bus_connection_string())
     client = _build_with_settings(settings)
 
     assert client.app.state.queue_publisher is not None
@@ -499,8 +520,8 @@ def test_create_app_prefers_service_bus_namespace_over_connection_string_when_bo
 
     settings = dataclasses.replace(
         _make_settings(),
-        service_bus_namespace="crgolden.servicebus.windows.net",
-        service_bus_connection_string="Endpoint=sb://example/;SharedAccessKey=x",
+        service_bus_namespace=new_service_bus_namespace(),
+        service_bus_connection_string=new_service_bus_connection_string(),
     )
     client = _build_with_settings(settings)
 
@@ -511,7 +532,7 @@ async def test_trophy_client_factory_raises_for_unlinked_user():
     client, *_ = _build()
 
     with pytest.raises(RuntimeError, match="No PSN link"):
-        await client.app.state.trophy_client_factory("no-such-sub")
+        await client.app.state.trophy_client_factory(new_identity_sub())
 
 
 async def test_create_app_wires_injected_redis_client_into_rate_limiter_and_trophy_cache():
@@ -543,7 +564,7 @@ async def test_create_app_wires_injected_redis_client_into_rate_limiter_and_trop
 def test_me_without_bearer_token_is_401():
     client, *_ = _build()
     response = client.get(_path(client, me_routes.me))
-    assert response.status_code == 401
+    assert response.status_code == HTTPStatus.UNAUTHORIZED
     assert response.headers[WWW_AUTHENTICATE_HEADER] == BEARER_SCHEME
 
 
@@ -552,19 +573,19 @@ def test_me_with_malformed_authorization_header_is_401():
     response = client.get(
         _path(client, me_routes.me), headers={AUTHORIZATION_HEADER: f"{uuid.uuid4().hex} {uuid.uuid4().hex}"}
     )
-    assert response.status_code == 401
+    assert response.status_code == HTTPStatus.UNAUTHORIZED
 
 
 def test_me_with_invalid_token_is_401():
     client, *_ = _build()
-    response = client.get(_path(client, me_routes.me), headers=_bearer("garbage-not-a-real-token"))
-    assert response.status_code == 401
+    response = client.get(_path(client, me_routes.me), headers=_bearer(new_opaque_token()))
+    assert response.status_code == HTTPStatus.UNAUTHORIZED
 
 
 def test_me_without_curator_scope_is_403():
-    client, *_ = _build_with_valid_token(scopes=("openid",))
-    response = client.get(_path(client, me_routes.me), headers=_bearer("valid-token"))
-    assert response.status_code == 403
+    client, *_ = _build_with_valid_token(scopes=(lowercase_token(),))
+    response = client.get(_path(client, me_routes.me), headers=_bearer(TOKEN))
+    assert response.status_code == HTTPStatus.FORBIDDEN
 
 
 def test_authenticated_request_upserts_caller_and_touches_login():
@@ -573,31 +594,31 @@ def test_authenticated_request_upserts_caller_and_touches_login():
     downstream write for a sub that was never upserted would fail at the database.
     """
     client, repo, *_ = _build_with_valid_token()
-    response = client.get(_path(client, me_routes.me), headers=_bearer("valid-token"))
-    assert response.status_code == 200
+    response = client.get(_path(client, me_routes.me), headers=_bearer(TOKEN))
+    assert response.status_code == HTTPStatus.OK
     assert SUB in repo.users
     assert repo.login_touches == [SUB]
 
 
 def test_request_without_curator_scope_never_upserts_caller():
-    client, repo, *_ = _build_with_valid_token(scopes=("openid",))
-    response = client.get(_path(client, me_routes.me), headers=_bearer("valid-token"))
-    assert response.status_code == 403
+    client, repo, *_ = _build_with_valid_token(scopes=(lowercase_token(),))
+    response = client.get(_path(client, me_routes.me), headers=_bearer(TOKEN))
+    assert response.status_code == HTTPStatus.FORBIDDEN
     assert repo.users == set()
     assert repo.login_touches == []
 
 
 def test_me_without_email_claim_is_403():
     client, *_ = _build_with_valid_token(email=None)
-    response = client.get(_path(client, me_routes.me), headers=_bearer("valid-token"))
-    assert response.status_code == 403
+    response = client.get(_path(client, me_routes.me), headers=_bearer(TOKEN))
+    assert response.status_code == HTTPStatus.FORBIDDEN
     assert response.json()["detail"] == EMAIL_CLAIM_REQUIRED_DETAIL
 
 
 def test_me_reports_unlinked():
     client, *_ = _build_with_valid_token()
-    response = client.get(_path(client, me_routes.me), headers=_bearer("valid-token"))
-    assert response.status_code == 200
+    response = client.get(_path(client, me_routes.me), headers=_bearer(TOKEN))
+    assert response.status_code == HTTPStatus.OK
     body = MeResponse.model_validate(response.json())
     assert body.sub == SUB
     assert body.email == EMAIL
@@ -608,7 +629,7 @@ def test_me_reports_unlinked():
 
 def test_me_reports_is_admin_true_for_an_admin_claim():
     client, *_ = _build_with_valid_token(is_admin=True)
-    response = client.get(_path(client, me_routes.me), headers=_bearer("valid-token"))
+    response = client.get(_path(client, me_routes.me), headers=_bearer(TOKEN))
     assert MeResponse.model_validate(response.json()).is_admin is True
 
 
@@ -619,12 +640,12 @@ def test_me_with_matching_verified_link_keeps_it_and_touches_verified():
     agent_factory.email_info = (EMAIL, True)
     _seed_link(repo, crypto, SUB, last_verified_at=OLD_IAT)
     validator = FakeTokenValidator()
-    validator.register("valid-token", _claims(iat=NEW_IAT))
+    validator.register(TOKEN, _claims(iat=NEW_IAT))
     client, *_ = _build(repository=repo, token_crypto=crypto, agent_factory=agent_factory, token_validator=validator)
 
-    response = client.get(_path(client, me_routes.me), headers=_bearer("valid-token"))
+    response = client.get(_path(client, me_routes.me), headers=_bearer(TOKEN))
 
-    assert response.status_code == 200
+    assert response.status_code == HTTPStatus.OK
     assert repo.delete_calls == []
     assert repo.touch_verified_calls == [SUB]
     assert MeResponse.model_validate(response.json()).linked is True
@@ -634,13 +655,13 @@ def test_me_with_mismatched_email_auto_unlinks():
     repo = FakeRepository()
     crypto = TokenCrypto(TokenCrypto.generate_key())
     agent_factory = FakeAgentFactory(repo, crypto)
-    agent_factory.email_info = ("someone-else@example.com", True)
+    agent_factory.email_info = (new_email_address(), True)
     _seed_link(repo, crypto, SUB, last_verified_at=OLD_IAT)
     validator = FakeTokenValidator()
-    validator.register("valid-token", _claims(iat=NEW_IAT))
+    validator.register(TOKEN, _claims(iat=NEW_IAT))
     client, *_ = _build(repository=repo, token_crypto=crypto, agent_factory=agent_factory, token_validator=validator)
 
-    response = client.get(_path(client, me_routes.me), headers=_bearer("valid-token"))
+    response = client.get(_path(client, me_routes.me), headers=_bearer(TOKEN))
 
     assert repo.delete_calls == [SUB]
     assert MeResponse.model_validate(response.json()).linked is False
@@ -653,10 +674,10 @@ def test_me_with_unverified_email_auto_unlinks():
     agent_factory.email_info = (EMAIL, False)
     _seed_link(repo, crypto, SUB, last_verified_at=OLD_IAT)
     validator = FakeTokenValidator()
-    validator.register("valid-token", _claims(iat=NEW_IAT))
+    validator.register(TOKEN, _claims(iat=NEW_IAT))
     client, *_ = _build(repository=repo, token_crypto=crypto, agent_factory=agent_factory, token_validator=validator)
 
-    response = client.get(_path(client, me_routes.me), headers=_bearer("valid-token"))
+    response = client.get(_path(client, me_routes.me), headers=_bearer(TOKEN))
 
     assert repo.delete_calls == [SUB]
     assert MeResponse.model_validate(response.json()).linked is False
@@ -668,20 +689,20 @@ def test_me_reverify_network_blip_leaves_link_intact():
 
     class FlakyAgent(FakeAgent):
         async def account_email_verified(self):
-            raise RuntimeError("transient network blip")
+            raise RuntimeError(new_opaque_token())
 
     calls: list[tuple[str, str | None]] = []
 
     def factory(sub, npsso=None):
         calls.append((sub, npsso))
-        return FlakyAgent(sub, repo, crypto, email_info=None, account_id="x", raise_kind=None)
+        return FlakyAgent(sub, repo, crypto, email_info=None, account_id=new_account_id(), raise_kind=None)
 
     _seed_link(repo, crypto, SUB, last_verified_at=OLD_IAT)
     validator = FakeTokenValidator()
-    validator.register("valid-token", _claims(iat=NEW_IAT))
+    validator.register(TOKEN, _claims(iat=NEW_IAT))
     client, *_ = _build(repository=repo, token_crypto=crypto, agent_factory=factory, token_validator=validator)
 
-    response = client.get(_path(client, me_routes.me), headers=_bearer("valid-token"))
+    response = client.get(_path(client, me_routes.me), headers=_bearer(TOKEN))
 
     assert repo.delete_calls == []
     assert repo.touch_verified_calls == []
@@ -695,12 +716,12 @@ def test_me_reverify_skips_psn_check_when_token_iat_not_newer_than_last_verified
     _seed_link(repo, crypto, SUB, last_verified_at=NEW_IAT)
     validator = FakeTokenValidator()
 
-    validator.register("valid-token", _claims(iat=OLD_IAT))
+    validator.register(TOKEN, _claims(iat=OLD_IAT))
     client, *_ = _build(repository=repo, token_crypto=crypto, agent_factory=agent_factory, token_validator=validator)
 
-    response = client.get(_path(client, me_routes.me), headers=_bearer("valid-token"))
+    response = client.get(_path(client, me_routes.me), headers=_bearer(TOKEN))
 
-    assert response.status_code == 200
+    assert response.status_code == HTTPStatus.OK
     assert agent_factory.calls == []
     assert repo.delete_calls == []
     assert repo.touch_verified_calls == []
@@ -709,40 +730,39 @@ def test_me_reverify_skips_psn_check_when_token_iat_not_newer_than_last_verified
 
 def test_psn_link_without_bearer_token_is_401():
     client, *_ = _build()
-    response = client.post(_path(client, psn_routes.psn_link), json=_link_body("some-token"))
-    assert response.status_code == 401
+    response = client.post(_path(client, psn_routes.psn_link), json=_link_body(new_npsso()))
+    assert response.status_code == HTTPStatus.UNAUTHORIZED
 
 
 def test_psn_link_without_curator_scope_is_403():
     client, *_ = _build_with_valid_token(scopes=())
-    response = client.post(_path(client, psn_routes.psn_link), json=_link_body("x"), headers=_bearer("valid-token"))
-    assert response.status_code == 403
+    response = client.post(_path(client, psn_routes.psn_link), json=_link_body(new_npsso()), headers=_bearer(TOKEN))
+    assert response.status_code == HTTPStatus.FORBIDDEN
 
 
 def test_psn_link_without_email_claim_is_403():
     client, *_ = _build_with_valid_token(email=None)
-    response = client.post(_path(client, psn_routes.psn_link), json=_link_body("x"), headers=_bearer("valid-token"))
-    assert response.status_code == 403
+    response = client.post(_path(client, psn_routes.psn_link), json=_link_body(new_npsso()), headers=_bearer(TOKEN))
+    assert response.status_code == HTTPStatus.FORBIDDEN
     assert response.json()["detail"] == EMAIL_CLAIM_REQUIRED_DETAIL
 
 
 def test_psn_link_happy_path_then_me_shows_linked_with_expirations():
     client, repo, _crypto, agent_factory, _validator, _audit = _build_with_valid_token()
     agent_factory.email_info = (EMAIL, True)
+    npsso = new_npsso()
 
-    response = client.post(
-        _path(client, psn_routes.psn_link), json=_link_body("the-npsso"), headers=_bearer("valid-token")
-    )
+    response = client.post(_path(client, psn_routes.psn_link), json=_link_body(npsso), headers=_bearer(TOKEN))
 
-    assert response.status_code == 200
+    assert response.status_code == HTTPStatus.OK
     body = LinkResponse.model_validate(response.json())
     assert body.linked is True
     assert body.psn.access_token_expires_at is not None
     assert body.psn.refresh_token_expires_at is not None
-    assert agent_factory.calls[-1] == (SUB, "the-npsso")
+    assert agent_factory.calls[-1] == (SUB, npsso)
     assert repo.touch_verified_calls == [SUB]
 
-    me_response = client.get(_path(client, me_routes.me), headers=_bearer("valid-token"))
+    me_response = client.get(_path(client, me_routes.me), headers=_bearer(TOKEN))
     me_body = MeResponse.model_validate(me_response.json())
     assert me_body.linked is True
     assert me_body.psn is not None
@@ -751,13 +771,11 @@ def test_psn_link_happy_path_then_me_shows_linked_with_expirations():
 
 def test_psn_link_mismatch_returns_409():
     client, _repo, _crypto, agent_factory, _validator, _audit = _build_with_valid_token()
-    agent_factory.email_info = ("someone-else@example.com", True)
+    agent_factory.email_info = (new_email_address(), True)
 
-    response = client.post(
-        _path(client, psn_routes.psn_link), json=_link_body("the-npsso"), headers=_bearer("valid-token")
-    )
+    response = client.post(_path(client, psn_routes.psn_link), json=_link_body(new_npsso()), headers=_bearer(TOKEN))
 
-    assert response.status_code == 409
+    assert response.status_code == HTTPStatus.CONFLICT
     assert response.json()["detail"] == _link_error_detail(LINK_ERROR_MISMATCH)
 
 
@@ -765,11 +783,9 @@ def test_psn_link_unverified_returns_409():
     client, _repo, _crypto, agent_factory, _validator, _audit = _build_with_valid_token()
     agent_factory.email_info = (EMAIL, False)
 
-    response = client.post(
-        _path(client, psn_routes.psn_link), json=_link_body("the-npsso"), headers=_bearer("valid-token")
-    )
+    response = client.post(_path(client, psn_routes.psn_link), json=_link_body(new_npsso()), headers=_bearer(TOKEN))
 
-    assert response.status_code == 409
+    assert response.status_code == HTTPStatus.CONFLICT
     assert response.json()["detail"] == _link_error_detail(LINK_ERROR_UNVERIFIED)
 
 
@@ -777,23 +793,21 @@ def test_psn_link_invalid_npsso_returns_400():
     client, _repo, _crypto, agent_factory, _validator, _audit = _build_with_valid_token()
 
     response = client.post(
-        _path(client, psn_routes.psn_link), json=_link_body("{not valid json"), headers=_bearer("valid-token")
+        _path(client, psn_routes.psn_link), json=_link_body("{" + new_npsso()), headers=_bearer(TOKEN)
     )
 
-    assert response.status_code == 400
+    assert response.status_code == HTTPStatus.BAD_REQUEST
     assert LinkErrorDetail.model_validate(response.json()["detail"]).error == LINK_ERROR_INVALID_NPSSO
     assert agent_factory.calls == []
 
 
 def test_psn_link_auth_failure_returns_401():
     client, _repo, _crypto, agent_factory, _validator, _audit = _build_with_valid_token()
-    agent_factory.raise_kind = "whoami"
+    agent_factory.raise_kind = RAISE_ON_WHOAMI
 
-    response = client.post(
-        _path(client, psn_routes.psn_link), json=_link_body("the-npsso"), headers=_bearer("valid-token")
-    )
+    response = client.post(_path(client, psn_routes.psn_link), json=_link_body(new_npsso()), headers=_bearer(TOKEN))
 
-    assert response.status_code == 401
+    assert response.status_code == HTTPStatus.UNAUTHORIZED
     assert response.json()["detail"] == _link_error_detail(LINK_ERROR_AUTH_FAILED)
 
 
@@ -804,13 +818,13 @@ def test_psn_unlink_then_me_shows_unlinked():
     agent_factory.email_info = (EMAIL, True)
     _seed_link(repo, crypto, SUB)
     validator = FakeTokenValidator()
-    validator.register("valid-token", _claims())
+    validator.register(TOKEN, _claims())
     client, *_ = _build(repository=repo, token_crypto=crypto, agent_factory=agent_factory, token_validator=validator)
 
-    response = client.delete(_path(client, psn_routes.psn_unlink), headers=_bearer("valid-token"))
-    assert response.status_code == 204
+    response = client.delete(_path(client, psn_routes.psn_unlink), headers=_bearer(TOKEN))
+    assert response.status_code == HTTPStatus.NO_CONTENT
 
-    me_response = client.get(_path(client, me_routes.me), headers=_bearer("valid-token"))
+    me_response = client.get(_path(client, me_routes.me), headers=_bearer(TOKEN))
     assert MeResponse.model_validate(me_response.json()).linked is False
 
 
@@ -826,12 +840,12 @@ def test_psn_unlink_clears_stored_trophy_progress():
     agent_factory.email_info = (EMAIL, True)
     _seed_link(repo, crypto, SUB, harvest_trophies=True)
     validator = FakeTokenValidator()
-    validator.register("valid-token", _claims())
+    validator.register(TOKEN, _claims())
     client, *_ = _build(repository=repo, token_crypto=crypto, agent_factory=agent_factory, token_validator=validator)
 
-    response = client.delete(_path(client, psn_routes.psn_unlink), headers=_bearer("valid-token"))
+    response = client.delete(_path(client, psn_routes.psn_unlink), headers=_bearer(TOKEN))
 
-    assert response.status_code == 204
+    assert response.status_code == HTTPStatus.NO_CONTENT
     assert client.app.state.library_repository.clear_trophy_progress_calls == [SUB]
 
 
@@ -845,25 +859,25 @@ def test_psn_unlink_deletes_any_recurring_refresh_schedule():
     agent_factory.email_info = (EMAIL, True)
     _seed_link(repo, crypto, SUB)
     validator = FakeTokenValidator()
-    validator.register("valid-token", _claims())
+    validator.register(TOKEN, _claims())
     client, *_ = _build(repository=repo, token_crypto=crypto, agent_factory=agent_factory, token_validator=validator)
 
-    response = client.delete(_path(client, psn_routes.psn_unlink), headers=_bearer("valid-token"))
+    response = client.delete(_path(client, psn_routes.psn_unlink), headers=_bearer(TOKEN))
 
-    assert response.status_code == 204
+    assert response.status_code == HTTPStatus.NO_CONTENT
     assert client.app.state.refresh_schedules_repository.delete_calls == [SUB]
 
 
 def test_psn_unlink_without_bearer_token_is_401():
     client, *_ = _build()
     response = client.delete(_path(client, psn_routes.psn_unlink))
-    assert response.status_code == 401
+    assert response.status_code == HTTPStatus.UNAUTHORIZED
 
 
 def test_psn_unlink_without_email_claim_is_403():
     client, *_ = _build_with_valid_token(email=None)
-    response = client.delete(_path(client, psn_routes.psn_unlink), headers=_bearer("valid-token"))
-    assert response.status_code == 403
+    response = client.delete(_path(client, psn_routes.psn_unlink), headers=_bearer(TOKEN))
+    assert response.status_code == HTTPStatus.FORBIDDEN
 
 
 def test_delete_me_removes_the_caller_and_their_link():
@@ -871,12 +885,12 @@ def test_delete_me_removes_the_caller_and_their_link():
     crypto = TokenCrypto(TokenCrypto.generate_key())
     _seed_link(repo, crypto, SUB)
     validator = FakeTokenValidator()
-    validator.register("valid-token", _claims())
+    validator.register(TOKEN, _claims())
     client, *_ = _build(repository=repo, token_crypto=crypto, token_validator=validator)
     _upsert_app_user_row_the_way_a_real_caller_would(client)
 
-    response = client.delete(_path(client, me_routes.delete_me), headers=_bearer("valid-token"))
-    assert response.status_code == 204
+    response = client.delete(_path(client, me_routes.delete_me), headers=_bearer(TOKEN))
+    assert response.status_code == HTTPStatus.NO_CONTENT
     assert repo.delete_user_calls == [SUB]
     assert SUB not in repo.users
     assert SUB not in repo.links
@@ -885,29 +899,29 @@ def test_delete_me_removes_the_caller_and_their_link():
 def test_delete_me_is_idempotent_for_a_caller_with_no_stored_data():
     client, repo, *_ = _build_with_valid_token()
 
-    response = client.delete(_path(client, me_routes.delete_me), headers=_bearer("valid-token"))
-    assert response.status_code == 204
+    response = client.delete(_path(client, me_routes.delete_me), headers=_bearer(TOKEN))
+    assert response.status_code == HTTPStatus.NO_CONTENT
     assert repo.delete_user_calls == [SUB]
 
 
 def test_delete_me_without_bearer_token_is_401():
     client, *_ = _build()
     response = client.delete(_path(client, me_routes.delete_me))
-    assert response.status_code == 401
+    assert response.status_code == HTTPStatus.UNAUTHORIZED
 
 
 def test_delete_me_without_email_claim_is_403():
     client, *_ = _build_with_valid_token(email=None)
-    response = client.delete(_path(client, me_routes.delete_me), headers=_bearer("valid-token"))
-    assert response.status_code == 403
+    response = client.delete(_path(client, me_routes.delete_me), headers=_bearer(TOKEN))
+    assert response.status_code == HTTPStatus.FORBIDDEN
 
 
 def test_delete_me_logs_account_deleted_before_removing_the_user():
     client, _repo, _crypto, _agent_factory, _validator, audit = _build_with_valid_token()
 
-    response = client.delete(_path(client, me_routes.delete_me), headers=_bearer("valid-token"))
+    response = client.delete(_path(client, me_routes.delete_me), headers=_bearer(TOKEN))
 
-    assert response.status_code == 204
+    assert response.status_code == HTTPStatus.NO_CONTENT
     assert audit.outcomes == [(ACTION_ACCOUNT_DELETED, OUTCOME_COMPLETED)]
 
 
@@ -915,7 +929,7 @@ def test_delete_me_deletes_nothing_when_the_history_row_cannot_be_written():
     client, repo, _crypto, _agent_factory, _validator, audit = _build_with_valid_token()
     audit.begin_error = RuntimeError(EMAIL)
     delete_me_path = _path(client, me_routes.delete_me)
-    headers = _bearer("valid-token")
+    headers = _bearer(TOKEN)
 
     with pytest.raises(RuntimeError):
         client.delete(delete_me_path, headers=headers)
@@ -927,23 +941,19 @@ def test_psn_link_happy_path_records_a_completed_link_request():
     client, _repo, _crypto, agent_factory, _validator, audit = _build_with_valid_token()
     agent_factory.email_info = (EMAIL, True)
 
-    response = client.post(
-        _path(client, psn_routes.psn_link), json=_link_body("the-npsso"), headers=_bearer("valid-token")
-    )
+    response = client.post(_path(client, psn_routes.psn_link), json=_link_body(new_npsso()), headers=_bearer(TOKEN))
 
-    assert response.status_code == 200
+    assert response.status_code == HTTPStatus.OK
     assert audit.entries == [(SUB, ACTION_LINK_REQUESTED, None)]
 
 
 def test_psn_link_mismatch_records_a_failed_link_request_with_the_reason():
     client, _repo, _crypto, agent_factory, _validator, audit = _build_with_valid_token()
-    agent_factory.email_info = ("someone-else@example.com", True)
+    agent_factory.email_info = (new_email_address(), True)
 
-    response = client.post(
-        _path(client, psn_routes.psn_link), json=_link_body("the-npsso"), headers=_bearer("valid-token")
-    )
+    response = client.post(_path(client, psn_routes.psn_link), json=_link_body(new_npsso()), headers=_bearer(TOKEN))
 
-    assert response.status_code == 409
+    assert response.status_code == HTTPStatus.CONFLICT
     assert [(row.action, row.detail, row.outcome) for row in audit.rows] == [
         (ACTION_LINK_REQUESTED, LINK_ERROR_MISMATCH, OUTCOME_FAILED)
     ]
@@ -953,8 +963,8 @@ def test_psn_link_never_uses_the_npsso_when_the_history_row_cannot_be_written():
     client, _repo, _crypto, agent_factory, _validator, audit = _build_with_valid_token()
     audit.begin_error = RuntimeError(EMAIL)
     link_path = _path(client, psn_routes.psn_link)
-    link_body = _link_body("the-npsso")
-    headers = _bearer("valid-token")
+    link_body = _link_body(new_npsso())
+    headers = _bearer(TOKEN)
 
     with pytest.raises(RuntimeError):
         client.post(link_path, json=link_body, headers=headers)
@@ -969,25 +979,25 @@ def test_psn_unlink_logs_unlinked():
     agent_factory.email_info = (EMAIL, True)
     _seed_link(repo, crypto, SUB)
     validator = FakeTokenValidator()
-    validator.register("valid-token", _claims())
+    validator.register(TOKEN, _claims())
     client, _repo, _crypto, _agent_factory, _validator, audit = _build(
         repository=repo, token_crypto=crypto, agent_factory=agent_factory, token_validator=validator
     )
 
-    response = client.delete(_path(client, psn_routes.psn_unlink), headers=_bearer("valid-token"))
+    response = client.delete(_path(client, psn_routes.psn_unlink), headers=_bearer(TOKEN))
 
-    assert response.status_code == 204
+    assert response.status_code == HTTPStatus.NO_CONTENT
     assert audit.outcomes == [(ACTION_LINK_REVERIFIED, OUTCOME_COMPLETED), (ACTION_UNLINKED, OUTCOME_COMPLETED)]
 
 
 def test_get_my_actions_returns_the_callers_own_history():
     client, _repo, _crypto, agent_factory, _validator, _audit = _build_with_valid_token()
     agent_factory.email_info = (EMAIL, True)
-    client.post(_path(client, psn_routes.psn_link), json=_link_body("the-npsso"), headers=_bearer("valid-token"))
+    client.post(_path(client, psn_routes.psn_link), json=_link_body(new_npsso()), headers=_bearer(TOKEN))
 
-    response = client.get(_path(client, me_routes.get_my_actions), headers=_bearer("valid-token"))
+    response = client.get(_path(client, me_routes.get_my_actions), headers=_bearer(TOKEN))
 
-    assert response.status_code == 200
+    assert response.status_code == HTTPStatus.OK
     actions = AccountActionsResponse.model_validate(response.json()).actions
     assert [(action.action, action.outcome) for action in actions] == [(ACTION_LINK_REQUESTED, OUTCOME_COMPLETED)]
 
@@ -995,4 +1005,4 @@ def test_get_my_actions_returns_the_callers_own_history():
 def test_get_my_actions_without_bearer_token_is_401():
     client, *_ = _build()
     response = client.get(_path(client, me_routes.get_my_actions))
-    assert response.status_code == 401
+    assert response.status_code == HTTPStatus.UNAUTHORIZED

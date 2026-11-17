@@ -11,6 +11,7 @@ from datetime import datetime
 import pytest
 from azure.servicebus import ServiceBusMessage
 from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.trace import format_trace_id
 
 from curator.jobs.queue_publisher import (
     _DIAGNOSTIC_ID_PROPERTY,
@@ -21,7 +22,7 @@ from curator.jobs.queue_publisher import (
     QueuePublisher,
 )
 from curator.jobs.repository import JOB_KIND_ENRICHMENT, JOB_KIND_LIBRARY_REFRESH
-from test_values import new_identity_sub
+from test_values import lowercase_token, new_identity_sub, new_utc_instant
 
 _TRACE_PARENT_PATTERN = r"^00-[0-9a-f]{32}-[0-9a-f]{16}-[0-9a-f]{2}$"
 
@@ -113,7 +114,7 @@ def recording_tracer():
     TracerProvider is not allowed" and leaves a ``ProxyTracer`` whose spans have no span context, so the
     assertions here would fail for a reason that has nothing to do with the code under test.
     """
-    return TracerProvider().get_tracer("test_jobs_queue_publisher")
+    return TracerProvider().get_tracer(lowercase_token())
 
 
 def _property(message: ServiceBusMessage, name: str) -> str:
@@ -126,9 +127,9 @@ async def test_library_refresh_message_carries_the_calling_span_trace_id(recordi
     library_sender = FakeSender()
     publisher = _make_publisher(library_sender=library_sender)
 
-    with recording_tracer.start_as_current_span("POST /library/refresh") as span:
+    with recording_tracer.start_as_current_span(lowercase_token()) as span:
         await publisher.publish_library_refresh(new_identity_sub())
-        expected_trace_id = format(span.get_span_context().trace_id, "032x")
+        expected_trace_id = format_trace_id(span.get_span_context().trace_id)
 
     assert expected_trace_id in _property(library_sender.sent[0], _TRACE_PARENT_KEY)
 
@@ -137,7 +138,7 @@ async def test_library_refresh_message_carries_both_property_names_the_worker_re
     library_sender = FakeSender()
     publisher = _make_publisher(library_sender=library_sender)
 
-    with recording_tracer.start_as_current_span("POST /library/refresh"):
+    with recording_tracer.start_as_current_span(lowercase_token()):
         await publisher.publish_library_refresh(new_identity_sub())
 
     message = library_sender.sent[0]
@@ -149,7 +150,7 @@ async def test_enrichment_message_carries_trace_context_too(recording_tracer):
     enrichment_sender = FakeSender()
     publisher = _make_publisher(enrichment_sender=enrichment_sender)
 
-    with recording_tracer.start_as_current_span("POST /enrichment/run"):
+    with recording_tracer.start_as_current_span(lowercase_token()):
         await publisher.publish_enrichment_run()
 
     assert re.match(_TRACE_PARENT_PATTERN, _property(enrichment_sender.sent[0], _TRACE_PARENT_KEY))
@@ -173,8 +174,8 @@ async def test_scheduled_refresh_carries_no_trace_context(recording_tracer):
         scheduled_refresh_sender=scheduled_sender,
     )
 
-    with recording_tracer.start_as_current_span("PUT /library/refresh/schedule"):
-        await publisher.publish_scheduled_library_refresh(new_identity_sub(), datetime(2026, 9, 1, 12, 0, 0))
+    with recording_tracer.start_as_current_span(lowercase_token()):
+        await publisher.publish_scheduled_library_refresh(new_identity_sub(), new_utc_instant())
 
     message, _ = scheduled_sender.scheduled[0]
     assert not message.application_properties

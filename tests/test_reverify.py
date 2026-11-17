@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+import json
 
 import pytest
 
@@ -13,10 +13,21 @@ from curator.persistence.crypto import TokenCrypto
 from curator.persistence.repository import LinkRecord
 from curator.psn.errors import PsnAuthError
 from curator.reverify import REVERIFY_AUTH_FAILED, REVERIFY_PSN_UNAVAILABLE, reverify_link
+from curator.token_response import ACCESS_TOKEN_KEY
 from curator.token_validation import TokenClaims
-from test_values import new_email_address, new_identity_sub
+from test_values import (
+    lowercase_token,
+    new_account_id,
+    new_email_address,
+    new_identity_sub,
+    new_opaque_token,
+    new_short_interval,
+    new_utc_instant,
+)
 
 EMAIL = new_email_address()
+_LAST_VERIFIED_AT = new_utc_instant()
+_ISSUED_AFTER_THE_LAST_VERIFICATION = _LAST_VERIFIED_AT + new_short_interval()
 
 
 class FakeRepository:
@@ -41,7 +52,7 @@ class FakeRepository:
                 refresh_token_expires_at=existing.refresh_token_expires_at,
                 linked_at=existing.linked_at,
                 updated_at=existing.updated_at,
-                last_verified_at=datetime(2026, 1, 1, 12, tzinfo=UTC),
+                last_verified_at=new_utc_instant(),
             )
 
     async def delete_link(self, sub):
@@ -71,15 +82,15 @@ def _make_crypto() -> TokenCrypto:
 def _seed_access_token_only_link(repo: FakeRepository, crypto: TokenCrypto, sub: str) -> None:
     """Simulate a persisted link whose token response has no refresh_token (a theoretical edge case now that
     _authorization_code() requests access_type=offline -- see reverify_link()'s docstring)."""
-    encrypted = crypto.encrypt(b'{"access_token": "AT"}')
+    encrypted = crypto.encrypt(json.dumps({ACCESS_TOKEN_KEY: new_opaque_token()}).encode())
     repo.links[sub] = LinkRecord(
-        psn_account_id="psn-account-1",
+        psn_account_id=new_account_id(),
         token_response_enc=encrypted,
-        access_token_expires_at=datetime(2026, 1, 1, 1, tzinfo=UTC),
+        access_token_expires_at=_LAST_VERIFIED_AT,
         refresh_token_expires_at=None,
-        linked_at=datetime(2026, 1, 1, tzinfo=UTC),
-        updated_at=datetime(2026, 1, 1, tzinfo=UTC),
-        last_verified_at=datetime(2026, 1, 1, tzinfo=UTC),
+        linked_at=_LAST_VERIFIED_AT,
+        updated_at=_LAST_VERIFIED_AT,
+        last_verified_at=_LAST_VERIFIED_AT,
     )
 
 
@@ -90,12 +101,12 @@ async def test_reverify_clears_access_token_only_link_when_expired_access_token_
     """
     repo = FakeRepository()
     crypto = _make_crypto()
-    sub = "sub-1"
+    sub = new_identity_sub()
     _seed_access_token_only_link(repo, crypto, sub)
-    claims = TokenClaims(sub=sub, email=EMAIL, iat=datetime(2026, 2, 1, tzinfo=UTC), scopes=(CURATOR_SCOPE,))
+    claims = _stale_verification_claims(sub)
 
     async def agent_factory(sub_arg, npsso=None):
-        return FakeAgent(sub_arg, npsso, raise_error=PsnAuthError("no refresh token available"))
+        return FakeAgent(sub_arg, npsso, raise_error=PsnAuthError(lowercase_token()))
 
     recorder = RecordingAuditRepository()
     await reverify_link(claims, repository=repo, token_crypto=crypto, agent_factory=agent_factory, recorder=recorder)
@@ -109,7 +120,7 @@ async def test_reverify_clears_access_token_only_link_when_expired_access_token_
 
 
 def _stale_verification_claims(sub: str) -> TokenClaims:
-    return TokenClaims(sub=sub, email=EMAIL, iat=datetime(2026, 2, 1, tzinfo=UTC), scopes=(CURATOR_SCOPE,))
+    return TokenClaims(sub=sub, email=EMAIL, iat=_ISSUED_AFTER_THE_LAST_VERIFICATION, scopes=(CURATOR_SCOPE,))
 
 
 async def test_reverify_records_the_check_before_it_reaches_psn():

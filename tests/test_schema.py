@@ -82,12 +82,24 @@ from curator.psn.title_platform import CONSOLE_PLATFORM_IDS, PS3, PS5, PSP, PSVI
 from disposable_database import is_disposable_database
 from schema_constants import EXPECTED_TABLES
 from test_values import (
+    lowercase_token,
     new_concept_id,
     new_game_title,
     new_genre_name,
+    new_np_communication_id,
+    new_opaque_token,
+    new_percent_completed,
+    new_positive_count,
     new_ps4_title_id,
+    new_rawg_game_id,
+    new_share_slug,
+    new_short_interval,
     new_size_gb,
+    new_small_count,
     new_store_product_id,
+    new_utc_instant,
+    token_from_first_half_of_alphabet,
+    token_from_second_half_of_alphabet,
 )
 
 DATABASE_URL = os.environ.get("CURATOR_TEST_DATABASE_URL")
@@ -165,11 +177,12 @@ def seeded_user_and_game(db_connection):
     """
     user_sub = str(uuid.uuid4())
     game_id = str(uuid.uuid4())
+    title = new_game_title()
     with db_connection.cursor() as cur:
         cur.execute("INSERT INTO app_users (identity_sub) VALUES (%s)", (user_sub,))
         cur.execute(
             "INSERT INTO games (game_id, canonical_title, normalized_title) VALUES (%s, %s, %s)",
-            (game_id, "Test Game", "test game"),
+            (game_id, title, title.lower()),
         )
     return user_sub, game_id
 
@@ -206,7 +219,7 @@ def test_the_catalog_title_search_has_a_trigram_index_to_serve_its_leading_wildc
 def test_the_planner_can_serve_the_catalog_title_search_from_the_trigram_index(db_connection):
     with db_connection.cursor() as cur:
         cur.execute("SET LOCAL enable_seqscan = off")
-        cur.execute("EXPLAIN SELECT game_id FROM games WHERE canonical_title ILIKE %s", ("%ghost%",))
+        cur.execute("EXPLAIN SELECT game_id FROM games WHERE canonical_title ILIKE %s", (f"%{lowercase_token()}%",))
         plan = "\n".join(row[0] for row in cur.fetchall())
     assert "idx_games_canonical_title_trgm" in plan, plan
 
@@ -266,20 +279,20 @@ def test_the_dead_columns_the_debt_inventory_named_no_longer_exist(db_connection
 
 
 def test_games_content_kind_rejects_a_value_outside_the_closed_vocabulary(db_connection):
+    title = new_game_title()
+    row = (title, title.lower(), lowercase_token())
     with pytest.raises(psycopg_errors.CheckViolation), db_connection.cursor() as cur:
-        cur.execute(
-            "INSERT INTO games (canonical_title, normalized_title, content_kind) VALUES (%s, %s, %s)",
-            ("Some App", "some app", "widget"),
-        )
+        cur.execute("INSERT INTO games (canonical_title, normalized_title, content_kind) VALUES (%s, %s, %s)", row)
 
 
 def test_games_content_kind_accepts_every_documented_kind_and_null(db_connection):
+    title_prefix = lowercase_token()
     with db_connection.cursor() as cur:
         cur.executemany(
             "INSERT INTO games (canonical_title, normalized_title, content_kind) VALUES (%s, %s, %s)",
-            [(f"Kind {kind}", f"kind {kind}", kind) for kind in (*CONTENT_KINDS, None)],
+            [(f"{title_prefix} {kind}", f"{title_prefix} {kind}", kind) for kind in (*CONTENT_KINDS, None)],
         )
-        cur.execute("SELECT count(*) FROM games WHERE normalized_title LIKE 'kind %'")
+        cur.execute("SELECT count(*) FROM games WHERE normalized_title LIKE %s", (f"{title_prefix} %",))
         (count,) = cur.fetchone()
     assert count == len(CONTENT_KINDS) + 1
 
@@ -349,7 +362,7 @@ def test_public_collections_containing_a_game_list_exactly_the_public_one(db_con
             "INSERT INTO collection_definitions (definition_id, identity_sub, name, kind, visibility, share_slug) "
             "VALUES (%s, %s, %s, %s, %s, %s)",
             [
-                (definition_id, user_sub, f"{visibility} list", FILTER_LIST_KIND, visibility, uuid.uuid4().hex)
+                (definition_id, user_sub, new_game_title(), FILTER_LIST_KIND, visibility, uuid.uuid4().hex)
                 for visibility, definition_id in definition_ids.items()
             ],
         )
@@ -357,7 +370,7 @@ def test_public_collections_containing_a_game_list_exactly_the_public_one(db_con
             "INSERT INTO collection_definition_items (definition_id, game_id, rank) VALUES (%s, %s, %s)",
             [(definition_id, game_id, 1) for definition_id in definition_ids.values()],
         )
-        cur.execute(PUBLIC_COLLECTIONS_CONTAINING_SQL, (game_id, 20))
+        cur.execute(PUBLIC_COLLECTIONS_CONTAINING_SQL, (game_id, new_positive_count()))
         listed = [str(row[0]) for row in cur.fetchall()]
         cur.execute(PUBLIC_COLLECTIONS_CONTAINING_COUNT_SQL, (game_id,))
         (total,) = cur.fetchone()
@@ -372,10 +385,11 @@ def test_a_store_hit_reachable_only_through_a_walked_product_id_links_without_a_
     title_id = new_ps4_title_id()
     store_product_id = new_store_product_id(title_id)
     concept_id = str(uuid.uuid4().int)[:8]
+    stored_title = new_game_title()
     with db_connection.cursor() as cur:
         cur.execute(
             "INSERT INTO games (game_id, canonical_title, normalized_title) VALUES (%s, %s, %s)",
-            (game_id, "Stored Title", "stored title"),
+            (game_id, stored_title, stored_title.lower()),
         )
         cur.execute(
             "INSERT INTO psn_catalog_cache (title_id, game_id, store_product_id) VALUES (%s, %s, %s)",
@@ -408,10 +422,12 @@ def test_the_two_ps_plus_categories_are_seeded_with_their_reporting_name_prefixe
 def test_reward_membership_type_is_derived_from_the_stored_entitlement_payload(db_connection, seeded_user_and_game):
     user_sub, _game_id = seeded_user_and_game
     pull_id = str(uuid.uuid4())
+    bought_entitlement_id = token_from_first_half_of_alphabet()
+    plus_entitlement_id = token_from_second_half_of_alphabet()
     with db_connection.cursor() as cur:
         cur.execute(
             "INSERT INTO entitlement_pulls (pull_id, identity_sub, source, entry_count) VALUES (%s, %s, %s, %s)",
-            (pull_id, user_sub, "curator-live", 2),
+            (pull_id, user_sub, "curator-live", new_small_count()),
         )
         cur.execute(
             "INSERT INTO entitlement_snapshots "
@@ -420,11 +436,11 @@ def test_reward_membership_type_is_derived_from_the_stored_entitlement_payload(d
             (
                 user_sub,
                 pull_id,
-                "plus-ent",
+                plus_entitlement_id,
                 json.dumps({"rewardMeta": {"rewardMembershipType": PS_PLUS_REWARD_MEMBERSHIP_TYPE}}),
                 user_sub,
                 pull_id,
-                "bought-ent",
+                bought_entitlement_id,
                 json.dumps({}),
             ),
         )
@@ -434,7 +450,7 @@ def test_reward_membership_type_is_derived_from_the_stored_entitlement_payload(d
             (user_sub,),
         )
         rows = cur.fetchall()
-    assert rows == [("bought-ent", None), ("plus-ent", PS_PLUS_REWARD_MEMBERSHIP_TYPE)]
+    assert rows == [(bought_entitlement_id, None), (plus_entitlement_id, PS_PLUS_REWARD_MEMBERSHIP_TYPE)]
 
 
 def _plant_ps_plus_walk(cur, category_id, *, started_at, completed_at):
@@ -475,13 +491,14 @@ def test_ps_plus_unclaimed_excludes_a_title_the_caller_actively_holds(db_connect
     held_title_id, unclaimed_title_id = new_ps4_title_id(), new_ps4_title_id()
     with db_connection.cursor() as cur:
         category_id = _extra_category_id(cur)
-        walk_id = _plant_ps_plus_walk(cur, category_id, started_at="2026-09-01", completed_at="2026-09-01")
-        _plant_ps_plus_membership(cur, category_id, walk_id, title_id=held_title_id, first_seen_at="2026-09-01")
-        _plant_ps_plus_membership(cur, category_id, walk_id, title_id=unclaimed_title_id, first_seen_at="2026-09-01")
+        walked_at = new_utc_instant()
+        walk_id = _plant_ps_plus_walk(cur, category_id, started_at=walked_at, completed_at=walked_at)
+        _plant_ps_plus_membership(cur, category_id, walk_id, title_id=held_title_id, first_seen_at=walked_at)
+        _plant_ps_plus_membership(cur, category_id, walk_id, title_id=unclaimed_title_id, first_seen_at=walked_at)
         cur.execute(
             "INSERT INTO library_entries (identity_sub, game_id, winning_entitlement_id, title_id) "
             "VALUES (%s, %s, %s, %s)",
-            (user_sub, game_id, "ent-held", held_title_id),
+            (user_sub, game_id, lowercase_token(), held_title_id),
         )
         cur.execute(UNCLAIMED_SQL, (user_sub,))
         rows = cur.fetchall()
@@ -496,17 +513,29 @@ def test_ps_plus_leaving_reports_a_departed_title_only_when_the_caller_got_it_th
     pull_id = str(uuid.uuid4())
     with db_connection.cursor() as cur:
         category_id = _extra_category_id(cur)
-        first_walk = _plant_ps_plus_walk(cur, category_id, started_at="2026-09-01", completed_at="2026-09-01")
-        _plant_ps_plus_walk(cur, category_id, started_at="2026-09-08", completed_at="2026-09-08")
+        first_walked_at = new_utc_instant()
+        second_walked_at = first_walked_at + new_short_interval()
+        first_walk = _plant_ps_plus_walk(cur, category_id, started_at=first_walked_at, completed_at=first_walked_at)
+        _plant_ps_plus_walk(cur, category_id, started_at=second_walked_at, completed_at=second_walked_at)
         _plant_ps_plus_membership(
-            cur, category_id, first_walk, title_id=plus_title_id, first_seen_at="2026-09-01", left_at="2026-09-08"
+            cur,
+            category_id,
+            first_walk,
+            title_id=plus_title_id,
+            first_seen_at=first_walked_at,
+            left_at=second_walked_at,
         )
         _plant_ps_plus_membership(
-            cur, category_id, first_walk, title_id=bought_title_id, first_seen_at="2026-09-01", left_at="2026-09-08"
+            cur,
+            category_id,
+            first_walk,
+            title_id=bought_title_id,
+            first_seen_at=first_walked_at,
+            left_at=second_walked_at,
         )
         cur.execute(
             "INSERT INTO entitlement_pulls (pull_id, identity_sub, source, entry_count) VALUES (%s, %s, %s, %s)",
-            (pull_id, user_sub, "curator-live", 2),
+            (pull_id, user_sub, "curator-live", new_small_count()),
         )
         cur.execute(
             "INSERT INTO entitlement_snapshots (identity_sub, pull_id, entitlement_id, title_id, raw, first_seen_at, "
@@ -514,12 +543,12 @@ def test_ps_plus_leaving_reports_a_departed_title_only_when_the_caller_got_it_th
             (
                 user_sub,
                 pull_id,
-                "plus-ent",
+                lowercase_token(),
                 plus_title_id,
                 json.dumps({"rewardMeta": {"rewardMembershipType": PS_PLUS_REWARD_MEMBERSHIP_TYPE}}),
                 user_sub,
                 pull_id,
-                "bought-ent",
+                lowercase_token(),
                 bought_title_id,
                 json.dumps({}),
             ),
@@ -540,7 +569,7 @@ def test_ps_plus_lapsed_reports_an_inactive_ps_plus_entitlement_once_per_title(d
     with db_connection.cursor() as cur:
         cur.execute(
             "INSERT INTO entitlement_pulls (pull_id, identity_sub, source, entry_count) VALUES (%s, %s, %s, %s)",
-            (pull_id, user_sub, "curator-live", 2),
+            (pull_id, user_sub, "curator-live", new_small_count()),
         )
         cur.executemany(
             "INSERT INTO entitlement_snapshots (identity_sub, pull_id, entitlement_id, title_id, active, raw, "
@@ -553,7 +582,7 @@ def test_ps_plus_lapsed_reports_an_inactive_ps_plus_entitlement_once_per_title(d
                     lapsed_title_id,
                     json.dumps({"rewardMeta": {"rewardMembershipType": PS_PLUS_REWARD_MEMBERSHIP_TYPE}}),
                 )
-                for entitlement_id in ("base", "edition")
+                for entitlement_id in (lowercase_token(), lowercase_token())
             ],
         )
         cur.execute(LAPSED_SQL, (user_sub, PS_PLUS_REWARD_MEMBERSHIP_TYPE))
@@ -572,33 +601,35 @@ def test_game_enrichment_genre_id_rejects_orphan_fk(db_connection, seeded_user_a
 
 def test_user_consoles_rejects_a_platform_outside_the_platforms_table(db_connection, seeded_user_and_game):
     user_sub, _game_id = seeded_user_and_game
+    row = (user_sub, new_game_title(), lowercase_token(), new_size_gb())
     with pytest.raises(psycopg_errors.ForeignKeyViolation), db_connection.cursor() as cur:
         cur.execute(
-            "INSERT INTO user_consoles (identity_sub, name, platform, raw_capacity_gb) VALUES (%s, %s, %s, %s)",
-            (user_sub, "Living Room", "NOT-A-PLATFORM", 825),
+            "INSERT INTO user_consoles (identity_sub, name, platform, raw_capacity_gb) VALUES (%s, %s, %s, %s)", row
         )
 
 
 def test_collection_definitions_rejects_invalid_visibility(db_connection, seeded_user_and_game):
     user_sub, _game_id = seeded_user_and_game
+    row = (user_sub, new_game_title(), FILTER_LIST_KIND, lowercase_token())
     with pytest.raises(psycopg_errors.CheckViolation), db_connection.cursor() as cur:
         cur.execute(
-            "INSERT INTO collection_definitions (identity_sub, name, kind, visibility) VALUES (%s, %s, %s, %s)",
-            (user_sub, "Bad Visibility", FILTER_LIST_KIND, "everyone"),
+            "INSERT INTO collection_definitions (identity_sub, name, kind, visibility) VALUES (%s, %s, %s, %s)", row
         )
 
 
 def test_collection_definitions_share_slug_is_unique(db_connection, seeded_user_and_game):
     user_sub, _game_id = seeded_user_and_game
+    shared_slug = new_share_slug()
     with db_connection.cursor() as cur:
         cur.execute(
             "INSERT INTO collection_definitions (identity_sub, name, kind, share_slug) VALUES (%s, %s, %s, %s)",
-            (user_sub, "First", FILTER_LIST_KIND, "same-slug"),
+            (user_sub, new_game_title(), FILTER_LIST_KIND, shared_slug),
         )
+    second_row = (user_sub, new_game_title(), FILTER_LIST_KIND, shared_slug)
     with pytest.raises(psycopg_errors.UniqueViolation), db_connection.cursor() as cur:
         cur.execute(
             "INSERT INTO collection_definitions (identity_sub, name, kind, share_slug) VALUES (%s, %s, %s, %s)",
-            (user_sub, "Second", FILTER_LIST_KIND, "same-slug"),
+            second_row,
         )
 
 
@@ -609,12 +640,12 @@ def test_deleting_a_console_untargets_its_collections_rather_than_deleting_them(
         cur.execute(
             "INSERT INTO user_consoles (console_id, identity_sub, name, platform, raw_capacity_gb) "
             "VALUES (%s, %s, %s, %s, %s)",
-            (console_id, user_sub, "Living room PS5", PS5, 825),
+            (console_id, user_sub, new_game_title(), PS5, new_size_gb()),
         )
         cur.execute(
             "INSERT INTO collection_definitions (identity_sub, name, kind, share_slug, install_target_console_id) "
             "VALUES (%s, %s, %s, %s, %s) RETURNING definition_id",
-            (user_sub, "For the PS5", FILTER_LIST_KIND, "slug-0052", console_id),
+            (user_sub, new_game_title(), FILTER_LIST_KIND, new_share_slug(), console_id),
         )
         definition_id = cur.fetchone()[0]
 
@@ -633,36 +664,39 @@ def test_an_install_target_that_is_no_console_is_rejected_so_the_set_null_above_
     db_connection, seeded_user_and_game
 ):
     user_sub, _game_id = seeded_user_and_game
+    row = (user_sub, new_game_title(), FILTER_LIST_KIND, new_share_slug(), str(uuid.uuid4()))
     with pytest.raises(psycopg_errors.ForeignKeyViolation), db_connection.cursor() as cur:
         cur.execute(
             "INSERT INTO collection_definitions (identity_sub, name, kind, share_slug, install_target_console_id) "
             "VALUES (%s, %s, %s, %s, %s)",
-            (user_sub, "Aimed at nothing", FILTER_LIST_KIND, "slug-0052-orphan", str(uuid.uuid4())),
+            row,
         )
 
 
 def test_the_real_item_projection_reports_install_state_against_the_target_console(db_connection, seeded_user_and_game):
     user_sub, installed_game = seeded_user_and_game
     console_id, absent_game, definition_id = str(uuid.uuid4()), str(uuid.uuid4()), None
+    absent_title = new_game_title()
+    installed_rank = new_small_count()
     with db_connection.cursor() as cur:
         cur.execute(
             "INSERT INTO games (game_id, canonical_title, normalized_title) VALUES (%s, %s, %s)",
-            (absent_game, "Not Installed", "not installed"),
+            (absent_game, absent_title, absent_title.lower()),
         )
         cur.execute(
             "INSERT INTO user_consoles (console_id, identity_sub, name, platform, raw_capacity_gb) "
             "VALUES (%s, %s, %s, %s, %s)",
-            (console_id, user_sub, "Target PS5", PS5, 825),
+            (console_id, user_sub, new_game_title(), PS5, new_size_gb()),
         )
         cur.execute(
             "INSERT INTO collection_definitions (identity_sub, name, kind, share_slug, "
             "install_target_console_id) VALUES (%s, %s, %s, %s, %s) RETURNING definition_id",
-            (user_sub, "Aimed", FILTER_LIST_KIND, f"slug-{uuid.uuid4()}", console_id),
+            (user_sub, new_game_title(), FILTER_LIST_KIND, new_share_slug(), console_id),
         )
         definition_id = cur.fetchone()[0]
         cur.executemany(
             "INSERT INTO collection_definition_items (definition_id, game_id, rank) VALUES (%s, %s, %s)",
-            [(definition_id, installed_game, 1), (definition_id, absent_game, 2)],
+            [(definition_id, installed_game, installed_rank), (definition_id, absent_game, installed_rank + 1)],
         )
         cur.execute(
             "INSERT INTO console_installs (console_id, game_id, installed) VALUES (%s, %s, true)",
@@ -689,7 +723,7 @@ def test_the_item_projection_reports_no_install_state_when_a_collection_targets_
         cur.execute(
             "INSERT INTO collection_definitions (identity_sub, name, kind, share_slug) "
             "VALUES (%s, %s, %s, %s) RETURNING definition_id",
-            (user_sub, "Untargeted", FILTER_LIST_KIND, f"slug-{uuid.uuid4()}"),
+            (user_sub, new_game_title(), FILTER_LIST_KIND, new_share_slug()),
         )
         definition_id = cur.fetchone()[0]
         cur.execute(
@@ -717,16 +751,18 @@ def test_game_measured_sizes_upserts_per_game_and_platform(db_connection, seeded
         "ON CONFLICT (game_id, platform) DO UPDATE SET "
         "size_gb = EXCLUDED.size_gb, recorded_by = EXCLUDED.recorded_by"
     )
+    first_size_gb = new_size_gb()
+    second_size_gb = new_size_gb()
     with db_connection.cursor() as cur:
-        cur.execute(upsert_sql, (game_id, PS5, 42.5, user_sub))
-        cur.execute(upsert_sql, (game_id, PS5, 50.0, user_sub))
+        cur.execute(upsert_sql, (game_id, PS5, first_size_gb, user_sub))
+        cur.execute(upsert_sql, (game_id, PS5, second_size_gb, user_sub))
         cur.execute(
             "SELECT count(*), max(size_gb) FROM game_measured_sizes WHERE game_id = %s AND platform = %s",
             (game_id, PS5),
         )
         count, size_gb = cur.fetchone()
     assert count == 1
-    assert float(size_gb) == 50.0
+    assert float(size_gb) == second_size_gb
 
 
 def test_game_measured_sizes_recorded_by_survives_contributor_deletion(db_connection, seeded_user_and_game):
@@ -734,10 +770,11 @@ def test_game_measured_sizes_recorded_by_survives_contributor_deletion(db_connec
     contributed data other users' collections may already be sized against, so deleting the contributor's
     account must not silently delete it (see migration 0025's own header comment)."""
     user_sub, game_id = seeded_user_and_game
+    measured_size_gb = new_size_gb()
     with db_connection.cursor() as cur:
         cur.execute(
             "INSERT INTO game_measured_sizes (game_id, platform, size_gb, recorded_by) VALUES (%s, %s, %s, %s)",
-            (game_id, PS5, 42.5, user_sub),
+            (game_id, PS5, measured_size_gb, user_sub),
         )
         cur.execute("DELETE FROM app_users WHERE identity_sub = %s", (user_sub,))
         cur.execute(
@@ -745,17 +782,14 @@ def test_game_measured_sizes_recorded_by_survives_contributor_deletion(db_connec
             (game_id, PS5),
         )
         size_gb, recorded_by = cur.fetchone()
-    assert float(size_gb) == 42.5
+    assert float(size_gb) == measured_size_gb
     assert recorded_by is None
 
 
 def test_job_runs_rejects_invalid_status(db_connection):
-    run_id = str(uuid.uuid4())
+    row = (str(uuid.uuid4()), JOB_KIND_LIBRARY_REFRESH, lowercase_token())
     with pytest.raises(psycopg_errors.CheckViolation), db_connection.cursor() as cur:
-        cur.execute(
-            "INSERT INTO job_runs (run_id, kind, status) VALUES (%s, %s, %s)",
-            (run_id, JOB_KIND_LIBRARY_REFRESH, "bogus"),
-        )
+        cur.execute("INSERT INTO job_runs (run_id, kind, status) VALUES (%s, %s, %s)", row)
 
 
 def test_job_runs_accepts_the_cancelled_status(db_connection):
@@ -887,19 +921,18 @@ def test_library_entry_platforms_rejects_a_platform_outside_the_platforms_table(
             "INSERT INTO library_entries (identity_sub, game_id, source) VALUES (%s, %s, %s)",
             (user_sub, game_id, "manual"),
         )
+    row = (user_sub, game_id, lowercase_token())
     with pytest.raises(psycopg_errors.ForeignKeyViolation), db_connection.cursor() as cur:
-        cur.execute(
-            "INSERT INTO library_entry_platforms (identity_sub, game_id, platform) VALUES (%s, %s, %s)",
-            (user_sub, game_id, "NOT-A-PLATFORM"),
-        )
+        cur.execute("INSERT INTO library_entry_platforms (identity_sub, game_id, platform) VALUES (%s, %s, %s)", row)
 
 
 def test_psn_catalog_cache_raw_defaults_to_an_empty_object_rather_than_null(db_connection):
     """A reader must never have to tell "no payload stored" from "payload stored and empty" -- both mean
     the row predates a walk that kept it. Same shape as ``entitlement_snapshots.raw``."""
+    title_id = new_ps4_title_id()
     with db_connection.cursor() as cur:
-        cur.execute("INSERT INTO psn_catalog_cache (title_id) VALUES (%s)", ("CUSA00207_00",))
-        cur.execute("SELECT raw FROM psn_catalog_cache WHERE title_id = %s", ("CUSA00207_00",))
+        cur.execute("INSERT INTO psn_catalog_cache (title_id) VALUES (%s)", (title_id,))
+        cur.execute("SELECT raw FROM psn_catalog_cache WHERE title_id = %s", (title_id,))
         (raw,) = cur.fetchone()
     assert raw == {}
 
@@ -996,6 +1029,7 @@ def test_deleting_a_user_cascades_every_per_user_table(db_connection, seeded_use
     definition_id = str(uuid.uuid4())
     run_id = str(uuid.uuid4())
     job_run_id = str(uuid.uuid4())
+    entitlement_id = lowercase_token()
 
     with db_connection.cursor() as cur:
         cur.execute(
@@ -1006,35 +1040,35 @@ def test_deleting_a_user_cascades_every_per_user_table(db_connection, seeded_use
             "INSERT INTO entitlement_snapshots "
             "(identity_sub, pull_id, entitlement_id, raw, first_seen_at, last_seen_at) "
             "VALUES (%s, %s, %s, %s, now(), now())",
-            (user_sub, pull_id, "ent-1", "{}"),
+            (user_sub, pull_id, entitlement_id, "{}"),
         )
         cur.execute(
             "INSERT INTO library_entries (identity_sub, game_id, winning_entitlement_id) VALUES (%s, %s, %s)",
-            (user_sub, game_id, "ent-1"),
+            (user_sub, game_id, entitlement_id),
         )
         cur.execute(
             "INSERT INTO library_exclusions (identity_sub, game_id, reason) VALUES (%s, %s, %s)",
-            (user_sub, game_id, "not interested"),
+            (user_sub, game_id, lowercase_token()),
         )
         cur.execute(
             "INSERT INTO user_consoles (console_id, identity_sub, name, platform, raw_capacity_gb) "
             "VALUES (%s, %s, %s, %s, %s)",
-            (console_id, user_sub, "Living room PS5", PS5, 800.0),
+            (console_id, user_sub, new_game_title(), PS5, new_size_gb()),
         )
         cur.execute("INSERT INTO console_installs (console_id, game_id) VALUES (%s, %s)", (console_id, game_id))
         cur.execute(
             "INSERT INTO storage_devices (device_id, identity_sub, console_id, name, kind, capacity_gb) "
             "VALUES (%s, %s, %s, %s, %s, %s)",
-            (device_id, user_sub, console_id, "Travel drive", STORAGE_KIND_USB, 500.0),
+            (device_id, user_sub, console_id, new_game_title(), STORAGE_KIND_USB, new_size_gb()),
         )
         cur.execute("INSERT INTO storage_device_installs (device_id, game_id) VALUES (%s, %s)", (device_id, game_id))
         cur.execute(
             "INSERT INTO game_measured_sizes (game_id, platform, size_gb, recorded_by) VALUES (%s, %s, %s, %s)",
-            (game_id, PS5, 50.0, user_sub),
+            (game_id, PS5, new_size_gb(), user_sub),
         )
         cur.execute(
             "INSERT INTO collection_definitions (definition_id, identity_sub, name, kind) VALUES (%s, %s, %s, %s)",
-            (definition_id, user_sub, "My RPGs", FILTER_LIST_KIND),
+            (definition_id, user_sub, new_game_title(), FILTER_LIST_KIND),
         )
         cur.execute(
             "INSERT INTO collection_definition_items (definition_id, game_id, rank) VALUES (%s, %s, %s)",
@@ -1098,12 +1132,12 @@ def test_deleting_a_console_detaches_its_storage_device_rather_than_deleting_it(
         cur.execute(
             "INSERT INTO user_consoles (console_id, identity_sub, name, platform, raw_capacity_gb) "
             "VALUES (%s, %s, %s, %s, %s)",
-            (console_id, user_sub, "Living room PS5", PS5, 800.0),
+            (console_id, user_sub, new_game_title(), PS5, new_size_gb()),
         )
         cur.execute(
             "INSERT INTO storage_devices (device_id, identity_sub, console_id, name, kind, capacity_gb) "
             "VALUES (%s, %s, %s, %s, %s, %s)",
-            (device_id, user_sub, console_id, "Travel drive", STORAGE_KIND_USB, 500.0),
+            (device_id, user_sub, console_id, new_game_title(), STORAGE_KIND_USB, new_size_gb()),
         )
         cur.execute("INSERT INTO storage_device_installs (device_id, game_id) VALUES (%s, %s)", (device_id, game_id))
 
@@ -1171,7 +1205,7 @@ def test_library_exclusions_cascade_but_shared_catalog_survives(db_connection, s
     with db_connection.cursor() as cur:
         cur.execute(
             "INSERT INTO library_exclusions (identity_sub, game_id, reason) VALUES (%s, %s, %s)",
-            (user_sub, game_id, "not interested"),
+            (user_sub, game_id, lowercase_token()),
         )
         cur.execute("DELETE FROM app_users WHERE identity_sub = %s", (user_sub,))
         cur.execute("SELECT count(*) FROM games WHERE game_id = %s", (game_id,))
@@ -1197,7 +1231,7 @@ def test_is_active_is_per_user_and_defaults_to_true(db_connection, seeded_user_a
         )
         cur.execute(
             "INSERT INTO library_entries (identity_sub, game_id, winning_entitlement_id) VALUES (%s, %s, %s)",
-            (user_b, game_id, "ent-b"),
+            (user_b, game_id, lowercase_token()),
         )
 
         cur.execute(
@@ -1230,7 +1264,7 @@ def test_set_trophy_match_accepts_a_no_match_result(db_connection, seeded_user_a
     with db_connection.cursor() as cur:
         cur.execute(
             "INSERT INTO library_entries (identity_sub, game_id, winning_entitlement_id) VALUES (%s, %s, %s)",
-            (user_sub, game_id, "ent-1"),
+            (user_sub, game_id, lowercase_token()),
         )
 
         cur.execute(
@@ -1264,10 +1298,12 @@ def test_set_trophy_match_accepts_a_confident_match_with_progress(db_connection,
     NULL branch above cannot have broken this one.
     """
     user_sub, game_id = seeded_user_and_game
+    np_communication_id = new_np_communication_id()
+    percent_completed = new_percent_completed()
     with db_connection.cursor() as cur:
         cur.execute(
             "INSERT INTO library_entries (identity_sub, game_id, winning_entitlement_id) VALUES (%s, %s, %s)",
-            (user_sub, game_id, "ent-1"),
+            (user_sub, game_id, lowercase_token()),
         )
 
         cur.execute(
@@ -1281,7 +1317,7 @@ def test_set_trophy_match_accepts_a_confident_match_with_progress(db_connection,
                     THEN trophy_progress_fetched_at ELSE now() END
             WHERE identity_sub = %s AND game_id = %s
             """,
-            ("NPWR12345_00", "fuzzy", 42, 42, user_sub, game_id),
+            (np_communication_id, "fuzzy", percent_completed, percent_completed, user_sub, game_id),
         )
 
         cur.execute(
@@ -1291,23 +1327,20 @@ def test_set_trophy_match_accepts_a_confident_match_with_progress(db_connection,
         )
         row = cur.fetchone()
 
-    assert row == ("NPWR12345_00", "fuzzy", 42, True)
+    assert row == (np_communication_id, "fuzzy", percent_completed, True)
 
 
 def test_account_action_log_accepts_followed_and_unfollowed_actions(db_connection, seeded_user_and_game):
     user_sub, _game_id = seeded_user_and_game
+    actions = (ACTION_FOLLOWED, ACTION_UNFOLLOWED)
     with db_connection.cursor() as cur:
-        cur.execute(
+        cur.executemany(
             "INSERT INTO account_action_log (identity_sub, action, detail) VALUES (%s, %s, %s)",
-            (user_sub, ACTION_FOLLOWED, str(uuid.uuid4())),
-        )
-        cur.execute(
-            "INSERT INTO account_action_log (identity_sub, action, detail) VALUES (%s, %s, %s)",
-            (user_sub, ACTION_UNFOLLOWED, str(uuid.uuid4())),
+            [(user_sub, action, str(uuid.uuid4())) for action in actions],
         )
         cur.execute("SELECT count(*) FROM account_action_log WHERE identity_sub = %s", (user_sub,))
         (count,) = cur.fetchone()
-    assert count == 2
+    assert count == len(actions)
 
 
 def test_account_action_log_accepts_enrichment_key_rejected_action(db_connection, seeded_user_and_game):
@@ -1326,21 +1359,15 @@ def test_account_action_log_accepts_the_friend_request_sent_and_chat_group_renam
     db_connection, seeded_user_and_game
 ):
     user_sub, _game_id = seeded_user_and_game
+    actions = (ACTION_FRIEND_REQUEST_SENT, ACTION_CHAT_GROUP_RENAMED)
     with db_connection.cursor() as cur:
-        cur.execute(
-            "INSERT INTO account_action_log (identity_sub, action, detail) VALUES (%s, %s, %s), (%s, %s, %s)",
-            (
-                user_sub,
-                ACTION_FRIEND_REQUEST_SENT,
-                new_genre_name(),
-                user_sub,
-                ACTION_CHAT_GROUP_RENAMED,
-                new_genre_name(),
-            ),
+        cur.executemany(
+            "INSERT INTO account_action_log (identity_sub, action, detail) VALUES (%s, %s, %s)",
+            [(user_sub, action, new_genre_name()) for action in actions],
         )
         cur.execute("SELECT count(*) FROM account_action_log WHERE identity_sub = %s", (user_sub,))
         (count,) = cur.fetchone()
-    assert count == 2
+    assert count == len(actions)
 
 
 def test_user_enrichment_keys_rejected_at_columns_round_trip(db_connection, seeded_user_and_game):
@@ -1348,7 +1375,7 @@ def test_user_enrichment_keys_rejected_at_columns_round_trip(db_connection, seed
     with db_connection.cursor() as cur:
         cur.execute(
             "INSERT INTO user_enrichment_keys (identity_sub, rawg_api_key_enc, rawg_added_at) VALUES (%s, %s, now())",
-            (user_sub, b"enc"),
+            (user_sub, new_opaque_token().encode()),
         )
         cur.execute("UPDATE user_enrichment_keys SET rawg_key_rejected_at = now() WHERE identity_sub = %s", (user_sub,))
         cur.execute(
@@ -1392,7 +1419,7 @@ def test_collection_definitions_filter_predicate_defaults_to_null(db_connection,
     with db_connection.cursor() as cur:
         cur.execute(
             "INSERT INTO collection_definitions (identity_sub, name, kind) VALUES (%s, %s, %s)",
-            (user_sub, "Handpicked", FILTER_LIST_KIND),
+            (user_sub, new_game_title(), FILTER_LIST_KIND),
         )
         cur.execute("SELECT filter_predicate FROM collection_definitions WHERE identity_sub = %s", (user_sub,))
         (filter_predicate,) = cur.fetchone()
@@ -1416,7 +1443,7 @@ def test_collection_definitions_filter_predicate_round_trips_as_jsonb(db_connect
     with db_connection.cursor() as cur:
         cur.execute(
             "INSERT INTO collection_definitions (identity_sub, name, kind, filter_predicate) VALUES (%s, %s, %s, %s)",
-            (user_sub, "Criterion-ish", FILTER_LIST_KIND, json.dumps(predicate)),
+            (user_sub, new_game_title(), FILTER_LIST_KIND, json.dumps(predicate)),
         )
         cur.execute("SELECT filter_predicate FROM collection_definitions WHERE identity_sub = %s", (user_sub,))
         (filter_predicate,) = cur.fetchone()
@@ -1450,7 +1477,7 @@ def seed_possessive_game(cur, *, apostrophe, rawg_enriched, opencritic_enriched,
     :returns: the new ``game_id``.
     """
     game_id = str(uuid.uuid4())
-    title = f"Studio{uuid.uuid4().hex[:8]}{apostrophe}s Adventure"
+    title = f"{new_game_title()}{apostrophe}{new_game_title()}"
     cur.execute(
         "INSERT INTO games (game_id, canonical_title, normalized_title) VALUES (%s, %s, %s)",
         (game_id, title, title.lower()),
@@ -1458,7 +1485,7 @@ def seed_possessive_game(cur, *, apostrophe, rawg_enriched, opencritic_enriched,
     cur.execute(
         "INSERT INTO game_enrichment (game_id, rawg_enriched, opencritic_enriched, rawg_attempted_at) "
         "VALUES (%s, %s, %s, %s)",
-        (game_id, rawg_enriched, opencritic_enriched, "2026-08-01T00:00:00+00:00" if attempted else None),
+        (game_id, rawg_enriched, opencritic_enriched, new_utc_instant() if attempted else None),
     )
     return game_id
 
@@ -1468,9 +1495,9 @@ def rawg_payload(marker):
 
 
 def test_rematch_rekeys_a_stale_rawg_cache_row_and_keeps_its_payload(db_connection):
-    stale_key = f"studio{uuid.uuid4().hex[:8]}{TYPOGRAPHIC_APOSTROPHE}s adventure"
+    stale_key = f"{lowercase_token()}{TYPOGRAPHIC_APOSTROPHE}{lowercase_token()}"
     fresh_key = stale_key.replace(TYPOGRAPHIC_APOSTROPHE, ASCII_APOSTROPHE)
-    rawg_game_id = uuid.uuid4().int % 1_000_000
+    rawg_game_id = new_rawg_game_id()
     payload = rawg_payload(uuid.uuid4().hex)
     with db_connection.cursor() as cur:
         cur.execute(
@@ -1487,8 +1514,8 @@ def test_rematch_rekeys_a_stale_rawg_cache_row_and_keeps_its_payload(db_connecti
 
 
 def test_rematch_leaves_an_already_normalized_rawg_cache_row_untouched(db_connection):
-    fresh_key = f"studio{uuid.uuid4().hex[:8]}'s adventure"
-    rawg_game_id = uuid.uuid4().int % 1_000_000
+    fresh_key = f"{lowercase_token()}{ASCII_APOSTROPHE}{lowercase_token()}"
+    rawg_game_id = new_rawg_game_id()
     with db_connection.cursor() as cur:
         cur.execute(
             "INSERT INTO rawg_cache (normalized_title, rawg_game_id, raw) VALUES (%s, %s, %s::jsonb)",
@@ -1506,9 +1533,9 @@ def test_rematch_leaves_an_already_normalized_rawg_cache_row_untouched(db_connec
 
 
 def test_rematch_lets_a_colliding_stale_positive_replace_the_cached_miss_it_lands_on(db_connection):
-    stale_key = f"studio{uuid.uuid4().hex[:8]}{TYPOGRAPHIC_APOSTROPHE}s adventure"
+    stale_key = f"{lowercase_token()}{TYPOGRAPHIC_APOSTROPHE}{lowercase_token()}"
     fresh_key = stale_key.replace(TYPOGRAPHIC_APOSTROPHE, ASCII_APOSTROPHE)
-    rawg_game_id = uuid.uuid4().int % 1_000_000
+    rawg_game_id = new_rawg_game_id()
     payload = rawg_payload(uuid.uuid4().hex)
     with db_connection.cursor() as cur:
         cur.execute(
@@ -1528,9 +1555,9 @@ def test_rematch_lets_a_colliding_stale_positive_replace_the_cached_miss_it_land
 
 
 def test_rematch_never_lets_a_stale_cached_miss_overwrite_the_payload_it_lands_on(db_connection):
-    stale_key = f"studio{uuid.uuid4().hex[:8]}{TYPOGRAPHIC_APOSTROPHE}s adventure"
+    stale_key = f"{lowercase_token()}{TYPOGRAPHIC_APOSTROPHE}{lowercase_token()}"
     fresh_key = stale_key.replace(TYPOGRAPHIC_APOSTROPHE, ASCII_APOSTROPHE)
-    rawg_game_id = uuid.uuid4().int % 1_000_000
+    rawg_game_id = new_rawg_game_id()
     payload = rawg_payload(uuid.uuid4().hex)
     with db_connection.cursor() as cur:
         cur.execute(
@@ -1553,11 +1580,12 @@ def test_rematch_folds_two_stale_spellings_of_one_title_onto_a_single_surviving_
     """Two typographic spellings of the same title fold to the same fresh key. Re-keying both in place
     would collide on rawg_cache's primary key and abort the whole migration -- and a migration that fails
     is never recorded in schema_migrations, so every later deploy would retry and fail the same way."""
-    base = f"studio{uuid.uuid4().hex[:8]}"
-    right_single_quote_key = f"{base}{TYPOGRAPHIC_APOSTROPHE}s adventure"
-    left_single_quote_key = f"{base}{SECOND_TYPOGRAPHIC_APOSTROPHE}s adventure"
-    fresh_key = f"{base}{ASCII_APOSTROPHE}s adventure"
-    rawg_game_id = uuid.uuid4().int % 1_000_000
+    base = lowercase_token()
+    suffix = lowercase_token()
+    right_single_quote_key = f"{base}{TYPOGRAPHIC_APOSTROPHE}{suffix}"
+    left_single_quote_key = f"{base}{SECOND_TYPOGRAPHIC_APOSTROPHE}{suffix}"
+    fresh_key = f"{base}{ASCII_APOSTROPHE}{suffix}"
+    rawg_game_id = new_rawg_game_id()
     payload = rawg_payload(uuid.uuid4().hex)
     with db_connection.cursor() as cur:
         cur.execute(
@@ -1598,12 +1626,12 @@ def test_rematch_clears_the_tombstone_only_where_a_provider_actually_missed(db_c
 
 
 def test_rematch_is_a_no_op_on_a_second_application(db_connection):
-    stale_key = f"studio{uuid.uuid4().hex[:8]}{TYPOGRAPHIC_APOSTROPHE}s adventure"
+    stale_key = f"{lowercase_token()}{TYPOGRAPHIC_APOSTROPHE}{lowercase_token()}"
     fresh_key = stale_key.replace(TYPOGRAPHIC_APOSTROPHE, ASCII_APOSTROPHE)
     with db_connection.cursor() as cur:
         cur.execute(
             "INSERT INTO rawg_cache (normalized_title, rawg_game_id, raw) VALUES (%s, %s, %s::jsonb)",
-            (stale_key, uuid.uuid4().int % 1_000_000, rawg_payload(uuid.uuid4().hex)),
+            (stale_key, new_rawg_game_id(), rawg_payload(uuid.uuid4().hex)),
         )
         apply_rematch(cur)
         cur.execute(

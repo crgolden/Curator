@@ -6,7 +6,6 @@ from __future__ import annotations
 
 import inspect
 import json
-import random
 import time
 from datetime import UTC, datetime
 
@@ -22,7 +21,14 @@ from curator.token_response import (
     SCOPE_KEY,
     TOKEN_TYPE_KEY,
 )
-from test_values import lowercase_token, new_identity_sub, new_opaque_token, new_utc_instant
+from test_values import (
+    lowercase_token,
+    new_access_token_lifetime_seconds,
+    new_identity_sub,
+    new_opaque_token,
+    new_refresh_token_lifetime_seconds,
+    new_utc_instant,
+)
 
 SUB = new_identity_sub()
 
@@ -49,8 +55,8 @@ class FakeRepository:
             token_response_enc=token_response_enc,
             access_token_expires_at=access_token_expires_at,
             refresh_token_expires_at=refresh_token_expires_at,
-            linked_at=datetime(2026, 1, 1, tzinfo=UTC),
-            updated_at=datetime(2026, 1, 1, tzinfo=UTC),
+            linked_at=new_utc_instant(),
+            updated_at=new_utc_instant(),
             last_verified_at=None,
         )
 
@@ -84,14 +90,14 @@ def _make_crypto() -> TokenCrypto:
 
 
 def _encrypted_link(crypto: TokenCrypto, payload: dict) -> LinkRecord:
-    encrypted = crypto.encrypt(json.dumps(payload).encode("utf-8"))
+    encrypted = crypto.encrypt(json.dumps(payload).encode())
     return LinkRecord(
         psn_account_id=None,
         token_response_enc=encrypted,
         access_token_expires_at=None,
         refresh_token_expires_at=None,
-        linked_at=datetime(2026, 1, 1, tzinfo=UTC),
-        updated_at=datetime(2026, 1, 1, tzinfo=UTC),
+        linked_at=new_utc_instant(),
+        updated_at=new_utc_instant(),
         last_verified_at=None,
     )
 
@@ -105,7 +111,7 @@ def _epoch_seconds() -> float:
 
 
 def _lifetime_seconds() -> int:
-    return random.randint(600, 7200)
+    return new_access_token_lifetime_seconds()
 
 
 async def test_load_returns_none_when_no_row():
@@ -120,8 +126,8 @@ async def test_load_returns_none_on_corrupt_ciphertext():
         token_response_enc=new_opaque_token().encode(),
         access_token_expires_at=None,
         refresh_token_expires_at=None,
-        linked_at=datetime(2026, 1, 1, tzinfo=UTC),
-        updated_at=datetime(2026, 1, 1, tzinfo=UTC),
+        linked_at=new_utc_instant(),
+        updated_at=new_utc_instant(),
         last_verified_at=None,
     )
     store = DbTokenStore(SUB, repo, _make_crypto())
@@ -156,7 +162,7 @@ async def test_load_reads_a_two_key_blob_written_by_the_worker_runtime():
     repo = FakeRepository()
     worker_blob = {
         REFRESH_TOKEN_KEY: new_opaque_token(),
-        REFRESH_TOKEN_EXPIRES_AT_KEY: time.time() + random.randint(86_400, 5_184_000),
+        REFRESH_TOKEN_EXPIRES_AT_KEY: time.time() + new_refresh_token_lifetime_seconds(),
     }
     repo.links[SUB] = _encrypted_link(crypto, worker_blob)
     store = DbTokenStore(SUB, repo, crypto)
@@ -170,7 +176,7 @@ async def test_save_round_trips_through_the_two_key_shape_the_worker_writes():
     crypto = _make_crypto()
     repo = FakeRepository()
     refresh_token = new_opaque_token()
-    refresh_expires_at = time.time() + random.randint(86_400, 5_184_000)
+    refresh_expires_at = time.time() + new_refresh_token_lifetime_seconds()
     lifetime = _lifetime_seconds()
     store = DbTokenStore(SUB, repo, crypto)
 

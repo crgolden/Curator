@@ -6,6 +6,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 from datetime import timedelta
+from http import HTTPStatus
 
 import pytest
 from fastapi.testclient import TestClient
@@ -29,7 +30,10 @@ from test_values import (
     new_identity_sub,
     new_opaque_token,
     new_positive_count,
+    new_short_interval,
     new_utc_instant,
+    token_from_first_half_of_alphabet,
+    token_from_second_half_of_alphabet,
 )
 
 SUB = new_identity_sub()
@@ -124,59 +128,73 @@ def test_repeated_registrations_of_one_device_collapse_to_a_single_entry():
 
     Observed live: two PS3 rows 267ms apart plus a third months later, all sharing one device_id.
     """
+    repeated_device_id = new_device_id()
+    other_device_id = new_device_id()
+    repeated_device_type = lowercase_token().upper()
+    activation_type = lowercase_token().upper()
+    older_device_name = lowercase_token()
+    first_activation = new_utc_instant()
+    latest_activation = (first_activation + new_short_interval()).isoformat()
     devices = [
         AccountDevice(
-            device_id="dev-ps3",
-            device_type="PS3",
-            device_name="PlayStation 3",
-            activation_type="PRIMARY",
-            activation_date="2026-03-09T14:12:31.064Z",
+            device_id=repeated_device_id,
+            device_type=repeated_device_type,
+            device_name=older_device_name,
+            activation_type=activation_type,
+            activation_date=first_activation.isoformat(),
             deactivation_date=None,
         ),
         AccountDevice(
-            device_id="dev-ps3",
-            device_type="PS3",
+            device_id=repeated_device_id,
+            device_type=repeated_device_type,
             device_name=None,
-            activation_type="PRIMARY",
-            activation_date="2026-05-22T13:47:16.339Z",
+            activation_type=activation_type,
+            activation_date=latest_activation,
             deactivation_date=None,
         ),
         AccountDevice(
-            device_id="dev-ps5",
-            device_type="PS5",
-            device_name="PlayStation 5",
-            activation_type="PRIMARY",
-            activation_date="2026-03-09T14:46:16.408Z",
+            device_id=other_device_id,
+            device_type=lowercase_token().upper(),
+            device_name=lowercase_token(),
+            activation_type=activation_type,
+            activation_date=(first_activation + new_short_interval()).isoformat(),
             deactivation_date=None,
         ),
     ]
 
     collapsed = _collapse_by_device_id(devices)
 
-    assert [d.device_id for d in collapsed] == ["dev-ps3", "dev-ps5"]
-    assert collapsed[0].activation_date == "2026-05-22T13:47:16.339Z", "the most recent activation wins"
-    assert collapsed[0].device_name == "PlayStation 3", "a name from an older row beats the newer row's null"
+    assert [d.device_id for d in collapsed] == [repeated_device_id, other_device_id]
+    assert collapsed[0].activation_date == latest_activation, "the most recent activation wins"
+    assert collapsed[0].device_name == older_device_name, "a name from an older row beats the newer row's null"
 
 
 def test_collapsing_preserves_first_seen_order():
+    later_sorting_id = token_from_second_half_of_alphabet()
+    earlier_sorting_id = token_from_first_half_of_alphabet()
+    first_activation = new_utc_instant()
     devices = [
-        AccountDevice("b", "PS5", "B", "PRIMARY", "2026-01-01T00:00:00Z", None),
-        AccountDevice("a", "PS4", "A", "PRIMARY", "2026-01-02T00:00:00Z", None),
-        AccountDevice("b", "PS5", "B", "PRIMARY", "2026-02-01T00:00:00Z", None),
+        replace(_account_device(), device_id=later_sorting_id, activation_date=first_activation.isoformat()),
+        replace(_account_device(), device_id=earlier_sorting_id),
+        replace(
+            _account_device(),
+            device_id=later_sorting_id,
+            activation_date=(first_activation + new_short_interval()).isoformat(),
+        ),
     ]
 
-    assert [d.device_id for d in _collapse_by_device_id(devices)] == ["b", "a"]
+    assert [d.device_id for d in _collapse_by_device_id(devices)] == [later_sorting_id, earlier_sorting_id]
 
 
 def test_devices_without_an_id_are_kept_rather_than_merged_together():
     devices = [
-        AccountDevice(None, "PS3", "One", "PRIMARY", "2026-01-01T00:00:00Z", None),
-        AccountDevice(None, "PS3", "Two", "PRIMARY", "2026-01-02T00:00:00Z", None),
+        replace(_account_device(), device_id=None),
+        replace(_account_device(), device_id=None),
     ]
 
     collapsed = _collapse_by_device_id(devices)
 
-    assert len(collapsed) == 2, "nothing identifies these well enough to treat them as the same device"
+    assert len(collapsed) == len(devices), "nothing identifies these well enough to treat them as the same device"
 
 
 def _get_devices(client):
@@ -196,9 +214,9 @@ def test_get_devices_returns_one_row_per_device_after_collapsing():
 
     response = _get_devices(client)
 
-    assert DevicesResponse.model_validate(response.json()) == DevicesResponse(
-        devices=[_expected_response(latest_registration, None)]
-    ), "the response must never carry the same device_id twice"
+    expected = DevicesResponse(devices=[_expected_response(latest_registration, None)])
+    body = DevicesResponse.model_validate(response.json())
+    assert body == expected, "the response must never carry the same device_id twice"
 
 
 def test_get_devices_annotates_a_linked_console_without_a_second_call():
@@ -211,7 +229,7 @@ def test_get_devices_annotates_a_linked_console_without_a_second_call():
 
     response = _get_devices(client)
 
-    assert response.status_code == 200
+    assert response.status_code == HTTPStatus.OK
     assert DevicesResponse.model_validate(response.json()).devices[0].linked_console_id == console_id
 
 
@@ -222,7 +240,7 @@ def test_get_devices_reports_no_link_as_null_rather_than_omitting_it():
 
     response = _get_devices(client)
 
-    assert response.status_code == 200
+    assert response.status_code == HTTPStatus.OK
     device = DevicesResponse.model_validate(response.json()).devices[0]
     assert device.linked_console_id is None
     assert device.model_fields_set == set(AccountDeviceResponse.model_fields)
@@ -231,7 +249,7 @@ def test_get_devices_reports_no_link_as_null_rather_than_omitting_it():
 def test_get_devices_no_link_is_404():
     client, _ = _build()
     response = _get_devices(client)
-    assert response.status_code == 404
+    assert response.status_code == HTTPStatus.NOT_FOUND
     assert response.json()["detail"] == PREFERENCE_NOT_LINKED_DETAIL
 
 
@@ -242,7 +260,7 @@ def test_get_devices_harvest_devices_disabled_is_403():
     client, _ = _build(repository=repository)
 
     response = _get_devices(client)
-    assert response.status_code == 403
+    assert response.status_code == HTTPStatus.FORBIDDEN
     assert response.json()["detail"] == preference_disabled_detail(HARVEST_DEVICES)
 
 
@@ -254,7 +272,7 @@ def test_get_devices_happy_path():
 
     response = _get_devices(client)
 
-    assert response.status_code == 200
+    assert response.status_code == HTTPStatus.OK
     body = DevicesResponse.model_validate(response.json())
     assert body == DevicesResponse(devices=[_expected_response(device, None)])
     assert body.devices[0].model_fields_set == set(AccountDeviceResponse.model_fields)
@@ -268,7 +286,7 @@ def test_get_devices_psn_auth_error_is_401():
     client, _ = _build_linked(factory)
 
     response = _get_devices(client)
-    assert response.status_code == 401
+    assert response.status_code == HTTPStatus.UNAUTHORIZED
     assert client.app.state.audit_repository.outcomes == [(ACTION_DEVICES_FETCH, OUTCOME_FAILED)]
 
 

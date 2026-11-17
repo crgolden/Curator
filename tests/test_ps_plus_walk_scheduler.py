@@ -1,13 +1,13 @@
 from __future__ import annotations
 
-import random
-from datetime import UTC, datetime, timedelta
+from datetime import timedelta
 
 from curator.jobs.ps_plus_walk_scheduler import (
     DEFAULT_MAX_PAGES_PER_CATEGORY,
     DEFAULT_WALK_INTERVAL,
     PsPlusWalkScheduler,
 )
+from test_values import lowercase_token, new_positive_count, new_utc_instant
 
 
 class FakeWalker:
@@ -20,7 +20,7 @@ class FakeWalker:
         self.calls += 1
         self.page_budgets.append(max_pages_per_category)
         if self._fails:
-            raise RuntimeError("gateway down")
+            raise RuntimeError(lowercase_token())
         return []
 
 
@@ -32,7 +32,7 @@ class FakeHistory:
         return self._latest
 
 
-_NOW = datetime(2026, 9, 10, 12, tzinfo=UTC)
+_NOW = new_utc_instant()
 
 
 def _scheduler(walker, latest, **options):
@@ -76,7 +76,7 @@ async def test_a_scheduled_walk_is_bounded_by_the_default_page_budget():
 
 async def test_a_configured_page_budget_reaches_the_walk():
     walker = FakeWalker()
-    page_budget = random.randint(1, 50)
+    page_budget = new_positive_count()
 
     await _scheduler(walker, None, max_pages_per_category=page_budget).check_once()
 

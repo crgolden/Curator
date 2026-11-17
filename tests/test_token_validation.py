@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import time
 import urllib.error
+from http import HTTPStatus
 
 import pytest
 from joserfc import jwt
@@ -18,6 +19,7 @@ from joserfc.errors import JoseError
 from joserfc.jwk import RSAKey
 
 from curator.token_validation import (
+    _ALGORITHMS,
     EMAIL_CLAIM,
     IAT_CLAIM,
     JWKS_URI_KEY,
@@ -29,18 +31,26 @@ from curator.token_validation import (
     _parse_scopes,
     discovery_url,
 )
-from test_values import lowercase_token, new_email_address, new_identity_sub
+from test_values import (
+    lowercase_token,
+    new_access_token_lifetime_seconds,
+    new_email_address,
+    new_endpoint_url,
+    new_identity_sub,
+    new_positive_count,
+)
 
-AUTHORITY = f"https://{lowercase_token()}.example.test"
+AUTHORITY = new_endpoint_url()
 DISCOVERY_URL = discovery_url(AUTHORITY)
 JWKS_URL = f"{AUTHORITY}/{lowercase_token()}"
 SUB = new_identity_sub()
 EMAIL = new_email_address()
 SCOPES = (lowercase_token(), lowercase_token())
+_SIGNING_ALGORITHM = _ALGORITHMS[0]
 
 
 def _generate_key(kid: str) -> RSAKey:
-    return RSAKey.generate_key(2048, {"kid": kid, "use": "sig", "alg": "RS256"}, private=True)
+    return RSAKey.generate_key(2048, {"kid": kid, "use": "sig", "alg": _SIGNING_ALGORITHM}, private=True)
 
 
 def _sign(key: RSAKey, kid: str, **payload_overrides: object) -> str:
@@ -51,10 +61,10 @@ def _sign(key: RSAKey, kid: str, **payload_overrides: object) -> str:
         EMAIL_CLAIM: EMAIL,
         SCOPE_CLAIM: list(SCOPES),
         IAT_CLAIM: now,
-        "exp": now + 3600,
+        "exp": now + new_access_token_lifetime_seconds(),
     }
     payload.update(payload_overrides)
-    header = {"alg": "RS256", "kid": kid}
+    header = {"alg": _SIGNING_ALGORITHM, "kid": kid}
     return jwt.encode(header, payload, key)
 
 
@@ -80,10 +90,11 @@ def _make_validator(jwks: dict) -> tuple[JwtValidator, FakeFetcher]:
 
 
 def test_valid_token_is_accepted_and_claims_extracted():
-    key = _generate_key("key-1")
+    kid = lowercase_token()
+    key = _generate_key(kid)
     jwks = {"keys": [key.as_dict(private=False)]}
     validator, _fetcher = _make_validator(jwks)
-    token = _sign(key, "key-1")
+    token = _sign(key, kid)
 
     claims = validator.validate(token)
 
@@ -95,42 +106,47 @@ def test_valid_token_is_accepted_and_claims_extracted():
 
 
 def test_wrong_signature_is_rejected():
-    key = _generate_key("key-1")
-    impostor_key_with_the_same_kid = _generate_key("key-1")
+    kid = lowercase_token()
+    key = _generate_key(kid)
+    impostor_key_with_the_same_kid = _generate_key(kid)
     jwks = {"keys": [key.as_dict(private=False)]}
     validator, _fetcher = _make_validator(jwks)
-    token = _sign(impostor_key_with_the_same_kid, "key-1")
+    token = _sign(impostor_key_with_the_same_kid, kid)
 
     with pytest.raises(TokenError):
         validator.validate(token)
 
 
 def test_wrong_issuer_is_rejected():
-    key = _generate_key("key-1")
+    kid = lowercase_token()
+    key = _generate_key(kid)
     jwks = {"keys": [key.as_dict(private=False)]}
     validator, _fetcher = _make_validator(jwks)
-    token = _sign(key, "key-1", iss=f"https://{lowercase_token()}.example.test")
+    token = _sign(key, kid, iss=new_endpoint_url())
 
     with pytest.raises(TokenError):
         validator.validate(token)
 
 
 def test_expired_token_is_rejected():
-    key = _generate_key("key-1")
+    kid = lowercase_token()
+    key = _generate_key(kid)
     jwks = {"keys": [key.as_dict(private=False)]}
     validator, _fetcher = _make_validator(jwks)
-    now = int(time.time())
-    token = _sign(key, "key-1", iat=now - 7200, exp=now - 3600)
+    expired_at = int(time.time()) - new_positive_count()
+    issued_at = expired_at - new_access_token_lifetime_seconds()
+    token = _sign(key, kid, iat=issued_at, exp=expired_at)
 
     with pytest.raises(TokenError):
         validator.validate(token)
 
 
 def test_scope_as_space_delimited_string_is_accepted():
-    key = _generate_key("key-1")
+    kid = lowercase_token()
+    key = _generate_key(kid)
     jwks = {"keys": [key.as_dict(private=False)]}
     validator, _fetcher = _make_validator(jwks)
-    token = _sign(key, "key-1", **{SCOPE_CLAIM: " ".join(SCOPES)})
+    token = _sign(key, kid, **{SCOPE_CLAIM: " ".join(SCOPES)})
 
     claims = validator.validate(token)
 
@@ -138,10 +154,11 @@ def test_scope_as_space_delimited_string_is_accepted():
 
 
 def test_scope_as_json_array_is_accepted():
-    key = _generate_key("key-1")
+    kid = lowercase_token()
+    key = _generate_key(kid)
     jwks = {"keys": [key.as_dict(private=False)]}
     validator, _fetcher = _make_validator(jwks)
-    token = _sign(key, "key-1", **{SCOPE_CLAIM: [SCOPES[0]]})
+    token = _sign(key, kid, **{SCOPE_CLAIM: [SCOPES[0]]})
 
     claims = validator.validate(token)
 
@@ -149,12 +166,13 @@ def test_scope_as_json_array_is_accepted():
 
 
 def test_missing_sub_is_rejected():
-    key = _generate_key("key-1")
+    kid = lowercase_token()
+    key = _generate_key(kid)
     jwks = {"keys": [key.as_dict(private=False)]}
     validator, _fetcher = _make_validator(jwks)
     now = int(time.time())
-    header = {"alg": "RS256", "kid": "key-1"}
-    payload = {"iss": AUTHORITY, EMAIL_CLAIM: EMAIL, IAT_CLAIM: now, "exp": now + 3600}
+    header = {"alg": _SIGNING_ALGORITHM, "kid": kid}
+    payload = {"iss": AUTHORITY, EMAIL_CLAIM: EMAIL, IAT_CLAIM: now, "exp": now + new_access_token_lifetime_seconds()}
     token = jwt.encode(header, payload, key)
 
     with pytest.raises(TokenError):
@@ -162,12 +180,19 @@ def test_missing_sub_is_rejected():
 
 
 def test_missing_email_claim_yields_none_email():
-    key = _generate_key("key-1")
+    kid = lowercase_token()
+    key = _generate_key(kid)
     jwks = {"keys": [key.as_dict(private=False)]}
     validator, _fetcher = _make_validator(jwks)
     now = int(time.time())
-    header = {"alg": "RS256", "kid": "key-1"}
-    payload = {"iss": AUTHORITY, SUB_CLAIM: SUB, SCOPE_CLAIM: list(SCOPES), IAT_CLAIM: now, "exp": now + 3600}
+    header = {"alg": _SIGNING_ALGORITHM, "kid": kid}
+    payload = {
+        "iss": AUTHORITY,
+        SUB_CLAIM: SUB,
+        SCOPE_CLAIM: list(SCOPES),
+        IAT_CLAIM: now,
+        "exp": now + new_access_token_lifetime_seconds(),
+    }
     token = jwt.encode(header, payload, key)
 
     claims = validator.validate(token)
@@ -176,17 +201,18 @@ def test_missing_email_claim_yields_none_email():
 
 
 def test_unknown_kid_triggers_a_refetch_and_succeeds_once_the_key_is_present():
-    old_key = _generate_key("key-1")
-    new_key = _generate_key("key-2")
+    old_kid, new_kid = lowercase_token(), lowercase_token()
+    old_key = _generate_key(old_kid)
+    new_key = _generate_key(new_kid)
     fetcher = FakeFetcher({"keys": [old_key.as_dict(private=False)]})
     validator = JwtValidator(AUTHORITY, fetch_json=fetcher)
 
-    token_old = _sign(old_key, "key-1")
+    token_old = _sign(old_key, old_kid)
     validator.validate(token_old)
     fetch_count_after_first_validate = len(fetcher.urls)
 
     fetcher.jwks = {"keys": [old_key.as_dict(private=False), new_key.as_dict(private=False)]}
-    token_new = _sign(new_key, "key-2")
+    token_new = _sign(new_key, new_kid)
 
     claims = validator.validate(token_new)
 
@@ -195,11 +221,12 @@ def test_unknown_kid_triggers_a_refetch_and_succeeds_once_the_key_is_present():
 
 
 def test_unknown_kid_still_rejected_after_refetch_if_truly_absent():
-    key = _generate_key("key-1")
+    key = _generate_key(lowercase_token())
     jwks = {"keys": [key.as_dict(private=False)]}
     validator, _fetcher = _make_validator(jwks)
-    other_key = _generate_key("key-999")
-    token = _sign(other_key, "key-999")
+    other_kid = lowercase_token()
+    other_key = _generate_key(other_kid)
+    token = _sign(other_key, other_kid)
 
     with pytest.raises(TokenError):
         validator.validate(token)
@@ -211,9 +238,6 @@ def test_parse_scopes_handles_list_string_and_none():
     assert _parse_scopes(f"{first} {second}") == SCOPES
     assert _parse_scopes(None) == ()
     assert _parse_scopes("") == ()
-
-
-_IDENTITY_RETURNED_ITS_OWN_500 = 500
 
 
 class FailingFetcher:
@@ -238,28 +262,32 @@ class KeysetFailsAfterTheFirstFetcher(FakeFetcher):
         if url == JWKS_URL:
             self.keysets_served += 1
             if self.keysets_served > 1:
-                raise urllib.error.HTTPError(url, _IDENTITY_RETURNED_ITS_OWN_500, lowercase_token(), {}, None)
+                raise urllib.error.HTTPError(url, HTTPStatus.INTERNAL_SERVER_ERROR, lowercase_token(), {}, None)
         return super().__call__(url)
 
 
 def _validate_a_token_that_would_otherwise_be_valid(fetch_json) -> None:
-    key = _generate_key("key-1")
-    JwtValidator(AUTHORITY, fetch_json=fetch_json).validate(_sign(key, "key-1"))
+    kid = lowercase_token()
+    key = _generate_key(kid)
+    JwtValidator(AUTHORITY, fetch_json=fetch_json).validate(_sign(key, kid))
 
 
 @pytest.mark.parametrize(
-    ("shape", "failure"),
+    "failure",
     [
-        (
-            "identity answered with its own 500",
-            urllib.error.HTTPError(DISCOVERY_URL, _IDENTITY_RETURNED_ITS_OWN_500, lowercase_token(), {}, None),
+        pytest.param(
+            urllib.error.HTTPError(DISCOVERY_URL, HTTPStatus.INTERNAL_SERVER_ERROR, lowercase_token(), {}, None),
+            id="identity answered with its own 500",
         ),
-        ("identity was unreachable", urllib.error.URLError("connection refused")),
-        ("the fetch timed out", TimeoutError("timed out")),
-        ("identity answered with something that is not json", json.JSONDecodeError("Expecting value", "<html/>", 0)),
+        pytest.param(urllib.error.URLError(lowercase_token()), id="identity was unreachable"),
+        pytest.param(TimeoutError(lowercase_token()), id="the fetch timed out"),
+        pytest.param(
+            json.JSONDecodeError(lowercase_token(), lowercase_token(), 0),
+            id="identity answered with something that is not json",
+        ),
     ],
 )
-def test_a_failed_discovery_fetch_is_an_authority_outage_not_a_bad_token(shape, failure):
+def test_a_failed_discovery_fetch_is_an_authority_outage_not_a_bad_token(failure):
     fetcher = FailingFetcher(failure)
 
     with pytest.raises(AuthorityUnavailableError):
@@ -275,7 +303,7 @@ def test_a_discovery_document_carrying_no_jwks_uri_is_an_authority_outage():
 
 
 def test_a_jwks_joserfc_cannot_import_is_an_authority_outage_though_no_fetch_failed():
-    unimportable_jwks = {"keys": [{"kty": "not-a-real-key-type"}]}
+    unimportable_jwks = {"keys": [{"kty": lowercase_token()}]}
     fetcher = FakeFetcher(unimportable_jwks)
 
     with pytest.raises(AuthorityUnavailableError):
@@ -283,13 +311,15 @@ def test_a_jwks_joserfc_cannot_import_is_an_authority_outage_though_no_fetch_fai
 
 
 def test_an_outage_during_the_kid_refetch_is_an_authority_outage_not_an_unverifiable_token():
-    original_key = _generate_key("key-1")
+    original_kid = lowercase_token()
+    original_key = _generate_key(original_kid)
     fetcher = KeysetFailsAfterTheFirstFetcher({"keys": [original_key.as_dict(private=False)]})
     validator = JwtValidator(AUTHORITY, fetch_json=fetcher)
-    validator.validate(_sign(original_key, "key-1"))
+    validator.validate(_sign(original_key, original_kid))
 
-    rotated_key = _generate_key("key-2")
-    token_signed_with_a_kid_the_cache_predates = _sign(rotated_key, "key-2")
+    rotated_kid = lowercase_token()
+    rotated_key = _generate_key(rotated_kid)
+    token_signed_with_a_kid_the_cache_predates = _sign(rotated_key, rotated_kid)
 
     with pytest.raises(AuthorityUnavailableError):
         validator.validate(token_signed_with_a_kid_the_cache_predates)

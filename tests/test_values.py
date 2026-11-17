@@ -194,3 +194,102 @@ def new_storage_device_id() -> str:
 
 def new_short_interval() -> timedelta:
     return timedelta(seconds=random.randint(60, 600))
+
+
+def new_rawg_game_id() -> int:
+    return random.randint(1, 999_999)
+
+
+def new_ps3_title_id() -> str:
+    return f"BLUS{random.randint(0, 99999):05d}_00"
+
+
+def new_ps_plus_sku_title_id() -> str:
+    return f"NPIA{random.randint(0, 99999):05d}_01"
+
+
+def new_install_size_gb() -> float:
+    return round(random.uniform(1, 100), 1)
+
+
+def new_capacity_gb() -> float:
+    return round(random.uniform(1000, 2000), 1)
+
+
+def new_size_gb_below(ceiling_gb: float) -> float:
+    return round(random.uniform(ceiling_gb / 10, ceiling_gb / 2), 2)
+
+
+def new_percent_above(floor: int) -> int:
+    return random.randint(floor + 1, 100)
+
+
+def new_percent_below(ceiling: int) -> int:
+    return random.randint(0, ceiling - 1)
+
+
+def new_review_score_below(ceiling: float) -> float:
+    return round(ceiling * random.uniform(0.1, 0.9), 1)
+
+
+def new_url_on_host(host: str) -> str:
+    return f"https://{host}/{lowercase_token()}"
+
+
+def new_direct_message_group_id() -> str:
+    return f"~{uuid.uuid4().hex[:16].upper()}.{uuid.uuid4().hex[:16].upper()}"
+
+
+def new_profile_handle() -> str:
+    return lowercase_token(random.randint(3, 16))
+
+
+def new_thousands_price_cents() -> int:
+    return random.randint(100_000, 99_999_999)
+
+
+def new_database_url() -> str:
+    return f"postgresql://{lowercase_token()}/{lowercase_token()}"
+
+
+def new_service_bus_namespace() -> str:
+    return f"{lowercase_token()}.servicebus.windows.net"
+
+
+def new_service_bus_connection_string() -> str:
+    return (
+        f"Endpoint=sb://{new_service_bus_namespace()}/;SharedAccessKeyName={lowercase_token()};"
+        f"SharedAccessKey={new_opaque_token()}"
+    )
+
+
+def new_access_token_lifetime_seconds() -> int:
+    return random.randint(600, 7200)
+
+
+def new_refresh_token_lifetime_seconds() -> int:
+    return random.randint(86_400, 5_184_000)
+
+
+def new_unmapped_title_id() -> str:
+    return f"{random.randint(1000, 9999)}{random.randint(0, 99999):05d}_00"
+
+
+def new_title_id_fragment() -> str:
+    return lowercase_token(random.randint(1, 3)).upper()
+
+
+def new_endpoint_url() -> str:
+    return f"https://{lowercase_token()}.{lowercase_token(4)}"
+
+
+def new_env_var_name() -> str:
+    return f"CURATOR_TEST_{lowercase_token().upper()}"
+
+
+def new_port() -> int:
+    return random.randint(1024, 65535)
+
+
+def new_npsso() -> str:
+    return "".join(random.choice(string.ascii_letters + string.digits) for _ in range(64))

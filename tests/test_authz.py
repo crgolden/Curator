@@ -11,8 +11,10 @@ them -- pytest's rootdir-relative import inserts ``tests/`` onto ``sys.path``, s
 
 from __future__ import annotations
 
+import json
 import uuid
-from datetime import UTC, datetime
+from datetime import datetime
+from http import HTTPStatus
 
 import pytest
 from fastapi.routing import iter_route_contexts
@@ -48,6 +50,7 @@ from curator.me_routes import MeResponse
 from curator.persistence.crypto import TokenCrypto
 from curator.persistence.repository import LinkRecord
 from curator.psn_routes import LinkRequest
+from curator.token_response import ACCESS_TOKEN_KEY, REFRESH_TOKEN_KEY
 from curator.token_validation import AUTHORITY_UNAVAILABLE_DETAIL, AuthorityUnavailableError, TokenClaims
 from test_routes import (
     FakeAgentFactory,
@@ -59,6 +62,14 @@ from test_routes import (
     _build,
     _claims,
     _make_settings,
+)
+from test_values import (
+    new_account_id,
+    new_email_address,
+    new_identity_sub,
+    new_opaque_token,
+    new_short_interval,
+    new_utc_instant,
 )
 
 _BEARER_REQUIRED_HANDLERS = [
@@ -280,19 +291,25 @@ class RecordingRepository(FakeRepository):
         return await super().delete_link(sub)
 
 
-def _seed_custom_link(repo: RecordingRepository, crypto: TokenCrypto, sub: str, account_id: str, hour: int) -> None:
+def _seed_custom_link(
+    repo: RecordingRepository, crypto: TokenCrypto, sub: str, account_id: str, verified_at: datetime
+) -> LinkRecord:
     """Seed a link with values distinguishable per-user (unlike ``test_routes._seed_link``'s fixed
     timestamps), so isolation between two users' rows is actually observable in assertions."""
-    encrypted = crypto.encrypt(f'{{"access_token": "AT-{sub}", "refresh_token": "RT-{sub}"}}'.encode())
-    repo.links[sub] = LinkRecord(
+    encrypted = crypto.encrypt(
+        json.dumps({ACCESS_TOKEN_KEY: new_opaque_token(), REFRESH_TOKEN_KEY: new_opaque_token()}).encode()
+    )
+    record = LinkRecord(
         psn_account_id=account_id,
         token_response_enc=encrypted,
-        access_token_expires_at=datetime(2026, 1, 1, hour, tzinfo=UTC),
-        refresh_token_expires_at=datetime(2026, 2, 1, hour, tzinfo=UTC),
-        linked_at=datetime(2026, 1, 1, hour, tzinfo=UTC),
-        updated_at=datetime(2026, 1, 1, hour, tzinfo=UTC),
-        last_verified_at=datetime(2026, 1, 1, hour, tzinfo=UTC),
+        access_token_expires_at=new_utc_instant(),
+        refresh_token_expires_at=new_utc_instant(),
+        linked_at=verified_at,
+        updated_at=verified_at,
+        last_verified_at=verified_at,
     )
+    repo.links[sub] = record
+    return record
 
 
 @pytest.mark.parametrize("handler", _BEARER_REQUIRED_HANDLERS, ids=lambda handler: handler.__name__)
@@ -302,7 +319,7 @@ def test_bearer_required_routes_reject_missing_authorization_header(handler):
 
     response = client.request(method, path)
 
-    assert response.status_code == 401
+    assert response.status_code == HTTPStatus.UNAUTHORIZED
 
 
 @pytest.mark.parametrize("handler", _BEARER_REQUIRED_HANDLERS, ids=lambda handler: handler.__name__)
@@ -312,7 +329,7 @@ def test_bearer_required_routes_reject_garbage_token(handler):
 
     response = client.request(method, path, headers=_bearer(uuid.uuid4().hex))
 
-    assert response.status_code == 401
+    assert response.status_code == HTTPStatus.UNAUTHORIZED
     assert response.headers.get(WWW_AUTHENTICATE_HEADER) == BEARER_SCHEME
 
 
@@ -323,7 +340,7 @@ def test_bearer_required_routes_document_the_bearer_refusals(handler):
 
     documented = set(route.responses)
 
-    assert {401, 403, 503} <= documented
+    assert {HTTPStatus.UNAUTHORIZED, HTTPStatus.FORBIDDEN, HTTPStatus.SERVICE_UNAVAILABLE} <= documented
 
 
 class UnreachableAuthorityValidator:
@@ -340,7 +357,7 @@ def test_bearer_required_routes_answer_503_when_identity_cannot_be_reached(handl
 
     response = client.request(method, path, headers=_bearer(uuid.uuid4().hex))
 
-    assert response.status_code == 503
+    assert response.status_code == HTTPStatus.SERVICE_UNAVAILABLE
     assert WWW_AUTHENTICATE_HEADER not in response.headers
     assert response.json()["detail"] == AUTHORITY_UNAVAILABLE_DETAIL
 
@@ -348,16 +365,19 @@ def test_bearer_required_routes_answer_503_when_identity_cannot_be_reached(handl
 def test_cross_user_isolation_between_two_established_callers():
     repo = RecordingRepository()
     crypto = TokenCrypto(TokenCrypto.generate_key())
-    _seed_custom_link(repo, crypto, "sub-a", account_id="psn-account-a", hour=1)
-    _seed_custom_link(repo, crypto, "sub-b", account_id="psn-account-b", hour=2)
+    sub_a, sub_b = new_identity_sub(), new_identity_sub()
+    sub_b_account_id = new_account_id()
+    relinked_account_id = new_account_id()
+    sub_a_verified_at = new_utc_instant()
+    _seed_custom_link(repo, crypto, sub_a, account_id=new_account_id(), verified_at=sub_a_verified_at)
+    sub_b_link = _seed_custom_link(repo, crypto, sub_b, account_id=sub_b_account_id, verified_at=new_utc_instant())
+    email_a = new_email_address()
+    token_a = new_opaque_token()
 
     agent_factory = FakeAgentFactory(repo, crypto)
-    agent_factory.email_info = ("usera@example.com", True)
+    agent_factory.email_info = (email_a, True)
     validator = FakeTokenValidator()
-    validator.register(
-        "token-a",
-        _claims(sub="sub-a", email="usera@example.com", iat=datetime(2026, 1, 1, 2, tzinfo=UTC)),
-    )
+    validator.register(token_a, _claims(sub=sub_a, email=email_a, iat=sub_a_verified_at + new_short_interval()))
     app = create_app(
         _make_settings(),
         repository=repo,
@@ -373,38 +393,36 @@ def test_cross_user_isolation_between_two_established_callers():
     link_path = app.url_path_for(psn_routes.psn_link.__name__)
     relink_npsso = uuid.uuid4().hex
 
-    me_response = client.get(me_path, headers=_bearer("token-a"))
-    assert me_response.status_code == 200
+    me_response = client.get(me_path, headers=_bearer(token_a))
+    assert me_response.status_code == HTTPStatus.OK
     assert repo.delete_calls == []
 
     baseline = len(repo.all_subs_seen)
 
     me_body = MeResponse.model_validate(me_response.json())
-    assert me_body.sub == "sub-a"
+    assert me_body.sub == sub_a
     assert me_body.linked is True
-    assert repo.links["sub-b"].psn_account_id == "psn-account-b"
+    assert repo.links[sub_b].psn_account_id == sub_b_account_id
 
-    delete_response = client.delete(link_path, headers=_bearer("token-a"))
-    assert delete_response.status_code == 204
-    assert repo.delete_calls == ["sub-a"]
-    assert "sub-b" in repo.links
-    assert repo.links["sub-b"].psn_account_id == "psn-account-b"
-    assert repo.links["sub-b"].access_token_expires_at == datetime(2026, 1, 1, 2, tzinfo=UTC)
-    assert repo.links["sub-b"].refresh_token_expires_at == datetime(2026, 2, 1, 2, tzinfo=UTC)
+    delete_response = client.delete(link_path, headers=_bearer(token_a))
+    assert delete_response.status_code == HTTPStatus.NO_CONTENT
+    assert repo.delete_calls == [sub_a]
+    assert sub_b in repo.links
+    assert repo.links[sub_b].psn_account_id == sub_b_account_id
+    assert repo.links[sub_b].access_token_expires_at == sub_b_link.access_token_expires_at
+    assert repo.links[sub_b].refresh_token_expires_at == sub_b_link.refresh_token_expires_at
 
-    agent_factory.account_id = "psn-account-a-relinked"
-    link_response = client.post(
-        link_path, json=LinkRequest(npsso=relink_npsso).model_dump(), headers=_bearer("token-a")
-    )
-    assert link_response.status_code == 200
-    assert agent_factory.calls[-1] == ("sub-a", relink_npsso)
-    assert repo.set_link_account_calls[-1] == ("sub-a", "psn-account-a-relinked")
+    agent_factory.account_id = relinked_account_id
+    link_response = client.post(link_path, json=LinkRequest(npsso=relink_npsso).model_dump(), headers=_bearer(token_a))
+    assert link_response.status_code == HTTPStatus.OK
+    assert agent_factory.calls[-1] == (sub_a, relink_npsso)
+    assert repo.set_link_account_calls[-1] == (sub_a, relinked_account_id)
 
-    assert repo.links["sub-b"].psn_account_id == "psn-account-b"
-    assert repo.links["sub-b"].access_token_expires_at == datetime(2026, 1, 1, 2, tzinfo=UTC)
+    assert repo.links[sub_b].psn_account_id == sub_b_account_id
+    assert repo.links[sub_b].access_token_expires_at == sub_b_link.access_token_expires_at
 
     subs_touched_by_a = set(repo.all_subs_seen[baseline:])
-    assert subs_touched_by_a == {"sub-a"}
+    assert subs_touched_by_a == {sub_a}
 
 
 def test_no_route_exposes_a_caller_suppliable_user_identifier_path_parameter():

@@ -6,8 +6,6 @@ resolves ``oidc_authority`` (for JWKS/issuer validation), ``token_key``, and ``d
 
 from __future__ import annotations
 
-import random
-
 import pytest
 
 from curator.persistence.config import ConfigError
@@ -30,7 +28,15 @@ from curator.settings import (
     STORE_QUERY_HASH,
     Settings,
 )
-from test_values import new_identity_sub, new_sha256_hash
+from test_values import (
+    lowercase_token,
+    new_database_url,
+    new_endpoint_url,
+    new_identity_sub,
+    new_port,
+    new_service_bus_namespace,
+    new_sha256_hash,
+)
 
 _FIRST_STORE_QUERY_HASH = f"{STORE_QUERY_HASH}__0"
 _SECOND_STORE_QUERY_HASH = f"{STORE_QUERY_HASH}__1"
@@ -38,13 +44,13 @@ _SECOND_STORE_QUERY_HASH = f"{STORE_QUERY_HASH}__1"
 _TELEMETRY_KEYS = (ALLOY_ENDPOINT, ELASTICSEARCH_NODE, ELASTICSEARCH_USERNAME, ELASTICSEARCH_PASSWORD)
 _TELEMETRY_URL_KEYS = (ALLOY_ENDPOINT, ELASTICSEARCH_NODE)
 
-_AUTHORITY = f"https://{new_identity_sub()}.example.test"
+_AUTHORITY = new_endpoint_url()
 _TOKEN_KEY = new_identity_sub()
-_DATABASE_URL = f"postgresql://{new_identity_sub()}"
+_DATABASE_URL = new_database_url()
 
 
 def _new_url() -> str:
-    return f"https://{new_identity_sub()}.example.test:{random.randint(1024, 65535)}"
+    return f"{new_endpoint_url()}:{new_port()}"
 
 
 def _telemetry_values() -> dict[str, str | None]:
@@ -61,10 +67,10 @@ def _set_all_required(monkeypatch, **overrides):
         OIDC_AUTHORITY: _AUTHORITY,
         TOKEN_KEY_ENV: _TOKEN_KEY,
         CURATOR_DATABASE_URL_ENV: _DATABASE_URL,
-        REDIS_HOST: "redis.example.test",
-        REDIS_PORT: "6379",
+        REDIS_HOST: lowercase_token(),
+        REDIS_PORT: str(new_port()),
         REDIS_SSL: "false",
-        SERVICE_BUS_NAMESPACE: "bus.example.test",
+        SERVICE_BUS_NAMESPACE: new_service_bus_namespace(),
         STORE_GRAPHQL_ENDPOINT: _new_url(),
         _FIRST_STORE_QUERY_HASH: new_sha256_hash(),
         _SECOND_STORE_QUERY_HASH: None,
@@ -87,7 +93,7 @@ def _set_all_required(monkeypatch, **overrides):
 
 def test_from_config_resolves_all_fields(monkeypatch, tmp_path):
     _set_all_required(monkeypatch)
-    settings = Settings.from_config(dotenv_path=tmp_path / "absent.env")
+    settings = Settings.from_config(dotenv_path=tmp_path / lowercase_token())
 
     assert settings.oidc_authority == _AUTHORITY
     assert settings.token_key == _TOKEN_KEY
@@ -105,7 +111,7 @@ def test_from_config_resolves_the_store_endpoint_and_its_query_hashes_in_order(m
         },
     )
 
-    settings = Settings.from_config(dotenv_path=tmp_path / "absent.env")
+    settings = Settings.from_config(dotenv_path=tmp_path / lowercase_token())
 
     assert settings.store_graphql_endpoint == endpoint
     assert settings.store_query_hashes == (first_hash, second_hash)
@@ -114,8 +120,9 @@ def test_from_config_resolves_the_store_endpoint_and_its_query_hashes_in_order(m
 def test_from_config_refuses_to_start_without_a_store_query_hash(monkeypatch, tmp_path):
     _set_all_required(monkeypatch, **{_FIRST_STORE_QUERY_HASH: None})
 
+    dotenv_path = tmp_path / lowercase_token()
     with pytest.raises(ConfigError) as raised:
-        Settings.from_config(dotenv_path=tmp_path / "absent.env")
+        Settings.from_config(dotenv_path=dotenv_path)
 
     assert raised.value.setting == STORE_QUERY_HASH
 
@@ -123,8 +130,9 @@ def test_from_config_refuses_to_start_without_a_store_query_hash(monkeypatch, tm
 def test_from_config_refuses_to_start_without_the_store_endpoint(monkeypatch, tmp_path):
     _set_all_required(monkeypatch, **{STORE_GRAPHQL_ENDPOINT: None})
 
+    dotenv_path = tmp_path / lowercase_token()
     with pytest.raises(ConfigError) as raised:
-        Settings.from_config(dotenv_path=tmp_path / "absent.env")
+        Settings.from_config(dotenv_path=dotenv_path)
 
     assert raised.value.setting == STORE_GRAPHQL_ENDPOINT
 
@@ -132,8 +140,9 @@ def test_from_config_refuses_to_start_without_the_store_endpoint(monkeypatch, tm
 def test_from_config_refuses_a_store_endpoint_that_is_not_an_absolute_url(monkeypatch, tmp_path):
     _set_all_required(monkeypatch, **{STORE_GRAPHQL_ENDPOINT: new_identity_sub()})
 
+    dotenv_path = tmp_path / lowercase_token()
     with pytest.raises(ConfigError) as raised:
-        Settings.from_config(dotenv_path=tmp_path / "absent.env")
+        Settings.from_config(dotenv_path=dotenv_path)
 
     assert raised.value.setting == STORE_GRAPHQL_ENDPOINT
 
@@ -142,8 +151,9 @@ def test_from_config_refuses_a_store_endpoint_that_is_not_an_absolute_url(monkey
 def test_from_config_refuses_to_start_without_a_redis_setting(monkeypatch, tmp_path, missing_key):
     _set_all_required(monkeypatch, **{missing_key: None})
 
+    dotenv_path = tmp_path / lowercase_token()
     with pytest.raises(ConfigError) as raised:
-        Settings.from_config(dotenv_path=tmp_path / "absent.env")
+        Settings.from_config(dotenv_path=dotenv_path)
 
     assert raised.value.setting == missing_key
 
@@ -152,8 +162,9 @@ def test_from_config_refuses_to_start_without_a_redis_setting(monkeypatch, tmp_p
 def test_from_config_refuses_a_redis_setting_it_cannot_parse(monkeypatch, tmp_path, invalid_key):
     _set_all_required(monkeypatch, **{invalid_key: new_identity_sub()})
 
+    dotenv_path = tmp_path / lowercase_token()
     with pytest.raises(ConfigError) as raised:
-        Settings.from_config(dotenv_path=tmp_path / "absent.env")
+        Settings.from_config(dotenv_path=dotenv_path)
 
     assert raised.value.setting == invalid_key
 
@@ -161,8 +172,9 @@ def test_from_config_refuses_a_redis_setting_it_cannot_parse(monkeypatch, tmp_pa
 def test_from_config_refuses_to_start_without_any_service_bus(monkeypatch, tmp_path):
     _set_all_required(monkeypatch, **{SERVICE_BUS_NAMESPACE: None, SERVICE_BUS_CONNECTION_STRING: None})
 
+    dotenv_path = tmp_path / lowercase_token()
     with pytest.raises(ConfigError) as raised:
-        Settings.from_config(dotenv_path=tmp_path / "absent.env")
+        Settings.from_config(dotenv_path=dotenv_path)
 
     assert raised.value.setting == SERVICE_BUS_NAMESPACE
 
@@ -171,19 +183,19 @@ def test_from_config_accepts_a_service_bus_connection_string_without_a_namespace
     connection_string = new_identity_sub()
     _set_all_required(monkeypatch, **{SERVICE_BUS_NAMESPACE: None, SERVICE_BUS_CONNECTION_STRING: connection_string})
 
-    settings = Settings.from_config(dotenv_path=tmp_path / "absent.env")
+    settings = Settings.from_config(dotenv_path=tmp_path / lowercase_token())
 
     assert settings.service_bus_connection_string == connection_string
 
 
 def test_from_config_resolves_redis_settings_when_set(monkeypatch, tmp_path):
     host, password = new_identity_sub(), new_identity_sub()
-    port = random.randint(1024, 65535)
+    port = new_port()
     _set_all_required(
         monkeypatch, **{REDIS_HOST: host, REDIS_PORT: str(port), REDIS_PASSWORD: password, REDIS_SSL: "TRUE"}
     )
 
-    settings = Settings.from_config(dotenv_path=tmp_path / "absent.env")
+    settings = Settings.from_config(dotenv_path=tmp_path / lowercase_token())
 
     assert settings.redis_host == host
     assert settings.redis_port == port
@@ -194,7 +206,7 @@ def test_from_config_resolves_redis_settings_when_set(monkeypatch, tmp_path):
 def test_from_config_leaves_telemetry_off_when_nothing_configures_it_off_app_service(monkeypatch, tmp_path):
     _set_all_required(monkeypatch)
 
-    settings = Settings.from_config(dotenv_path=tmp_path / "absent.env")
+    settings = Settings.from_config(dotenv_path=tmp_path / lowercase_token())
 
     assert settings.alloy_endpoint is None
     assert settings.elasticsearch_node is None
@@ -204,7 +216,7 @@ def test_from_config_resolves_every_telemetry_setting_on_app_service(monkeypatch
     telemetry = _telemetry_values()
     _set_all_required(monkeypatch, **{APP_SERVICE_SITE_NAME: new_identity_sub(), **telemetry})
 
-    settings = Settings.from_config(dotenv_path=tmp_path / "absent.env")
+    settings = Settings.from_config(dotenv_path=tmp_path / lowercase_token())
 
     assert settings.alloy_endpoint == telemetry[ALLOY_ENDPOINT]
     assert settings.elasticsearch_node == telemetry[ELASTICSEARCH_NODE]
@@ -218,8 +230,9 @@ def test_from_config_refuses_to_start_on_app_service_without_a_telemetry_setting
     telemetry[missing_key] = None
     _set_all_required(monkeypatch, **{APP_SERVICE_SITE_NAME: new_identity_sub(), **telemetry})
 
+    dotenv_path = tmp_path / lowercase_token()
     with pytest.raises(ConfigError) as raised:
-        Settings.from_config(dotenv_path=tmp_path / "absent.env")
+        Settings.from_config(dotenv_path=dotenv_path)
 
     assert raised.value.setting == missing_key
 
@@ -230,8 +243,9 @@ def test_from_config_refuses_an_elasticsearch_node_without_its_credentials(monke
     telemetry[credential_key] = None
     _set_all_required(monkeypatch, **telemetry)
 
+    dotenv_path = tmp_path / lowercase_token()
     with pytest.raises(ConfigError) as raised:
-        Settings.from_config(dotenv_path=tmp_path / "absent.env")
+        Settings.from_config(dotenv_path=dotenv_path)
 
     assert raised.value.setting == credential_key
 
@@ -242,8 +256,9 @@ def test_from_config_refuses_a_telemetry_endpoint_that_is_not_an_absolute_url(mo
     telemetry[url_key] = new_identity_sub()
     _set_all_required(monkeypatch, **telemetry)
 
+    dotenv_path = tmp_path / lowercase_token()
     with pytest.raises(ConfigError) as raised:
-        Settings.from_config(dotenv_path=tmp_path / "absent.env")
+        Settings.from_config(dotenv_path=dotenv_path)
 
     assert raised.value.setting == url_key
 
@@ -251,18 +266,20 @@ def test_from_config_refuses_a_telemetry_endpoint_that_is_not_an_absolute_url(mo
 @pytest.mark.parametrize("missing_key", [OIDC_AUTHORITY, TOKEN_KEY_ENV])
 def test_from_config_raises_config_error_when_required_key_missing(monkeypatch, tmp_path, missing_key):
     _set_all_required(monkeypatch, **{missing_key: None})
+    dotenv_path = tmp_path / lowercase_token()
     with pytest.raises(ConfigError):
-        Settings.from_config(dotenv_path=tmp_path / "absent.env")
+        Settings.from_config(dotenv_path=dotenv_path)
 
 
 def test_from_config_raises_config_error_when_database_url_missing(monkeypatch, tmp_path):
     _set_all_required(monkeypatch, CURATOR_DATABASE_URL=None)
+    dotenv_path = tmp_path / lowercase_token()
     with pytest.raises(ConfigError):
-        Settings.from_config(dotenv_path=tmp_path / "absent.env")
+        Settings.from_config(dotenv_path=dotenv_path)
 
 
 def test_settings_is_frozen(monkeypatch, tmp_path):
     _set_all_required(monkeypatch)
-    settings = Settings.from_config(dotenv_path=tmp_path / "absent.env")
+    settings = Settings.from_config(dotenv_path=tmp_path / lowercase_token())
     with pytest.raises(AttributeError):
-        settings.__setattr__("token_key", "changed")
+        settings.__setattr__("token_key", lowercase_token())

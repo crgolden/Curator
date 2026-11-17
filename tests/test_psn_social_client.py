@@ -109,6 +109,7 @@ from test_values import (
     new_online_id,
     new_opaque_token,
     new_positive_count,
+    new_small_count,
     new_store_product_id,
     new_utc_instant,
 )
@@ -451,7 +452,7 @@ async def test_universal_search_games_pages_past_the_first_page_to_satisfy_the_l
         pages=[_domain_page([_game_hit(second)])],
     )
 
-    results = await SocialClient(session).universal_search_games(lowercase_token(), limit=2)
+    results = await SocialClient(session).universal_search_games(lowercase_token(), limit=new_small_count() + 1)
 
     assert [result.name for result in results] == [first[NAME_KEY], second[NAME_KEY]]
 
@@ -464,7 +465,7 @@ async def test_game_paging_uses_the_games_hash_not_the_one_player_paging_uses():
         pages=[_domain_page([_game_hit(_concept())])],
     )
 
-    await SocialClient(session).universal_search_games(lowercase_token(), limit=2)
+    await SocialClient(session).universal_search_games(lowercase_token(), limit=new_small_count() + 1)
 
     [paging_call] = _domain_search_calls(session)
     assert _hash_of(paging_call) == GAME_DOMAIN_SEARCH_HASH
@@ -477,7 +478,9 @@ async def test_game_paging_names_the_domain_being_read_not_a_fixed_one():
         pages=[_domain_page([_game_hit(_concept())])],
     )
 
-    await SocialClient(session).universal_search_games(lowercase_token(), domain=ADD_ONS_DOMAIN, limit=2)
+    await SocialClient(session).universal_search_games(
+        lowercase_token(), domain=ADD_ONS_DOMAIN, limit=new_small_count() + 1
+    )
 
     [paging_call] = _domain_search_calls(session)
     assert json.loads(paging_call[1][VARIABLES_PARAM])[SEARCH_DOMAIN_VARIABLE] == ADD_ONS_DOMAIN
@@ -491,7 +494,7 @@ async def test_game_paging_stops_when_psn_runs_out_rather_than_looping_on_a_stal
         pages=[_domain_page([], next_cursor=cursor)],
     )
 
-    results = await SocialClient(session).universal_search_games(lowercase_token(), limit=50)
+    results = await SocialClient(session).universal_search_games(lowercase_token(), limit=new_small_count() + 1)
 
     assert [result.name for result in results] == [only[NAME_KEY]]
     assert len(_domain_search_calls(session)) == 1
@@ -503,10 +506,14 @@ async def test_game_paging_stops_at_the_page_cap_even_while_psn_still_offers_mor
     cursor = new_opaque_token()
     session = _games_session(
         [_domain(FULL_GAMES_DOMAIN, [_game_hit(_concept())], next_cursor=cursor)],
-        pages=[_domain_page([_game_hit(_concept())], next_cursor=cursor) for _ in range(MAX_GAME_SEARCH_PAGES + 5)],
+        pages=[
+            _domain_page([_game_hit(_concept())], next_cursor=cursor)
+            for _ in range(MAX_GAME_SEARCH_PAGES + new_small_count())
+        ],
     )
+    limit_beyond_the_cap = MAX_GAME_SEARCH_PAGES + new_small_count() + 1
 
-    results = await SocialClient(session).universal_search_games(lowercase_token(), limit=50)
+    results = await SocialClient(session).universal_search_games(lowercase_token(), limit=limit_beyond_the_cap)
 
     assert len(_domain_search_calls(session)) == MAX_GAME_SEARCH_PAGES
     assert len(results) == MAX_GAME_SEARCH_PAGES + 1
@@ -559,8 +566,8 @@ async def test_universal_search_games_resolves_cover_art_by_role_preference_not_
 
 
 async def test_universal_search_games_caps_the_page_at_the_requested_limit():
-    requested_limit = 2
-    hits = [_game_hit(_concept()) for _ in range(requested_limit + 3)]
+    requested_limit = new_small_count()
+    hits = [_game_hit(_concept()) for _ in range(requested_limit + new_small_count())]
     client = SocialClient(_games_session([_domain(FULL_GAMES_DOMAIN, hits)]))
 
     results = await client.universal_search_games(lowercase_token(), limit=requested_limit)

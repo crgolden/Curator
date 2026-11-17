@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from curator.collections.repository import CollectionsRepository
+from test_values import new_console_id, new_device_id, new_identity_sub
 
 
 class FakeCursor:
@@ -57,54 +58,63 @@ class FakePool:
 
 
 async def test_links_are_returned_keyed_by_device_for_annotating_a_device_list():
-    pool = FakePool(fetchall_results=[[("dev-1", "console-a"), ("dev-2", "console-b")]])
+    first_device_id = new_device_id()
+    first_console_id = new_console_id()
+    second_device_id = new_device_id()
+    second_console_id = new_console_id()
+    pool = FakePool(fetchall_results=[[(first_device_id, first_console_id), (second_device_id, second_console_id)]])
     repository = CollectionsRepository(pool)
 
-    links = await repository.list_console_device_links("sub-a")
+    links = await repository.list_console_device_links(new_identity_sub())
 
-    assert links == {"dev-1": "console-a", "dev-2": "console-b"}
+    assert links == {first_device_id: first_console_id, second_device_id: second_console_id}
 
 
 async def test_linking_clears_both_sides_before_inserting():
+    identity_sub = new_identity_sub()
+    console_id = new_console_id()
+    device_id = new_device_id()
     pool = FakePool()
     repository = CollectionsRepository(pool)
 
-    await repository.link_console_device("sub-a", "console-a", "dev-1")
+    await repository.link_console_device(identity_sub, console_id, device_id)
 
     delete_sql, delete_params = pool.connections[0].executed[0]
     assert delete_sql.strip().startswith("DELETE FROM console_device_links")
     assert "console_id = %s OR device_id = %s" in delete_sql, (
         "either uniqueness rule can be the one that fires, so re-linking must clear both sides"
     )
-    assert delete_params == ("sub-a", "console-a", "dev-1")
+    assert delete_params == (identity_sub, console_id, device_id)
 
     insert_sql, insert_params = pool.connections[0].executed[1]
     assert insert_sql.strip().startswith("INSERT INTO console_device_links")
-    assert insert_params == ("sub-a", "console-a", "dev-1")
+    assert insert_params == (identity_sub, console_id, device_id)
 
 
 async def test_linking_happens_in_one_connection_so_the_clear_and_insert_cannot_separate():
     pool = FakePool()
     repository = CollectionsRepository(pool)
 
-    await repository.link_console_device("sub-a", "console-a", "dev-1")
+    await repository.link_console_device(new_identity_sub(), new_console_id(), new_device_id())
 
     assert len(pool.connections) == 1, "a clear that lands without its insert would silently unlink a console"
     assert len(pool.connections[0].executed) == 2
 
 
 async def test_unlinking_is_scoped_to_the_caller_and_reports_whether_a_link_existed():
+    identity_sub = new_identity_sub()
+    console_id = new_console_id()
     pool = FakePool(rowcount=1)
     repository = CollectionsRepository(pool)
 
-    assert await repository.unlink_console_device("sub-a", "console-a") is True
+    assert await repository.unlink_console_device(identity_sub, console_id) is True
     sql, params = pool.connections[0].executed[0]
     assert "identity_sub = %s AND console_id = %s" in sql
-    assert params == ("sub-a", "console-a")
+    assert params == (identity_sub, console_id)
 
 
 async def test_unlinking_a_console_with_no_link_reports_false():
     pool = FakePool(rowcount=0)
     repository = CollectionsRepository(pool)
 
-    assert await repository.unlink_console_device("sub-a", "console-a") is False
+    assert await repository.unlink_console_device(new_identity_sub(), new_console_id()) is False

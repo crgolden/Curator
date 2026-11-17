@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from http import HTTPStatus
 
 from fastapi.testclient import TestClient
 
@@ -135,7 +136,7 @@ def test_requires_bearer_token():
 
     response = client.post(_path(client, enrichment_routes.start_enrichment_run))
 
-    assert response.status_code == 401
+    assert response.status_code == HTTPStatus.UNAUTHORIZED
 
 
 def test_non_admin_scope_is_forbidden():
@@ -144,7 +145,7 @@ def test_non_admin_scope_is_forbidden():
 
     response = client.post(_path(client, enrichment_routes.start_enrichment_run), headers=_bearer(token))
 
-    assert response.status_code == 403
+    assert response.status_code == HTTPStatus.FORBIDDEN
     assert publisher.enrichment_calls == 0
 
 
@@ -154,7 +155,7 @@ def test_admin_scope_publishes_and_returns_run_id():
 
     response = client.post(_path(client, enrichment_routes.start_enrichment_run), headers=_bearer(token))
 
-    assert response.status_code == 202
+    assert response.status_code == HTTPStatus.ACCEPTED
     assert EnrichmentRunResponse.model_validate(response.json()) == EnrichmentRunResponse(run_id=publisher.run_id)
     assert publisher.enrichment_calls == 1
 
@@ -173,7 +174,7 @@ def test_a_live_in_flight_run_is_returned_rather_than_queueing_a_second_one():
 
     response = client.post(_path(client, enrichment_routes.start_enrichment_run), headers=_bearer(token))
 
-    assert response.status_code == 202
+    assert response.status_code == HTTPStatus.ACCEPTED
     assert EnrichmentRunResponse.model_validate(response.json()) == EnrichmentRunResponse(run_id=in_flight_run_id)
     assert publisher.enrichment_calls == 0
     assert job_runs.marked_failed == []
@@ -193,7 +194,7 @@ def test_a_running_run_whose_lease_lapsed_is_superseded_by_a_fresh_one():
 
     response = client.post(_path(client, enrichment_routes.start_enrichment_run), headers=_bearer(token))
 
-    assert response.status_code == 202
+    assert response.status_code == HTTPStatus.ACCEPTED
     assert EnrichmentRunResponse.model_validate(response.json()) == EnrichmentRunResponse(run_id=publisher.run_id)
     assert publisher.enrichment_calls == 1
     assert job_runs.marked_failed == [(lapsed_run_id, lease_lapsed_reason(ENRICHMENT_RUN_NOUN))]
@@ -213,7 +214,7 @@ def test_a_queued_run_that_made_no_progress_for_a_day_is_superseded():
 
     response = client.post(_path(client, enrichment_routes.start_enrichment_run), headers=_bearer(token))
 
-    assert response.status_code == 202
+    assert response.status_code == HTTPStatus.ACCEPTED
     assert publisher.enrichment_calls == 1
     assert job_runs.marked_failed == [(stuck_run_id, no_progress_reason(ENRICHMENT_RUN_NOUN))]
 
@@ -226,7 +227,7 @@ def test_a_terminal_run_never_blocks_a_new_one():
 
     response = client.post(_path(client, enrichment_routes.start_enrichment_run), headers=_bearer(token))
 
-    assert response.status_code == 202
+    assert response.status_code == HTTPStatus.ACCEPTED
     assert EnrichmentRunResponse.model_validate(response.json()) == EnrichmentRunResponse(run_id=publisher.run_id)
     assert publisher.enrichment_calls == 1
 
@@ -238,7 +239,7 @@ def test_queue_not_configured_returns_503():
 
     response = client.post(_path(client, enrichment_routes.start_enrichment_run), headers=_bearer(token))
 
-    assert response.status_code == 503
+    assert response.status_code == HTTPStatus.SERVICE_UNAVAILABLE
 
 
 def test_get_latest_run_requires_bearer_token():
@@ -246,7 +247,7 @@ def test_get_latest_run_requires_bearer_token():
 
     response = client.get(_path(client, enrichment_routes.get_latest_enrichment_run))
 
-    assert response.status_code == 401
+    assert response.status_code == HTTPStatus.UNAUTHORIZED
 
 
 def test_get_latest_run_non_admin_scope_is_forbidden():
@@ -255,7 +256,7 @@ def test_get_latest_run_non_admin_scope_is_forbidden():
 
     response = client.get(_path(client, enrichment_routes.get_latest_enrichment_run), headers=_bearer(token))
 
-    assert response.status_code == 403
+    assert response.status_code == HTTPStatus.FORBIDDEN
 
 
 def test_get_latest_run_returns_the_most_recent_run_of_that_kind():
@@ -267,7 +268,7 @@ def test_get_latest_run_returns_the_most_recent_run_of_that_kind():
 
     response = client.get(_path(client, enrichment_routes.get_latest_enrichment_run), headers=_bearer(token))
 
-    assert response.status_code == 200
+    assert response.status_code == HTTPStatus.OK
     assert EnrichmentRunStatusResponse.model_validate(response.json()) == EnrichmentRunStatusResponse(
         run_id=run_id, status=JOB_STATUS_SUCCEEDED, error=None, result_summary=result_summary
     )
@@ -279,7 +280,7 @@ def test_get_latest_run_404_when_no_run_ever_queued():
 
     response = client.get(_path(client, enrichment_routes.get_latest_enrichment_run), headers=_bearer(token))
 
-    assert response.status_code == 404
+    assert response.status_code == HTTPStatus.NOT_FOUND
 
 
 def test_get_latest_run_route_is_not_captured_by_the_run_id_route():
@@ -292,7 +293,7 @@ def test_get_latest_run_route_is_not_captured_by_the_run_id_route():
 
     response = client.get(_path(client, enrichment_routes.get_latest_enrichment_run), headers=_bearer(token))
 
-    assert response.status_code == 200
+    assert response.status_code == HTTPStatus.OK
     assert EnrichmentRunStatusResponse.model_validate(response.json()).run_id == run_id
 
 
@@ -301,7 +302,7 @@ def test_get_run_status_requires_bearer_token():
 
     response = client.get(_path(client, enrichment_routes.get_enrichment_run_status, run_id=new_run_id()))
 
-    assert response.status_code == 401
+    assert response.status_code == HTTPStatus.UNAUTHORIZED
 
 
 def test_get_run_status_non_admin_scope_is_forbidden():
@@ -313,7 +314,7 @@ def test_get_run_status_non_admin_scope_is_forbidden():
 
     response = client.get(_status_path(client, run_id), headers=_bearer(token))
 
-    assert response.status_code == 403
+    assert response.status_code == HTTPStatus.FORBIDDEN
 
 
 def test_get_run_status_returns_the_run():
@@ -325,7 +326,7 @@ def test_get_run_status_returns_the_run():
 
     response = client.get(_status_path(client, run_id), headers=_bearer(token))
 
-    assert response.status_code == 200
+    assert response.status_code == HTTPStatus.OK
     assert EnrichmentRunStatusResponse.model_validate(response.json()) == EnrichmentRunStatusResponse(
         run_id=run_id, status=JOB_STATUS_FAILED, error=error, result_summary=None
     )
@@ -339,7 +340,7 @@ def test_get_run_status_404_when_unknown_run_id():
         _path(client, enrichment_routes.get_enrichment_run_status, run_id=new_run_id()), headers=_bearer(token)
     )
 
-    assert response.status_code == 404
+    assert response.status_code == HTTPStatus.NOT_FOUND
 
 
 def test_get_run_status_404_when_run_is_not_an_enrichment_kind():
@@ -350,7 +351,7 @@ def test_get_run_status_404_when_run_is_not_an_enrichment_kind():
 
     response = client.get(_status_path(client, run_id), headers=_bearer(token))
 
-    assert response.status_code == 404
+    assert response.status_code == HTTPStatus.NOT_FOUND
 
 
 def test_cancel_requires_bearer_token():
@@ -358,7 +359,7 @@ def test_cancel_requires_bearer_token():
 
     response = client.post(_path(client, enrichment_routes.cancel_enrichment_run, run_id=new_run_id()))
 
-    assert response.status_code == 401
+    assert response.status_code == HTTPStatus.UNAUTHORIZED
 
 
 def test_cancel_non_admin_scope_is_forbidden():
@@ -369,7 +370,7 @@ def test_cancel_non_admin_scope_is_forbidden():
 
     response = client.post(_cancel_path(client, run_id), headers=_bearer(token))
 
-    assert response.status_code == 403
+    assert response.status_code == HTTPStatus.FORBIDDEN
     assert job_runs.runs[run_id].status == _QUEUED_STATUS
 
 
@@ -381,7 +382,7 @@ def test_cancel_stands_a_stuck_queued_run_down_and_returns_it():
 
     response = client.post(_cancel_path(client, run_id), headers=_bearer(token))
 
-    assert response.status_code == 200
+    assert response.status_code == HTTPStatus.OK
     assert EnrichmentRunStatusResponse.model_validate(response.json()) == EnrichmentRunStatusResponse(
         run_id=run_id, status=JOB_STATUS_CANCELLED, error=CANCELLED_BY_ADMIN, result_summary=None
     )
@@ -410,7 +411,7 @@ def test_cancel_409_when_the_run_has_already_finished():
 
     response = client.post(_cancel_path(client, run_id), headers=_bearer(token))
 
-    assert response.status_code == 409
+    assert response.status_code == HTTPStatus.CONFLICT
     assert job_runs.runs[run_id].status == JOB_STATUS_SUCCEEDED, "a late cancel must not rewrite a finished outcome"
 
 
@@ -422,7 +423,7 @@ def test_cancel_404_when_run_is_not_an_enrichment_kind():
 
     response = client.post(_cancel_path(client, run_id), headers=_bearer(token))
 
-    assert response.status_code == 404
+    assert response.status_code == HTTPStatus.NOT_FOUND
     assert job_runs.runs[run_id].status == _QUEUED_STATUS, (
         "a library refresh is ownership-checked, so it must not be cancellable through the admin route"
     )
@@ -436,4 +437,4 @@ def test_cancel_404_when_unknown_run_id():
         _path(client, enrichment_routes.cancel_enrichment_run, run_id=new_run_id()), headers=_bearer(token)
     )
 
-    assert response.status_code == 404
+    assert response.status_code == HTTPStatus.NOT_FOUND

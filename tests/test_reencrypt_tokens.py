@@ -10,19 +10,20 @@ import pytest
 from cryptography.fernet import Fernet
 
 from curator.persistence.crypto import SCHEME_AES_GCM_V1, TokenCrypto
+from test_values import new_opaque_token
 
 _SCRIPT = Path(__file__).resolve().parents[1] / "db" / "reencrypt_tokens.py"
-_SPEC = importlib.util.spec_from_file_location("reencrypt_tokens", _SCRIPT)
+_SPEC = importlib.util.spec_from_file_location(_SCRIPT.stem, _SCRIPT)
 assert _SPEC is not None
 assert _SPEC.loader is not None
 reencrypt_tokens = importlib.util.module_from_spec(_SPEC)
-sys.modules["reencrypt_tokens"] = reencrypt_tokens
+sys.modules[_SCRIPT.stem] = reencrypt_tokens
 _SPEC.loader.exec_module(reencrypt_tokens)
 
 Disposition = reencrypt_tokens.Disposition
 classify = reencrypt_tokens.classify
 
-SECRET = b'{"refresh_token": "sample-refresh-token-value", "scope": "psn:mobile.v2.core"}'
+SECRET = new_opaque_token().encode()
 
 
 @pytest.fixture

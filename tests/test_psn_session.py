@@ -9,11 +9,13 @@ testing convention.
 from __future__ import annotations
 
 import time
+from http import HTTPStatus
 from urllib.parse import parse_qs, urlencode, urlparse
 
 import httpx
 import pytest
 
+import curator.psn.session
 from curator.http_headers import (
     AUTHORIZATION_HEADER,
     BEARER_SCHEME,
@@ -57,9 +59,14 @@ from curator.token_response import (
     SCOPE_KEY,
     TOKEN_TYPE_KEY,
 )
-from test_values import lowercase_token, new_opaque_token, new_positive_count
-
-_ONE_HOUR_SECONDS = 3600
+from test_values import (
+    lowercase_token,
+    new_access_token_lifetime_seconds,
+    new_endpoint_url,
+    new_opaque_token,
+    new_positive_count,
+    new_refresh_token_lifetime_seconds,
+)
 
 
 @pytest.fixture
@@ -68,8 +75,8 @@ def no_retry_backoff(monkeypatch):
 
     ``_request`` reads the multiplier at call time, so patching the module attribute is enough.
     """
-    monkeypatch.setattr("curator.psn.session.RETRY_BACKOFF_MULTIPLIER_SECONDS", 0)
-    monkeypatch.setattr("curator.psn.session.RETRY_MAX_WAIT_SECONDS", 0)
+    monkeypatch.setattr(curator.psn.session, "RETRY_BACKOFF_MULTIPLIER_SECONDS", 0)
+    monkeypatch.setattr(curator.psn.session, "RETRY_MAX_WAIT_SECONDS", 0)
 
 
 class FakeTokenStore:
@@ -101,16 +108,18 @@ def _token_response(**overrides):
         ACCESS_TOKEN_KEY: new_opaque_token(),
         REFRESH_TOKEN_KEY: new_opaque_token(),
         TOKEN_TYPE_KEY: lowercase_token(),
-        EXPIRES_IN_KEY: _ONE_HOUR_SECONDS,
+        EXPIRES_IN_KEY: new_access_token_lifetime_seconds(),
         SCOPE_KEY: lowercase_token(),
-        REFRESH_TOKEN_EXPIRES_IN_KEY: new_positive_count() * _ONE_HOUR_SECONDS,
+        REFRESH_TOKEN_EXPIRES_IN_KEY: new_refresh_token_lifetime_seconds(),
     }
     body.update(overrides)
     return body
 
 
 def _live_token_response(**overrides):
-    return _token_response(**{ACCESS_TOKEN_EXPIRES_AT_KEY: time.time() + _ONE_HOUR_SECONDS, **overrides})
+    return _token_response(
+        **{ACCESS_TOKEN_EXPIRES_AT_KEY: time.time() + new_access_token_lifetime_seconds(), **overrides}
+    )
 
 
 def _redirect(**query):
@@ -147,7 +156,7 @@ class ConnectFailsOnceThenAnswers:
         self.requests.append(request)
         if len(self.requests) == 1:
             raise httpx.ConnectError(lowercase_token(), request=request)
-        return httpx.Response(200, json=self._body)
+        return httpx.Response(HTTPStatus.OK, json=self._body)
 
 
 def _session(recorder, *, npsso=None, token_store=None, rate_limiter=None) -> PsnSession:
@@ -168,7 +177,9 @@ async def _authenticated(recorder) -> PsnSession:
 async def test_bootstrap_from_npsso_sets_token():
     npsso = new_opaque_token()
     issued = _token_response()
-    recorder = RequestRecorder([_redirect(**{CODE_PARAM: new_opaque_token()}), httpx.Response(200, json=issued)])
+    recorder = RequestRecorder(
+        [_redirect(**{CODE_PARAM: new_opaque_token()}), httpx.Response(HTTPStatus.OK, json=issued)]
+    )
     session = _session(recorder, npsso=npsso)
 
     await session._ensure_fresh()
@@ -188,7 +199,9 @@ async def test_bootstrap_requests_offline_access():
     this missing, silently downgrading every user's link to an access-token-only session that expired in
     ~1 hour. The pin locks the value; the second assert proves the request carries it."""
     issued = _token_response()
-    recorder = RequestRecorder([_redirect(**{CODE_PARAM: new_opaque_token()}), httpx.Response(200, json=issued)])
+    recorder = RequestRecorder(
+        [_redirect(**{CODE_PARAM: new_opaque_token()}), httpx.Response(HTTPStatus.OK, json=issued)]
+    )
     session = _session(recorder, npsso=new_opaque_token())
 
     await session._ensure_fresh()
@@ -201,7 +214,9 @@ async def test_bootstrap_handles_response_without_refresh_token():
     issued = _token_response()
     del issued[REFRESH_TOKEN_KEY]
     del issued[REFRESH_TOKEN_EXPIRES_IN_KEY]
-    recorder = RequestRecorder([_redirect(**{CODE_PARAM: new_opaque_token()}), httpx.Response(200, json=issued)])
+    recorder = RequestRecorder(
+        [_redirect(**{CODE_PARAM: new_opaque_token()}), httpx.Response(HTTPStatus.OK, json=issued)]
+    )
     session = _session(recorder, npsso=new_opaque_token())
 
     await session._ensure_fresh()
@@ -232,8 +247,8 @@ async def test_restore_uses_cached_token_without_bootstrapping():
 
 async def test_expired_cached_token_triggers_refresh_and_persists_it():
     refreshed = _token_response()
-    expired = _token_response(**{ACCESS_TOKEN_EXPIRES_AT_KEY: time.time() - 10})
-    recorder = RequestRecorder([httpx.Response(200, json=refreshed)])
+    expired = _token_response(**{ACCESS_TOKEN_EXPIRES_AT_KEY: time.time() - new_positive_count()})
+    recorder = RequestRecorder([httpx.Response(HTTPStatus.OK, json=refreshed)])
     store = FakeTokenStore(saved=expired)
     client = httpx.AsyncClient(transport=httpx.MockTransport(recorder))
     session = await PsnSession.restore(None, store, client=client)
@@ -258,7 +273,7 @@ async def test_restore_requires_npsso_or_cached_token():
 async def test_get_attaches_bearer_and_ensures_fresh_token():
     body = {lowercase_token(): lowercase_token()}
     cached = _live_token_response()
-    recorder = RequestRecorder([httpx.Response(200, json=body)])
+    recorder = RequestRecorder([httpx.Response(HTTPStatus.OK, json=body)])
     session = await _restored(recorder, cached)
     url, params = _psn_url(), {lowercase_token(): lowercase_token()}
 
@@ -272,7 +287,7 @@ async def test_get_attaches_bearer_and_ensures_fresh_token():
 
 
 async def test_post_raises_psn_auth_error_on_401():
-    recorder = RequestRecorder([httpx.Response(401)])
+    recorder = RequestRecorder([httpx.Response(HTTPStatus.UNAUTHORIZED)])
     session = await _authenticated(recorder)
     psn_url = _psn_url()
     payload = {lowercase_token(): lowercase_token()}
@@ -283,7 +298,9 @@ async def test_post_raises_psn_auth_error_on_401():
 
 async def test_patch_put_delete_attach_bearer():
     cached = _live_token_response()
-    recorder = RequestRecorder([httpx.Response(200, json={}), httpx.Response(200), httpx.Response(200)])
+    recorder = RequestRecorder(
+        [httpx.Response(HTTPStatus.OK, json={}), httpx.Response(HTTPStatus.OK), httpx.Response(HTTPStatus.OK)]
+    )
     session = await _restored(recorder, cached)
 
     await session.patch(_psn_url(), json={lowercase_token(): lowercase_token()})
@@ -298,7 +315,7 @@ async def test_patch_put_delete_attach_bearer():
 
 
 async def test_get_raises_for_other_http_errors(no_retry_backoff):
-    recorder = RequestRecorder([httpx.Response(500)] * READ_ATTEMPTS)
+    recorder = RequestRecorder([httpx.Response(HTTPStatus.INTERNAL_SERVER_ERROR)] * READ_ATTEMPTS)
     session = await _authenticated(recorder)
     psn_url = _psn_url()
 
@@ -307,11 +324,12 @@ async def test_get_raises_for_other_http_errors(no_retry_backoff):
 
 
 def _foreign_host_url():
-    return f"https://{lowercase_token()}.invalid/{lowercase_token()}"
+    return f"{new_endpoint_url()}/{lowercase_token()}"
 
 
 def _psn_host_suffixed_url():
-    return f"https://{urlparse(PROFILE_URI).hostname}.{lowercase_token()}.invalid/{lowercase_token()}"
+    profile = urlparse(PROFILE_URI)
+    return profile._replace(netloc=f"{profile.hostname}.{lowercase_token()}").geturl()
 
 
 def _plain_http_psn_url():
@@ -320,7 +338,7 @@ def _plain_http_psn_url():
 
 @pytest.mark.parametrize("make_url", [_foreign_host_url, _psn_host_suffixed_url, _plain_http_psn_url])
 async def test_a_request_to_anything_but_a_psn_host_over_https_is_refused(make_url):
-    recorder = RequestRecorder([httpx.Response(200)])
+    recorder = RequestRecorder([httpx.Response(HTTPStatus.OK)])
     session = await _authenticated(recorder)
     refused_url = make_url()
 
@@ -331,7 +349,7 @@ async def test_a_request_to_anything_but_a_psn_host_over_https_is_refused(make_u
 
 
 async def test_a_path_that_escapes_its_endpoint_is_refused():
-    recorder = RequestRecorder([httpx.Response(200)])
+    recorder = RequestRecorder([httpx.Response(HTTPStatus.OK)])
     session = await _authenticated(recorder)
     escaping_url = f"{GAMING_LOUNGE_URI}/../../{lowercase_token()}"
 
@@ -366,7 +384,9 @@ def test_every_base_url_a_psn_client_calls_is_allowed(base_url):
 
 async def test_every_request_acquires_the_rate_limiter():
     rate_limiter = FakeRateLimiter()
-    session = await _restored(RequestRecorder([httpx.Response(200)]), _live_token_response(), rate_limiter=rate_limiter)
+    session = await _restored(
+        RequestRecorder([httpx.Response(HTTPStatus.OK)]), _live_token_response(), rate_limiter=rate_limiter
+    )
 
     await session.get(_psn_url())
 
@@ -377,7 +397,11 @@ async def test_run_with_reauth_refreshes_once_then_retries_when_there_is_no_npss
     refreshed = _token_response()
     retried_body = {lowercase_token(): lowercase_token()}
     recorder = RequestRecorder(
-        [httpx.Response(401), httpx.Response(200, json=refreshed), httpx.Response(200, json=retried_body)]
+        [
+            httpx.Response(HTTPStatus.UNAUTHORIZED),
+            httpx.Response(HTTPStatus.OK, json=refreshed),
+            httpx.Response(HTTPStatus.OK, json=retried_body),
+        ]
     )
     session = _session(recorder)
     session.token_response = _live_token_response()
@@ -399,10 +423,10 @@ async def test_run_with_reauth_bootstraps_from_npsso_when_there_is_no_refresh_to
     retried_body = {lowercase_token(): lowercase_token()}
     recorder = RequestRecorder(
         [
-            httpx.Response(401),
+            httpx.Response(HTTPStatus.UNAUTHORIZED),
             _redirect(**{CODE_PARAM: new_opaque_token()}),
-            httpx.Response(200, json=rebootstrapped),
-            httpx.Response(200, json=retried_body),
+            httpx.Response(HTTPStatus.OK, json=rebootstrapped),
+            httpx.Response(HTTPStatus.OK, json=retried_body),
         ]
     )
     session = _session(recorder, npsso=new_opaque_token())
@@ -431,7 +455,7 @@ async def test_run_with_reauth_reraises_when_there_is_neither_a_refresh_token_no
 
 
 async def test_a_transient_token_endpoint_failure_is_not_an_auth_failure():
-    session = _session(RequestRecorder([httpx.Response(503)]), npsso=new_opaque_token())
+    session = _session(RequestRecorder([httpx.Response(HTTPStatus.SERVICE_UNAVAILABLE)]), npsso=new_opaque_token())
     refresh_token = new_opaque_token()
 
     with pytest.raises(httpx.HTTPStatusError):
@@ -441,7 +465,7 @@ async def test_a_transient_token_endpoint_failure_is_not_an_auth_failure():
 async def test_a_token_response_without_expires_in_is_an_auth_failure():
     issued = _token_response()
     del issued[EXPIRES_IN_KEY]
-    session = _session(RequestRecorder([httpx.Response(200, json=issued)]), npsso=new_opaque_token())
+    session = _session(RequestRecorder([httpx.Response(HTTPStatus.OK, json=issued)]), npsso=new_opaque_token())
     refresh_token = new_opaque_token()
 
     with pytest.raises(PsnAuthError, match=EXPIRES_IN_KEY):
@@ -450,7 +474,7 @@ async def test_a_token_response_without_expires_in_is_an_auth_failure():
 
 async def test_run_with_reauth_reraises_the_original_error_when_the_refresh_grant_is_refused():
     message = lowercase_token()
-    session = _session(RequestRecorder([httpx.Response(400)]))
+    session = _session(RequestRecorder([httpx.Response(HTTPStatus.BAD_REQUEST)]))
     session.token_response = _live_token_response()
 
     async def operation():
@@ -462,17 +486,18 @@ async def test_run_with_reauth_reraises_the_original_error_when_the_refresh_gran
 
 async def test_a_read_retries_a_5xx_and_returns_the_eventual_success(no_retry_backoff):
     body = {lowercase_token(): lowercase_token()}
-    recorder = RequestRecorder([httpx.Response(503), httpx.Response(200, json=body)])
+    responses = [httpx.Response(HTTPStatus.SERVICE_UNAVAILABLE), httpx.Response(HTTPStatus.OK, json=body)]
+    recorder = RequestRecorder(responses)
     session = await _authenticated(recorder)
 
     response = await session.get(_psn_url())
 
     assert response.json() == body
-    assert len(recorder.requests) == 2
+    assert len(recorder.requests) == len(responses)
 
 
 async def test_a_read_gives_up_after_the_attempt_budget(no_retry_backoff):
-    recorder = RequestRecorder([httpx.Response(503)] * READ_ATTEMPTS)
+    recorder = RequestRecorder([httpx.Response(HTTPStatus.SERVICE_UNAVAILABLE)] * READ_ATTEMPTS)
     session = await _authenticated(recorder)
     psn_url = _psn_url()
 
@@ -494,7 +519,7 @@ async def test_a_read_retries_a_transport_failure(no_retry_backoff):
 
 
 async def test_a_write_is_never_retried_because_it_could_apply_twice(no_retry_backoff):
-    recorder = RequestRecorder([httpx.Response(503)])
+    recorder = RequestRecorder([httpx.Response(HTTPStatus.SERVICE_UNAVAILABLE)])
     session = await _authenticated(recorder)
     psn_url = _psn_url()
     payload = {lowercase_token(): lowercase_token()}
@@ -506,7 +531,7 @@ async def test_a_write_is_never_retried_because_it_could_apply_twice(no_retry_ba
 
 
 async def test_a_read_does_not_retry_a_deliberate_4xx(no_retry_backoff):
-    recorder = RequestRecorder([httpx.Response(404)])
+    recorder = RequestRecorder([httpx.Response(HTTPStatus.NOT_FOUND)])
     session = await _authenticated(recorder)
     psn_url = _psn_url()
 
@@ -517,7 +542,7 @@ async def test_a_read_does_not_retry_a_deliberate_4xx(no_retry_backoff):
 
 
 async def test_a_read_does_not_retry_an_auth_rejection(no_retry_backoff):
-    recorder = RequestRecorder([httpx.Response(401)])
+    recorder = RequestRecorder([httpx.Response(HTTPStatus.UNAUTHORIZED)])
     session = await _authenticated(recorder)
     psn_url = _psn_url()
 
@@ -529,7 +554,14 @@ async def test_a_read_does_not_retry_an_auth_rejection(no_retry_backoff):
 
 @pytest.mark.parametrize(
     ("status_code", "retryable"),
-    [(500, True), (502, True), (503, True), (429, False), (404, False), (400, False)],
+    [
+        (HTTPStatus.INTERNAL_SERVER_ERROR, True),
+        (HTTPStatus.BAD_GATEWAY, True),
+        (HTTPStatus.SERVICE_UNAVAILABLE, True),
+        (HTTPStatus.TOO_MANY_REQUESTS, False),
+        (HTTPStatus.NOT_FOUND, False),
+        (HTTPStatus.BAD_REQUEST, False),
+    ],
 )
 def test_only_server_side_failures_are_transient(status_code, retryable):
     request = httpx.Request(GET_METHOD, _psn_url())

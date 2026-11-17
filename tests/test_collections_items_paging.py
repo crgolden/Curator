@@ -8,6 +8,17 @@ from typing import get_args
 import pytest
 
 from curator.collections.repository import _ITEM_SORT_COLUMNS, CollectionItemSortField, CollectionsRepository
+from test_values import (
+    lowercase_token,
+    new_cover_image_url,
+    new_definition_id,
+    new_game_id,
+    new_game_title,
+    new_genre_name,
+    new_positive_count,
+    new_psn_rating,
+    new_review_score,
+)
 
 
 class FakeCursor:
@@ -69,18 +80,18 @@ class FakePool:
         return conn
 
 
-def _item_row(game_id="11111111-1111-1111-1111-111111111111", rank=1, title="Bloodborne", installed_on_target=None):
+def _item_row(title, rank=1, installed_on_target=None):
     return (
-        game_id,
+        new_game_id(),
         rank,
         title,
-        "FromSoftware",
-        "Action",
-        "AAA",
-        92.0,
-        91.0,
-        4.5,
-        "https://img/1.png",
+        lowercase_token(),
+        new_genre_name(),
+        lowercase_token(),
+        new_review_score(),
+        new_review_score(),
+        new_psn_rating(),
+        new_cover_image_url(),
         True,
         installed_on_target,
     )
@@ -91,35 +102,41 @@ def _pool_returning(rows, total):
 
 
 async def test_returns_page_and_total_separately():
-    pool = _pool_returning([_item_row()], total=137)
+    title = new_game_title()
+    rows = [_item_row(title)]
+    expected_total = len(rows) + new_positive_count()
+    pool = _pool_returning(rows, total=expected_total)
     repository = CollectionsRepository(pool)
 
-    items, total = await repository.list_definition_items_page("def-1")
+    items, total = await repository.list_definition_items_page(new_definition_id())
 
-    assert total == 137, "total must come from COUNT(*), not the length of the page"
+    assert total == expected_total, "total must come from COUNT(*), not the length of the page"
     assert len(items) == 1
-    assert items[0].title == "Bloodborne"
+    assert items[0].title == title
     assert items[0].owner_has_access is True
 
 
 async def test_counts_the_filtered_set_not_the_whole_collection():
+    definition_id = new_definition_id()
+    search = lowercase_token()
+    genre = new_genre_name()
     pool = _pool_returning([], total=0)
     repository = CollectionsRepository(pool)
 
-    await repository.list_definition_items_page("def-1", search="souls", genre="RPG")
+    await repository.list_definition_items_page(definition_id, search=search, genre=genre)
 
     count_sql, count_params = pool.connections[0].executed[0]
     assert "COUNT(*)" in count_sql
     assert "ILIKE" in count_sql, "the title filter must apply to the count as well as the page"
     assert "gen.name = %s" in count_sql
-    assert count_params == ("def-1", "%souls%", "RPG")
+    assert count_params == (definition_id, f"%{search}%", genre)
 
 
 async def test_defaults_to_rank_order_so_the_unpaged_route_is_unchanged():
     pool = _pool_returning([], total=0)
     repository = CollectionsRepository(pool)
 
-    await repository.list_definition_items_page("def-1")
+    await repository.list_definition_items_page(new_definition_id())
 
     page_sql, _ = pool.connections[0].executed[1]
     assert "ORDER BY cdi.rank ASC" in page_sql
@@ -134,7 +151,7 @@ async def test_every_sort_field_resolves_to_its_allow_listed_column(sort):
     pool = _pool_returning([], total=0)
     repository = CollectionsRepository(pool)
 
-    await repository.list_definition_items_page("def-1", sort=sort)
+    await repository.list_definition_items_page(new_definition_id(), sort=sort)
 
     page_sql, _ = pool.connections[0].executed[1]
     assert f"ORDER BY {_ITEM_SORT_COLUMNS[sort]} ASC" in page_sql
@@ -145,7 +162,7 @@ async def test_unknown_sort_field_raises_rather_than_reaching_the_sql():
     repository = CollectionsRepository(pool)
 
     with pytest.raises(KeyError):
-        await repository.list_definition_items_page("def-1", sort="; DROP TABLE games--")
+        await repository.list_definition_items_page(new_definition_id(), sort=lowercase_token())
 
     assert pool.connections == [], "the allow-list must reject before a connection is taken"
 
@@ -156,7 +173,7 @@ async def test_unresolved_scores_sort_last_in_both_directions(direction: str):
     repository = CollectionsRepository(pool)
 
     await repository.list_definition_items_page(
-        "def-1", sort=random.choice(get_args(CollectionItemSortField)), sort_dir=direction
+        new_definition_id(), sort=random.choice(get_args(CollectionItemSortField)), sort_dir=direction
     )
 
     page_sql, _ = pool.connections[0].executed[1]
@@ -167,7 +184,9 @@ async def test_every_sort_carries_a_deterministic_tiebreak():
     pool = _pool_returning([], total=0)
     repository = CollectionsRepository(pool)
 
-    await repository.list_definition_items_page("def-1", sort="title", sort_dir="desc")
+    await repository.list_definition_items_page(
+        new_definition_id(), sort=random.choice(get_args(CollectionItemSortField)), sort_dir="desc"
+    )
 
     page_sql, _ = pool.connections[0].executed[1]
     assert page_sql.rstrip().endswith("LIMIT %s OFFSET %s")
@@ -175,35 +194,42 @@ async def test_every_sort_carries_a_deterministic_tiebreak():
 
 
 async def test_unrecognised_sort_direction_falls_back_to_ascending():
+    sort = random.choice(get_args(CollectionItemSortField))
     pool = _pool_returning([], total=0)
     repository = CollectionsRepository(pool)
 
-    await repository.list_definition_items_page("def-1", sort="title", sort_dir="sideways")
+    await repository.list_definition_items_page(new_definition_id(), sort=sort, sort_dir=lowercase_token())
 
     page_sql, _ = pool.connections[0].executed[1]
-    assert "ORDER BY g.canonical_title ASC" in page_sql
+    assert f"ORDER BY {_ITEM_SORT_COLUMNS[sort]} ASC" in page_sql
 
 
 async def test_limit_and_offset_are_the_last_two_parameters():
+    definition_id = new_definition_id()
+    search = lowercase_token()
+    limit = new_positive_count()
+    offset = limit + new_positive_count()
     pool = _pool_returning([], total=0)
     repository = CollectionsRepository(pool)
 
-    await repository.list_definition_items_page("def-1", search="halo", limit=25, offset=50)
+    await repository.list_definition_items_page(definition_id, search=search, limit=limit, offset=offset)
 
     _, page_params = pool.connections[0].executed[1]
-    assert page_params == ("def-1", "%halo%", 25, 50)
+    assert page_params == (definition_id, f"%{search}%", limit, offset)
 
 
 async def test_removal_targets_one_row_and_never_rewrites_the_membership():
+    definition_id = new_definition_id()
+    game_id = new_game_id()
     pool = FakePool(rowcount=1)
     repository = CollectionsRepository(pool)
 
-    removed = await repository.remove_definition_item("def-1", "game-9")
+    removed = await repository.remove_definition_item(definition_id, game_id)
 
     assert removed is True
     sql, params = pool.connections[0].executed[0]
     assert sql.strip().startswith("DELETE FROM collection_definition_items")
-    assert params == ("def-1", "game-9")
+    assert params == (definition_id, game_id)
     assert "INSERT" not in sql, "removal must not replace the membership -- that is what paging makes unsafe"
 
 
@@ -211,14 +237,14 @@ async def test_removal_reports_false_when_the_game_was_not_a_member():
     pool = FakePool(rowcount=0)
     repository = CollectionsRepository(pool)
 
-    assert await repository.remove_definition_item("def-1", "not-a-member") is False
+    assert await repository.remove_definition_item(new_definition_id(), new_game_id()) is False
 
 
 async def test_page_query_is_not_scoped_to_a_viewer():
     pool = _pool_returning([], total=0)
     repository = CollectionsRepository(pool)
 
-    await repository.list_definition_items_page("def-1")
+    await repository.list_definition_items_page(new_definition_id())
 
     assert [sql for sql, _ in pool.connections[0].executed if "le.identity_sub = cd.identity_sub" not in sql] == [], (
         "access resolves from the owner's sub, never a viewer's"

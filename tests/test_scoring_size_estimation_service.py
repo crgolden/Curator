@@ -2,170 +2,283 @@
 
 from __future__ import annotations
 
+from curator.psn.title_platform import PS3, PS4, PS5
 from curator.scoring.size_estimation_service import SizeEstimate, estimate_install_size_gb
+from test_values import lowercase_token, new_game_title, new_genre_name, new_size_gb
+
+_OVERRIDE_PATTERN = lowercase_token()
+_OVERRIDE_PS5_GB = new_size_gb()
+_OVERRIDE_PS4_GB = new_size_gb()
+_SERIES_PATTERN = lowercase_token()
+_SEQUEL_PATTERN = f"{_SERIES_PATTERN} {lowercase_token()}"
+_SEQUEL_PS5_GB = new_size_gb()
+_SERIES_PS5_GB = new_size_gb()
+_TOP_TIER = lowercase_token()
+_MIDDLE_TIER = lowercase_token()
+_INDIE_TIER = lowercase_token()
+_OPEN_WORLD_CLASS = lowercase_token()
+_SHOOTER_CLASS = lowercase_token()
+_TOP_OPEN_WORLD_PS5_GB = new_size_gb()
+_TOP_OPEN_WORLD_PS4_GB = new_size_gb()
+_TOP_SHOOTER_PS5_GB = new_size_gb()
+_TOP_PS5_GB = new_size_gb()
+_TOP_PS4_GB = new_size_gb()
+_MIDDLE_PS5_GB = new_size_gb()
+_MIDDLE_PS4_GB = new_size_gb()
+_INDIE_PS5_GB = new_size_gb()
+_INDIE_PS4_GB = new_size_gb()
 
 _ESTIMATES = [
     SizeEstimate(
-        estimate_id="1", title_pattern="god of war", aaa_tier=None, genre_class=None, platform="PS5", size_gb=50
-    ),
-    SizeEstimate(
-        estimate_id="2", title_pattern="god of war", aaa_tier=None, genre_class=None, platform="PS4", size_gb=45
-    ),
-    SizeEstimate(
-        estimate_id="3",
-        title_pattern="call of duty: modern warfare ii",
+        estimate_id=lowercase_token(),
+        title_pattern=_OVERRIDE_PATTERN,
         aaa_tier=None,
         genre_class=None,
-        platform="PS5",
-        size_gb=150,
+        platform=PS5,
+        size_gb=_OVERRIDE_PS5_GB,
     ),
     SizeEstimate(
-        estimate_id="4",
-        title_pattern="call of duty: modern warfare",
+        estimate_id=lowercase_token(),
+        title_pattern=_OVERRIDE_PATTERN,
         aaa_tier=None,
         genre_class=None,
-        platform="PS5",
-        size_gb=200,
+        platform=PS4,
+        size_gb=_OVERRIDE_PS4_GB,
     ),
     SizeEstimate(
-        estimate_id="5", title_pattern=None, aaa_tier="AAA", genre_class="open world", platform="PS5", size_gb=81
+        estimate_id=lowercase_token(),
+        title_pattern=_SEQUEL_PATTERN,
+        aaa_tier=None,
+        genre_class=None,
+        platform=PS5,
+        size_gb=_SEQUEL_PS5_GB,
     ),
     SizeEstimate(
-        estimate_id="6", title_pattern=None, aaa_tier="AAA", genre_class="open world", platform="PS4", size_gb=64
+        estimate_id=lowercase_token(),
+        title_pattern=_SERIES_PATTERN,
+        aaa_tier=None,
+        genre_class=None,
+        platform=PS5,
+        size_gb=_SERIES_PS5_GB,
     ),
     SizeEstimate(
-        estimate_id="7", title_pattern=None, aaa_tier="AAA", genre_class="shooter", platform="PS5", size_gb=68
+        estimate_id=lowercase_token(),
+        title_pattern=None,
+        aaa_tier=_TOP_TIER,
+        genre_class=_OPEN_WORLD_CLASS,
+        platform=PS5,
+        size_gb=_TOP_OPEN_WORLD_PS5_GB,
     ),
-    SizeEstimate(estimate_id="8", title_pattern=None, aaa_tier="AAA", genre_class=None, platform="PS5", size_gb=59),
-    SizeEstimate(estimate_id="9", title_pattern=None, aaa_tier="AAA", genre_class=None, platform="PS4", size_gb=47),
-    SizeEstimate(estimate_id="10", title_pattern=None, aaa_tier="AA", genre_class=None, platform="PS5", size_gb=18),
-    SizeEstimate(estimate_id="11", title_pattern=None, aaa_tier="AA", genre_class=None, platform="PS4", size_gb=12),
-    SizeEstimate(estimate_id="12", title_pattern=None, aaa_tier="Indie", genre_class=None, platform="PS5", size_gb=16),
-    SizeEstimate(estimate_id="13", title_pattern=None, aaa_tier="Indie", genre_class=None, platform="PS4", size_gb=16),
+    SizeEstimate(
+        estimate_id=lowercase_token(),
+        title_pattern=None,
+        aaa_tier=_TOP_TIER,
+        genre_class=_OPEN_WORLD_CLASS,
+        platform=PS4,
+        size_gb=_TOP_OPEN_WORLD_PS4_GB,
+    ),
+    SizeEstimate(
+        estimate_id=lowercase_token(),
+        title_pattern=None,
+        aaa_tier=_TOP_TIER,
+        genre_class=_SHOOTER_CLASS,
+        platform=PS5,
+        size_gb=_TOP_SHOOTER_PS5_GB,
+    ),
+    SizeEstimate(
+        estimate_id=lowercase_token(),
+        title_pattern=None,
+        aaa_tier=_TOP_TIER,
+        genre_class=None,
+        platform=PS5,
+        size_gb=_TOP_PS5_GB,
+    ),
+    SizeEstimate(
+        estimate_id=lowercase_token(),
+        title_pattern=None,
+        aaa_tier=_TOP_TIER,
+        genre_class=None,
+        platform=PS4,
+        size_gb=_TOP_PS4_GB,
+    ),
+    SizeEstimate(
+        estimate_id=lowercase_token(),
+        title_pattern=None,
+        aaa_tier=_MIDDLE_TIER,
+        genre_class=None,
+        platform=PS5,
+        size_gb=_MIDDLE_PS5_GB,
+    ),
+    SizeEstimate(
+        estimate_id=lowercase_token(),
+        title_pattern=None,
+        aaa_tier=_MIDDLE_TIER,
+        genre_class=None,
+        platform=PS4,
+        size_gb=_MIDDLE_PS4_GB,
+    ),
+    SizeEstimate(
+        estimate_id=lowercase_token(),
+        title_pattern=None,
+        aaa_tier=_INDIE_TIER,
+        genre_class=None,
+        platform=PS5,
+        size_gb=_INDIE_PS5_GB,
+    ),
+    SizeEstimate(
+        estimate_id=lowercase_token(),
+        title_pattern=None,
+        aaa_tier=_INDIE_TIER,
+        genre_class=None,
+        platform=PS4,
+        size_gb=_INDIE_PS4_GB,
+    ),
 ]
 
 
+def _open_world_genre():
+    return f"{_OPEN_WORLD_CLASS.upper()} {new_genre_name()}"
+
+
 def test_title_override_wins_over_tier_band():
-    result = estimate_install_size_gb("God of War", "Action", platform="PS5", aaa_tier="AAA", estimates=_ESTIMATES)
-    assert result == 50
+    result = estimate_install_size_gb(
+        _OVERRIDE_PATTERN.upper(), new_genre_name(), platform=PS5, aaa_tier=_TOP_TIER, estimates=_ESTIMATES
+    )
+    assert result == _OVERRIDE_PS5_GB
 
 
 def test_title_override_is_platform_specific():
-    result = estimate_install_size_gb("God of War", "Action", platform="PS4", aaa_tier="AAA", estimates=_ESTIMATES)
-    assert result == 45
+    result = estimate_install_size_gb(
+        _OVERRIDE_PATTERN.upper(), new_genre_name(), platform=PS4, aaa_tier=_TOP_TIER, estimates=_ESTIMATES
+    )
+    assert result == _OVERRIDE_PS4_GB
 
 
 def test_longest_matching_title_pattern_wins():
 
     result = estimate_install_size_gb(
-        "Call of Duty: Modern Warfare II", "Shooter", platform="PS5", aaa_tier="AAA", estimates=_ESTIMATES
+        _SEQUEL_PATTERN.upper(), _SHOOTER_CLASS, platform=PS5, aaa_tier=_TOP_TIER, estimates=_ESTIMATES
     )
-    assert result == 150
+    assert result == _SEQUEL_PS5_GB
 
 
 def test_shorter_title_pattern_matches_when_more_specific_one_does_not():
     result = estimate_install_size_gb(
-        "Call of Duty: Modern Warfare", "Shooter", platform="PS5", aaa_tier="AAA", estimates=_ESTIMATES
+        _SERIES_PATTERN.upper(), _SHOOTER_CLASS, platform=PS5, aaa_tier=_TOP_TIER, estimates=_ESTIMATES
     )
-    assert result == 200
+    assert result == _SERIES_PS5_GB
 
 
 def test_genre_class_band_wins_over_generic_tier_band():
     result = estimate_install_size_gb(
-        "Some Open World Game", "Open World RPG", platform="PS5", aaa_tier="AAA", estimates=_ESTIMATES
+        new_game_title(), _open_world_genre(), platform=PS5, aaa_tier=_TOP_TIER, estimates=_ESTIMATES
     )
-    assert result == 81
+    assert result == _TOP_OPEN_WORLD_PS5_GB
 
 
 def test_generic_tier_band_used_when_no_genre_class_matches():
     result = estimate_install_size_gb(
-        "Some Puzzle Game", "Puzzle", platform="PS5", aaa_tier="AAA", estimates=_ESTIMATES
+        new_game_title(), new_genre_name(), platform=PS5, aaa_tier=_TOP_TIER, estimates=_ESTIMATES
     )
-    assert result == 59
+    assert result == _TOP_PS5_GB
 
 
 def test_aa_tier_band():
-    result = estimate_install_size_gb("Some AA Game", "Adventure", platform="PS5", aaa_tier="AA", estimates=_ESTIMATES)
-    assert result == 18
+    result = estimate_install_size_gb(
+        new_game_title(), new_genre_name(), platform=PS5, aaa_tier=_MIDDLE_TIER, estimates=_ESTIMATES
+    )
+    assert result == _MIDDLE_PS5_GB
 
 
 def test_indie_tier_band():
     result = estimate_install_size_gb(
-        "Some Indie Game", "Puzzle", platform="PS4", aaa_tier="Indie", estimates=_ESTIMATES
+        new_game_title(), new_genre_name(), platform=PS4, aaa_tier=_INDIE_TIER, estimates=_ESTIMATES
     )
-    assert result == 16
+    assert result == _INDIE_PS4_GB
 
 
 def test_returns_none_when_nothing_matches():
     result = estimate_install_size_gb(
-        "Unknown Game", "Unknown Genre", platform="PS5", aaa_tier="Unrated", estimates=_ESTIMATES
+        new_game_title(), new_genre_name(), platform=PS5, aaa_tier=lowercase_token(), estimates=_ESTIMATES
     )
     assert result is None
 
 
 def test_ps5_and_ps4_use_independent_bands():
-    ps5 = estimate_install_size_gb(
-        "Some Open World Game", "Open World", platform="PS5", aaa_tier="AAA", estimates=_ESTIMATES
-    )
-    ps4 = estimate_install_size_gb(
-        "Some Open World Game", "Open World", platform="PS4", aaa_tier="AAA", estimates=_ESTIMATES
-    )
-    assert ps5 == 81
-    assert ps4 == 64
+    title = new_game_title()
+    genre = _open_world_genre()
+    ps5 = estimate_install_size_gb(title, genre, platform=PS5, aaa_tier=_TOP_TIER, estimates=_ESTIMATES)
+    ps4 = estimate_install_size_gb(title, genre, platform=PS4, aaa_tier=_TOP_TIER, estimates=_ESTIMATES)
+    assert ps5 == _TOP_OPEN_WORLD_PS5_GB
+    assert ps4 == _TOP_OPEN_WORLD_PS4_GB
 
 
 def test_empty_estimates_returns_none():
-    assert estimate_install_size_gb("Anything", "Action", platform="PS5", aaa_tier="AAA", estimates=[]) is None
+    assert (
+        estimate_install_size_gb(new_game_title(), new_genre_name(), platform=PS5, aaa_tier=_TOP_TIER, estimates=[])
+        is None
+    )
 
 
 def test_a_platform_with_no_seeded_band_returns_none_rather_than_borrowing_another_platforms():
     assert (
         estimate_install_size_gb(
-            "Some Open World Game", "Open World", platform="PS3", aaa_tier="AAA", estimates=_ESTIMATES
+            new_game_title(), _open_world_genre(), platform=PS3, aaa_tier=_TOP_TIER, estimates=_ESTIMATES
         )
         is None
     ), "0033 seeds PS5 and PS4 only; silently answering with a PS4 band would report a PS3 disc as 64 GB"
 
 
+_PART_ONE_PATTERN = lowercase_token()
+_PART_TWO_PATTERN = f"{_PART_ONE_PATTERN}{lowercase_token()}"
+_PART_TWO_REMASTERED_PATTERN = f"{_PART_TWO_PATTERN} {lowercase_token()}"
+_PART_ONE_GB = new_size_gb()
+_PART_TWO_GB = new_size_gb()
+_PART_TWO_REMASTERED_GB = new_size_gb()
+
 _LAST_OF_US_ESTIMATES = [
     SizeEstimate(
-        estimate_id="1",
-        title_pattern="the last of us part i",
+        estimate_id=lowercase_token(),
+        title_pattern=_PART_ONE_PATTERN,
         aaa_tier=None,
         genre_class=None,
-        platform="PS5",
-        size_gb=80,
+        platform=PS5,
+        size_gb=_PART_ONE_GB,
     ),
     SizeEstimate(
-        estimate_id="2",
-        title_pattern="the last of us part ii remastered",
+        estimate_id=lowercase_token(),
+        title_pattern=_PART_TWO_REMASTERED_PATTERN,
         aaa_tier=None,
         genre_class=None,
-        platform="PS5",
-        size_gb=80,
+        platform=PS5,
+        size_gb=_PART_TWO_REMASTERED_GB,
     ),
     SizeEstimate(
-        estimate_id="3",
-        title_pattern="the last of us part ii",
+        estimate_id=lowercase_token(),
+        title_pattern=_PART_TWO_PATTERN,
         aaa_tier=None,
         genre_class=None,
-        platform="PS5",
-        size_gb=78,
+        platform=PS5,
+        size_gb=_PART_TWO_GB,
     ),
 ]
 
 
 def test_part_ii_resolves_to_its_own_size_not_the_part_i_prefix_that_also_matches():
     result = estimate_install_size_gb(
-        "The Last of Us Part II", "Action", platform="PS5", aaa_tier="AAA", estimates=_LAST_OF_US_ESTIMATES
+        _PART_TWO_PATTERN.upper(), new_genre_name(), platform=PS5, aaa_tier=_TOP_TIER, estimates=_LAST_OF_US_ESTIMATES
     )
 
-    assert result == 78
+    assert result == _PART_TWO_GB
 
 
 def test_part_ii_remastered_resolves_over_both_shorter_prefixes():
     result = estimate_install_size_gb(
-        "The Last of Us Part II Remastered", "Action", platform="PS5", aaa_tier="AAA", estimates=_LAST_OF_US_ESTIMATES
+        _PART_TWO_REMASTERED_PATTERN.upper(),
+        new_genre_name(),
+        platform=PS5,
+        aaa_tier=_TOP_TIER,
+        estimates=_LAST_OF_US_ESTIMATES,
     )
 
-    assert result == 80
+    assert result == _PART_TWO_REMASTERED_GB

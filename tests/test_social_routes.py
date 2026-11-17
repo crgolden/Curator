@@ -8,6 +8,8 @@ missing link, a withheld consent flag and a guard refusal into status codes, and
 
 from __future__ import annotations
 
+from http import HTTPStatus
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -29,6 +31,7 @@ from curator.deps import HARVEST_IDENTITY, PREFERENCE_NOT_LINKED_DETAIL, prefere
 from curator.persistence.crypto import TokenCrypto
 from curator.psn.errors import MutationNotAllowedError, NoPendingFriendRequestError, PsnAuthError
 from curator.psn.models import SocialUser
+from curator.psn.mutation_service import MutationService
 from curator.psn.safety import FRIEND_WRITES
 from curator.social_routes import (
     NO_PENDING_REQUEST_DETAIL,
@@ -88,31 +91,31 @@ class FakeMutationService:
             raise self._raises
 
     async def accept_friend_request(self, online_id):
-        self._record("accept_friend_request", online_id=online_id)
+        self._record(MutationService.accept_friend_request.__name__, online_id=online_id)
 
     async def send_friend_request(self, online_id):
-        self._record("send_friend_request", online_id=online_id)
+        self._record(MutationService.send_friend_request.__name__, online_id=online_id)
 
     async def remove_friend(self, online_id=None, account_id=None):
-        self._record("remove_friend", online_id=online_id)
+        self._record(MutationService.remove_friend.__name__, online_id=online_id)
         if online_id in self.friends:
             self.friends.discard(online_id)
             return True
         return False
 
     async def create_group(self, online_ids=None, account_ids=None):
-        self._record("create_group", online_ids=online_ids, account_ids=account_ids)
+        self._record(MutationService.create_group.__name__, online_ids=online_ids, account_ids=account_ids)
         return self._group_id
 
     async def rename_group(self, group_id, name):
-        self._record("rename_group", group_id, name)
+        self._record(MutationService.rename_group.__name__, group_id, name)
 
     async def invite_to_group(self, group_id, online_ids=None, account_ids=None):
-        self._record("invite_to_group", group_id, online_ids=online_ids, account_ids=account_ids)
+        self._record(MutationService.invite_to_group.__name__, group_id, online_ids=online_ids, account_ids=account_ids)
         return self._group_id
 
     async def leave_group(self, group_id):
-        self._record("leave_group", group_id)
+        self._record(MutationService.leave_group.__name__, group_id)
         if group_id in self.groups:
             self.groups.discard(group_id)
             return True
@@ -199,7 +202,7 @@ def test_accept_friend_without_a_psn_link_is_404():
 
     response = client.put(_friend_path(client, new_online_id()), headers=_bearer(TOKEN))
 
-    assert response.status_code == 404
+    assert response.status_code == HTTPStatus.NOT_FOUND
     assert response.json()["detail"] == PREFERENCE_NOT_LINKED_DETAIL
     assert service.calls == []
 
@@ -209,7 +212,7 @@ def test_accept_friend_without_friend_write_consent_is_403():
 
     response = client.put(_friend_path(client, new_online_id()), headers=_bearer(TOKEN))
 
-    assert response.status_code == 403
+    assert response.status_code == HTTPStatus.FORBIDDEN
     assert response.json()["detail"] == preference_disabled_detail(FRIEND_WRITES)
     assert service.calls == []
 
@@ -219,7 +222,7 @@ def test_sending_a_friend_request_without_consent_is_403_and_writes_nothing():
 
     response = client.post(_friend_request_path(client, new_online_id()), headers=_bearer(TOKEN))
 
-    assert response.status_code == 403
+    assert response.status_code == HTTPStatus.FORBIDDEN
     assert response.json()["detail"] == preference_disabled_detail(FRIEND_WRITES)
     assert service.calls == []
     assert audit.rows == [], "a consent refusal is decided from the database before any history row or PSN call"
@@ -232,7 +235,7 @@ def test_accepting_when_no_request_is_pending_is_409_and_sends_nothing_to_psn():
 
     response = client.put(_friend_path(client, requester), headers=_bearer(TOKEN))
 
-    assert response.status_code == 409
+    assert response.status_code == HTTPStatus.CONFLICT
     assert response.json()["detail"] == NO_PENDING_REQUEST_DETAIL
     assert [call[0] for call in service.calls] == ["accept_friend_request"]
     assert audit.outcomes == [(ACTION_FRIEND_ADDED, OUTCOME_FAILED)]
@@ -243,10 +246,10 @@ def test_chat_write_consent_does_not_authorize_a_friend_write():
     group_body = CreateGroupRequest(online_ids=[new_online_id()]).model_dump()
 
     response = client.post(_groups_path(client), json=group_body, headers=_bearer(TOKEN))
-    assert response.status_code == 200
+    assert response.status_code == HTTPStatus.OK
 
     response = client.delete(_unfriend_path(client, new_online_id()), headers=_bearer(TOKEN))
-    assert response.status_code == 403
+    assert response.status_code == HTTPStatus.FORBIDDEN
     assert response.json()["detail"] == preference_disabled_detail(FRIEND_WRITES)
     assert [call[0] for call in service.calls] == ["create_group"]
 
@@ -258,7 +261,7 @@ def test_guard_refusal_inside_the_service_is_403():
 
     response = client.put(_friend_path(client, new_online_id()), headers=_bearer(TOKEN))
 
-    assert response.status_code == 403
+    assert response.status_code == HTTPStatus.FORBIDDEN
     assert response.json()["detail"] == refusal
     assert audit.outcomes == [(ACTION_FRIEND_ADDED, OUTCOME_FAILED)]
 
@@ -270,7 +273,7 @@ def test_expired_psn_token_is_401():
 
     response = client.put(_friend_path(client, new_online_id()), headers=_bearer(TOKEN))
 
-    assert response.status_code == 401
+    assert response.status_code == HTTPStatus.UNAUTHORIZED
     assert audit.outcomes == [(ACTION_FRIEND_ADDED, OUTCOME_FAILED)]
 
 
@@ -279,7 +282,7 @@ def test_factory_reporting_no_link_is_404():
 
     response = client.put(_friend_path(client, new_online_id()), headers=_bearer(TOKEN))
 
-    assert response.status_code == 404
+    assert response.status_code == HTTPStatus.NOT_FOUND
     assert response.json()["detail"] == PREFERENCE_NOT_LINKED_DETAIL
 
 
@@ -289,8 +292,8 @@ def test_accepting_a_pending_request_logs_a_friend_added():
 
     response = client.put(_friend_path(client, requester), headers=_bearer(TOKEN))
 
-    assert response.status_code == 204
-    assert service.calls == [("accept_friend_request", (), {"online_id": requester})]
+    assert response.status_code == HTTPStatus.NO_CONTENT
+    assert service.calls == [(MutationService.accept_friend_request.__name__, (), {"online_id": requester})]
     assert audit.entries == [(SUB, ACTION_FRIEND_ADDED, requester)]
 
 
@@ -300,8 +303,8 @@ def test_sending_a_friend_request_logs_its_own_action():
 
     response = client.post(_friend_request_path(client, target), headers=_bearer(TOKEN))
 
-    assert response.status_code == 204
-    assert service.calls == [("send_friend_request", (), {"online_id": target})]
+    assert response.status_code == HTTPStatus.NO_CONTENT
+    assert service.calls == [(MutationService.send_friend_request.__name__, (), {"online_id": target})]
     assert audit.entries == [(SUB, ACTION_FRIEND_REQUEST_SENT, target)]
 
 
@@ -313,7 +316,7 @@ def test_removing_a_friend_twice_writes_to_psn_once_and_answers_204_both_times()
     first = client.delete(_unfriend_path(client, friend), headers=_bearer(TOKEN))
     second = client.delete(_unfriend_path(client, friend), headers=_bearer(TOKEN))
 
-    assert (first.status_code, second.status_code) == (204, 204)
+    assert (first.status_code, second.status_code) == (HTTPStatus.NO_CONTENT, HTTPStatus.NO_CONTENT)
     assert audit.entries == [
         (SUB, ACTION_FRIEND_REMOVED, friend),
         (SUB, ACTION_FRIEND_REMOVED, nothing_sent_detail(friend)),
@@ -325,7 +328,7 @@ def test_listing_friend_requests_needs_identity_harvesting():
 
     response = client.get(_friend_requests_path(client), headers=_bearer(TOKEN))
 
-    assert response.status_code == 403
+    assert response.status_code == HTTPStatus.FORBIDDEN
     assert response.json()["detail"] == preference_disabled_detail(HARVEST_IDENTITY)
 
 
@@ -335,7 +338,7 @@ def test_listing_friend_requests_is_a_live_proxy():
 
     response = client.get(_friend_requests_path(client), headers=_bearer(TOKEN))
 
-    assert response.status_code == 200
+    assert response.status_code == HTTPStatus.OK
     assert FriendRequestsResponse.model_validate(response.json()) == FriendRequestsResponse(
         requests=[FriendRequestResponse(online_id=requester.online_id, account_id=requester.account_id)]
     )
@@ -345,7 +348,7 @@ def test_listing_friend_requests_with_a_rejected_token_is_401():
     rejecting = FakeSocialClient(raises=PsnAuthError(new_opaque_token()))
     client, _, _ = _build(social_client=rejecting, harvest_identity=True)
 
-    assert client.get(_friend_requests_path(client), headers=_bearer(TOKEN)).status_code == 401
+    assert client.get(_friend_requests_path(client), headers=_bearer(TOKEN)).status_code == HTTPStatus.UNAUTHORIZED
 
 
 def test_create_chat_group_returns_and_logs_the_group_id():
@@ -359,9 +362,11 @@ def test_create_chat_group_returns_and_logs_the_group_id():
         headers=_bearer(TOKEN),
     )
 
-    assert response.status_code == 200
+    assert response.status_code == HTTPStatus.OK
     group_id = CreateGroupResponse.model_validate(response.json()).group_id
-    assert service.calls == [("create_group", (), {"online_ids": [peer], "account_ids": [account]})]
+    assert service.calls == [
+        (MutationService.create_group.__name__, (), {"online_ids": [peer], "account_ids": [account]})
+    ]
     assert audit.entries == [(SUB, ACTION_CHAT_GROUP_CREATED, group_id)]
 
 
@@ -374,8 +379,8 @@ def test_renaming_a_chat_group_logs_its_own_action():
         _group_path(client, group_id), json=RenameGroupRequest(name=new_name).model_dump(), headers=_bearer(TOKEN)
     )
 
-    assert response.status_code == 204
-    assert service.calls == [("rename_group", (group_id, new_name), {})]
+    assert response.status_code == HTTPStatus.NO_CONTENT
+    assert service.calls == [(MutationService.rename_group.__name__, (group_id, new_name), {})]
     assert audit.entries == [(SUB, ACTION_CHAT_GROUP_RENAMED, group_id)]
 
 
@@ -388,7 +393,7 @@ def test_renaming_a_chat_group_to_a_blank_name_is_422():
         headers=_bearer(TOKEN),
     )
 
-    assert response.status_code == 422
+    assert response.status_code == HTTPStatus.UNPROCESSABLE_ENTITY
     assert service.calls == []
 
 
@@ -405,9 +410,11 @@ def test_inviting_to_a_chat_group_reports_where_psn_put_the_invitee_and_logs_tha
         headers=_bearer(TOKEN),
     )
 
-    assert response.status_code == 200
+    assert response.status_code == HTTPStatus.OK
     assert InviteToGroupResponse.model_validate(response.json()) == InviteToGroupResponse(group_id=resulting_group_id)
-    assert service.calls == [("invite_to_group", (group_id,), {"online_ids": [peer], "account_ids": []})]
+    assert service.calls == [
+        (MutationService.invite_to_group.__name__, (group_id,), {"online_ids": [peer], "account_ids": []})
+    ]
     assert audit.entries == [(SUB, ACTION_CHAT_MEMBERSHIP_CHANGED, invited_detail(resulting_group_id, 1))]
 
 
@@ -418,8 +425,8 @@ def test_leave_chat_group_logs_a_membership_change():
 
     response = client.delete(_membership_path(client, group_id), headers=_bearer(TOKEN))
 
-    assert response.status_code == 204
-    assert service.calls == [("leave_group", (group_id,), {})]
+    assert response.status_code == HTTPStatus.NO_CONTENT
+    assert service.calls == [(MutationService.leave_group.__name__, (group_id,), {})]
     assert audit.entries == [(SUB, ACTION_CHAT_MEMBERSHIP_CHANGED, left_detail(group_id))]
 
 
@@ -431,7 +438,7 @@ def test_leaving_a_group_twice_writes_to_psn_once():
     client.delete(_membership_path(client, group_id), headers=_bearer(TOKEN))
     second = client.delete(_membership_path(client, group_id), headers=_bearer(TOKEN))
 
-    assert second.status_code == 204
+    assert second.status_code == HTTPStatus.NO_CONTENT
     assert audit.entries == [
         (SUB, ACTION_CHAT_MEMBERSHIP_CHANGED, left_detail(group_id)),
         (SUB, ACTION_CHAT_MEMBERSHIP_CHANGED, nothing_sent_detail(group_id)),
