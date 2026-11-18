@@ -13,21 +13,19 @@ $gateOutput = if (Get-Command Get-GateOutputDirectory -ErrorAction SilentlyConti
     (New-Item -ItemType Directory -Force -Path (Join-Path ([IO.Path]::GetTempPath()) "claude\crgolden-gates\$(Split-Path -Leaf $PSScriptRoot)")).FullName
 }
 
-Register-GateSteps @('Schema test database configuration', 'poetry check --lock', 'ruff check', 'ruff format --check', 'mypy',
+Register-GateStep @('Schema test database configuration', 'poetry check --lock', 'ruff check', 'ruff format --check', 'mypy',
     'Bearer-list control', 'Run tests with coverage', 'SonarCloud analysis', 'Fail on open Sonar issues',
     'Verify deployment package boots')
-Register-StepInputs @{
-    'Schema test database configuration' = @('*')
-    'poetry check --lock'                = @('pyproject.toml', 'poetry.lock')
-    'ruff check'                         = @('*.py', 'pyproject.toml')
-    'ruff format --check'                = @('*.py', 'pyproject.toml')
-    'mypy'                               = @('*.py', 'pyproject.toml', 'poetry.lock')
-    'Bearer-list control'                = @('*')
-    'Run tests with coverage'            = @('*')
-    'SonarCloud analysis'                = @('*')
-    'Fail on open Sonar issues'          = @('*')
-    'Verify deployment package boots'    = @('*')
-}
+Register-StepInput 'Schema test database configuration' @('*')
+Register-StepInput 'poetry check --lock' @('pyproject.toml', 'poetry.lock')
+Register-StepInput 'ruff check' @('*.py', 'pyproject.toml')
+Register-StepInput 'ruff format --check' @('*.py', 'pyproject.toml')
+Register-StepInput 'mypy' @('*.py', 'pyproject.toml', 'poetry.lock')
+Register-StepInput 'Bearer-list control' @('*')
+Register-StepInput 'Run tests with coverage' @('*')
+Register-StepInput 'SonarCloud analysis' @('*')
+Register-StepInput 'Fail on open Sonar issues' @('*')
+Register-StepInput 'Verify deployment package boots' @('*')
 $repo = $PSScriptRoot
 $pytestLog = Join-Path $gateOutput 'pytest.txt'
 $sonarBranch = Get-SonarBranchName
@@ -64,8 +62,8 @@ if ($Only) {
 }
 exit (Invoke-Gate {
 Initialize-GateState 'Curator' $repo
-Resolve-OwedSteps
-Invoke-CatalogSteps
+Get-OwedStep | Register-OwedStep
+Invoke-GateLibraryStep
 
 if ([string]::IsNullOrWhiteSpace($env:CURATOR_TEST_DATABASE_URL)) {
     $envFile = Join-Path $repo '.env'
@@ -143,7 +141,7 @@ else {
     $global:LASTEXITCODE = $null
     sonar-scanner -D"sonar.projectKey=crgolden_Curator" -D"sonar.organization=crgolden" -D"sonar.host.url=https://sonarcloud.io" -D"sonar.sources=src" -D"sonar.tests=tests" -D"sonar.python.coverage.reportPaths=coverage.xml" -D"sonar.python.version=3.15" -D"sonar.exclusions=**/__pycache__/**,**/*.pyc,.venv/**" -D"sonar.qualitygate.wait=true" -D"sonar.scanner.skipJreProvisioning=true" -D"sonar.branch.name=$sonarBranch"
     Assert-StepExit $sonarStep
-    Test-SonarIssues $sonarIssues 'crgolden_Curator' $sonarBranch $sonarStartedAt
+    Assert-NoOpenSonarIssue $sonarIssues 'crgolden_Curator' $sonarBranch $sonarStartedAt
 }
 
 $bootStep = "Verify deployment package boots (the workflow step's exports, no .env)"
