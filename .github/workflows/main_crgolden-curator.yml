@@ -91,6 +91,7 @@ jobs:
             -Dsonar.exclusions=**/__pycache__/**,**/*.pyc,.venv/**
             -Dsonar.qualitygate.wait=true
             -Dsonar.scanner.skipJreProvisioning=true
+            -Dsonar.scm.use.blame.algorithm=GIT_NATIVE_BLAME
 
       - name: Fail on open Sonar issues
         if: github.actor != 'dependabot[bot]'
