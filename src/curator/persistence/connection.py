@@ -13,10 +13,13 @@ app has one trust store rather than two.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
 import certifi
 from psycopg.conninfo import conninfo_to_dict, make_conninfo
+from psycopg_pool import AsyncConnectionPool
 
 from curator.persistence.config import ConfigError, resolve_setting
 
@@ -66,3 +69,19 @@ def with_root_certificate(url: str) -> str:
         return url
 
     return make_conninfo(url, **{SSLROOTCERT_PARAM: certifi.where()})
+
+
+def build_connection_pool(
+    database_url: str,
+    pool_factory: Callable[..., AsyncConnectionPool[Any]] = AsyncConnectionPool,
+) -> AsyncConnectionPool[Any]:
+    """Build the app's unopened pool, which checks every connection before handing it out.
+
+    A connection the server closed while it sat idle (a restart, an administrator's terminate) is discarded
+    and replaced at checkout instead of failing the request that drew it with ``AdminShutdown``.
+
+    :param database_url: The resolved connection URL.
+    :param pool_factory: The pool constructor; tests pass a recording stand-in.
+    :returns: A pool the lifespan opens.
+    """
+    return pool_factory(database_url, open=False, check=AsyncConnectionPool.check_connection)

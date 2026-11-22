@@ -62,6 +62,7 @@ from curator.library_routes import router as library_router
 from curator.link_service import AgentFactory, PsnAgentLike
 from curator.me_routes import router as me_router
 from curator.measured_sizes_routes import router as measured_sizes_router
+from curator.persistence.connection import build_connection_pool
 from curator.persistence.crypto import TokenCrypto
 from curator.persistence.db_token_store import DbTokenStore
 from curator.persistence.enrichment_keys_repository import EnrichmentKeysRepository
@@ -313,7 +314,7 @@ def create_app(settings: Settings | None = None, **collaborators: Unpack[AppColl
     given_repository = collaborators.get("repository")
     given_pool = collaborators.get("pool")
     owns_pool = given_repository is None and given_pool is None
-    pool = given_pool or (AsyncConnectionPool(settings.database_url, open=False) if given_repository is None else None)
+    pool = given_pool or (build_connection_pool(settings.database_url) if given_repository is None else None)
     shared_pool = cast(AsyncConnectionPool, pool)
 
     given_redis_client = collaborators.get("redis_client")

@@ -33,6 +33,12 @@ def test_bootstrap_failure_reporter_targets_the_same_data_stream_as_runtime_logg
     assert shim._ES_DATA_STREAM == telemetry._ES_DATA_STREAM
 
 
+def test_bootstrap_failure_reporter_names_the_same_service_as_runtime_telemetry(monkeypatch: pytest.MonkeyPatch):
+    shim = _load_app_shim(monkeypatch)
+
+    assert shim._SERVICE_NAME == telemetry.SERVICE_NAME_VALUE
+
+
 def test_shim_does_not_import_curator_or_elasticsearch_at_module_scope():
     source = _APP_SHIM_PATH.read_text(encoding="utf-8")
     import_lines = [line.strip() for line in source.splitlines() if line.startswith(("import ", "from "))]

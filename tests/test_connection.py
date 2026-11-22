@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 import certifi
 import pytest
 from psycopg.conninfo import conninfo_to_dict
+from psycopg_pool import AsyncConnectionPool
 
 from curator.persistence.config import ConfigError
 from curator.persistence.connection import (
@@ -16,6 +18,7 @@ from curator.persistence.connection import (
     SSLMODE_PARAM,
     SSLROOTCERT_PARAM,
     VERIFY_FULL_SSL_MODE,
+    build_connection_pool,
     resolve_database_url,
     with_root_certificate,
 )
@@ -38,6 +41,36 @@ def _new_url(query: str = "") -> str:
 def _clear_database_env(monkeypatch) -> None:
     monkeypatch.delenv(CURATOR_DATABASE_URL_ENV, raising=False)
     monkeypatch.delenv(DATABASE_URL_ENV, raising=False)
+
+
+class _RecordingPoolFactory:
+    """Stands in for ``AsyncConnectionPool``'s constructor and keeps what it was called with."""
+
+    def __init__(self) -> None:
+        self.args: tuple[Any, ...] = ()
+        self.kwargs: dict[str, Any] = {}
+
+    def __call__(self, *args: Any, **kwargs: Any) -> Any:
+        self.args = args
+        self.kwargs = kwargs
+        return self
+
+
+def test_build_connection_pool_checks_each_connection_before_handing_it_out():
+    factory = _RecordingPoolFactory()
+
+    build_connection_pool(_new_url(), pool_factory=factory)
+
+    assert factory.kwargs["check"] is AsyncConnectionPool.check_connection
+
+
+def test_build_connection_pool_leaves_opening_to_the_lifespan():
+    factory = _RecordingPoolFactory()
+    url = _new_url()
+
+    build_connection_pool(url, pool_factory=factory)
+
+    assert (factory.args, factory.kwargs["open"]) == ((url,), False)
 
 
 def test_resolve_database_url_prefers_explicit(monkeypatch):

@@ -39,6 +39,7 @@ from datetime import UTC, datetime
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "src"))
 
 _ES_DATA_STREAM = "logs-app-curator"
+_SERVICE_NAME = "crgolden-curator"
 _ES_NODE_SETTING = "ElasticsearchNode"
 _ES_USERNAME_SETTING = "ElasticsearchUsername"
 _ES_PASSWORD_SETTING = "ElasticsearchPassword"
@@ -65,7 +66,7 @@ def _report_bootstrap_failure(exc: BaseException) -> None:
         "@timestamp": datetime.now(UTC).isoformat(),
         "message": "Bootstrap failed before create_app() returned",
         "log.level": "Fatal",
-        "service.name": "curator",
+        "service.name": _SERVICE_NAME,
         "logger.name": "app.bootstrap",
         "error.stack_trace": "".join(traceback.format_exception(exc)),
     }
