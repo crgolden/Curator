@@ -29,7 +29,7 @@ Register-StepInput 'Verify deployment package boots' @('*')
 $repo = $PSScriptRoot
 $pytestLog = Join-Path $gateOutput 'pytest.txt'
 $sonarBranch = Get-SonarBranchName
-$pytestStep = 'Run tests with coverage (pytest -x --cov)'
+$pytestStep = 'Run tests with coverage (pytest --cov)'
 $sonarStep = "SonarCloud analysis (sonar-scanner, branch $sonarBranch, quality gate waited)"
 $sonarIssues = 'Fail on open Sonar issues'
 $env:TZ = 'UTC'
@@ -48,7 +48,7 @@ if ($Only) {
     $env:PYTHONPATH = 'src'
     Write-Host "PROBE: running one test, '$($Only.Trim())' of $pytestStep; no gate record or verdict is written"
     $global:LASTEXITCODE = $null
-    python -m pytest -x $Only.Trim() -q *>&1 | Tee-Object -FilePath $pytestLog
+    python -m pytest $Only.Trim() -q *>&1 | Tee-Object -FilePath $pytestLog
     $pytestExit = $global:LASTEXITCODE
     $summary = Select-String -Path $pytestLog -Pattern '(\d+) passed' | Select-Object -Last 1
     $skipped = Select-String -Path $pytestLog -Pattern '(\d+) skipped' | Select-Object -Last 1
@@ -65,35 +65,38 @@ Initialize-GateState 'Curator' $repo
 Get-OwedStep | Register-OwedStep
 Invoke-GateLibraryStep
 
-if ([string]::IsNullOrWhiteSpace($env:CURATOR_TEST_DATABASE_URL)) {
-    $envFile = Join-Path $repo '.env'
-    $databaseLine = if (Test-Path -LiteralPath $envFile) { Select-String -Path $envFile -Pattern '^CURATOR_TEST_DATABASE_URL=' -Raw }
-    if (-not $databaseLine) { Stop-Gate 'Schema test database configuration' 'CURATOR_TEST_DATABASE_URL is neither in the environment nor in Curator/.env' }
-    $env:CURATOR_TEST_DATABASE_URL = ($databaseLine -split '=', 2)[1].Trim()
-    Write-Row 'Schema test database configuration' 'PASS' 'CURATOR_TEST_DATABASE_URL loaded from Curator/.env'
-}
-else {
-    Write-Row 'Schema test database configuration' 'PASS' 'CURATOR_TEST_DATABASE_URL taken from the environment'
+$dbConfig = 'Schema test database configuration'
+Invoke-GateStep -Name $dbConfig -Always -Body {
+    if ([string]::IsNullOrWhiteSpace($env:CURATOR_TEST_DATABASE_URL)) {
+        $envFile = Join-Path $repo '.env'
+        $databaseLine = if (Test-Path -LiteralPath $envFile) { Select-String -Path $envFile -Pattern '^CURATOR_TEST_DATABASE_URL=' -Raw }
+        if (-not $databaseLine) { Stop-Gate $dbConfig 'CURATOR_TEST_DATABASE_URL is neither in the environment nor in Curator/.env' }
+        $env:CURATOR_TEST_DATABASE_URL = ($databaseLine -split '=', 2)[1].Trim()
+        Write-Row $dbConfig 'PASS' 'CURATOR_TEST_DATABASE_URL loaded from Curator/.env'
+    }
+    else {
+        Write-Row $dbConfig 'PASS' 'CURATOR_TEST_DATABASE_URL taken from the environment'
+    }
 }
 $env:MYPYPATH = 'src'
 $env:PYTHONPATH = 'src'
 
-if (-not (Test-StepCarried 'poetry check --lock')) {
+Invoke-GateStep -Name 'poetry check --lock' -Body {
     $global:LASTEXITCODE = $null
     poetry check --lock
     Assert-StepExit 'poetry check --lock'
 }
-if (-not (Test-StepCarried 'ruff check')) {
+Invoke-GateStep -Name 'ruff check' -Body {
     $global:LASTEXITCODE = $null
     python -m ruff check src tests app.py dev_server.py
     Assert-StepExit 'ruff check'
 }
-if (-not (Test-StepCarried 'ruff format --check')) {
+Invoke-GateStep -Name 'ruff format --check' -Body {
     $global:LASTEXITCODE = $null
     python -m ruff format --check src tests app.py dev_server.py
     Assert-StepExit 'ruff format --check'
 }
-if (-not (Test-StepCarried 'mypy')) {
+Invoke-GateStep -Name 'mypy' -Body {
     $global:LASTEXITCODE = $null
     python -m mypy src tests app.py dev_server.py
     Assert-StepExit 'mypy'
@@ -101,7 +104,7 @@ if (-not (Test-StepCarried 'mypy')) {
 
 $GateDelta = @('plant:tests/test_authz.py')
 $bearerControl = 'Bearer-list control (must FAIL naming GET /consoles without its handler)'
-if (-not (Test-StepCarried $bearerControl)) {
+Invoke-GateStep -Name $bearerControl -Body {
     $authzPath = Join-Path $repo 'tests\test_authz.py'
     $authzOriginal = [IO.File]::ReadAllText($authzPath)
     $entryPattern = '(?m)^[ \t]*consoles_routes\.list_consoles,\r?\n'
@@ -121,9 +124,9 @@ if (-not (Test-StepCarried $bearerControl)) {
     Write-Row $bearerControl 'PASS' 'the completeness test failed naming GET /consoles'
 }
 
-if (-not (Test-StepCarried $pytestStep)) {
+Invoke-GateStep -Name $pytestStep -Needs @($dbConfig) -Body {
     $global:LASTEXITCODE = $null
-    python -m pytest -x --cov=src/curator --cov-report=xml:coverage.xml --cov-report=term -q *>&1 | Tee-Object -FilePath $pytestLog
+    python -m pytest --cov=src/curator --cov-report=xml:coverage.xml --cov-report=term -q *>&1 | Tee-Object -FilePath $pytestLog
     $pytestExit = $global:LASTEXITCODE
     $summary = Select-String -Path $pytestLog -Pattern '(\d+) passed' | Select-Object -Last 1
     $skipped = Select-String -Path $pytestLog -Pattern '(\d+) skipped' | Select-Object -Last 1
@@ -138,14 +141,18 @@ if (Test-StepCarried $sonarIssues) {
 }
 else {
     $sonarStartedAt = [DateTimeOffset]::UtcNow
-    $global:LASTEXITCODE = $null
-    sonar-scanner -D"sonar.projectKey=crgolden_Curator" -D"sonar.organization=crgolden" -D"sonar.host.url=https://sonarcloud.io" -D"sonar.sources=src" -D"sonar.tests=tests" -D"sonar.python.coverage.reportPaths=coverage.xml" -D"sonar.python.version=3.15" -D"sonar.exclusions=**/__pycache__/**,**/*.pyc,.venv/**" -D"sonar.qualitygate.wait=true" -D"sonar.scanner.skipJreProvisioning=true" -D"sonar.scm.use.blame.algorithm=GIT_NATIVE_BLAME" -D"sonar.branch.name=$sonarBranch"
-    Assert-StepExit $sonarStep
-    Assert-NoOpenSonarIssue $sonarIssues 'crgolden_Curator' $sonarBranch $sonarStartedAt
+    Invoke-GateStep -Name $sonarStep -Needs @($pytestStep) -Always -Body {
+        $global:LASTEXITCODE = $null
+        sonar-scanner -D"sonar.projectKey=crgolden_Curator" -D"sonar.organization=crgolden" -D"sonar.host.url=https://sonarcloud.io" -D"sonar.sources=src" -D"sonar.tests=tests" -D"sonar.python.coverage.reportPaths=coverage.xml" -D"sonar.python.version=3.15" -D"sonar.exclusions=**/__pycache__/**,**/*.pyc,.venv/**" -D"sonar.qualitygate.wait=true" -D"sonar.scanner.skipJreProvisioning=true" -D"sonar.scm.use.blame.algorithm=GIT_NATIVE_BLAME" -D"sonar.branch.name=$sonarBranch"
+        Assert-StepExit $sonarStep
+    }
+    Invoke-GateStep -Name $sonarIssues -Needs @($sonarStep) -Always -Body {
+        Assert-NoOpenSonarIssue $sonarIssues 'crgolden_Curator' $sonarBranch $sonarStartedAt
+    }
 }
 
 $bootStep = "Verify deployment package boots (the workflow step's exports, no .env)"
-if (-not (Test-StepCarried $bootStep)) {
+Invoke-GateStep -Name $bootStep -Body {
     $package = Join-Path $gateOutput 'publish'
     if (Test-Path -LiteralPath $package) { Remove-Item -LiteralPath $package -Recurse -Force }
     New-Item -ItemType Directory -Force -Path $package | Out-Null

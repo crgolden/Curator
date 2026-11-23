@@ -122,7 +122,7 @@ python -m ruff check src tests app.py dev_server.py
 python -m ruff format --check src tests app.py dev_server.py
 $env:MYPYPATH = 'src'
 python -m mypy src tests app.py dev_server.py
-python -m pytest -x --cov=src/curator --cov-report=term -q
+python -m pytest --cov=src/curator --cov-report=term -q
 ```
 
 Run the last command with `CURATOR_TEST_DATABASE_URL` set, so the schema tier runs as it does in CI. Every
