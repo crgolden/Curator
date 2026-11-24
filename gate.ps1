@@ -141,7 +141,7 @@ if (Test-StepCarried $sonarIssues) {
 }
 else {
     $sonarStartedAt = [DateTimeOffset]::UtcNow
-    Invoke-GateStep -Name $sonarStep -Needs @($pytestStep) -Always -Body {
+    Invoke-GateStep -Name $sonarStep -Needs @($dbConfig) -Always -Body {
         $global:LASTEXITCODE = $null
         sonar-scanner -D"sonar.projectKey=crgolden_Curator" -D"sonar.organization=crgolden" -D"sonar.host.url=https://sonarcloud.io" -D"sonar.sources=src" -D"sonar.tests=tests" -D"sonar.python.coverage.reportPaths=coverage.xml" -D"sonar.python.version=3.15" -D"sonar.exclusions=**/__pycache__/**,**/*.pyc,.venv/**" -D"sonar.qualitygate.wait=true" -D"sonar.scanner.skipJreProvisioning=true" -D"sonar.scm.use.blame.algorithm=GIT_NATIVE_BLAME" -D"sonar.branch.name=$sonarBranch"
         Assert-StepExit $sonarStep
